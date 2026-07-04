@@ -1,0 +1,92 @@
+/**
+ * DataCoolie Studio design tokens.
+ *
+ * Single source of truth for color, spacing, radius, elevation, and typography
+ * primitives. New components should consume these variables instead of
+ * hard-coded values so the look stays consistent and themeable.
+ */
+:root {
+  /* Brand + accent — "Slate Console": teal accent on a light data canvas */
+  --color-brand: #0c1322;
+  --color-accent: #0d9488;
+  --color-accent-strong: #0a766e;
+  --color-accent-soft: #e3f6f3;
+  --color-accent-soft-strong: #c7ece7;
+  --color-accent-ink: #04221f;
+  --gradient-accent: linear-gradient(135deg, #14c2b4 0%, #0ea5b8 100%);
+  --gradient-brand: linear-gradient(135deg, #14c2b4 0%, #0ea5b8 100%);
+
+  /* Focus rings */
+  --ring-accent: 0 0 0 3px rgba(13, 148, 136, 0.30);
+  --ring-accent-soft: 0 0 0 3px rgba(13, 148, 136, 0.16);
+
+  /* Surfaces (light canvas) */
+  --color-bg: #eef1f6;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f6f8fb;
+  --color-surface-sunken: #f1f4f9;
+  --color-surface-raised: #ffffff;
+
+  /* Shell (dark sidebar) */
+  --color-sidebar: #0c1322;
+  --color-sidebar-2: #111a2e;
+  --color-sidebar-line: #1f2b44;
+  --color-sidebar-text: #c4cfe3;
+  --color-sidebar-text-dim: #7e8bab;
+  --color-sidebar-active: #15233f;
+
+  /* Text */
+  --color-text: #18202f;
+  --color-text-muted: #5a657c;
+  --color-text-subtle: #8a94a8;
+  --color-text-inverse: #ffffff;
+
+  /* Borders + lines */
+  --color-border: #e3e8f0;
+  --color-border-strong: #d2dae6;
+
+  /* Status */
+  --color-success: #18a571;
+  --color-success-soft: #e4f6ee;
+  --color-warning: #c77d10;
+  --color-warning-soft: #fbefdc;
+  --color-danger: #dc3b51;
+  --color-danger-soft: #fceaed;
+  --color-info: #2f7bf0;
+  --color-info-soft: #e7f0fe;
+
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* Elevation — soft, layered */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 12px 28px rgba(15, 23, 42, 0.07);
+  --shadow-lg: 0 18px 48px rgba(15, 23, 42, 0.16);
+  --shadow-accent: 0 4px 14px rgba(13, 148, 136, 0.30);
+
+  /* Typography scale */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* Motion */
+  --transition-fast: 120ms ease;
+  --transition-base: 180ms ease;
+}

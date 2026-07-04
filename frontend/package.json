@@ -1,0 +1,38 @@
+{
+  "name": "datacoolie-studio-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "test": "vitest run",
+    "preview": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "@iconify-icons/carbon": "^1.2.20",
+    "@iconify-icons/simple-icons": "^1.2.74",
+    "@iconify-icons/vscode-icons": "^1.2.29",
+    "@iconify/react": "^6.0.2",
+    "@tanstack/react-table": "^8.21.3",
+    "@xyflow/react": "^12.8.2",
+    "echarts": "^6.1.0",
+    "echarts-for-react": "^3.0.6",
+    "elkjs": "^0.11.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-datasheet-grid": "^4.11.6",
+    "react-dom": "^18.3.1",
+    "tslib": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.0.2",
+    "playwright": "^1.56.1",
+    "typescript": "^5.6.3",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.8"
+  }
+}

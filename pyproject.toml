@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "datacoolie-studio"
+version = "0.1.0"
+description = "Local web studio for inspecting DataCoolie metadata, lineage, and ETL logs."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "DataCoolie Team" }]
+dependencies = [
+  "duckdb>=1.1",
+  "fastapi>=0.115",
+  "libcst>=1.8",
+  "openpyxl>=3.1",
+  "pytz>=2024.1",
+  "pydantic>=2.8",
+  "pyyaml>=6.0",
+  "ruamel.yaml>=0.18",
+  "sqlalchemy>=2.0",
+  "sqlglot>=27.0",
+  "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27",
+  "pytest>=8.0",
+]
+
+[project.scripts]
+datacoolie-studio = "datacoolie_studio.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/datacoolie_studio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
