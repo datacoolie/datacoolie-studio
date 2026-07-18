@@ -15,16 +15,16 @@ def validate_metadata_source(session: Session, source: EnvironmentSource) -> dic
     try:
         path = require_local_path(source.uri)
     except StorageProviderNotEnabled as exc:
-        return _save_read_check(session, source, _error(source.id, "metadata", str(exc), provider=exc.provider))
+        return record_source_validation(session, source, source_validation_error(source, str(exc), provider=exc.provider))
     if not path.exists():
-        return _save_read_check(session, source, _error(source.id, "metadata", f"Metadata file not found: {source.uri}"))
+        return record_source_validation(session, source, source_validation_error(source, f"Metadata file not found: {source.uri}"))
     if not path.is_file():
-        return _save_read_check(session, source, _error(source.id, "metadata", f"Metadata source is not a file: {source.uri}"))
+        return record_source_validation(session, source, source_validation_error(source, f"Metadata source is not a file: {source.uri}"))
     try:
         with path.open("rb") as handle:
             handle.read(1)
     except OSError as exc:
-        return _save_read_check(session, source, _error(source.id, "metadata", f"Metadata file is not readable: {exc}"))
+        return record_source_validation(session, source, source_validation_error(source, f"Metadata file is not readable: {exc}"))
 
     detected_format = _metadata_format(source.uri)
     result = {
@@ -38,7 +38,7 @@ def validate_metadata_source(session: Session, source: EnvironmentSource) -> dic
         "records_scanned": 1,
         "errors": [],
     }
-    return _save_read_check(session, source, result)
+    return record_source_validation(session, source, result)
 
 
 def validate_log_source(session: Session, source: EnvironmentSource) -> dict:
@@ -48,15 +48,15 @@ def validate_log_source(session: Session, source: EnvironmentSource) -> dict:
         etl_path = require_local_path(etl_uri)
         system_path = require_local_path(log_paths.system_logs_uri) if log_paths.system_logs_uri else None
     except StorageProviderNotEnabled as exc:
-        return _save_read_check(session, source, _error(source.id, "logs", str(exc), provider=exc.provider))
+        return record_source_validation(session, source, source_validation_error(source, str(exc), provider=exc.provider))
     dataflow_files = discover_dataflow_parquet_files(etl_path.as_posix())
     job_files = discover_job_jsonl_files(etl_path.as_posix())
     system_files = discover_system_jsonl_files(system_path.as_posix() if system_path else None)
     if not dataflow_files and not job_files and not system_files:
-        return _save_read_check(
+        return record_source_validation(
             session,
             source,
-            _error(source.id, "logs", "No ETL or system log files found"),
+            source_validation_error(source, "No ETL or system log files found"),
         )
 
     counts = {
@@ -75,7 +75,7 @@ def validate_log_source(session: Session, source: EnvironmentSource) -> dict:
         "records_scanned": sum(counts.values()),
         "errors": [],
     }
-    return _save_read_check(session, source, result)
+    return record_source_validation(session, source, result)
 
 
 def _metadata_format(uri: str) -> str:
@@ -87,10 +87,10 @@ def _metadata_format(uri: str) -> str:
     return "json"
 
 
-def _error(source_id: int, source_kind: str, message: str, *, provider: str = "local") -> dict:
+def source_validation_error(source: EnvironmentSource, message: str, *, provider: str = "local") -> dict:
     return {
-        "source_id": source_id,
-        "source_kind": source_kind,
+        "source_id": source.id,
+        "source_kind": source.source_kind,
         "status": "error",
         "message": message,
         "detected_provider": provider,
@@ -101,11 +101,17 @@ def _error(source_id: int, source_kind: str, message: str, *, provider: str = "l
     }
 
 
-def _save_read_check(session: Session, source: EnvironmentSource, result: dict) -> dict:
-    checked_at = utc_now()
+def record_source_validation(
+    session: Session,
+    source: EnvironmentSource,
+    result: dict,
+    *,
+    checked_at: datetime | None = None,
+) -> dict:
+    checked_at = checked_at or utc_now()
     source.read_check_status = str(result["status"])
     source.read_checked_at = checked_at
-    source.read_check_result_json = json.dumps(result)
+    source.read_check_result_json = json.dumps({**result, "validated_at": checked_at.isoformat()}, sort_keys=True)
     session.commit()
     session.refresh(source)
     return {**result, "validated_at": _as_utc(source.read_checked_at or checked_at)}

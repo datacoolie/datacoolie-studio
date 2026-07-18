@@ -40,6 +40,10 @@ def evaluate_string(
                 return UNKNOWN
             parts.append(value)
         return "".join(parts)
+    if isinstance(node, cst.ConcatenatedString):
+        left = evaluate_string(node.left, symbols, context)
+        right = evaluate_string(node.right, symbols, context)
+        return f"{left}{right}" if isinstance(left, str) and isinstance(right, str) else UNKNOWN
     if isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
         base = evaluate_string(node.func.value, symbols, context)
         method = node.func.attr.value

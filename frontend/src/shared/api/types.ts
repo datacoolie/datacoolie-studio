@@ -1,3 +1,8 @@
+export type TargetIdentifierKind = "logical_table" | "physical_path" | "api_endpoint";
+export type ResolutionStatus = "resolved_auto" | "resolved_manual" | "ambiguous" | "unresolved" | "mapping_target_missing";
+export type ReferenceType = "table_reference" | "path_reference" | "api_endpoint_reference" | "unknown";
+export type ReferenceGroupStatus = "resolved_single" | "resolved_mixed" | "partially_resolved" | "ambiguous" | "unresolved" | "mapping_target_missing";
+
 export interface Project {
   id: number;
   name: string;
@@ -21,6 +26,20 @@ export interface ProjectSummary extends Project {
   metadata_source_count: number;
   etl_log_path_count: number;
   environments: ProjectEnvironmentSummary[];
+}
+
+export interface ProjectReferenceMapping {
+  id: number;
+  project_id: number;
+  reference_type: ReferenceType;
+  reference_normalized_value: string;
+  reference_signature: Record<string, unknown>;
+  target_identifier_kind: TargetIdentifierKind;
+  target_normalized_value: string;
+  target_display_value: string;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface StudioPathInfo {
@@ -51,6 +70,7 @@ export interface StudioStorageInfo {
 export interface StudioSettings {
   timezone: string;
   timezone_source: "configured" | "server_default";
+  source_check_interval_seconds: number;
   updated_at?: string | null;
   storage: StudioStorageInfo;
 }
@@ -190,6 +210,8 @@ export interface EnvironmentFreshness {
   max_source_modified_at?: string | null;
   metadata_source_count: number;
   etl_log_path_count: number;
+  source_cache_version: string;
+  structural_cache_version: string;
   metadata: FreshnessGroup;
   etl_logs: FreshnessGroup;
   items: FreshnessSourceItem[];
@@ -252,6 +274,38 @@ export interface MetadataResponse {
   errors: Array<Record<string, unknown>>;
 }
 
+export interface EnvironmentOverview {
+  schema_version: "environment-overview.v1";
+  sources: {
+    metadata: { configured: number; enabled: number };
+    logs: { configured: number; enabled: number };
+    validation: { errors: number; warnings: number };
+  };
+  metadata: {
+    connections: number;
+    enabled_connections: number;
+    dataflows: number;
+    enabled_dataflows: number;
+    schema_hints: number;
+    enabled_schema_hints: number;
+    stages: Array<{ name: string; count: number }>;
+    load_types: Array<{ name: string; count: number }>;
+    errors: Array<Record<string, unknown>>;
+  };
+  lineage: LineageSummary & { error_count: number };
+  monitoring: {
+    job_records: number;
+    total_failures: number;
+    dataflow_success_rate: number;
+    failed_job_windows: { last7: number; last30: number; last365: number };
+    active_engines: number;
+    latest_log_at: string | null;
+    date_range: { min?: string | null; max?: string | null };
+    errors: Array<Record<string, unknown>>;
+  };
+  cache: { state: "hit" | "miss"; computed_at: string };
+}
+
 export interface MetadataEditorColumn {
   key: string;
   name: string;
@@ -300,8 +354,9 @@ export interface MetadataBackup {
 
 export interface LineageAsset {
   id: string;
+  entity_type: "asset";
   label: string;
-  kind: "table" | "path" | "sql_query" | "python_function" | "api" | "unresolved";
+  asset_type: "table" | "path" | "sql_query" | "python_function" | "api" | "unresolved";
   display_name: string;
   declaration_status: "declared" | "discovered_only";
   display_label?: string;
@@ -326,14 +381,49 @@ export interface LineageAsset {
 
 export interface LineageReference {
   id: string;
-  kind: "table_reference" | "path_reference" | "dynamic_expression" | "unknown";
+  entity_type: "reference";
+  reference_type: ReferenceType;
   display_name: string;
-  resolution_status: "ambiguous" | "unresolved";
+  normalized_value: string;
+  group_status: ReferenceGroupStatus;
+  resolved_asset_id?: string | null;
+  resolved_asset_ids: string[];
+  candidate_asset_ids: string[];
+  occurrence_ids: string[];
+  consumer_asset_ids: string[];
+  provenances: Array<"sql" | "python" | "python_sql">;
+  dependency_count: number;
+  observations: Array<Record<string, unknown>>;
+}
+
+export interface SourceLocation {
+  module?: string | null;
+  path?: string | null;
+  function_path?: string | null;
+  line?: number | null;
+  column?: number | null;
+  end_line?: number | null;
+  end_column?: number | null;
+  coordinate_space?: "query_source" | "function_source" | null;
+}
+
+export interface LineageReferenceOccurrence {
+  id: string;
+  reference_id: string;
+  reference_type: ReferenceType;
+  display_name: string;
+  resolution_status: ResolutionStatus;
   raw_value: string;
+  normalized_value: string;
+  context_scope?: string | null;
+  context_scope_source?: "detected" | "metadata_context" | null;
+  source_location?: SourceLocation | null;
   provenance: "sql" | "python" | "python_sql";
   target_asset_id: string;
+  consumer_asset_id: string;
+  resolved_asset_id?: string | null;
   candidate_asset_ids: string[];
-  reason_code: string;
+  resolution_method: string;
   observations: Array<Record<string, unknown>>;
 }
 
@@ -351,15 +441,15 @@ export interface LineageDataflow {
 
 export interface LineageDependency {
   id: string;
-  source: {
-    entity_type: "asset" | "reference";
-    id: string;
-  };
   target_asset_id: string;
+  consumer_asset_id: string;
   kind: "reads" | "uses";
   provenance: "sql" | "python" | "python_sql";
-  resolution_status: "resolved" | "discovered_only" | "ambiguous" | "unresolved";
+  resolution_status: ResolutionStatus;
   resolution_method: string;
+  reference_id: string;
+  reference_occurrence_id: string;
+  resolved_asset_id?: string | null;
   observations: Array<Record<string, unknown>>;
 }
 
@@ -380,11 +470,12 @@ export interface LineageSummary {
   dependencies: number;
   stitched_assets: number;
   declared_assets: number;
-  discovered_only_assets: number;
+  resolved_auto_dependencies: number;
   resolved_dependencies: number;
-  discovered_only_dependencies: number;
+  resolved_manual_dependencies?: number;
   ambiguous_dependencies: number;
   unresolved_dependencies: number;
+  mapping_target_missing_dependencies?: number;
   diagnostics: number;
 }
 
@@ -393,6 +484,7 @@ export interface LineageResponse {
   summary: LineageSummary;
   assets: LineageAsset[];
   references: LineageReference[];
+  reference_occurrences: LineageReferenceOccurrence[];
   dataflows: LineageDataflow[];
   dependencies: LineageDependency[];
   diagnostics: LineageDiagnostic[];
@@ -400,10 +492,15 @@ export interface LineageResponse {
 
 export interface AssetSummary {
   assets: number;
-  declared: number;
-  discovered_only: number;
-  stitched: number;
-  with_issues: number;
+  references: number;
+  manual_mappings: number;
+  visible: number;
+  asset_attention: number;
+  with_attention: number;
+  references_needing_mapping: number;
+  references_ambiguous: number;
+  references_unresolved: number;
+  references_mapping_target_missing: number;
 }
 
 export interface AssetMetadataSource {
@@ -411,23 +508,43 @@ export interface AssetMetadataSource {
   uri: string;
 }
 
-export interface AssetIssue {
+export interface AssetAttention {
   severity: "info" | "warning" | "error";
   code: string;
   message: string;
+  source_type: string;
+  subject_type: string;
   dataflow_id?: string | null;
   metadata_source_id?: number | null;
   reference_id?: string | null;
+  reference_occurrence_id?: string | null;
   details: Record<string, unknown>;
 }
 
 export interface AssetFilterOptions {
   connections: string[];
   formats: string[];
-  kinds: string[];
+  asset_types: string[];
   roles: string[];
-  declaration_statuses: Array<"declared" | "discovered_only" | string>;
-  issue_states: string[];
+  attention_states: string[];
+}
+
+export interface AssetReferenceFilterOptions {
+  connections?: string[];
+  reference_types: Array<ReferenceType | string>;
+  provenances: Array<"sql" | "python" | "python_sql" | string>;
+  group_statuses?: Array<ReferenceGroupStatus | string>;
+  resolution_statuses?: Array<ResolutionStatus | string>;
+  resolution_methods?: string[];
+  attention_states: string[];
+}
+
+export interface AssetManualMappingInfo {
+  mapping_id: number;
+  status?: string;
+  note?: string | null;
+  target_identifier_kind?: string | null;
+  target_normalized_value?: string | null;
 }
 
 export interface AssetInventoryItem {
@@ -435,7 +552,7 @@ export interface AssetInventoryItem {
   display_name: string;
   friendly_name: string;
   full_identity: string;
-  kind: "table" | "path" | "sql_query" | "python_function" | "api" | "unresolved";
+  asset_type: "table" | "path" | "sql_query" | "python_function" | "api" | "unresolved";
   format?: string | null;
   connection_name?: string | null;
   connection_type?: string | null;
@@ -446,31 +563,249 @@ export interface AssetInventoryItem {
   path?: string | null;
   query?: string | null;
   python_function?: string | null;
-  declaration_status: "declared" | "discovered_only";
   roles: string[];
   metadata_source_ids: number[];
-  metadata_sources: AssetMetadataSource[];
+  metadata_sources?: AssetMetadataSource[];
+  metadata_source_count?: number;
   upstream_count: number;
   downstream_count: number;
   input_dataflow_count: number;
   output_dataflow_count: number;
-  dependency_count: number;
-  issue_count: number;
-  issues: AssetIssue[];
-  identifiers: Array<Record<string, unknown>>;
-  observations: Array<Record<string, unknown>>;
+  depends_on_count: number;
+  used_by_count: number;
+  attention_count: number;
+  attention_items?: AssetAttention[];
+  identifiers?: Array<Record<string, unknown>>;
+  observations?: Array<Record<string, unknown>>;
+  identifier_count?: number;
+  observation_count?: number;
+  mapping_target?: {
+    kind: TargetIdentifierKind | string;
+    value: string;
+    display: string;
+  } | null;
 }
 
-export interface AssetsResponse {
+export interface AssetReferenceGroupItem {
+  id: string;
+  reference_type: ReferenceType;
+  normalized_value: string;
+  display_name: string;
+  group_status: ReferenceGroupStatus;
+  resolved_asset_id?: string | null;
+  resolved_asset_ids: string[];
+  resolved_asset?: AssetBrief | null;
+  candidate_asset_ids: string[];
+  candidate_assets: AssetBrief[];
+  occurrence_ids: string[];
+  consumer_asset_ids: string[];
+  consumer_assets: AssetBrief[];
+  provenances: Array<"sql" | "python" | "python_sql" | string>;
+  dependency_count: number;
+  dataflow_ids: string[];
+  attention_count: number;
+  attention_items: AssetAttention[];
+  observations: Array<Record<string, unknown>>;
+  manual_mapping?: AssetManualMappingInfo | null;
+}
+
+export interface AssetReferenceOccurrenceItem {
+  id: string;
+  reference_id: string;
+  reference_type: ReferenceType;
+  raw_value: string;
+  normalized_value: string;
+  context_scope?: string | null;
+  context_scope_source?: "detected" | "metadata_context" | null;
+  source_location?: SourceLocation | null;
+  display_name: string;
+  provenance?: "sql" | "python" | "python_sql" | string | null;
+  consumer_asset_id?: string | null;
+  consumer_asset?: AssetBrief | null;
+  connection_name?: string | null;
+  resolution_status: ResolutionStatus;
+  resolution_method?: string | null;
+  resolved_asset_id?: string | null;
+  resolved_asset?: AssetBrief | null;
+  candidate_asset_ids: string[];
+  candidate_assets: AssetBrief[];
+  dependency_count: number;
+  dataflow_ids: string[];
+  attention_count: number;
+  attention_items: AssetAttention[];
+  observations: Array<Record<string, unknown>>;
+  manual_mapping?: AssetManualMappingInfo | null;
+}
+
+export interface AssetInventoryResponse {
   summary: AssetSummary;
-  assets: AssetInventoryItem[];
+  items: AssetInventoryItem[];
   filter_options: AssetFilterOptions;
-  diagnostics: LineageDiagnostic[];
+  catalog_version: string;
+}
+
+export interface AssetReferenceListResponse {
+  items: AssetReferenceGroupItem[];
+  filter_options: AssetReferenceFilterOptions;
+  catalog_version: string;
+}
+
+export interface AssetReferenceDetailResponse {
+  reference: AssetReferenceGroupItem;
+  occurrences: AssetReferenceOccurrenceItem[];
+  catalog_version: string;
+}
+
+export interface AssetDirectRelationships {
+  upstream_assets: number;
+  downstream_assets: number;
+  input_flows: number;
+  output_flows: number;
+  depends_on_count: number;
+  depends_on_total?: number;
+  depends_on_mapped_count?: number;
+  depends_on_unmapped_count?: number;
+  depends_on_asset_count?: number;
+  depends_on_reference_count?: number;
+  used_by_count: number;
+  used_by_total?: number;
+  position: "entry" | "transit" | "exit" | "isolated" | string;
+}
+
+export interface AssetBrief {
+  id: string;
+  display_name: string;
+  friendly_name: string;
+  full_identity?: string;
+  asset_type: AssetInventoryItem["asset_type"] | string;
+  connection_name?: string | null;
+  format?: string | null;
+  attention_count: number;
+}
+
+export interface AssetNeighbor {
+  asset: AssetBrief;
+  relation_flow_count: number;
+  relation_dependency_count: number;
+  relation_kinds: string[];
+}
+
+export interface AssetFlow {
+  id: string;
+  dataflow_id: string;
+  name: string;
+  stage?: string | null;
+  load_type?: string | null;
+  metadata_source_id?: number | null;
+  metadata_source_uri?: string | null;
+  source_asset_id?: string | null;
+  destination_asset_id?: string | null;
+  counterpart: AssetBrief;
+}
+
+export interface AssetDependencyReference {
+  id: string;
+  display_name: string;
+  reference_type: string;
+  resolution_status: string;
+  raw_value?: string | null;
+  provenance?: string | null;
+}
+
+export interface AssetDependsOnItem {
+  id: string;
+  kind: string;
+  provenance: string;
+  resolution_status: string;
+  resolution_method: string;
+  reference_id?: string | null;
+  resolved_asset_id?: string | null;
+  resolved_asset?: AssetBrief | null;
+  source_reference?: AssetDependencyReference | null;
+}
+
+export interface AssetUsedByItem {
+  id: string;
+  kind: string;
+  provenance: string;
+  resolution_status: string;
+  resolution_method: string;
+  target_asset: AssetBrief;
+  reference?: AssetDependencyReference | null;
+}
+
+export interface AssetDefinitionDiagnostic {
+  severity: "info" | "warning" | "error" | string;
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface AssetDefinitionResponse {
+  kind: "sql_query" | "python_function" | "api" | "path" | "unresolved" | string;
+  language?: string | null;
+  status: "available" | "unavailable" | "ambiguous" | "empty" | string;
+  title?: string | null;
+  raw?: string | null;
+  formatted?: string | null;
+  source?: string | null;
+  function_path?: string | null;
+  module_name?: string | null;
+  relative_path?: string | null;
+  line_count?: number;
+  diagnostics?: AssetDefinitionDiagnostic[];
+  matches?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface AssetSourceResponse {
+  definition: AssetDefinitionResponse;
+  catalog_version: string;
 }
 
 export interface AssetDetailResponse {
   asset: AssetInventoryItem;
-  diagnostics: AssetIssue[];
+  definition?: AssetDefinitionResponse | null;
+  attention_items: AssetAttention[];
+  direct_relationships: AssetDirectRelationships;
+  upstream_assets: AssetNeighbor[];
+  downstream_assets: AssetNeighbor[];
+  input_flows: AssetFlow[];
+  output_flows: AssetFlow[];
+  depends_on: AssetDependsOnItem[];
+  used_by: AssetUsedByItem[];
+}
+
+export interface ReferenceSourceMatch {
+  line: number;
+  column: number;
+  end_line: number;
+  end_column: number;
+  precision: "exact_reference" | "detection_expression" | "location_only";
+}
+
+export interface ReferenceSourceView {
+  id: "query_source" | "consumer_source" | "evaluated_sql";
+  label: string;
+  language: "sql" | "python";
+  content: string;
+  path?: string | null;
+  function_path?: string | null;
+  module_name?: string | null;
+  matches: ReferenceSourceMatch[];
+}
+
+export interface ReferenceSourceDiagnostic {
+  severity: "info" | "warning" | "error";
+  code: string;
+  message: string;
+}
+
+export interface ReferenceOccurrenceSourceResponse {
+  occurrence_id: string;
+  consumer_asset_id: string;
+  views: ReferenceSourceView[];
+  diagnostics: ReferenceSourceDiagnostic[];
 }
 
 export interface MonitoringRecord {
@@ -619,6 +954,7 @@ export interface MonitoringReport {
     workload_efficiency_points?: Array<Record<string, string | number | null>>;
     slowest_dataflow_profiles?: Array<Record<string, string | number | null>>;
     runtime_context_profiles?: Array<Record<string, string | number | null>>;
+    performance_trend?: Array<Record<string, string | number | null>>;
     investigation_queue?: MonitoringRecord[];
     duration_breakdown: Array<Record<string, string | number>>;
     duration_vs_rows: Array<Record<string, string | number>>;
@@ -640,6 +976,7 @@ export interface MonitoringReport {
     top_dataflows_by_rows_written: Array<Record<string, string | number>>;
     top_dataflows_by_bytes_added?: Array<Record<string, string | number>>;
     top_dataflows_by_net_bytes?: Array<Record<string, string | number | null>>;
+    dataflow_registry?: MonitoringRecord[];
     investigation_queue?: MonitoringRecord[];
   };
   maintenance: {
@@ -711,12 +1048,11 @@ export interface MonitoringOverview {
 }
 
 export interface LatestStatusResponse {
-  latest: Record<string, MonitoringRecord>;
-  latest_by_id?: Record<string, MonitoringRecord>;
-  latest_by_name?: Record<string, MonitoringRecord>;
-  ambiguous_names?: string[];
-  errors: Array<Record<string, unknown>>;
-}
+    latest_by_id: Record<string, MonitoringRecord>;
+    latest_by_name: Record<string, MonitoringRecord>;
+    ambiguous_names: string[];
+    errors: Array<Record<string, unknown>>;
+  }
 
 export interface MonitoringRecordsResponse<T extends Record<string, unknown>> {
   records: T[];

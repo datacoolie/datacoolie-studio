@@ -27,13 +27,29 @@ def get_engine():
 
 def init_db() -> None:
     engine = get_engine()
+    _migrate_project_reference_mappings(engine)
     Base.metadata.create_all(bind=engine)
+    _drop_legacy_derived_cache_tables(engine)
     _ensure_scan_run_columns(engine)
     _ensure_environment_source_columns(engine)
     _ensure_log_file_manifest_columns(engine)
     _migrate_environment_sources(engine)
     _migrate_log_sources(engine)
     _migrate_log_file_manifest(engine)
+
+
+def _drop_legacy_derived_cache_tables(engine) -> None:
+    """Discard superseded projections only; all source-of-truth tables remain intact."""
+    legacy_tables = {
+        "lineage_graph_cache_entries",
+        "environment_summary_cache_entries",
+    }
+    existing = legacy_tables.intersection(inspect(engine).get_table_names())
+    if not existing:
+        return
+    with engine.begin() as connection:
+        for table_name in sorted(existing):
+            connection.execute(text(f"DROP TABLE {table_name}"))
 
 
 def create_session() -> Session:
@@ -217,6 +233,35 @@ def _migrate_log_file_manifest(engine) -> None:
             )
         )
         connection.execute(text("DROP TABLE etl_log_file_manifest"))
+
+
+def _migrate_project_reference_mappings(engine) -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    legacy_table = "project_asset_mappings"
+    target_table = "project_reference_mappings"
+    if legacy_table in tables and target_table not in tables:
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {legacy_table} RENAME TO {target_table}"))
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+    if target_table not in tables:
+        return
+    columns = {column["name"] for column in inspector.get_columns(target_table)}
+    with engine.begin() as connection:
+        if "reference_kind" in columns and "reference_type" not in columns:
+            connection.execute(text(f"ALTER TABLE {target_table} ADD COLUMN reference_type VARCHAR(50)"))
+        if "reference_kind" in columns:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {target_table}
+                    SET reference_type = reference_kind
+                    WHERE reference_type IS NULL OR reference_type = ''
+                    """
+                )
+            )
+            connection.execute(text(f"ALTER TABLE {target_table} DROP COLUMN reference_kind"))
 
 
 def _migrate_scan_run_read_checks(connection, tables: set[str]) -> None:

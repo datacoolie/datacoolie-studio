@@ -1,7 +1,6 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getSmoothStepPath,
   type EdgeProps
 } from "@xyflow/react";
 import type { LineageFlowEdge } from "../model/types";
@@ -45,7 +44,7 @@ export function LineageDataflowEdge(props: EdgeProps<LineageFlowEdge>) {
       {data?.relationType === "dataflow" ? (
         <EdgeLabelRenderer>
           <div
-            className={`lineage-edge-label${data.status !== "unknown" ? ` status-${data.status}` : ""}`}
+            className={`lineage-edge-label${data.status !== "unknown" ? ` status-${data.status}` : ""} selection-${data.selectionState}`}
             style={{
               maxWidth: EDGE_LABEL_MAX_WIDTH,
               transform: labelTransform(
@@ -65,15 +64,15 @@ export function LineageDataflowEdge(props: EdgeProps<LineageFlowEdge>) {
 }
 
 export function LineageDependencyEdge(props: EdgeProps<LineageFlowEdge>) {
-  const [edgePath] = getSmoothStepPath({
+  const routeLane = props.data?.relationType === "dependency"
+    ? props.data.routeLane
+    : 0;
+  const edgePath = dependencyEdgePath({
     sourceX: props.sourceX,
     sourceY: props.sourceY,
-    sourcePosition: props.sourcePosition,
     targetX: props.targetX,
     targetY: props.targetY,
-    targetPosition: props.targetPosition,
-    borderRadius: 6,
-    offset: 22
+    routeLane
   });
   return (
     <BaseEdge
@@ -83,4 +82,30 @@ export function LineageDependencyEdge(props: EdgeProps<LineageFlowEdge>) {
       style={props.style}
     />
   );
+}
+
+interface DependencyPathArgs {
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+  routeLane: number;
+}
+
+export function dependencyEdgePath({
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  routeLane
+}: DependencyPathArgs) {
+  const direction = targetX >= sourceX ? 1 : -1;
+  const attachmentOffset = Math.max(-18, Math.min(18, routeLane * 9));
+  const availableWidth = Math.abs(targetX - sourceX);
+  const channelOffset = Math.min(32 + Math.abs(routeLane) * 8, Math.max(20, availableWidth / 2));
+  const channelX = sourceX + direction * channelOffset;
+  const laneSourceY = sourceY + attachmentOffset;
+  const laneTargetY = targetY + attachmentOffset;
+
+  return `M ${sourceX} ${sourceY} V ${laneSourceY} H ${channelX} V ${laneTargetY} H ${targetX}`;
 }

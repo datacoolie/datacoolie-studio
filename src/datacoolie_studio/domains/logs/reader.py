@@ -143,6 +143,7 @@ def read_system_log_file(
     *,
     job_id: str | None = None,
     dataflow_id: str | None = None,
+    include_dataflow_logs: bool = False,
     level: str | None = None,
     q: str | None = None,
     limit: int = 500,
@@ -166,6 +167,8 @@ def read_system_log_file(
                 if job_id:
                     row.setdefault("job_id", job_id)
                 if dataflow_id and str(row.get("dataflow_id") or "").lower() != dataflow_id.lower():
+                    continue
+                if not dataflow_id and not include_dataflow_logs and str(row.get("dataflow_id") or "").strip():
                     continue
                 if normalized_level and str(row.get("level") or "").lower() != normalized_level:
                     continue

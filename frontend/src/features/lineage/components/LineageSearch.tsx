@@ -45,7 +45,7 @@ export function LineageSearch({
 
   return (
     <div className="lineage-search">
-      <label htmlFor={`${listboxId}-input`}>Find asset, dataflow, or reference</label>
+      <label htmlFor={`${listboxId}-input`}>Find an entity</label>
       <div className="lineage-search-control">
         <Search size={15} aria-hidden="true" />
         <input
@@ -55,7 +55,7 @@ export function LineageSearch({
           aria-controls={listboxId}
           aria-expanded={open && Boolean(query.trim())}
           value={query}
-          placeholder="Connection, table, path, dataflow"
+          placeholder="Asset, reference, dataflow, dependency"
           onChange={(event) => {
             onQueryChange(event.target.value);
             setOpen(true);
@@ -101,7 +101,7 @@ export function LineageSearch({
                 <small>{result.subtitle}</small>
                 <code title={result.identity}>{result.identity}</code>
               </span>
-              <i>{searchKindLabel(result.kind)}</i>
+              <i className={`lineage-search-kind kind-${result.kind}`}>{searchKindLabel(result.kind)}</i>
             </button>
           )) : (
             <div className="lineage-search-empty">No matching lineage entities</div>

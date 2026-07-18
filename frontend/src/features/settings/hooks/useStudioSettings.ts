@@ -8,7 +8,12 @@ export interface StudioSettingsState {
   busy: boolean;
   error: string | null;
   reload: () => Promise<void>;
-  saveTimezone: (timezone: string | null) => Promise<void>;
+  saveSettings: (changes: StudioSettingsChanges) => Promise<void>;
+}
+
+export interface StudioSettingsChanges {
+  timezone: string | null;
+  source_check_interval_seconds: number;
 }
 
 /**
@@ -34,22 +39,19 @@ export function useStudioSettings(options?: { onSaved?: () => void | Promise<voi
     void reload();
   }, [reload]);
 
-  const saveTimezone = useCallback(
-    async (timezone: string | null) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const updated = await api.updateStudioSettings({ timezone });
-        setSettings(updated);
-        if (onSaved) await onSaved();
-      } catch (err) {
-        setError(toErrorMessage(err));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [onSaved]
-  );
+  const saveSettings = useCallback(async (changes: StudioSettingsChanges) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.updateStudioSettings(changes);
+      setSettings(updated);
+      if (onSaved) await onSaved();
+    } catch (err) {
+      setError(toErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [onSaved]);
 
-  return { settings, busy, error, reload, saveTimezone };
+  return { settings, busy, error, reload, saveSettings };
 }

@@ -1,7 +1,8 @@
-import { CheckCircle2, Code2, Database, FolderOpen, Layers3, Plus, PlusCircle } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, Code2, Database, FolderOpen, Layers3, Plus, Search } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
-import type { ProjectSummary } from "../../shared/api/types";
+import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
 import { orderedEnvironmentNamesWithMissing } from "../../shared/environmentOrder";
+import { environmentReadiness, environmentReadinessLabel } from "../../shared/environmentReadiness";
 
 interface ProjectsPageProps {
   projects: ProjectSummary[];
@@ -9,7 +10,6 @@ interface ProjectsPageProps {
   onCreateProject: (name: string) => Promise<void>;
   onOpenEnvironment: (projectId: number, environmentId: number) => void;
   onOpenProject: (projectId: number) => void;
-  onOpenProjectEnvironments: (projectId: number) => void;
   onQuickCreateEnvironment: (projectId: number, name: string) => Promise<void>;
 }
 
@@ -19,19 +19,19 @@ export function ProjectsPage({
   onCreateProject,
   onOpenEnvironment,
   onOpenProject,
-  onOpenProjectEnvironments,
   onQuickCreateEnvironment
 }: ProjectsPageProps) {
   const [projectName, setProjectName] = useState("");
-  const totals = useMemo(
-    () => ({
-      projects: projects.length,
-      environments: projects.reduce((sum, project) => sum + project.environment_count, 0),
-      metadataSources: projects.reduce((sum, project) => sum + project.metadata_source_count, 0),
-      logPaths: projects.reduce((sum, project) => sum + project.etl_log_path_count, 0)
-    }),
+  const [query, setQuery] = useState("");
+  const totals = useMemo(() => workspaceTotals(projects), [projects]);
+  const sortedProjects = useMemo(
+    () => [...projects].sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" })),
     [projects]
   );
+  const filteredProjects = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle ? sortedProjects.filter((project) => projectSearchText(project).includes(needle)) : sortedProjects;
+  }, [query, sortedProjects]);
 
   async function submitProject(event: FormEvent) {
     event.preventDefault();
@@ -40,26 +40,27 @@ export function ProjectsPage({
     setProjectName("");
   }
 
+  const summary = query.trim()
+    ? `${filteredProjects.length} matching · ${totals.projects} projects in workspace`
+    : `${totals.projects} projects · ${totals.environments} environments · ${totals.metadataSources} metadata sources`;
+
   return (
-    <div className="view-stack">
-      <div className="projects-kpi-strip">
-        <KpiTile label="Projects" value={totals.projects} icon={<Layers3 size={18} />} />
-        <KpiTile label="Environments" value={totals.environments} icon={<CheckCircle2 size={18} />} />
-        <KpiTile label="Metadata sources" value={totals.metadataSources} icon={<Database size={18} />} />
-        <KpiTile label="Log paths" value={totals.logPaths} icon={<FolderOpen size={18} />} />
-      </div>
-
-      <section className="table-panel projects-panel">
-        <div className="panel-toolbar">
-          <h2>Projects</h2>
-          <span>{projects.length} configured</span>
-        </div>
-
-        <div className="projects-add-row">
-          <form className="settings-form projects-create-form" onSubmit={submitProject}>
-            <label>
-              Project name
-              <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="New project name" />
+    <div className="view-stack projects-directory">
+      <section className="table-panel projects-panel projects-directory-panel" aria-labelledby="projects-heading">
+        <div className="panel-toolbar projects-directory-toolbar">
+          <div className="projects-directory-heading">
+            <h2 id="projects-heading">Projects</h2>
+            <span>{summary}</span>
+          </div>
+          <form className="projects-directory-create-form" onSubmit={submitProject}>
+            <label htmlFor="new-project-name">
+              <span>New project</span>
+              <input
+                id="new-project-name"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+                placeholder="Project name"
+              />
             </label>
             <button type="submit" disabled={busy || !projectName.trim()}>
               <Plus size={15} />
@@ -68,91 +69,175 @@ export function ProjectsPage({
           </form>
         </div>
 
-        <div className="project-card-list">
-          {projects.map((project) => (
-            <article key={project.id} className="project-card">
-              <div className="project-card-header">
-                <button className="project-card-title-btn" onClick={() => onOpenProject(project.id)}>
-                  <strong><Layers3 size={14} />{project.name}</strong>
-                  {project.description ? <span>{project.description}</span> : null}
-                </button>
-                <div className="project-card-header-actions">
-                  <button className="text-action" onClick={() => onOpenProject(project.id)}>Overview</button>
-                  <button className="text-action" onClick={() => onOpenProjectEnvironments(project.id)}>Environments</button>
-                </div>
-              </div>
+        <div className="projects-directory-search">
+          <Search size={15} aria-hidden="true" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search projects, descriptions, environments"
+            aria-label="Search projects"
+          />
+        </div>
 
-              <div className="project-card-stats">
-                <span><Database size={13} />{project.metadata_source_count} metadata sources</span>
-                <span><FolderOpen size={13} />{project.etl_log_path_count} log paths</span>
-                <span><Layers3 size={13} />{project.environment_count} environments</span>
-              </div>
-
-              <div className="project-card-envs">
-                <span className="project-card-envs-label">Environments</span>
-                <div className="project-env-tiles">
-                  {orderedEnvironmentNamesWithMissing(project.environments).map((name) => {
-                    const env = project.environments.find((item) => item.name === name);
-                    return env ? (() => {
-                      const hasMetadata = env.metadata_source_count > 0;
-                      const hasLogs = env.etl_log_path_count > 0;
-                      const status = hasMetadata && hasLogs ? "ready"
-                        : (hasMetadata || hasLogs || env.code_artifact_count > 0) ? "partial"
-                        : "empty";
-                      return (
-                        <button key={name} className={`project-env-tile ready`} onClick={() => onOpenEnvironment(project.id, env.id)}>
-                          <div className="project-env-tile-header">
-                            <span className="project-env-tile-name">{name}</span>
-                            {status === "ready" && <span className="project-env-tile-ready"><CheckCircle2 size={11} />ready</span>}
-                            {status === "partial" && <span className="project-env-tile-partial">partial</span>}
-                            {status === "empty" && <span className="project-env-tile-missing">empty</span>}
-                          </div>
-                          <div className="project-env-tile-stats-row">
-                            <span title="Metadata sources"><Database size={10} />{env.metadata_source_count} src</span>
-                            <span title="Log paths"><FolderOpen size={10} />{env.etl_log_path_count} log</span>
-                            <span title="Code artifacts"><Code2 size={10} />{env.code_artifact_count} code</span>
-                          </div>
-                        </button>
-                      );
-                    })() : (
-                      <button key={name} className="project-env-tile missing" disabled={busy} onClick={() => onQuickCreateEnvironment(project.id, name)} title={`Create ${name} environment`}>
-                        <div className="project-env-tile-header">
-                          <span className="project-env-tile-name">{name}</span>
-                          <span className="project-env-tile-missing">not created</span>
-                        </div>
-                        <div className="project-env-tile-stats-row muted">
-                          <span><PlusCircle size={10} />click to create</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </article>
+        <div className="project-directory-list">
+          {filteredProjects.map((project) => (
+            <ProjectDirectoryRow
+              key={project.id}
+              project={project}
+              busy={busy}
+              onOpenEnvironment={onOpenEnvironment}
+              onOpenProject={onOpenProject}
+              onQuickCreateEnvironment={onQuickCreateEnvironment}
+            />
           ))}
-          {!projects.length ? (
-            <div className="project-card-empty">
-              <Layers3 size={20} />
-              <div>
-                <strong>No projects yet</strong>
-                <span>Create your first project using the form above.</span>
-              </div>
-            </div>
-          ) : null}
+          {!projects.length ? <EmptyProjectsState /> : null}
+          {projects.length && !filteredProjects.length ? <NoSearchMatchesState /> : null}
         </div>
       </section>
     </div>
   );
 }
 
-function KpiTile({ label, value, icon }: { label: string; value: number; icon: React.ReactNode }) {
+function ProjectDirectoryRow({
+  project,
+  busy,
+  onOpenEnvironment,
+  onOpenProject,
+  onQuickCreateEnvironment
+}: {
+  project: ProjectSummary;
+  busy: boolean;
+  onOpenEnvironment: (projectId: number, environmentId: number) => void;
+  onOpenProject: (projectId: number) => void;
+  onQuickCreateEnvironment: (projectId: number, name: string) => Promise<void>;
+}) {
+  const readiness = projectReadiness(project);
+  const codeArtifactCount = project.environments.reduce((total, environment) => total + environment.code_artifact_count, 0);
+
   return (
-    <div className="projects-kpi-tile">
-      <span className="projects-kpi-icon">{icon}</span>
+    <article className="project-directory-row">
+      <div className="project-directory-identity">
+        <button type="button" className="project-directory-title" onClick={() => onOpenProject(project.id)}>
+          <span className="project-directory-icon"><Layers3 size={17} /></span>
+          <span className="project-directory-copy">
+            <strong>{project.name}</strong>
+            {project.description ? <span>{project.description}</span> : null}
+          </span>
+        </button>
+        <span className={`project-directory-readiness is-${readiness.tone}`}>
+          {readiness.tone === "ready" ? <CheckCircle2 size={13} /> : <span className="project-status-dot" aria-hidden="true" />}
+          {readiness.label}
+        </span>
+      </div>
+
+      <div className="project-directory-environments">
+        <span className="project-directory-label">Environments</span>
+        <div className="project-environment-chip-list">
+          {orderedEnvironmentNamesWithMissing(project.environments).map((name) => {
+            const environment = project.environments.find((item) => item.name === name);
+            return environment ? (
+              <EnvironmentChip
+                key={environment.id}
+                environment={environment}
+                onOpen={() => onOpenEnvironment(project.id, environment.id)}
+              />
+            ) : (
+              <button
+                key={name}
+                type="button"
+                className="project-environment-chip is-missing"
+                disabled={busy}
+                onClick={() => onQuickCreateEnvironment(project.id, name)}
+                title={`Create ${name} environment`}
+              >
+                <Plus size={13} />
+                <span>Create {name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="project-directory-coverage">
+        <span className="project-directory-label">Coverage</span>
+        <div>
+          <span><Database size={13} />{project.metadata_source_count} sources</span>
+          <span><FolderOpen size={13} />{project.etl_log_path_count} logs</span>
+          <span><Code2 size={13} />{codeArtifactCount} code</span>
+        </div>
+      </div>
+
+      <button type="button" className="project-directory-open" onClick={() => onOpenProject(project.id)}>
+        <span>Open</span>
+        <ArrowUpRight size={15} aria-hidden="true" />
+      </button>
+    </article>
+  );
+}
+
+function EnvironmentChip({ environment, onOpen }: { environment: ProjectEnvironmentSummary; onOpen: () => void }) {
+  const status = environmentReadiness(environment);
+  return (
+    <button type="button" className={`project-environment-chip is-${status}`} onClick={onOpen}>
+      <span className="project-environment-status" aria-hidden="true" />
+      <span className="project-environment-name">{environment.name}</span>
+      <span className="project-environment-status-label">{environmentReadinessLabel(status)}</span>
+    </button>
+  );
+}
+
+function EmptyProjectsState() {
+  return (
+    <div className="project-directory-empty">
+      <Layers3 size={20} />
       <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
+        <strong>No projects yet</strong>
+        <span>Create a project to start grouping environments.</span>
       </div>
     </div>
   );
+}
+
+function NoSearchMatchesState() {
+  return (
+    <div className="project-directory-empty">
+      <Search size={20} />
+      <div>
+        <strong>No projects match the search</strong>
+        <span>Try another name, description, or environment.</span>
+      </div>
+    </div>
+  );
+}
+
+function workspaceTotals(projects: ProjectSummary[]) {
+  return projects.reduce((totals, project) => ({
+    projects: totals.projects + 1,
+    environments: totals.environments + project.environment_count,
+    metadataSources: totals.metadataSources + project.metadata_source_count,
+  }), { projects: 0, environments: 0, metadataSources: 0 });
+}
+
+function projectSearchText(project: ProjectSummary) {
+  return [
+    project.name,
+    project.description,
+    ...project.environments.map((environment) => environment.name),
+  ]
+    .filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLowerCase();
+}
+
+function projectReadiness(project: ProjectSummary) {
+  const statuses = project.environments.map(environmentReadiness);
+  const ready = statuses.filter((status) => status === "ready").length;
+  const needsMetadata = statuses.length - ready;
+  if (!statuses.length) return { tone: "empty", label: "No environments" };
+  if (ready === statuses.length) return { tone: "ready", label: "All ready" };
+  if (ready) return { tone: "needs-metadata", label: `${ready}/${statuses.length} ready` };
+  return {
+    tone: "needs-metadata",
+    label: `${needsMetadata} ${needsMetadata === 1 ? "environment needs" : "environments need"} metadata`
+  };
 }

@@ -5,7 +5,6 @@ import {
   FolderKanban,
   GitBranch,
   Home,
-  Layers3,
   Settings,
   SlidersHorizontal,
   TableProperties,
@@ -14,8 +13,6 @@ import {
 
 export type ModuleKey =
   | "projects"
-  | "project-overview"
-  | "environments"
   | "overview"
   | "sources"
   | "metadata"
@@ -24,6 +21,8 @@ export type ModuleKey =
   | "monitoring"
   | "master-data"
   | "settings";
+
+export type ProjectSectionKey = "overview" | "environments" | "reference-mappings";
 
 /**
  * A capability module is a feature package that can be enabled or disabled at
@@ -60,9 +59,7 @@ export interface StudioModule {
 }
 
 export const modules: StudioModule[] = [
-  { key: "projects", label: "All projects", path: "projects", icon: FolderKanban, group: "Projects", scope: "global", requiresEnvironment: false },
-  { key: "project-overview", label: "Project overview", path: "project-overview", icon: Home, group: "Projects", scope: "project", requiresEnvironment: false },
-  { key: "environments", label: "Environments", path: "environments", icon: Layers3, group: "Projects", scope: "project", requiresEnvironment: false },
+  { key: "projects", label: "Projects", path: "projects", icon: FolderKanban, group: "Projects", scope: "global", requiresEnvironment: false },
   { key: "overview", label: "Overview", path: "overview", icon: Home, group: "Environment", scope: "environment", requiresEnvironment: true },
   { key: "metadata", label: "Metadata", path: "metadata", icon: Database, group: "Environment", scope: "environment", requiresEnvironment: true, capability: "metadata" },
   { key: "assets", label: "Assets", path: "assets", icon: TableProperties, group: "Environment", scope: "environment", requiresEnvironment: true, capability: "metadata" },
@@ -75,7 +72,7 @@ export const modules: StudioModule[] = [
 
 export const defaultModule: ModuleKey = "projects";
 export const environmentDefaultModule: ModuleKey = "overview";
-export const projectDefaultModule: ModuleKey = "project-overview";
+export const projectDefaultSection: ProjectSectionKey = "overview";
 export const monitoringDefaultPage: MonitoringPageKey = "overview";
 export const monitoringPages: MonitoringPageKey[] = [
   "overview",

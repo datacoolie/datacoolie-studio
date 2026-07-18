@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Code2,
@@ -6,16 +7,29 @@ import {
   FileCheck2,
   FolderOpen,
   HardDrive,
+  LoaderCircle,
   Plus,
   RefreshCw,
   Search,
   Settings2,
+  TimerReset,
   Trash2,
+  X,
   XCircle
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
-import type { SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/types";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { SourceBatchAction, SourceBatchEntry, SourceBatchResult } from "../../app/useStudioWorkspace";
+import type { SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/types";
+import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
+import { toErrorMessage } from "../../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
+import {
+  aggregateDeleteImpacts,
+  LOG_REFRESH_INTERVALS,
+  logRefreshInterval,
+  logScheduleLabel,
+  summarizeSourceHealth
+} from "./sourceWorkspaceModel";
 
 export type { SourceKind } from "../../shared/lib/sources";
 
@@ -50,13 +64,16 @@ interface SourcesPageProps {
     }
   ) => Promise<void>;
   onDeleteSource: (kind: SourceKind, id: number) => Promise<void>;
-  onDeleteSources: (kind: SourceKind, ids: number[]) => Promise<void>;
+  onGetDeleteImpact: (kind: SourceKind, id: number) => Promise<SourceDeleteImpact>;
   onValidateSource: (kind: SourceKind, id: number) => Promise<SourceReadCheckResult>;
   onSyncSource: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
+  onRunSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[]) => Promise<SourceBatchResult>;
+  onRefreshSources: () => Promise<void>;
   syncStatuses: Record<string, SourceSyncStatus>;
 }
 
-type ImportNotice = {
+type SourceOperationNotice = {
+  tone: "success" | "warning" | "error";
   title: string;
   detail: string;
   errors: string[];
@@ -67,8 +84,18 @@ type SourceEntry = {
   kind: SourceKind;
 };
 
-type SectionBulkAction = "check" | "sync" | "delete";
+type SectionBulkAction = SourceBatchAction;
 type SectionBulkScope = "configurations" | "logs";
+
+type BulkProgress = {
+  scope: SectionBulkScope;
+  action: SectionBulkAction;
+} | null;
+
+type DeletePrompt = {
+  entries: SourceEntry[];
+  impacts: SourceDeleteImpact[];
+};
 
 export function SourcesPage({
   metadataSources,
@@ -82,13 +109,17 @@ export function SourcesPage({
   onAddCodeArtifact,
   onUpdateSource,
   onDeleteSource,
-  onDeleteSources,
+  onGetDeleteImpact,
   onValidateSource,
   onSyncSource,
+  onRunSourceBatch,
+  onRefreshSources,
   syncStatuses
 }: SourcesPageProps) {
-  const [notice, setNotice] = useState<ImportNotice>(null);
-  const [sectionBulkBusy, setSectionBulkBusy] = useState<`${SectionBulkScope}:${SectionBulkAction}` | null>(null);
+  const [notice, setNotice] = useState<SourceOperationNotice>(null);
+  const [bulkProgress, setBulkProgress] = useState<BulkProgress>(null);
+  const [deletePrompt, setDeletePrompt] = useState<DeletePrompt | null>(null);
+  const [loadingDeleteImpact, setLoadingDeleteImpact] = useState(false);
   const configurationSources = useMemo(
     () => [
       ...metadataSources.map((source) => ({ source, kind: "metadata" as const })),
@@ -101,79 +132,106 @@ export function SourcesPage({
     () => [...configurationSources, ...logSources],
     [configurationSources, logSources]
   );
-  const enabledCount = allSources.filter(({ source }) => source.enabled).length;
-  const readableCount = allSources.filter(
-    ({ source }) => source.latest_validation?.status === "ok" || source.latest_validation?.status === "warning"
-  ).length;
-  const syncedCount = allSources.filter(({ source, kind }) => syncStatuses[sourceKey(kind, source.id)]?.status === "ok").length;
+  const sourceHealth = useMemo(() => summarizeSourceHealth(allSources, syncStatuses), [allSources, syncStatuses]);
   const disabled = !selectedEnvironmentId;
-  const sectionActionBusy = busy || sectionBulkBusy !== null;
+  const sectionActionBusy = busy || bulkProgress !== null;
 
-  async function runSectionCheck(scope: SectionBulkScope, entries: SourceEntry[]) {
+  useEffect(() => {
+    if (!deletePrompt) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDeletePrompt(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deletePrompt]);
+
+  useEffect(() => {
+    setNotice(null);
+  }, [selectedEnvironmentId]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 7_500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  async function requestDelete(entries: SourceEntry[]) {
     if (!entries.length) return;
-    setSectionBulkBusy(`${scope}:check`);
+    setLoadingDeleteImpact(true);
     try {
-      for (const entry of entries) {
-        await onValidateSource(entry.kind, entry.source.id);
-      }
+      const impacts = await Promise.all(entries.map((entry) => onGetDeleteImpact(entry.kind, entry.source.id)));
+      setDeletePrompt({ entries, impacts });
     } finally {
-      setSectionBulkBusy(null);
+      setLoadingDeleteImpact(false);
+    }
+  }
+
+  async function requestSourceDelete(kind: SourceKind, id: number) {
+    const entry = allSources.find((item) => item.kind === kind && item.source.id === id);
+    if (entry) await requestDelete([entry]);
+  }
+
+  async function confirmDelete() {
+    if (!deletePrompt) return;
+    const entries = deletePrompt.entries;
+    const scope = entries.every((entry) => entry.kind === "logs") ? "logs" : "configurations";
+    setDeletePrompt(null);
+    setBulkProgress({ scope, action: "delete" });
+    try {
+      const result = await onRunSourceBatch("delete", toBatchEntries(entries));
+      setNotice(batchNotice("delete", result));
+    } finally {
+      setBulkProgress(null);
+    }
+  }
+
+  async function runSectionValidate(scope: SectionBulkScope, entries: SourceEntry[]) {
+    if (!entries.length) return;
+    try {
+      setBulkProgress({ scope, action: "validate" });
+      const result = await onRunSourceBatch("validate", toBatchEntries(entries));
+      setNotice(batchNotice("validate", result));
+    } finally {
+      setBulkProgress(null);
     }
   }
 
   async function runSectionSync(scope: SectionBulkScope, entries: SourceEntry[]) {
     if (!entries.length) return;
-    setSectionBulkBusy(`${scope}:sync`);
     try {
-      for (const entry of entries) {
-        await onSyncSource(entry.kind, entry.source.id);
-      }
+      setBulkProgress({ scope, action: "sync" });
+      const result = await onRunSourceBatch("sync", toBatchEntries(entries));
+      setNotice(batchNotice("sync", result));
     } finally {
-      setSectionBulkBusy(null);
+      setBulkProgress(null);
     }
   }
 
-  async function runSectionDelete(scope: SectionBulkScope, entries: SourceEntry[]) {
+  async function runSectionDelete(_scope: SectionBulkScope, entries: SourceEntry[]) {
     if (!entries.length) return;
-    setSectionBulkBusy(`${scope}:delete`);
-    try {
-      for (const kind of ["metadata", "code", "logs"] as SourceKind[]) {
-        const ids = entries.filter((entry) => entry.kind === kind).map((entry) => entry.source.id);
-        if (ids.length) await onDeleteSources(kind, ids);
-      }
-    } finally {
-      setSectionBulkBusy(null);
-    }
+    await requestDelete(entries);
   }
 
   function activeSectionAction(scope: SectionBulkScope): SectionBulkAction | null {
-    if (!sectionBulkBusy?.startsWith(`${scope}:`)) return null;
-    return sectionBulkBusy.split(":")[1] as SectionBulkAction;
+    return bulkProgress?.scope === scope ? bulkProgress.action : null;
   }
 
   return (
     <div className="sources-page">
-      <section className="sources-overview table-panel">
-        <SourceOverviewMetric icon={<HardDrive size={17} />} label="Sources" value={allSources.length} detail={`${enabledCount} enabled`} />
-        <SourceOverviewMetric icon={<FileCheck2 size={17} />} label="Read checks" value={readableCount} detail={`${allSources.length - readableCount} need check`} />
-        <SourceOverviewMetric icon={<RefreshCw size={17} />} label="Cache sync" value={syncedCount} detail={`${allSources.length - syncedCount} not current`} />
-      </section>
-
-      {notice ? (
-        <section className={`source-import-notice table-panel ${notice.errors.length ? "has-errors" : ""}`}>
+      <section className="sources-workspace-bar table-panel">
+        <div className="sources-workspace-summary">
+          <HardDrive size={16} />
           <div>
-            <strong>{notice.title}</strong>
-            <span>{notice.detail}</span>
+            <strong>{allSources.length} configured sources</strong>
+            <span>{configurationSources.length} metadata &amp; code · {logSources.length} logs</span>
           </div>
-          {notice.errors.length ? (
-            <ul>
-              {notice.errors.map((error) => (
-                <li key={error}>{error}</li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
-      ) : null}
+        </div>
+        <div className="sources-health-line" aria-label={`${sourceHealth.enabled} enabled, ${sourceHealth.readable} readable, ${sourceHealth.current} current`}>
+          <span><strong>{sourceHealth.enabled}</strong> enabled</span>
+          <span><strong>{sourceHealth.readable}</strong> readable</span>
+          <span><strong>{sourceHealth.current}</strong> current</span>
+        </div>
+      </section>
 
       <div className="view-stack sources-stack">
         <section className="table-panel source-panel source-project-panel">
@@ -181,7 +239,7 @@ export function SourcesPage({
             <div className="section-heading">
               <FolderOpen size={18} />
               <div>
-                <h2>Metadata</h2>
+                <h2>Metadata &amp; code</h2>
                 <span>Metadata and source code.</span>
               </div>
             </div>
@@ -191,34 +249,54 @@ export function SourcesPage({
                 <strong>{metadataSources.length} metadata · {codeArtifacts.length} code</strong>
               </div>
               <SourceSectionBulkActions
-                label="Metadata"
+                label="Metadata and code"
                 total={configurationSources.length}
                 busy={sectionActionBusy}
                 active={activeSectionAction("configurations")}
-                onCheck={() => runSectionCheck("configurations", configurationSources)}
+                onValidate={() => runSectionValidate("configurations", configurationSources)}
                 onSync={() => runSectionSync("configurations", configurationSources)}
                 onDelete={() => runSectionDelete("configurations", configurationSources)}
               />
             </div>
           </div>
-          <div className="source-project-layout">
+          <div className="source-section-layout">
+          <aside className="source-config-sidebar" aria-label="Add metadata or source code">
             <DatacoolieProjectForm
               busy={busy}
               disabled={disabled}
               onImportMetadataSources={async (uri, label) => {
-                const result = await onImportMetadataSources(uri, label);
-                setNotice(importNotice(result, "Metadata scan complete"));
+                try {
+                  const result = await onImportMetadataSources(uri, label);
+                  setNotice(importNotice(result, "Metadata scan complete"));
+                  return Boolean(result && (!result.errors.length || result.created.length || result.existing.length));
+                } catch (error) {
+                  setNotice(operationFailureNotice("Metadata scan could not be completed", toErrorMessage(error)));
+                  return false;
+                }
               }}
               onImportDatacoolieProjectSources={async (payload) => {
-                const result = await onImportDatacoolieProjectSources(payload);
-                setNotice(importNotice(result, "Project scan complete"));
+                try {
+                  const result = await onImportDatacoolieProjectSources(payload);
+                  setNotice(importNotice(result, "Project scan complete"));
+                  return Boolean(result && (!result.errors.length || result.created.length || result.existing.length));
+                } catch (error) {
+                  setNotice(operationFailureNotice("Project scan could not be completed", toErrorMessage(error)));
+                  return false;
+                }
               }}
               onAddCodeArtifact={async (uri, label, sourceConfig) => {
-                await onAddCodeArtifact(uri, label, sourceConfig);
-                setNotice({ title: "Source code added", detail: "1 code artifact configured.", errors: [] });
+                try {
+                  await onAddCodeArtifact(uri, label, sourceConfig);
+                  setNotice({ tone: "success", title: "Source code added", detail: "1 code artifact configured.", errors: [] });
+                  return true;
+                } catch (error) {
+                  setNotice(operationFailureNotice("Source code was not added", toErrorMessage(error)));
+                  return false;
+                }
               }}
             />
-            <div className="source-project-lists">
+          </aside>
+          <div className="source-project-lists">
               <SourceGroup
                 title="Metadata sources"
                 description="Files discovered from metadata path or project scan."
@@ -229,9 +307,10 @@ export function SourcesPage({
                 emptyDetail="Scan a project or add a metadata file/folder."
                 busy={busy}
                 onUpdate={onUpdateSource}
-                onDelete={onDeleteSource}
+                onDelete={requestSourceDelete}
                 onValidate={onValidateSource}
                 onSync={onSyncSource}
+                onRefresh={onRefreshSources}
                 syncStatuses={syncStatuses}
               />
               <SourceGroup
@@ -244,12 +323,13 @@ export function SourcesPage({
                 emptyDetail="Project scan uses the functions folder by default."
                 busy={busy}
                 onUpdate={onUpdateSource}
-                onDelete={onDeleteSource}
+                onDelete={requestSourceDelete}
                 onValidate={onValidateSource}
                 onSync={onSyncSource}
+                onRefresh={onRefreshSources}
                 syncStatuses={syncStatuses}
               />
-            </div>
+          </div>
           </div>
         </section>
 
@@ -272,21 +352,30 @@ export function SourcesPage({
                 total={logSources.length}
                 busy={sectionActionBusy}
                 active={activeSectionAction("logs")}
-                onCheck={() => runSectionCheck("logs", logSources)}
+                onValidate={() => runSectionValidate("logs", logSources)}
                 onSync={() => runSectionSync("logs", logSources)}
                 onDelete={() => runSectionDelete("logs", logSources)}
               />
             </div>
           </div>
-          <div className="source-logs-layout">
+          <div className="source-section-layout">
+          <aside className="source-config-sidebar" aria-label="Add log source">
             <LogSourceForm
               busy={busy}
               disabled={disabled}
               onAddLogPath={async (uri, label, sourceConfig) => {
-                await onAddLogPath(uri, label, sourceConfig);
-                setNotice({ title: "Log source added", detail: "1 log source configured.", errors: [] });
+                try {
+                  await onAddLogPath(uri, label, sourceConfig);
+                  setNotice({ tone: "success", title: "Log source added", detail: "1 log source configured.", errors: [] });
+                  return true;
+                } catch (error) {
+                  setNotice(operationFailureNotice("Log source was not added", toErrorMessage(error)));
+                  return false;
+                }
               }}
             />
+          </aside>
+          <div className="source-logs-inventory">
             <SourceGroup
               title="Log sources"
               description="Base logs path, or separate ETL/system paths."
@@ -297,14 +386,25 @@ export function SourcesPage({
               emptyDetail="Add a base logs folder or separate ETL/system folders."
               busy={busy}
               onUpdate={onUpdateSource}
-              onDelete={onDeleteSource}
+              onDelete={requestSourceDelete}
               onValidate={onValidateSource}
               onSync={onSyncSource}
+              onRefresh={onRefreshSources}
               syncStatuses={syncStatuses}
             />
           </div>
+          </div>
         </section>
       </div>
+      {deletePrompt ? (
+        <SourceDeleteDialog
+          prompt={deletePrompt}
+          onCancel={() => setDeletePrompt(null)}
+          onConfirm={() => void confirmDelete()}
+        />
+      ) : null}
+      {loadingDeleteImpact ? <div className="source-delete-impact-loading" role="status">Reviewing cached data…</div> : null}
+      {notice ? <SourceOperationNotification notice={notice} onClose={() => setNotice(null)} /> : null}
     </div>
   );
 }
@@ -314,7 +414,7 @@ function SourceSectionBulkActions({
   total,
   busy,
   active,
-  onCheck,
+  onValidate,
   onSync,
   onDelete
 }: {
@@ -322,22 +422,22 @@ function SourceSectionBulkActions({
   total: number;
   busy: boolean;
   active: SectionBulkAction | null;
-  onCheck: () => Promise<void>;
+  onValidate: () => Promise<void>;
   onSync: () => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
   return (
     <div className="source-bulk-actions source-section-bulk-actions" aria-label={`${label} bulk actions`}>
-      <button type="button" onClick={onCheck} disabled={busy || !total} title={`Check all ${label.toLowerCase()} sources`}>
-        <CheckCircle2 size={13} />
-        <span>{active === "check" ? "Checking" : "Check all"}</span>
+      <button type="button" onClick={() => void onValidate()} disabled={busy || !total} aria-busy={active === "validate"} title={`Validate all ${label.toLowerCase()} sources`}>
+        {active === "validate" ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />}
+        <span>{active === "validate" ? "Validating" : "Validate all"}</span>
       </button>
-      <button type="button" onClick={onSync} disabled={busy || !total} title={`Sync all ${label.toLowerCase()} sources`}>
-        <RefreshCw size={13} className={active === "sync" ? "spin" : undefined} />
+      <button type="button" className="source-bulk-primary" onClick={onSync} disabled={busy || !total} aria-busy={active === "sync"} title={`Sync all ${label.toLowerCase()} sources`}>
+        {active === "sync" ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
         <span>{active === "sync" ? "Syncing" : "Sync all"}</span>
       </button>
-      <button type="button" className="danger" onClick={onDelete} disabled={busy || !total} title={`Delete all ${label.toLowerCase()} sources`}>
-        <Trash2 size={13} />
+      <button type="button" className="danger" onClick={() => void onDelete()} disabled={busy || !total} aria-busy={active === "delete"} title={`Delete all ${label.toLowerCase()} sources`}>
+        {active === "delete" ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}
         <span>{active === "delete" ? "Deleting" : "Delete all"}</span>
       </button>
     </div>
@@ -353,7 +453,7 @@ function DatacoolieProjectForm({
 }: {
   busy: boolean;
   disabled: boolean;
-  onImportMetadataSources: (uri: string, label?: string) => Promise<void>;
+  onImportMetadataSources: (uri: string, label?: string) => Promise<boolean>;
   onImportDatacoolieProjectSources: (payload: {
     project_uri: string;
     metadata_subpath?: string;
@@ -362,8 +462,8 @@ function DatacoolieProjectForm({
     code_uri?: string | null;
     include_metadata?: boolean;
     include_code?: boolean;
-  }) => Promise<void>;
-  onAddCodeArtifact: SourcesPageProps["onAddCodeArtifact"];
+  }) => Promise<boolean>;
+  onAddCodeArtifact: (uri: string, label?: string, sourceConfig?: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [mode, setMode] = useState<"project" | "manual">("project");
   const [projectUri, setProjectUri] = useState("");
@@ -393,18 +493,17 @@ function DatacoolieProjectForm({
   async function submitManual(event: FormEvent) {
     event.preventDefault();
     if (!manualUri.trim()) return;
-    if (manualKind === "metadata") {
-      await onImportMetadataSources(manualUri.trim(), manualLabel.trim() || undefined);
-    } else {
-      await onAddCodeArtifact(manualUri.trim(), manualLabel.trim() || undefined, {
-        artifact_type: artifactType,
-        module_roots: moduleRoots
-          .split(",")
-          .map((value) => value.trim())
-          .filter(Boolean),
-        ...(modulePrefix.trim() ? { module_prefix: modulePrefix.trim() } : {})
-      });
-    }
+    const added = manualKind === "metadata"
+      ? await onImportMetadataSources(manualUri.trim(), manualLabel.trim() || undefined)
+      : await onAddCodeArtifact(manualUri.trim(), manualLabel.trim() || undefined, {
+          artifact_type: artifactType,
+          module_roots: moduleRoots
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+          ...(modulePrefix.trim() ? { module_prefix: modulePrefix.trim() } : {})
+        });
+    if (!added) return;
     setManualUri("");
     setManualLabel("");
   }
@@ -412,18 +511,18 @@ function DatacoolieProjectForm({
   return (
     <div className="source-config-card">
       <div className="source-config-tabs" role="tablist" aria-label="Project source mode">
-        <button type="button" className={mode === "project" ? "active" : ""} onClick={() => setMode("project")}>
+        <button id="project-source-project-tab" type="button" role="tab" aria-selected={mode === "project"} aria-controls="project-source-project-panel" tabIndex={mode === "project" ? 0 : -1} className={mode === "project" ? "active" : ""} onClick={() => setMode("project")}>
           <FolderOpen size={14} />
           Project path
         </button>
-        <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => setMode("manual")}>
+        <button id="project-source-manual-tab" type="button" role="tab" aria-selected={mode === "manual"} aria-controls="project-source-manual-panel" tabIndex={mode === "manual" ? 0 : -1} className={mode === "manual" ? "active" : ""} onClick={() => setMode("manual")}>
           <Settings2 size={14} />
           Manual path
         </button>
       </div>
 
       {mode === "project" ? (
-        <form className="source-add-form source-project-form" onSubmit={submitProject}>
+        <form id="project-source-project-panel" role="tabpanel" aria-labelledby="project-source-project-tab" className="source-add-form source-project-form" onSubmit={submitProject}>
           <div className="source-add-heading">
             <strong>Scan project</strong>
             <span>Defaults: metadata and functions.</span>
@@ -458,7 +557,7 @@ function DatacoolieProjectForm({
           </button>
         </form>
       ) : (
-        <form className="source-add-form source-project-form" onSubmit={submitManual}>
+        <form id="project-source-manual-panel" role="tabpanel" aria-labelledby="project-source-manual-tab" className="source-add-form source-project-form" onSubmit={submitManual}>
           <div className="source-add-heading">
             <strong>Add path</strong>
             <span>Metadata can be a file or folder.</span>
@@ -521,7 +620,7 @@ function LogSourceForm({
 }: {
   busy: boolean;
   disabled: boolean;
-  onAddLogPath: SourcesPageProps["onAddLogPath"];
+  onAddLogPath: (uri: string, label?: string, sourceConfig?: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [mode, setMode] = useState<"base_log_path" | "separate_paths">("base_log_path");
   const [baseUri, setBaseUri] = useState("");
@@ -533,19 +632,21 @@ function LogSourceForm({
     event.preventDefault();
     if (mode === "base_log_path") {
       if (!baseUri.trim()) return;
-      await onAddLogPath(baseUri.trim(), label.trim() || undefined, {
+      const added = await onAddLogPath(baseUri.trim(), label.trim() || undefined, {
         mode: "base_log_path",
         base_log_uri: baseUri.trim()
       });
+      if (!added) return;
       setBaseUri("");
     } else {
       if (!etlUri.trim() && !systemUri.trim()) return;
       const primaryUri = etlUri.trim() || systemUri.trim();
-      await onAddLogPath(primaryUri, label.trim() || undefined, {
+      const added = await onAddLogPath(primaryUri, label.trim() || undefined, {
         mode: "separate_paths",
         etl_logs_uri: etlUri.trim() || undefined,
         system_logs_uri: systemUri.trim() || undefined
       });
+      if (!added) return;
       setEtlUri("");
       setSystemUri("");
     }
@@ -609,6 +710,7 @@ function SourceGroup({
   onDelete,
   onValidate,
   onSync,
+  onRefresh,
   syncStatuses
 }: {
   title: string;
@@ -623,16 +725,15 @@ function SourceGroup({
   onDelete: SourcesPageProps["onDeleteSource"];
   onValidate: SourcesPageProps["onValidateSource"];
   onSync: SourcesPageProps["onSyncSource"];
+  onRefresh: SourcesPageProps["onRefreshSources"];
   syncStatuses: Record<string, SourceSyncStatus>;
 }) {
-  const [validation, setValidation] = useState<Record<number, SourceReadCheckResult>>({});
   const [syncStatus, setSyncStatus] = useState<Record<number, SourceSyncStatus>>({});
   const [syncing, setSyncing] = useState<Record<number, boolean>>({});
   const enabled = items.filter((item) => item.enabled).length;
 
   async function validate(id: number) {
-    const result = await onValidate(kind, id);
-    setValidation((current) => ({ ...current, [id]: result }));
+    await onValidate(kind, id);
   }
 
   async function sync(id: number) {
@@ -651,6 +752,7 @@ function SourceGroup({
     try {
       const result = await onSync(kind, id);
       setSyncStatus((current) => ({ ...current, [id]: result }));
+      await onRefresh();
     } finally {
       setSyncing((current) => ({ ...current, [id]: false }));
     }
@@ -678,7 +780,7 @@ function SourceGroup({
             kind={kind}
             busy={busy}
             syncing={Boolean(syncing[item.id])}
-            validation={validation[item.id] ?? item.latest_validation ?? null}
+            validation={item.latest_validation ?? null}
             syncStatus={syncStatus[item.id] ?? syncStatuses[sourceKey(kind, item.id)] ?? null}
             onUpdate={onUpdate}
             onDelete={onDelete}
@@ -697,19 +799,6 @@ function SourceGroup({
         ) : null}
       </div>
     </section>
-  );
-}
-
-function SourceOverviewMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: number; detail: string }) {
-  return (
-    <div className="sources-overview-metric">
-      <span className="sources-overview-icon">{icon}</span>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </div>
-      <em>{detail}</em>
-    </div>
   );
 }
 
@@ -752,13 +841,76 @@ function SourceCard({
   const primaryPath = etlPath || item.uri;
   const displayName = item.label || basename(item.uri);
   const typeLabel = sourceTypeLabel(kind, item, modeLabel);
+  const scheduleInterval = logRefreshInterval(item);
 
   return (
     <article className="source-card">
-      <div className="source-card-main">
-        <div className="source-card-line source-card-line-primary">
+      <div className="source-card-line source-card-line-primary">
+        <div className="source-card-identity-row">
           <strong className="source-card-name" title={displayName}>{displayName}</strong>
           <span className="source-type-chip">{typeLabel}</span>
+        </div>
+        <div className="source-card-row-actions">
+          <button
+            className={`source-enabled-toggle ${item.enabled ? "is-enabled" : "is-disabled"}`}
+            onClick={() => onUpdate(kind, item.id, { enabled: !item.enabled })}
+            disabled={busy}
+            title={item.enabled ? "Click to disable" : "Click to enable"}
+          >
+            <span className="source-enabled-dot" />
+            {item.enabled ? "Enabled" : "Disabled"}
+          </button>
+          {kind === "logs" ? (
+            <div className="source-log-schedule" title={item.last_scheduled_sync_at ? `Last scheduled refresh: ${item.last_scheduled_sync_at}` : "No scheduled refresh yet"}>
+              <button
+                type="button"
+                className={`source-schedule-toggle ${item.sync_schedule_enabled ? "is-enabled" : ""}`}
+                aria-pressed={item.sync_schedule_enabled}
+                onClick={() => onUpdate(kind, item.id, {
+                  sync_schedule_enabled: !item.sync_schedule_enabled,
+                  sync_interval_minutes: scheduleInterval
+                })}
+                disabled={busy}
+              >
+                <TimerReset size={12} />
+                <span>Auto refresh</span>
+              </button>
+              <select
+                aria-label={`Auto refresh interval for ${displayName}`}
+                value={scheduleInterval}
+                onChange={(event) => onUpdate(kind, item.id, { sync_interval_minutes: Number(event.target.value) })}
+                disabled={busy}
+              >
+                {LOG_REFRESH_INTERVALS.map((minutes) => (
+                  <option key={minutes} value={minutes}>{minutes === 60 ? "1h" : `${minutes}m`}</option>
+                ))}
+              </select>
+              <span className="source-schedule-state">{logScheduleLabel(item)}</span>
+            </div>
+          ) : null}
+          <div className="source-card-actions">
+            <button className="source-action-btn" onClick={() => onValidate(item.id)} disabled={busy} title="Validate source" aria-label={`Validate ${displayName}`}>
+              <CheckCircle2 size={13} />
+              <span>Validate</span>
+            </button>
+            <button className="source-action-btn" onClick={() => onSync(item.id)} disabled={busy || syncing} title="Sync cache now" aria-label={`Sync cache for ${displayName}`}>
+              <RefreshCw size={13} className={syncing ? "spin" : undefined} />
+              <span>Sync</span>
+            </button>
+            <button
+              className="source-action-btn danger"
+              onClick={() => void onDelete(kind, item.id)}
+              disabled={busy}
+              title="Delete source"
+              aria-label={`Delete ${displayName}`}
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className="source-card-line source-card-line-secondary">
+        <div className="source-card-path-list">
           <div className="source-card-path-inline" title={primaryPath}>
             <span>{primaryPathLabel}</span>
             <code>{primaryPath}</code>
@@ -770,44 +922,71 @@ function SourceCard({
             </div>
           ) : null}
         </div>
-        <div className="source-card-line source-card-line-secondary">
-          <div className="source-card-status">
-            <LabeledStatus label="Read">
-              <ReadCheckBadge validation={validation} />
-            </LabeledStatus>
-            <LabeledStatus label="Cache">
-              <SyncBadge status={syncStatus} />
-            </LabeledStatus>
-          </div>
-        </div>
-      </div>
-
-      <div className="source-card-row-actions">
-        <button
-          className={`source-enabled-toggle ${item.enabled ? "is-enabled" : "is-disabled"}`}
-          onClick={() => onUpdate(kind, item.id, { enabled: !item.enabled })}
-          disabled={busy}
-          title={item.enabled ? "Click to disable" : "Click to enable"}
-        >
-          <span className="source-enabled-dot" />
-          {item.enabled ? "Enabled" : "Disabled"}
-        </button>
-        <div className="source-card-actions">
-          <button className="source-action-btn" onClick={() => onValidate(item.id)} disabled={busy} title="Check readability" aria-label="Check readability">
-            <CheckCircle2 size={13} />
-            <span>Check</span>
-          </button>
-          <button className="source-action-btn" onClick={() => onSync(item.id)} disabled={syncing} title="Sync cache now" aria-label="Sync cache now">
-            <RefreshCw size={13} className={syncing ? "spin" : undefined} />
-            <span>Sync</span>
-          </button>
-          <button className="source-action-btn danger" onClick={() => onDelete(kind, item.id)} disabled={busy} title="Remove source" aria-label="Remove source">
-            <Trash2 size={13} />
-          </button>
+        <div className="source-card-status">
+          <LabeledStatus label="Read">
+            <ReadCheckBadge validation={validation} />
+          </LabeledStatus>
+          <LabeledStatus label="Cache">
+            <SyncBadge status={syncStatus} />
+          </LabeledStatus>
         </div>
       </div>
     </article>
   );
+}
+
+function SourceDeleteDialog({
+  prompt,
+  onCancel,
+  onConfirm
+}: {
+  prompt: DeletePrompt;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const impacts = aggregateDeleteImpacts(prompt.impacts);
+  const count = prompt.entries.length;
+  const singleKind = prompt.entries.every((entry) => entry.kind === prompt.entries[0]?.kind)
+    ? prompt.entries[0]?.kind
+    : null;
+  const sourceLabel = count === 1 && singleKind
+    ? `${sourceKindLabel(singleKind)} source`
+    : count > 1 && singleKind
+      ? `${count} ${sourceKindLabel(singleKind)} sources`
+      : `${count} selected sources`;
+  return (
+    <OperationConfirmationDialog
+      confirmIcon={<Trash2 size={14} />}
+      confirmLabel={count === 1 ? "Delete source" : `Delete ${count} sources`}
+      description={`This removes ${count === 1 ? "its" : "their"} configuration and the related Studio-owned data listed below.`}
+      icon={<AlertTriangle size={18} />}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+      tone="danger"
+      title={`Delete ${sourceLabel}?`}
+    >
+      {impacts.length ? (
+        <ul>
+          {impacts.map((item) => (
+            <li key={`${item.kind}:${item.label}`} className={item.severity === "warning" ? "is-warning" : ""}>
+              <strong>{item.count.toLocaleString()}</strong>
+              <span>{item.label}</span>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="source-delete-empty-impact">No cached Studio data is currently associated with the selected source.</p>}
+      <div className="operation-confirmation-note tone-success">
+        <FileCheck2 size={15} />
+        <span><strong>Original source files will not be deleted.</strong> Only configuration and data stored by Datacoolie Studio are removed.</span>
+      </div>
+    </OperationConfirmationDialog>
+  );
+}
+
+function sourceKindLabel(kind: SourceKind) {
+  if (kind === "metadata") return "metadata";
+  if (kind === "code") return "code";
+  return "log";
 }
 
 function sourceTypeLabel(kind: SourceKind, item: SourcePath, modeLabel: string | null) {
@@ -838,9 +1017,9 @@ function LabeledStatus({ label, children }: { label: string; children: React.Rea
 function ReadCheckBadge({ validation }: { validation: SourceReadCheckResult | null }) {
   if (!validation) {
     return (
-      <span className="source-status-pill muted" title="Not yet checked">
+      <span className="source-status-pill muted" title="Not yet validated">
         <Clock size={11} />
-        <span>not checked</span>
+        <span>not validated</span>
       </span>
     );
   }
@@ -877,16 +1056,70 @@ function SyncBadge({ status }: { status: SourceSyncStatus | null }) {
   );
 }
 
-function importNotice(result: SourceImportResponse | null, title: string): ImportNotice {
-  if (!result) return null;
+function toBatchEntries(entries: SourceEntry[]): SourceBatchEntry[] {
+  return entries.map((entry) => ({ kind: entry.kind, id: entry.source.id }));
+}
+
+function operationFailureNotice(title: string, detail = "Review the error and retry the action."): SourceOperationNotice {
+  return {
+    tone: "error",
+    title,
+    detail,
+    errors: []
+  };
+}
+
+function batchNotice(action: SourceBatchAction, result: SourceBatchResult): SourceOperationNotice {
+  const actionLabel = action === "validate" ? "Validation" : action === "sync" ? "Sync" : "Deletion";
+  const completed = result.succeeded + result.warnings;
+  const parts = [
+    `${result.succeeded} ${action === "validate" ? "validated" : action === "sync" ? "synced" : "deleted"}`,
+    result.warnings ? `${result.warnings} completed with warning${result.warnings === 1 ? "" : "s"}` : "",
+    result.failed ? `${result.failed} failed` : ""
+  ].filter(Boolean);
+  return {
+    tone: result.failed === result.total ? "error" : result.failed || result.warnings ? "warning" : "success",
+    title: result.failed ? `${actionLabel} completed with issues` : `${actionLabel} complete`,
+    detail: `${completed}/${result.total} sources processed · ${parts.join(" · ")}`,
+    errors: result.errors
+  };
+}
+
+function SourceOperationNotification({ notice, onClose }: { notice: NonNullable<SourceOperationNotice>; onClose: () => void }) {
+  const Icon = notice.tone === "success" ? CheckCircle2 : notice.tone === "warning" ? AlertTriangle : XCircle;
+  return (
+    <aside className={`source-operation-notification tone-${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live="polite">
+      <Icon className="source-operation-notification-icon" size={18} aria-hidden="true" />
+      <div className="source-operation-notification-body">
+        <strong>{notice.title}</strong>
+        <span>{notice.detail}</span>
+        {notice.errors.length ? (
+          <ul>
+            {notice.errors.map((error, index) => (
+              <li key={`${error}-${index}`}>{error}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      <button type="button" className="source-operation-notification-close" onClick={onClose} aria-label="Dismiss notification" title="Dismiss notification">
+        <X size={15} />
+      </button>
+    </aside>
+  );
+}
+
+function importNotice(result: SourceImportResponse | null, title: string): SourceOperationNotice {
+  if (!result) return operationFailureNotice(`${title.replace(" complete", "")} could not be completed`);
   const created = result.summary.created ?? result.created.length;
   const existing = result.summary.existing ?? result.existing.length;
   const metadata = result.summary.metadata_sources ?? 0;
   const code = result.summary.code_artifacts ?? 0;
+  const autoSynced = result.summary.auto_synced ?? 0;
   const errors = result.errors.map((item) => String(item.message ?? item.uri ?? JSON.stringify(item)));
   return {
+    tone: errors.length ? created || existing ? "warning" : "error" : "success",
     title,
-    detail: `${created} created · ${existing} reused · ${metadata} metadata · ${code} code`,
+    detail: `${created} created · ${existing} reused · ${metadata} metadata · ${code} code${autoSynced ? ` · ${autoSynced} validated & synced` : ""}`,
     errors
   };
 }

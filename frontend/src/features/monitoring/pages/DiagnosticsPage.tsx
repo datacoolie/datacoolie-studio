@@ -3,7 +3,6 @@ import type { MonitoringReport } from "../../../shared/api/types";
 import {
   DataTable,
   DetailMetric,
-  DiagnosticsSeverity,
   HealthStripCard,
   ReportChart,
   ReportPanel,
@@ -21,6 +20,13 @@ import {
   reportChartPalette,
   reportTightChartGrid
 } from "../monitoringShared";
+import {
+  diagnosticsCoverageSummary,
+  diagnosticsCategoryLabel,
+  diagnosticsLinkagePresentation,
+  diagnosticsSeverityPresentation,
+  diagnosticsSourceLabel,
+} from "../diagnosticsPresentation";
 
 type DiagnosticsRow = Record<string, unknown>;
 
@@ -40,6 +46,7 @@ export function DiagnosticsPage({
   const fieldCompleteness = (diagnostics.field_completeness ?? []) as DiagnosticsRow[];
   const sourceCoverage = (diagnostics.source_coverage ?? []) as DiagnosticsRow[];
   const investigationQueue = (diagnostics.investigation_queue ?? []) as DiagnosticsRow[];
+  const coverageSummary = diagnosticsCoverageSummary(fieldCompleteness);
   const healthStatus = String(kpis.health_status ?? "no_evidence");
   const mismatchCount = Number(kpis.reconciliation_mismatches ?? report.reconciliation.mismatch_count ?? 0);
   const warningCount = Number(kpis.read_errors ?? report.errors.length ?? 0);
@@ -51,7 +58,7 @@ export function DiagnosticsPage({
     <div className="monitoring-page monitoring-diagnostics-report">
       <section className={`overview-health-strip monitoring-diagnostics-health-strip health-${healthIntent(healthStatus)}`}>
         <HealthStripCard
-          label="Diagnostics health"
+          label="Core integrity"
           value={healthLabel(healthStatus)}
           detail={
             <span>
@@ -62,8 +69,10 @@ export function DiagnosticsPage({
               <DetailMetric label="recon" value={formatNumber(mismatchCount)} tone={mismatchCount ? "bad" : "neutral"} labelFirst />
             </span>
           }
-          title="Health is based on read/cache warnings, job_id linkage gaps, and reconciliation mismatches. Fields are shown as evidence coverage only and do not determine Diagnostics health."
+          title="Core integrity is based on read/cache warnings, job_id linkage gaps, and reconciliation mismatches. Conditional field coverage is reported separately."
           intent={healthIntent(healthStatus)}
+          accent="intent"
+          className="diagnostics-kpi-core"
         />
         <HealthStripCard
           label="Job linkage"
@@ -77,6 +86,7 @@ export function DiagnosticsPage({
           }
           title="Matched job IDs divided by the union of job IDs found in job and dataflow logs."
           intent={Number(kpis.orphan_dataflow_job_ids ?? 0) ? "bad" : "good"}
+          accent="intent"
         />
         <HealthStripCard
           label="Job-only IDs"
@@ -84,6 +94,7 @@ export function DiagnosticsPage({
           detail="job logs without child dataflow records"
           title="Job logs that have no dataflow_run_log records for the same job_id in the current filter."
           intent={Number(kpis.jobs_without_dataflow_records ?? 0) ? "warning" : "good"}
+          accent="intent"
         />
         <HealthStripCard
           label="Reconciliation"
@@ -95,17 +106,21 @@ export function DiagnosticsPage({
           }
           title="Mismatch count between job totals and rollups from child dataflow records."
           intent={mismatchCount ? "bad" : "good"}
+          accent="intent"
         />
         <HealthStripCard
-          label="Field readiness"
+          label="Evidence coverage"
           value={formatPercent(Number(kpis.field_readiness_rate ?? 0))}
           detail={
             <span>
               <DetailMetric label="issues" value={formatNumber(fieldIssues)} tone={fieldIssues ? "warning" : "neutral"} />
+              <span className="separator"> · </span>
+              <DetailMetric label="conditional" value={formatNumber(coverageSummary.conditional.length)} tone="neutral" />
             </span>
           }
-          title="Evidence coverage for log fields used by Monitoring pages, such as identity, time/status, duration, source, destination, totals, and runtime context fields. This does not determine Diagnostics health."
+          title="Coverage for evidence fields used by Monitoring. Watermark and maintenance groups are conditional context and do not create incidents until applicability is known."
           intent={fieldIssues ? "warning" : "good"}
+          accent="intent"
         />
         <HealthStripCard
           label="Read/cache warnings"
@@ -117,12 +132,13 @@ export function DiagnosticsPage({
           }
           title="Warnings emitted while reading or caching ETL log sources."
           intent={warningCount || cacheWarnings ? "warning" : "good"}
+          accent="intent"
         />
       </section>
 
       <div className="monitoring-diagnostics-content report-layout-table-heavy-3">
         <section className="monitoring-diagnostics-primary-grid">
-          <ReportPanel title="Record evidence trend" subtitle="job/dataflow records by selected grain">
+          <ReportPanel title="Record evidence trend" headerAction={<DiagnosticsRecordLegend />}>
             <ReportChart option={recordEvidenceTrendOption(recordEvidence)} height="100%" />
           </ReportPanel>
           <ReportPanel title="Job ID linkage health" subtitle="matched, orphan, and job-only IDs">
@@ -134,19 +150,41 @@ export function DiagnosticsPage({
           <ReportPanel title="Reconciliation by metric" subtitle="job totals vs child rollups">
             <ReportChart option={reconciliationByMetricOption(reconciliationByMetric)} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
-          <ReportPanel title="Critical field completeness" subtitle="required evidence fields">
-            <FieldCompleteness rows={fieldCompleteness} />
+          <ReportPanel
+            title="Evidence coverage"
+            headerAction={<DiagnosticsCoverageHeader summary={coverageSummary} />}
+          >
+            <FieldCompleteness rows={coverageSummary.visible} />
           </ReportPanel>
           <ReportPanel title="Log source / cache coverage" subtitle="records, files, and source warnings">
             <SourceCoverageTable rows={sourceCoverage} timezoneName={timezoneName} />
           </ReportPanel>
         </section>
 
-        <ReportPanel title="Diagnostics investigation queue" subtitle={`${formatNumber(investigationQueue.length)} evidence items`}>
+        <ReportPanel title="Diagnostics investigation queue" subtitle={`${formatNumber(investigationQueue.length)} evidence ${investigationQueue.length === 1 ? "item" : "items"}`}>
           <DiagnosticsQueueTable rows={investigationQueue} timezoneName={timezoneName} onInspect={onInspect} />
         </ReportPanel>
       </div>
     </div>
+  );
+}
+
+function DiagnosticsRecordLegend() {
+  return (
+    <span className="monitoring-diagnostics-chart-legend" aria-label="Record evidence legend">
+      <span><i className="is-job" />Job records</span>
+      <span><i className="is-dataflow" />Dataflow records</span>
+    </span>
+  );
+}
+
+function DiagnosticsCoverageHeader({ summary }: { summary: ReturnType<typeof diagnosticsCoverageSummary> }) {
+  return (
+    <span className="monitoring-diagnostics-coverage-summary">
+      <span className={summary.issues.length ? "is-warning" : "is-clear"}>{formatNumber(summary.issues.length)} {summary.issues.length === 1 ? "issue" : "issues"}</span>
+      <span>{formatNumber(summary.ready.length)} ready</span>
+      <span className="is-conditional">{formatNumber(summary.conditional.length)} conditional</span>
+    </span>
   );
 }
 
@@ -158,7 +196,7 @@ function JobLinkageHealth({ rows }: { rows: DiagnosticsRow[] }) {
       <div className="diagnostics-linkage-bar" aria-hidden="true">
         {rows.map((row) => {
           const count = num(row, "count");
-          const width = total ? Math.max(2, (count / total) * 100) : 0;
+          const width = count > 0 && total ? Math.max(2, (count / total) * 100) : 0;
           return <span key={String(row.category)} className={`diagnostics-linkage-segment segment-${String(row.severity ?? "info")}`} style={{ width: `${width}%` }} />;
         })}
       </div>
@@ -168,7 +206,7 @@ function JobLinkageHealth({ rows }: { rows: DiagnosticsRow[] }) {
           { key: "label", label: "Linkage", sortable: true, minWidth: 140, fillPriority: "last" },
           { key: "count", label: "Count", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.count)) },
           { key: "share", label: "Share", sortable: true, autoFit: true, render: (row) => formatPercent(Number(row.share ?? 0)) },
-          { key: "severity", label: "Status", sortable: true, width: 100, render: (row) => <DiagnosticsSeverity value={String(row.severity ?? "info")} /> }
+          { key: "severity", label: "Status", sortable: true, autoFit: true, minWidth: 78, maxWidth: 104, render: (row) => <DiagnosticsLinkageStatus row={row} /> }
         ]}
         maxRows={8}
         className="diagnostics-compact-table monitoring-table-one-line"
@@ -177,15 +215,21 @@ function JobLinkageHealth({ rows }: { rows: DiagnosticsRow[] }) {
   );
 }
 
+function DiagnosticsLinkageStatus({ row }: { row: DiagnosticsRow }) {
+  const presentation = diagnosticsLinkagePresentation(row);
+  return <span className={`diagnostics-severity diagnostics-${presentation.tone}`}>{presentation.label}</span>;
+}
+
 function FieldCompleteness({ rows }: { rows: DiagnosticsRow[] }) {
-  if (!rows.length) return <div className="table-empty">No field evidence</div>;
+  if (!rows.length) return <div className="table-empty diagnostics-coverage-clear">All required evidence groups are ready.</div>;
   return (
     <DataTable
       rows={rows}
       columns={[
         { key: "record_type", label: "Type", sortable: true, autoFit: true, render: (row) => humanLabel(row.record_type) },
-        { key: "group", label: "Group", sortable: true, minWidth: 150, fillPriority: "last", render: (row) => humanLabel(row.group) },
-        { key: "completeness_rate", label: "Ready", sortable: true, autoFit: true, render: (row) => <CompletenessValue row={row} /> },
+        { key: "group", label: "Evidence", sortable: true, minWidth: 132, fillPriority: "last", render: (row) => humanLabel(row.group) },
+        { key: "applicability", label: "Scope", sortable: true, autoFit: true, minWidth: 82, maxWidth: 108, render: (row) => <EvidenceScope row={row} /> },
+        { key: "completeness_rate", label: "Coverage", sortable: true, autoFit: true, render: (row) => <CompletenessValue row={row} /> },
         { key: "missing_values", label: "Missing", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.missing_values)) }
       ]}
       maxRows={12}
@@ -195,8 +239,16 @@ function FieldCompleteness({ rows }: { rows: DiagnosticsRow[] }) {
 }
 
 function CompletenessValue({ row }: { row: DiagnosticsRow }) {
+  if (row.applicability === "conditional") {
+    return <span className="diagnostics-completeness-value completeness-conditional">{formatPercent(Number(row.completeness_rate ?? 0))}</span>;
+  }
   const severity = String(row.severity ?? "info");
   return <span className={`diagnostics-completeness-value completeness-${severity}`}>{formatPercent(Number(row.completeness_rate ?? 0))}</span>;
+}
+
+function EvidenceScope({ row }: { row: DiagnosticsRow }) {
+  const conditional = row.applicability === "conditional";
+  return <span className={`diagnostics-scope-chip ${conditional ? "is-conditional" : "is-required"}`}>{conditional ? "Conditional" : "Required"}</span>;
 }
 
 function SourceCoverageTable({ rows, timezoneName }: { rows: DiagnosticsRow[]; timezoneName: string | null }) {
@@ -204,15 +256,14 @@ function SourceCoverageTable({ rows, timezoneName }: { rows: DiagnosticsRow[]; t
     <DataTable
       rows={rows}
       columns={[
-        { key: "source", label: "Source", sortable: true, minWidth: 90, fillPriority: "last", render: (row) => <SourceCell row={row} /> },
+        { key: "source", label: "Source", sortable: true, minWidth: 118, fillPriority: "last", render: (row) => <SourceCell row={row} /> },
         { key: "records", label: "Recs", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.records)) },
-        { key: "file_count", label: "Files", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.file_count)) },
         { key: "latest_log_at", label: "Latest", sortable: true, width: 170, render: (row) => formatTime(row.latest_log_at, timezoneName) },
         { key: "warning_count", label: "Warn", sortable: true, autoFit: true, render: (row) => <WarningValue value={Number(row.warning_count ?? 0)} /> }
       ]}
       maxRows={10}
       timezoneName={timezoneName}
-      className="diagnostics-compact-table monitoring-table-one-line"
+      className="diagnostics-compact-table diagnostics-source-coverage-table"
     />
   );
 }
@@ -230,11 +281,11 @@ function DiagnosticsQueueTable({
     <DataTable
       rows={rows}
       columns={[
-        { key: "severity", label: "Severity", sortable: true, width: 86, render: (row) => <DiagnosticsSeverity value={String(row.severity ?? "info")} /> },
-        { key: "category", label: "Category", sortable: true, minWidth: 145, maxWidth: 170, render: (row) => humanLabel(row.category) },
+        { key: "severity", label: "Severity", sortable: true, autoFit: true, minWidth: 72, maxWidth: 92, render: (row) => <DiagnosticsSeverityCell value={row.severity} /> },
+        { key: "category", label: "Category", sortable: true, autoFit: true, minWidth: 132, maxWidth: 184, render: (row) => diagnosticsCategoryLabel(row.category) },
         { key: "issue", label: "Issue", sortable: true, minWidth: 360, fillPriority: "last", render: (row) => <span className="diagnostics-issue-cell" title={String(row.issue ?? "")}>{String(row.issue ?? "-")}</span> },
         { key: "target", label: "Target", sortable: true, minWidth: 210, maxWidth: 260, render: (row) => <span className="monitoring-ellipsis" title={String(row.target ?? "")}>{String(row.target ?? "-")}</span> },
-        { key: "latest_time", label: "Latest", sortable: true, width: 170, render: (row) => formatTime(row.latest_time, timezoneName) },
+        { key: "latest_time", label: "Latest", sortable: true, autoFit: true, minWidth: 156, maxWidth: 184, render: (row) => formatTime(row.latest_time, timezoneName) },
         { key: "action_hint", label: "Action", sortable: true, minWidth: 360, fillPriority: "last", render: (row) => <span className="diagnostics-issue-cell" title={String(row.action_hint ?? "")}>{String(row.action_hint ?? "-")}</span> }
       ]}
       maxRows={50}
@@ -245,11 +296,16 @@ function DiagnosticsQueueTable({
   );
 }
 
+function DiagnosticsSeverityCell({ value }: { value: unknown }) {
+  const presentation = diagnosticsSeverityPresentation(value);
+  return <span className={`diagnostics-severity diagnostics-${presentation.tone}`}>{presentation.label}</span>;
+}
+
 function recordEvidenceTrendOption(rows: DiagnosticsRow[]): EChartsOption {
   if (!rows.length) return emptyChartOption("No evidence records");
   const labels = rows.map((row) => String(row.bucket ?? row.date ?? "-"));
   return baseChartOption({
-    grid: reportTightChartGrid({ top: 18, right: 6, left: 6 }),
+    grid: reportTightChartGrid({ top: 6, right: 6, left: 6 }),
     tooltip: {
       trigger: "axis",
       confine: true,
@@ -268,13 +324,7 @@ function recordEvidenceTrendOption(rows: DiagnosticsRow[]): EChartsOption {
         ].join("<br/>");
       }
     },
-    legend: {
-      top: 0,
-      left: "center",
-      itemWidth: 9,
-      itemHeight: 9,
-      textStyle: { fontSize: 10 }
-    },
+    legend: { show: false },
     xAxis: {
       type: "category",
       data: labels,
@@ -386,10 +436,8 @@ function SourceCell({ row }: { row: DiagnosticsRow }) {
   const fileKind = String(row.file_kind ?? "unknown");
   return (
     <span className="monitoring-stack-cell diagnostics-source-cell">
-      <span className="monitoring-ellipsis" title={`${source} · ${fileKind}`}>
-        {displaySource(source)}
-        <small> · {fileKind}</small>
-      </span>
+      <strong className="monitoring-ellipsis" title={source}>{diagnosticsSourceLabel(source)}</strong>
+      <small>{fileKind} · {formatNumber(toNumber(row.file_count))} files</small>
     </span>
   );
 }
@@ -416,10 +464,6 @@ function humanLabel(value: unknown) {
   const text = String(value ?? "unknown");
   if (!text || text === "null" || text === "undefined") return "Unknown";
   return text.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function displaySource(value: string) {
-  return value.replace(/^source:/i, "");
 }
 
 function healthLabel(value: string) {

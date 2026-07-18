@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import type { Environment, EnvironmentFreshness, Project } from "../shared/api/types";
 import { RelativeTime } from "../shared/components/RelativeTime";
 import type { ModuleKey, ModuleScope } from "./moduleRegistry";
@@ -13,7 +14,7 @@ interface ContextBarProps {
   logPathCount: number;
   freshness: EnvironmentFreshness | null;
   onProjectSelect: (projectId: number | null) => void;
-  onEnvironmentSelect: (environmentId: number | null) => void;
+  onOpenProject: (projectId: number) => void;
 }
 
 export function ContextBar({
@@ -27,9 +28,12 @@ export function ContextBar({
   logPathCount,
   freshness,
   onProjectSelect,
-  onEnvironmentSelect
+  onOpenProject
 }: ContextBarProps) {
-  if (scope === "global") {
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
+  const selectedEnvironment = environments.find((environment) => environment.id === selectedEnvironmentId) ?? null;
+
+  if (scope === "global" && !selectedProjectId) {
     return (
       <header className="context-bar context-bar-global">
         <div>
@@ -42,40 +46,22 @@ export function ContextBar({
 
   return (
     <header className="context-bar">
-      <div className="context-selectors">
-        <label>
-          Project
-          <select
-            value={selectedProjectId ?? ""}
-            onChange={(event) => onProjectSelect(event.target.value ? Number(event.target.value) : null)}
-          >
-            <option value="">Select project</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        {scope === "environment" ? (
-          <label>
-            Environment
-            <select
-              value={selectedEnvironmentId ?? ""}
-              onChange={(event) => onEnvironmentSelect(event.target.value ? Number(event.target.value) : null)}
-              disabled={!selectedProjectId}
-            >
-              <option value="">Select environment</option>
-              {environments.map((environment) => (
-                <option key={environment.id} value={environment.id}>
-                  {environment.name}
-                </option>
-              ))}
-            </select>
-          </label>
+      <nav className="context-trail" aria-label="Current location">
+        <button className="context-trail-link" type="button" onClick={() => onProjectSelect(null)}>Projects</button>
+        {selectedProject ? (
+          <>
+            <ChevronRight className="context-trail-separator" size={14} aria-hidden="true" />
+            <button className="context-trail-project" type="button" onClick={() => onOpenProject(selectedProject.id)}>{selectedProject.name}</button>
+          </>
         ) : null}
-      </div>
-
+        {selectedEnvironment ? (
+          <>
+            <ChevronRight className="context-trail-separator" size={14} aria-hidden="true" />
+            <span className="context-trail-current" aria-current="page">{selectedEnvironment.name}</span>
+          </>
+        ) : null}
+        {scope === "environment" ? <span className="context-trail-module">{activeModule}</span> : null}
+      </nav>
       {scope === "environment" ? (
         <div className="context-status">
           {freshness ? (
@@ -121,7 +107,7 @@ function FreshnessPill({
   status: string;
 }) {
   return (
-    <strong className={`freshness-chip freshness-${status}`}>
+    <strong className={`freshness-chip freshness-${status}`} title={freshnessDescription(label, status)}>
       <span className="freshness-label">{label}</span>
       <span className="freshness-count">
         {count} {countLabel}
@@ -140,10 +126,19 @@ function FreshnessPill({
 function freshnessLabel(status: string) {
   return {
     current: "Current",
-    source_changed: "Source changed",
-    not_cached: "Not cached",
+    not_cached: "Not synced",
     missing: "Missing",
     sync_failed: "Sync failed",
     unknown: "Unknown"
   }[status] ?? "Unknown";
+}
+
+function freshnessDescription(label: string, status: string) {
+  return {
+    current: `${label} source and Studio cache are aligned.`,
+    not_cached: `${label} source is configured, but Studio has not cached it yet.`,
+    missing: `${label} source cannot be found at its configured path.`,
+    sync_failed: `${label} source could not be synchronized into Studio.`,
+    unknown: `${label} cache state is not available.`
+  }[status] ?? `${label} cache state is not available.`;
 }

@@ -3,13 +3,22 @@ import "react-datasheet-grid/dist/style.css";
 import { DynamicDataSheetGrid, type Column, type DataSheetGridRef } from "react-datasheet-grid";
 import { Database } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import type { MetadataBackup, MetadataEditorDocument, MetadataEditorIssue, MetadataResponse } from "../../shared/api/types";
+import type { MetadataBackup, MetadataEditorDocument, MetadataEditorIssue } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
+import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
+import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { MetadataIssuesDrawer } from "./MetadataIssuesDrawer";
 import { MetadataHistoryDrawer } from "./MetadataHistoryDrawer";
 import { MetadataMetrics } from "./MetadataMetrics";
 import { MetadataSheetContextMenu } from "./MetadataSheetContextMenu";
 import { MetadataSheetToolbar } from "./MetadataSheetToolbar";
+import { MetadataDataflowDrawer } from "../dataflows/MetadataDataflowDrawer";
+import {
+  buildMetadataDataflowRecords,
+  findMetadataDataflowRecord,
+  type MetadataDataflowSelection,
+  updateMetadataDataflowRow,
+} from "../dataflows/metadataDataflowModel";
 import { buildSheetColumns } from "./metadataSheetColumns";
 import {
   findMetadataBoundaryCell,
@@ -36,12 +45,17 @@ import {
   writeClipboard
 } from "./metadataSheetOperations";
 import type { SelectionState, SheetKey, SheetRow } from "./metadataSheetTypes";
+import { metadataDraftState } from "./metadataDraftState";
+import { metadataSaveConfirmation } from "./metadataSaveConfirmation";
+import { MetadataSourceSaveConfirmationDialog } from "./MetadataSourceSaveConfirmationDialog";
 
 interface MetadataExplorerProps {
-  metadata: MetadataResponse | null;
   editorDocument: MetadataEditorDocument | null;
   serverDraft: MetadataEditorDocument | null;
   routeSearch?: string;
+  metadataNavigation?: MetadataNavigationTarget | null;
+  onMetadataNavigationConsumed?: () => void;
+  onFocusInLineage: (target: LineageDataflowFocusTarget) => void;
   loading: boolean;
   busy: boolean;
   onValidate: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
@@ -61,10 +75,12 @@ const metadataHeaderRowHeight = 38;
 const metadataScrollbarAllowance = 18;
 
 export function MetadataExplorer({
-  metadata,
   editorDocument,
   serverDraft,
   routeSearch,
+  metadataNavigation,
+  onMetadataNavigationConsumed,
+  onFocusInLineage,
   loading,
   busy,
   onValidate,
@@ -83,11 +99,20 @@ export function MetadataExplorer({
   const [gridHeight, setGridHeight] = useState(360);
   const [activeSheet, setActiveSheet] = useState<SheetKey>("dataflows");
   const [query, setQuery] = useState("");
+  const [targetDataflowIds, setTargetDataflowIds] = useState<string[]>([]);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [mode, setMode] = useState<"view" | "edit">("view");
   const [draft, setDraft] = useState<MetadataEditorDocument | null>(null);
+  const [pendingSourceSave, setPendingSourceSave] = useState<MetadataEditorDocument | null>(null);
   const [selection, setSelection] = useState<SelectionState>(null);
+  const [selectedDataflow, setSelectedDataflow] = useState<MetadataDataflowSelection | null>(null);
+  const [dataflowDrawerStack, setDataflowDrawerStack] = useState<MetadataDataflowSelection[]>([]);
+  const selectedDataflowRef = useRef(selectedDataflow);
+  const dataflowDrawerStackRef = useRef(dataflowDrawerStack);
+  const dataflowDrawerHistoryDepthRef = useRef(0);
+  const suppressNextDataflowDrawerPopRef = useRef(false);
+  const preserveEditModeOnNextDocumentRefreshRef = useRef(false);
   const [pendingFocus, setPendingFocus] = useState<{ sheet: SheetKey; row: number; col: number } | null>(null);
   const [columnWidthsBySheet, setColumnWidthsBySheet] = useState<Record<SheetKey, Record<string, number>>>({
     connections: {},
@@ -102,8 +127,20 @@ export function MetadataExplorer({
 
   useEffect(() => {
     setDraft(serverDraft ?? editorDocument);
+  }, [serverDraft]);
+
+  useEffect(() => {
+    setDraft(serverDraft ?? editorDocument);
+    if (preserveEditModeOnNextDocumentRefreshRef.current) {
+      preserveEditModeOnNextDocumentRefreshRef.current = false;
+      return;
+    }
     setMode("view");
-  }, [editorDocument, serverDraft]);
+  }, [editorDocument]);
+
+  useEffect(() => {
+    if (!busy) preserveEditModeOnNextDocumentRefreshRef.current = false;
+  }, [busy]);
 
   useEffect(() => {
     const params = new URLSearchParams(routeSearch ?? "");
@@ -116,6 +153,16 @@ export function MetadataExplorer({
     gridRef.current?.setSelection(null);
     setSelection(null);
   }, [routeSearch]);
+
+  useEffect(() => {
+    if (!metadataNavigation) return;
+    setActiveSheet("dataflows");
+    setTargetDataflowIds(metadataNavigation.dataflowIds);
+    setQuery(metadataNavigation.dataflowIds.length ? "" : metadataNavigation.fallbackQuery || "");
+    gridRef.current?.setSelection(null);
+    setSelection(null);
+    onMetadataNavigationConsumed?.();
+  }, [metadataNavigation, onMetadataNavigationConsumed]);
 
   useLayoutEffect(() => {
     const element = gridWrapRef.current;
@@ -158,9 +205,15 @@ export function MetadataExplorer({
     () => environmentMetadataSourceOptionsForSheet(activeDocument, activeSheet),
     [activeDocument, activeSheet]
   );
+  const targetRows = useMemo(
+    () => activeSheet === "dataflows" && targetDataflowIds.length
+      ? sheet.rows.filter((row) => targetDataflowIds.includes(formatCellValue(row.dataflow_id)))
+      : sheet.rows,
+    [activeSheet, sheet.rows, targetDataflowIds],
+  );
   const rows = useMemo<SheetRow[]>(
-    () => filterMetadataRows(activeSheet, sheet.rows, sheet.columns, query),
-    [activeSheet, query, sheet.columns, sheet.rows]
+    () => filterMetadataRows(activeSheet, targetRows, sheet.columns, query),
+    [activeSheet, query, sheet.columns, targetRows]
   );
   const showAddRowLine = editable && !query.trim();
   const displayedRows = useMemo<SheetRow[]>(
@@ -178,6 +231,70 @@ export function MetadataExplorer({
   );
   const needsVerticalScroll =
     metadataHeaderRowHeight + displayedRows.length * metadataRowHeight + metadataScrollbarAllowance > gridHeight;
+  const dataflowRecords = useMemo(
+    () => buildMetadataDataflowRecords(activeDocument),
+    [activeDocument]
+  );
+  const selectedDataflowRecord = useMemo(
+    () => findMetadataDataflowRecord(dataflowRecords, selectedDataflow),
+    [dataflowRecords, selectedDataflow]
+  );
+
+  function popDataflowDrawerState() {
+    const stack = dataflowDrawerStackRef.current;
+    const previous = stack[stack.length - 1];
+    const nextStack = stack.slice(0, -1);
+    setSelectedDataflow(previous ?? null);
+    setDataflowDrawerStack(nextStack);
+    selectedDataflowRef.current = previous ?? null;
+    dataflowDrawerStackRef.current = nextStack;
+    dataflowDrawerHistoryDepthRef.current = Math.max(0, dataflowDrawerHistoryDepthRef.current - 1);
+  }
+
+  function pushDataflowDrawerHistory() {
+    window.history.pushState({ datacoolieMetadataDataflowDrawer: true }, "", window.location.href);
+    dataflowDrawerHistoryDepthRef.current += 1;
+  }
+
+  function openDataflowDrawer(next: MetadataDataflowSelection) {
+    pushDataflowDrawerHistory();
+    setSelectedDataflow(next);
+    setDataflowDrawerStack([]);
+    selectedDataflowRef.current = next;
+    dataflowDrawerStackRef.current = [];
+  }
+
+  function pushDataflowDrawer(next: MetadataDataflowSelection) {
+    pushDataflowDrawerHistory();
+    const current = selectedDataflowRef.current;
+    if (current) {
+      const nextStack = [...dataflowDrawerStackRef.current, current];
+      setDataflowDrawerStack(nextStack);
+      dataflowDrawerStackRef.current = nextStack;
+    }
+    setSelectedDataflow(next);
+    selectedDataflowRef.current = next;
+  }
+
+  function popDataflowDrawer() {
+    if (dataflowDrawerHistoryDepthRef.current > 0) {
+      window.history.back();
+      return;
+    }
+    popDataflowDrawerState();
+  }
+
+  function closeDataflowDrawer() {
+    setSelectedDataflow(null);
+    setDataflowDrawerStack([]);
+    selectedDataflowRef.current = null;
+    dataflowDrawerStackRef.current = [];
+    if (dataflowDrawerHistoryDepthRef.current > 0) {
+      suppressNextDataflowDrawerPopRef.current = true;
+      window.history.go(-dataflowDrawerHistoryDepthRef.current);
+      dataflowDrawerHistoryDepthRef.current = 0;
+    }
+  }
   const columns = useMemo<Column<SheetRow>[]>(
     () =>
       buildSheetColumns({
@@ -194,7 +311,30 @@ export function MetadataExplorer({
   );
   const metadataGutterColumn = useMemo(() => ({
     component: ({ rowData }: { rowData: SheetRow }) => {
-      if (!rowData.__isAddRow) return <>{rowData.__rowIndex + 1}</>;
+      if (!rowData.__isAddRow) {
+        if (activeSheet === "dataflows") {
+          return (
+            <button
+              type="button"
+              className="metadata-grid-row-number-button"
+              title="Double-click to open dataflow details"
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                openDataflowDrawer({
+                  metadataSourceId: Number(rowData.__metadata_source_id),
+                  rowIndex: rowData.__rowIndex,
+                  dataflowId: formatCellValue(rowData.dataflow_id),
+                  name: formatCellValue(rowData.name),
+                });
+              }}
+            >
+              {rowData.__rowIndex + 1}
+            </button>
+          );
+        }
+        return <>{rowData.__rowIndex + 1}</>;
+      }
       return (
         <button
           type="button"
@@ -210,7 +350,35 @@ export function MetadataExplorer({
         </button>
       );
     }
-  }), [sheet.rows.length]);
+  }), [activeSheet, sheet.rows.length]);
+
+  useEffect(() => {
+    if (activeSheet !== "dataflows") closeDataflowDrawer();
+  }, [activeSheet]);
+
+  useEffect(() => {
+    if (selectedDataflow && !selectedDataflowRecord) closeDataflowDrawer();
+  }, [selectedDataflow, selectedDataflowRecord]);
+
+  useEffect(() => {
+    selectedDataflowRef.current = selectedDataflow;
+    dataflowDrawerStackRef.current = dataflowDrawerStack;
+  }, [dataflowDrawerStack, selectedDataflow]);
+
+  useEffect(() => {
+    function handlePopState() {
+      if (suppressNextDataflowDrawerPopRef.current) {
+        suppressNextDataflowDrawerPopRef.current = false;
+        dataflowDrawerHistoryDepthRef.current = 0;
+        return;
+      }
+      if (!selectedDataflowRef.current || dataflowDrawerHistoryDepthRef.current <= 0) return;
+      popDataflowDrawerState();
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useLayoutEffect(() => {
     if (!pendingFocus || pendingFocus.sheet !== activeSheet) return;
@@ -249,7 +417,7 @@ export function MetadataExplorer({
     return () => document.removeEventListener("keydown", handleBoundaryNavigation, true);
   }, [rows, sheet.columns]);
 
-  if (!metadata && !activeDocument && !loading) {
+  if (!activeDocument && !loading) {
     return <EmptyState icon={<Database size={24} />} title="Add metadata source to inspect metadata" />;
   }
 
@@ -257,8 +425,10 @@ export function MetadataExplorer({
     return <EmptyState icon={<Database size={24} />} title={loading ? "Loading metadata" : "No metadata editor document"} />;
   }
 
-  const dirty = Boolean(serverDraft) || (editorDocument ? JSON.stringify(draft?.sheets) !== JSON.stringify(editorDocument.sheets) : false);
-  const enabledDataflows = metadata?.dataflows.filter((dataflow) => dataflow.is_active !== false).length ?? countEnabled(activeDocument.sheets.dataflows?.rows ?? []);
+  const draftState = metadataDraftState(editorDocument, serverDraft, activeDocument);
+  const dirty = draftState.hasLocalChanges;
+  const sourceSaveConfirmation = pendingSourceSave ? metadataSaveConfirmation(editorDocument, pendingSourceSave) : null;
+  const enabledDataflows = countEnabled(activeDocument.sheets.dataflows?.rows ?? []);
   const selectedRowIndex = selection ? rows[selection.min.row]?.__rowIndex ?? null : null;
   const selectedColumnKey = selection?.min.colId && selection.min.colId !== "__gutter" ? selection.min.colId : null;
 
@@ -296,6 +466,7 @@ export function MetadataExplorer({
     if (nextSheet === activeSheet) return;
     gridRef.current?.setSelection(null);
     setSelection(null);
+    setTargetDataflowIds([]);
     setActiveSheet(nextSheet);
     setQuery("");
   }
@@ -311,6 +482,7 @@ export function MetadataExplorer({
     if (nextQuery === query) return;
     gridRef.current?.setSelection(null);
     setSelection(null);
+    setTargetDataflowIds([]);
     setQuery(nextQuery);
   }
 
@@ -356,34 +528,63 @@ export function MetadataExplorer({
     document.addEventListener("mouseup", handleMouseUp, { once: true });
   }
 
-  async function validateDraft() {
-    if (!activeDocument) return;
-    setDraft(await onValidate(activeDocument));
+  async function validateDraft(document = activeDocument, updateEditor = true) {
+    if (!document) return;
+    try {
+      const validated = await onValidate(document);
+      if (updateEditor) setDraft(validated);
+      return validated;
+    } catch {
+      return undefined;
+    }
   }
 
-  async function saveDraft() {
-    if (!activeDocument) return;
-    setDraft(await onSaveDraft(activeDocument));
+  async function saveDraft(document = activeDocument) {
+    if (!document) return;
+    try {
+      const saved = await onSaveDraft(document);
+      setDraft(saved);
+      return saved;
+    } catch {
+      return undefined;
+    }
   }
 
   async function discardDraft() {
     if (!editorDocument) return;
-    await onDiscardDraft(editorDocument.source.source_id);
-    setDraft(editorDocument);
-    setMode("view");
+    preserveEditModeOnNextDocumentRefreshRef.current = true;
+    try {
+      await onDiscardDraft(editorDocument.source.source_id);
+      setDraft(editorDocument);
+    } catch {
+      preserveEditModeOnNextDocumentRefreshRef.current = false;
+    }
   }
 
-  async function saveChanges() {
-    if (!activeDocument) return;
-    const confirmed = window.confirm(
-      activeDocument.source.scope === "environment"
-        ? "Overwrite metadata sources?\n\nRows will be saved back to their metadata_source files. Backups will be created before saving changed files."
-        : `Overwrite metadata source?\n\n${activeDocument.source.uri}\n\nA backup will be created before saving.`
-    );
-    if (!confirmed) return;
-    const saved = await onSave(activeDocument);
-    setDraft(saved);
-    setMode("view");
+  async function saveChanges(document = activeDocument) {
+    if (!document) return;
+    try {
+      const saved = await onSave(document);
+      setDraft(saved);
+      setMode("view");
+      return saved;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function requestSourceSave(document = activeDocument) {
+    if (!document) return;
+    setPendingSourceSave(document);
+  }
+
+  async function confirmSourceSave() {
+    if (!pendingSourceSave) return;
+    const saved = await saveChanges(pendingSourceSave);
+    if (saved) {
+      setPendingSourceSave(null);
+      closeDataflowDrawer();
+    }
   }
 
   async function restoreBackup(backup: MetadataBackup) {
@@ -517,7 +718,9 @@ export function MetadataExplorer({
         <MetadataSheetToolbar
           activeSheet={activeSheet}
           busy={busy}
-          dirty={dirty}
+          hasLocalChanges={draftState.hasLocalChanges}
+          hasSourceChanges={draftState.hasSourceChanges}
+          hasStoredDraft={draftState.hasStoredDraft}
           filteredRowCount={rows.length}
           totalRowCount={sheet.rows.length}
           mode={mode}
@@ -531,7 +734,7 @@ export function MetadataExplorer({
           onHistoryOpen={() => setHistoryOpen(true)}
           onModeChange={changeMode}
           onQueryChange={changeQuery}
-          onSave={saveChanges}
+          onSave={requestSourceSave}
           onSaveDraft={saveDraft}
           onValidate={validateDraft}
         />
@@ -608,6 +811,44 @@ export function MetadataExplorer({
           onList={onListBackups}
           onPreview={onPreviewBackup}
           onRestore={restoreBackup}
+        />
+      ) : null}
+      {pendingSourceSave && sourceSaveConfirmation ? (
+        <MetadataSourceSaveConfirmationDialog
+          busy={busy}
+          confirmation={sourceSaveConfirmation}
+          onCancel={() => setPendingSourceSave(null)}
+          onConfirm={() => void confirmSourceSave()}
+        />
+      ) : null}
+      {selectedDataflowRecord ? (
+        <MetadataDataflowDrawer
+          record={selectedDataflowRecord}
+          editable={!readOnlyDocument}
+          readOnly={readOnlyDocument}
+          busy={busy}
+          connectionRows={activeDocument?.sheets.connections?.rows ?? []}
+          connectionColumns={activeDocument?.sheets.connections?.columns ?? []}
+          relatedDataflows={dataflowRecords}
+          onSave={(nextRow) => requestSourceSave(
+            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
+          )}
+          onSaveDraft={(nextRow) => saveDraft(
+            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
+          )}
+          onValidate={(nextRow) => validateDraft(
+            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
+            false,
+          )}
+          onBack={dataflowDrawerStack.length ? popDataflowDrawer : undefined}
+          onSelectRelatedDataflow={(related) => pushDataflowDrawer({
+            metadataSourceId: related.metadataSourceId,
+            rowIndex: related.rowIndex,
+            dataflowId: related.dataflowId,
+            name: related.name,
+          })}
+          onFocusInLineage={onFocusInLineage}
+          onClose={closeDataflowDrawer}
         />
       ) : null}
     </div>

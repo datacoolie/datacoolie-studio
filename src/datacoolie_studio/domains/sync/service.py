@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,23 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import EnvironmentSource, SourceRevision, SyncJob, utc_now
 from datacoolie_studio.domains.storage.uri import parse_storage_uri
+
+
+_refresh_locks_guard = threading.Lock()
+_refresh_locks: dict[int, threading.Lock] = {}
+
+
+@contextmanager
+def source_refresh_guard(source_id: int):
+    """Prevent overlapping refreshes for a source within this Studio process."""
+    with _refresh_locks_guard:
+        lock = _refresh_locks.setdefault(source_id, threading.Lock())
+    acquired = lock.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
 
 
 def refresh_source(session: Session, source: EnvironmentSource, job_type: str = "manual_refresh") -> dict[str, Any]:

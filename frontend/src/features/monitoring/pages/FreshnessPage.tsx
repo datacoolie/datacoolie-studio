@@ -1,6 +1,7 @@
 import type { EChartsOption } from "echarts";
 import { useEffect, useState } from "react";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
+import type { MonitoringFilters } from "../monitoringFilters";
 import {
   DataTable,
   DetailMetric,
@@ -18,23 +19,55 @@ import {
   formatNumber,
   formatPercent,
   monitoringTimezone,
+  horizontalBarDataZoom,
+  horizontalBarSeriesSizing,
   reportChartPalette,
   reportChartGrid,
+  resolveTrendBucketKeys,
+  normalizeTrendGrain,
   type TableSort
 } from "../monitoringShared";
 
 type FreshnessRow = Record<string, unknown>;
 
+const STALE_THRESHOLD_DAYS = 7;
+const WATERMARK_MOVEMENT_LEGEND = [
+  ["Initialized", reportChartPalette.teal],
+  ["Advanced", reportChartPalette.success],
+  ["Unchanged", reportChartPalette.skipped],
+  ["Incomplete", reportChartPalette.blue],
+  ["Invalid", reportChartPalette.failed],
+  ["Unknown", reportChartPalette.unknown],
+  ["Advanced %", reportChartPalette.blue],
+] as const;
+const FRESHNESS_AGE_LEGEND = [
+  ["Current ≤7d", reportChartPalette.unknown],
+  ["Stale >7d", reportChartPalette.amber],
+] as const;
+const WATERMARK_COVERAGE_LEGEND = [
+  ["Enabled", reportChartPalette.success],
+  ["Not configured", reportChartPalette.unknown],
+] as const;
+
 export function FreshnessPage({
   report,
+  filters,
   onInspect
 }: {
   report: MonitoringReport;
+  filters: MonitoringFilters;
   onInspect?: (row: FreshnessRow) => void;
 }) {
   const kpis = report.freshness.kpis;
   const timezoneName = monitoringTimezone(report);
   const registryRows = report.freshness.dataflow_registry ?? [];
+  const watermarkTrendRows = fillMissingWatermarkMovementTrendRows(
+    report.freshness.watermark_movement_by_date ?? [],
+    filters,
+    report.summary.date_range,
+    timezoneName,
+    String(report.summary.effective_grain ?? filters.grain ?? "day")
+  );
   const [registrySort, setRegistrySort] = useState<TableSort>({ sortBy: "latest_freshness_at", sortDir: "desc" });
   const [registryOffset, setRegistryOffset] = useState(0);
   const [registryLimit, setRegistryLimit] = useState(100);
@@ -48,7 +81,7 @@ export function FreshnessPage({
   const unchangedRuns = Number(kpis.watermark_unchanged_runs ?? 0);
   const skippedStreakDataflows = Number(kpis.skipped_streak_dataflows ?? 0);
   const skippedStreakThreshold = Number(kpis.skipped_streak_threshold ?? 3);
-  const staleThresholdDays = Number(kpis.stale_threshold_days ?? 7);
+  const staleThresholdDays = STALE_THRESHOLD_DAYS;
   const successfulRuns = Number(kpis.successful_runs ?? kpis.latest_successful_runs ?? 0);
   const failedRuns = Number(kpis.failed_runs ?? 0);
   const skippedRuns = Number(kpis.skipped_runs ?? kpis.skipped_no_new_data ?? 0);
@@ -87,6 +120,7 @@ export function FreshnessPage({
             </span>
           }
           intent={healthIntent}
+          accent="intent"
           title={healthTitle}
         />
         <HealthStripCard
@@ -111,6 +145,7 @@ export function FreshnessPage({
           value={formatNumber(staleDataflows)}
           detail={<DetailMetric label="of dataflows" value={formatPercent(Number(kpis.stale_dataflow_rate ?? 0))} tone={staleDataflows ? "warning" : "neutral"} />}
           intent={staleDataflows ? "warning" : "neutral"}
+          accent="intent"
           title={`Stale = latest succeeded/skipped run is older than ${staleThresholdDays} days. Counted by dataflow_id.`}
         />
         <HealthStripCard
@@ -122,10 +157,11 @@ export function FreshnessPage({
               <span className="separator"> · </span>
               <DetailMetric label="P50" value={formatAgeSeconds(Number(kpis.p50_age_seconds ?? 0))} tone="blue" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="max" value={formatAgeSeconds(Number(kpis.max_age_seconds ?? 0))} tone={Number(kpis.max_age_days ?? 0) > 7 ? "warning" : "neutral"} labelFirst />
+              <DetailMetric label="max" value={formatAgeSeconds(Number(kpis.max_age_seconds ?? 0))} tone={Number(kpis.max_age_days ?? 0) > STALE_THRESHOLD_DAYS ? "warning" : "neutral"} labelFirst />
             </span>
           }
-          intent={Number(kpis.p95_age_days ?? 0) > 7 ? "warning" : "neutral"}
+          intent={Number(kpis.p95_age_days ?? 0) > STALE_THRESHOLD_DAYS ? "warning" : "neutral"}
+          accent="intent"
           title="Age is measured from the latest succeeded/skipped ETL run per dataflow."
         />
         <HealthStripCard
@@ -133,6 +169,7 @@ export function FreshnessPage({
           value={formatPercent(Number(kpis.watermark_coverage_rate ?? 0))}
           detail={<DetailMetric label="enabled flows" value={formatNumber(Number(kpis.watermark_enabled_dataflows ?? 0))} tone="blue" />}
           intent={Number(kpis.watermark_coverage_rate ?? 0) > 0 ? "good" : "neutral"}
+          accent={Number(kpis.watermark_coverage_rate ?? 0) > 0 ? "source" : "neutral"}
           title="Watermark coverage = dataflows with watermark config or watermark values / observed dataflows."
         />
         <HealthStripCard
@@ -149,6 +186,7 @@ export function FreshnessPage({
             </span>
           }
           intent={latestWatermarkIssueDataflows ? "warning" : "neutral"}
+          accent="intent"
           title="Movement = latest watermark change evidence. Advanced changed, unchanged did not change, initialized has first watermark."
         />
       </section>
@@ -159,6 +197,7 @@ export function FreshnessPage({
             title="Oldest / stale dataflows"
             subtitle="latest check age"
             titleTooltip="Ranks dataflows by age of latest succeeded/skipped ETL run. Stale candidates are older than the configured threshold."
+            headerAction={<FreshnessChartLegend label="Freshness age legend" items={FRESHNESS_AGE_LEGEND} />}
           >
             <ReportChart option={freshnessAgeByDataflowOption(report.freshness.dataflow_registry ?? [])} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
@@ -166,8 +205,9 @@ export function FreshnessPage({
             title="Watermark movement trend"
             subtitle={`${report.summary.effective_grain ?? "day"} grain`}
             titleTooltip="Counts watermark-enabled ETL runs by committed movement state: advanced, initialized, unchanged, incomplete, invalid, and unknown. This is diagnostic history across the filter; Freshness health only uses the latest watermark state per dataflow."
+            headerAction={<WatermarkMovementLegend />}
           >
-            <ReportChart option={watermarkMovementTrendOption(report.freshness.watermark_movement_by_date ?? [])} height="100%" />
+            <ReportChart option={watermarkMovementTrendOption(watermarkTrendRows)} height="100%" />
           </ReportPanel>
         </section>
 
@@ -181,8 +221,8 @@ export function FreshnessPage({
           </ReportPanel>
           <ReportPanel
             title="Watermark coverage by stage"
-            subtitle="enabled vs not configured by stage"
             titleTooltip="Stage-level dataflow coverage. A dataflow is enabled when at least one ETL row for that stage has watermark columns or watermark values. Not configured is neutral: freshness still uses latest succeeded/skipped run."
+            headerAction={<FreshnessChartLegend label="Watermark coverage legend" items={WATERMARK_COVERAGE_LEGEND} />}
           >
             <ReportChart option={watermarkCoverageByStageOption(report.freshness.watermark_coverage_by_stage ?? [])} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
@@ -194,11 +234,11 @@ export function FreshnessPage({
             <ReportChart option={skippedStreakDistributionOption(report.freshness.skipped_streak_distribution ?? [])} height="100%" />
           </ReportPanel>
           <ReportPanel
-            title="Watermark adjustment"
-            subtitle="effective read-boundary signal"
+            title="Watermark adjustments"
+            subtitle="changed read boundary"
             titleTooltip="Adjustment is separate from watermark movement. Adjusted means source_watermark_effective differs from source_watermark_before."
           >
-            <ReportChart option={watermarkAdjustmentOption(report.freshness.watermark_movement_by_date ?? [])} height="100%" />
+            <ReportChart option={watermarkAdjustmentOption(watermarkTrendRows)} height="100%" />
           </ReportPanel>
         </section>
 
@@ -261,15 +301,15 @@ function DataflowFreshnessTable({
     <DataTable<FreshnessRow>
       rows={rows}
       columns={[
-        { key: "dataflow_name", label: "Dataflow", sortable: true, width: 160, render: (row) => <CompactDataflowCell row={row} /> },
-        { key: "stage", label: "Stage", sortable: true, autoFit: true, minWidth: 64, maxWidth: 140 },
-        { key: "source_name", label: "Source", sortable: true, width: 160, render: (row) => <EndpointCell row={row as MonitoringRecord} direction="source" /> },
-        { key: "destination_name", label: "Destination", sortable: true, width: 160, render: (row) => <EndpointCell row={row as MonitoringRecord} direction="destination" /> },
-        { key: "destination_load_type", label: "Load", sortable: true, width: 120, render: (row) => String(row.destination_load_type ?? "-") },
+        { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 150, fillPriority: "normal", render: (row) => <CompactDataflowCell row={row} /> },
+        { key: "stage", label: "Stage", sortable: true, minWidth: 90, maxWidth: 150, fillPriority: "normal" },
+        { key: "source_name", label: "Source", sortable: true, minWidth: 150, maxWidth: 240, fillPriority: "normal", render: (row) => <EndpointCell row={row as MonitoringRecord} direction="source" /> },
+        { key: "destination_name", label: "Destination", sortable: true, minWidth: 150, maxWidth: 240, fillPriority: "normal", render: (row) => <EndpointCell row={row as MonitoringRecord} direction="destination" /> },
+        { key: "destination_load_type", label: "Load", sortable: true, autoFit: true, minWidth: 58, maxWidth: 112, render: (row) => String(row.destination_load_type ?? "-"), measureValue: (row) => String(row.destination_load_type ?? "-") },
         { key: "latest_freshness_at", label: "Latest check", sortable: true, autoFit: true, minWidth: 132, maxWidth: 178, render: (row) => <TableDateTimeValue value={row.latest_freshness_at} timezoneName={timezoneName} /> },
         { key: "age_days", label: "Age", sortable: true, autoFit: true, minWidth: 54, maxWidth: 76, render: (row) => <AgeCell row={row} /> },
-        { key: "last_statuses", label: "Last status", sortable: true, sortKey: "latest_run_status", autoFit: true, minWidth: 82, maxWidth: 98, render: (row) => <LastStatusCell row={row} timezoneName={timezoneName} /> },
-        { key: "movement_state", label: "Watermark", sortable: true, width: 130, render: (row) => <WatermarkBadge value={row.movement_state} effective={row.source_watermark_effective} /> },
+        { key: "last_statuses", label: "Recent runs", sortable: true, sortKey: "latest_run_status", autoFit: true, minWidth: 88, maxWidth: 104, render: (row) => <LastStatusCell row={row} timezoneName={timezoneName} /> },
+        { key: "movement_state", label: "Watermark", sortable: true, autoFit: true, minWidth: 98, maxWidth: 138, render: (row) => <WatermarkBadge value={row.movement_state} effective={row.source_watermark_effective} />, measureValue: (row) => String(row.movement_state ?? "Not configured") },
         { key: "latest_success_watermark", label: "Latest watermark", sortable: true, minWidth: 160, fillPriority: "last", render: (row) => <LatestWatermarkCell row={row} /> }
       ]}
       maxRows={limit}
@@ -305,7 +345,7 @@ function LatestWatermarkCell({ row }: { row: FreshnessRow }) {
 function AgeCell({ row }: { row: FreshnessRow }) {
   const ageDays = Number(row.age_days ?? 0);
   const ageSeconds = Number(row.age_seconds ?? ageDays * 86400);
-  const tone = Number.isFinite(ageDays) && ageDays > 7 ? "is-warning" : "";
+  const tone = Number.isFinite(ageDays) && ageDays > STALE_THRESHOLD_DAYS ? "is-warning" : "";
   return <span className={`freshness-age-value ${tone}`}>{Number.isFinite(ageSeconds) ? formatAgeSeconds(ageSeconds) : "-"}</span>;
 }
 
@@ -326,6 +366,29 @@ function LastStatusCell({ row, timezoneName }: { row: FreshnessRow; timezoneName
         return <i key={`${status}-${index}`} className={`status-bg-${status}`} title={title || status} />;
       })}
     </span>
+  );
+}
+
+function WatermarkMovementLegend() {
+  return <FreshnessChartLegend label="Watermark movement legend" items={WATERMARK_MOVEMENT_LEGEND} />;
+}
+
+function FreshnessChartLegend({
+  label,
+  items,
+}: {
+  label: string;
+  items: ReadonlyArray<readonly [string, string]>;
+}) {
+  return (
+    <div className="freshness-chart-legend" aria-label={label}>
+      {items.map(([itemLabel, color]) => (
+        <span key={itemLabel}>
+          <i style={{ backgroundColor: color }} aria-hidden="true" />
+          {itemLabel}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -351,11 +414,12 @@ function formatStatusHistoryTime(value: string, timezoneName: string) {
   }).format(date);
 }
 
-function freshnessAgeByDataflowOption(rows: FreshnessRow[]): EChartsOption {
+export function freshnessAgeByDataflowOption(rows: FreshnessRow[]): EChartsOption {
   const visible = [...rows]
     .filter((row) => row.age_days !== null && row.age_days !== undefined && Number.isFinite(Number(row.age_days)))
     .sort((a, b) => Number(b.age_days ?? 0) - Number(a.age_days ?? 0));
-  const zoomConfig = horizontalDataZoom(visible.length);
+  const zoomConfig = horizontalBarDataZoom(visible.length);
+  const barSizing = horizontalBarSeriesSizing(visible.length);
   if (!visible.length) return emptyChartOption("No dataflow freshness evidence.");
   return baseChartOption({
     tooltip: {
@@ -368,42 +432,41 @@ function freshnessAgeByDataflowOption(rows: FreshnessRow[]): EChartsOption {
         return [
           `<strong>${String(row.dataflow_name ?? row.dataflow_id ?? "unknown")}</strong>`,
           `Age: ${formatAgeSeconds(Number(row.age_seconds ?? Number(row.age_days ?? 0) * 86400))}`,
+          `Freshness: ${Number(row.age_days ?? 0) > STALE_THRESHOLD_DAYS ? "Stale" : "Current"}`,
           `Target: ${String(row.target ?? "unknown")}`,
           `Latest check: ${String(row.latest_freshness_at ?? "-")}`,
-          `Status: ${String(row.latest_freshness_status ?? "-")}`
+          `Latest run status: ${String(row.latest_freshness_status ?? "-")}`
         ].join("<br/>");
       }
     },
-    grid: fixedHorizontalBarGrid(132, Boolean(zoomConfig), { right: zoomConfig ? 16 : 8, top: 6 }),
+    grid: fixedHorizontalBarGrid(132, Boolean(zoomConfig), { top: 6 }),
     xAxis: { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => `${formatCompact(value)}d` }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-    yAxis: fixedHorizontalCategoryAxis(visible.map((row) => String(row.dataflow_name ?? row.dataflow_id ?? "unknown")), 132),
+    yAxis: fixedHorizontalCategoryAxis(
+      visible.map((row) => String(row.dataflow_name ?? row.dataflow_id ?? "unknown")),
+      132,
+      { axisLine: { show: true, lineStyle: { color: "#d9e1ea", width: 1 } } }
+    ),
     dataZoom: zoomConfig,
     series: [{
       name: "Age days",
       type: "bar",
-      barMaxWidth: visible.length <= 8 ? 16 : 12,
+      ...barSizing,
       label: optionalValueLabel("right", (value) => `${formatCompact(value)}d`),
       labelLayout: { hideOverlap: true },
       itemStyle: { borderRadius: 2 },
       data: visible.map((row) => ({
         value: Number(row.age_days ?? 0),
-        itemStyle: { color: freshnessStatusColor(String(row.latest_freshness_status ?? row.status ?? "unknown")) }
+        itemStyle: { color: freshnessAgeColor(Number(row.age_days ?? 0)) }
       }))
     }]
   });
 }
 
-function freshnessStatusColor(status: string) {
-  const normalized = status.toLowerCase();
-  if (normalized === "succeeded") return reportChartPalette.success;
-  if (normalized === "failed") return reportChartPalette.failed;
-  if (normalized === "skipped") return reportChartPalette.skipped;
-  if (normalized === "running") return reportChartPalette.running;
-  if (normalized === "pending") return reportChartPalette.pending;
-  return reportChartPalette.unknown;
+function freshnessAgeColor(ageDays: number) {
+  return ageDays > STALE_THRESHOLD_DAYS ? reportChartPalette.amber : reportChartPalette.unknown;
 }
 
-function watermarkMovementTrendOption(rows: FreshnessRow[]): EChartsOption {
+export function watermarkMovementTrendOption(rows: FreshnessRow[]): EChartsOption {
   if (!rows.length) return emptyChartOption("No watermark movement evidence.");
   const maxTotal = Math.max(1, ...rows.map((row) => Number(row.total ?? 0)));
   const statuses = [
@@ -434,8 +497,8 @@ function watermarkMovementTrendOption(rows: FreshnessRow[]): EChartsOption {
         ].filter(Boolean).join("<br/>");
       }
     },
-    legend: { top: 0, left: "center", itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10, color: reportChartPalette.muted } },
-    grid: reportChartGrid({ left: 8, right: 12, top: 22 }),
+    legend: { show: false },
+    grid: reportChartGrid({ left: 36, right: 40, top: 6, bottom: 5, containLabel: false }),
     xAxis: { type: "category", data: rows.map((row) => String(row.date ?? row.bucket ?? "unknown")), axisTick: { show: false }, axisLabel: { fontSize: 10, color: reportChartPalette.muted, hideOverlap: true } },
     yAxis: [
       { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
@@ -478,7 +541,51 @@ function watermarkMovementTrendOption(rows: FreshnessRow[]): EChartsOption {
   });
 }
 
-function freshnessAgeDistributionOption(rows: FreshnessRow[]): EChartsOption {
+export function fillMissingWatermarkMovementTrendRows(
+  rows: FreshnessRow[],
+  filters: MonitoringFilters,
+  dateRange: { min?: string | null; max?: string | null },
+  timezoneName: string,
+  reportEffectiveGrain = "day"
+) {
+  const effectiveGrain = String(rows.find((row) => row.grain)?.grain ?? reportEffectiveGrain ?? filters.grain ?? "day");
+  const knownRows = rows.filter((row) => {
+    const key = String(row.bucket ?? row.date ?? "").trim();
+    return Boolean(key && key !== "unknown");
+  });
+  const rowByKey = new Map(knownRows.map((row) => [String(row.bucket ?? row.date), row]));
+  const bucketKeys = resolveTrendBucketKeys(
+    filters,
+    dateRange,
+    timezoneName,
+    Array.from(rowByKey.keys()),
+    effectiveGrain
+  );
+  if (!bucketKeys.length) return knownRows;
+  return bucketKeys.map((bucket) => ({
+    ...createEmptyWatermarkMovementTrendRow(bucket, effectiveGrain),
+    ...(rowByKey.get(bucket) ?? {})
+  }));
+}
+
+function createEmptyWatermarkMovementTrendRow(bucket: string, grain: string): FreshnessRow {
+  return {
+    date: bucket,
+    bucket,
+    grain: normalizeTrendGrain(grain),
+    initialized: 0,
+    advanced: 0,
+    unchanged: 0,
+    incomplete: 0,
+    invalid: 0,
+    unknown: 0,
+    adjusted: 0,
+    total: 0,
+    advanced_rate: 0
+  };
+}
+
+export function freshnessAgeDistributionOption(rows: FreshnessRow[]): EChartsOption {
   if (!rows.length) return emptyChartOption("No age distribution evidence.");
   const maxValue = Math.max(1, ...rows.map((row) => Number(row.dataflows ?? row.targets ?? 0)));
   return baseChartOption({
@@ -486,7 +593,7 @@ function freshnessAgeDistributionOption(rows: FreshnessRow[]): EChartsOption {
       trigger: "item",
       formatter: (params: any) => `${params?.name}: ${formatNumber(Number(params?.value ?? 0))} dataflows`
     },
-    grid: reportChartGrid({ left: 8, right: 8, top: 18 }),
+    grid: reportChartGrid({ left: 34, right: 8, top: 18, bottom: 5, containLabel: false }),
     xAxis: { type: "category", data: rows.map((row) => String(row.bucket ?? "unknown")), axisTick: { show: false }, axisLabel: { fontSize: 10, color: reportChartPalette.muted } },
     yAxis: { type: "value", max: chartLabelHeadroomMax(maxValue), axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
     series: [{
@@ -495,17 +602,31 @@ function freshnessAgeDistributionOption(rows: FreshnessRow[]): EChartsOption {
       barMaxWidth: 34,
       label: optionalValueLabel("top", (value) => formatCompact(value)),
       labelLayout: { hideOverlap: true },
-      itemStyle: { color: reportChartPalette.blue, borderRadius: 2 },
-      data: rows.map((row) => Number(row.dataflows ?? row.targets ?? 0))
+      itemStyle: { borderRadius: 2 },
+      data: rows.map((row) => ({
+        value: Number(row.dataflows ?? row.targets ?? 0),
+        itemStyle: { color: freshnessAgeBucketColor(String(row.bucket ?? "unknown")) }
+      }))
     }]
   });
 }
 
-function watermarkCoverageByStageOption(rows: FreshnessRow[]): EChartsOption {
+function freshnessAgeBucketColor(bucket: string) {
+  const normalized = bucket.trim().toLowerCase();
+  if (normalized === "<24h") return reportChartPalette.teal;
+  if (normalized === "1-3d") return reportChartPalette.blue;
+  if (normalized === "3-7d") return reportChartPalette.pending;
+  if (normalized === "7-30d") return reportChartPalette.amber;
+  if (normalized === ">30d") return reportChartPalette.failed;
+  return reportChartPalette.unknown;
+}
+
+export function watermarkCoverageByStageOption(rows: FreshnessRow[]): EChartsOption {
   const visible = [...rows]
     .filter((row) => Number(row.total ?? 0) > 0)
     .sort((left, right) => String(left.stage ?? "unknown").localeCompare(String(right.stage ?? "unknown")));
-  const zoomConfig = horizontalDataZoom(visible.length);
+  const zoomConfig = horizontalBarDataZoom(visible.length);
+  const barSizing = horizontalBarSeriesSizing(visible.length);
   if (!visible.length) return emptyChartOption("No watermark coverage evidence.");
   return baseChartOption({
     tooltip: {
@@ -523,17 +644,21 @@ function watermarkCoverageByStageOption(rows: FreshnessRow[]): EChartsOption {
         ].join("<br/>");
       }
     },
-    legend: { top: 0, left: "center", itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10, color: reportChartPalette.muted } },
-    grid: fixedHorizontalBarGrid(96, Boolean(zoomConfig), { right: zoomConfig ? 16 : 8, top: 22 }),
+    legend: { show: false },
+    grid: fixedHorizontalBarGrid(96, Boolean(zoomConfig), { top: 6 }),
     xAxis: { type: "value", max: 100, axisLabel: { fontSize: 10, formatter: (value: number) => `${value}%` }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-    yAxis: fixedHorizontalCategoryAxis(visible.map((row) => String(row.stage ?? "unknown")), 96),
+    yAxis: fixedHorizontalCategoryAxis(
+      visible.map((row) => String(row.stage ?? "unknown")),
+      96,
+      { axisLine: { show: true, lineStyle: { color: "#d9e1ea", width: 1 } } }
+    ),
     dataZoom: zoomConfig,
     series: [
       {
         name: "Enabled",
         type: "bar",
         stack: "coverage",
-        barMaxWidth: visible.length <= 8 ? 16 : 12,
+        ...barSizing,
         label: optionalInsideShareLabel(visible, () => 100, (value) => `${formatCompact(value)}%`),
         labelLayout: { hideOverlap: true },
         itemStyle: { color: reportChartPalette.success, borderRadius: [2, 0, 0, 2] },
@@ -543,7 +668,7 @@ function watermarkCoverageByStageOption(rows: FreshnessRow[]): EChartsOption {
         name: "Not configured",
         type: "bar",
         stack: "coverage",
-        barMaxWidth: visible.length <= 8 ? 16 : 12,
+        ...barSizing,
         label: optionalInsideShareLabel(visible, () => 100, (value) => `${formatCompact(value)}%`),
         labelLayout: { hideOverlap: true },
         itemStyle: { color: reportChartPalette.unknown, borderRadius: [0, 2, 2, 0] },
@@ -553,7 +678,7 @@ function watermarkCoverageByStageOption(rows: FreshnessRow[]): EChartsOption {
   });
 }
 
-function skippedStreakDistributionOption(rows: FreshnessRow[]): EChartsOption {
+export function skippedStreakDistributionOption(rows: FreshnessRow[]): EChartsOption {
   if (!rows.length) return emptyChartOption("No consecutive skipped dataflow streaks.");
   const maxValue = Math.max(1, ...rows.map((row) => Number(row.dataflows ?? row.targets ?? 0)));
   return baseChartOption({
@@ -561,7 +686,7 @@ function skippedStreakDistributionOption(rows: FreshnessRow[]): EChartsOption {
       trigger: "item",
       formatter: (params: any) => `${params?.name}: ${formatNumber(Number(params?.value ?? 0))} dataflows`
     },
-    grid: reportChartGrid({ left: 8, right: 8, top: 18 }),
+    grid: reportChartGrid({ left: 30, right: 8, top: 18, bottom: 5, containLabel: false }),
     xAxis: { type: "category", data: rows.map((row) => String(row.bucket ?? "unknown")), axisTick: { show: false }, axisLabel: { fontSize: 10, color: reportChartPalette.muted } },
     yAxis: { type: "value", max: chartLabelHeadroomMax(maxValue), axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
     series: [{
@@ -576,7 +701,7 @@ function skippedStreakDistributionOption(rows: FreshnessRow[]): EChartsOption {
   });
 }
 
-function watermarkAdjustmentOption(rows: FreshnessRow[]): EChartsOption {
+export function watermarkAdjustmentOption(rows: FreshnessRow[]): EChartsOption {
   if (!rows.length) return emptyChartOption("No watermark adjustment evidence.");
   const maxValue = Math.max(1, ...rows.map((row) => Number(row.adjusted ?? 0)));
   return baseChartOption({
@@ -593,7 +718,7 @@ function watermarkAdjustmentOption(rows: FreshnessRow[]): EChartsOption {
         ].join("<br/>");
       }
     },
-    grid: reportChartGrid({ left: 8, right: 12, top: 18 }),
+    grid: reportChartGrid({ left: 30, right: 12, top: 18, bottom: 5, containLabel: false }),
     xAxis: { type: "category", data: rows.map((row) => String(row.date ?? row.bucket ?? "unknown")), axisTick: { show: false }, axisLabel: { fontSize: 10, color: reportChartPalette.muted, hideOverlap: true } },
     yAxis: { type: "value", max: chartLabelHeadroomMax(maxValue), axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
     series: [{
@@ -657,14 +782,6 @@ function optionalInsideShareLabel(
 
 function chartLabelHeadroomMax(maxValue: number) {
   return Math.ceil(Math.max(1, maxValue) * 1.18);
-}
-
-function horizontalDataZoom(rowCount: number) {
-  if (rowCount <= 8) return undefined;
-  return [
-    { type: "slider", yAxisIndex: 0, width: 8, right: 2, startValue: 0, endValue: 7, showDetail: false, brushSelect: false },
-    { type: "inside", yAxisIndex: 0, startValue: 0, endValue: 7, zoomOnMouseWheel: false, moveOnMouseWheel: true, moveOnMouseMove: false }
-  ];
 }
 
 function emptyChartOption(message: string): EChartsOption {

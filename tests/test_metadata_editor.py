@@ -330,7 +330,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         source_backup_path = Path(source_backup["backup_path"])
         assert source_backup_path.exists()
 
-        impact = client.get(f"/api/v1/metadata-sources/{source['id']}/delete-impact").json()
+        impact = client.get(f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/delete-impact").json()
         impact_counts = {item["kind"]: item["count"] for item in impact["impacts"]}
         assert impact["has_impact"] is True
         assert impact["metadata_file_deleted"] is False
@@ -343,7 +343,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         assert impact_counts["sync_job"] >= 1
         assert "metadata file will not be deleted" in impact["summary"]
 
-        response = client.delete(f"/api/v1/metadata-sources/{source['id']}")
+        response = client.delete(f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}")
         assert response.status_code == 204
         assert not source_backup_path.exists()
         assert client.get(f"/api/v1/environments/{env['id']}/metadata-sources").json() == []

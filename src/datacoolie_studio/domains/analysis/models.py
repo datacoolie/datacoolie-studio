@@ -8,8 +8,12 @@ from typing import Any
 class SourceLocation:
     module: str | None = None
     path: str | None = None
+    function_path: str | None = None
     line: int | None = None
     column: int | None = None
+    end_line: int | None = None
+    end_column: int | None = None
+    coordinate_space: str | None = None
 
 
 @dataclass(slots=True)

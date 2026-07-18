@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import type { AssetIconKind } from "../../lineage/model/presentation";
+import { formatTimestampForDisplay } from "../../../shared/time";
+import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
 import {
   DataTable,
@@ -84,6 +85,8 @@ export function MaintenancePage({
             </span>
           }
           intent={maintenanceHealthIntent(health)}
+          accent="intent"
+          className="maintenance-kpi maintenance-kpi-health"
           title={`Healthy when active lakehouse tables have maintenance coverage, no latest failed maintenance, and no maintenance lag over ${lagWarningDays} days. No-op maintenance is an optimization signal, not a health rule.`}
         />
         <HealthStripCard
@@ -99,13 +102,17 @@ export function MaintenancePage({
             </span>
           }
           intent={Number(kpis.failed_ops ?? 0) ? "bad" : Number(kpis.skipped_ops ?? 0) ? "warning" : "neutral"}
+          accent="intent"
+          className="maintenance-kpi maintenance-kpi-runs"
           title="Maintenance run counts are dataflow run records identified by operation_type=maintenance or compact/cleanup destination operation fallback."
         />
         <HealthStripCard
           label="Maintained tables"
           value={`${formatNumber(Number(kpis.maintained_tables ?? 0))} / ${formatNumber(Number(kpis.active_lakehouse_tables ?? 0))}`}
           detail={<DetailMetric label="coverage" value={formatPercent(coverageRate)} tone={coverageRate >= 95 ? "good" : Number(kpis.active_lakehouse_tables ?? 0) ? "amber" : "neutral"} labelFirst />}
-          intent={Number(kpis.coverage_missing_tables ?? 0) ? "warning" : "neutral"}
+          intent={Number(kpis.coverage_missing_tables ?? 0) ? "warning" : Number(kpis.active_lakehouse_tables ?? 0) ? "good" : "neutral"}
+          accent="intent"
+          className="maintenance-kpi maintenance-kpi-coverage"
           title="Coverage = maintained active lakehouse tables / active lakehouse tables. Active lakehouse table means ETL wrote rows, files, or bytes to Delta/Iceberg-like destinations in current filters."
         />
         <HealthStripCard
@@ -113,6 +120,8 @@ export function MaintenancePage({
           value={formatNumber(Number(kpis.tables_with_reclaim ?? 0))}
           detail={<DetailMetric label="no-op runtime" value={formatPercent(noOpRuntimeShare)} tone={noOpRuntimeShare ? "amber" : "neutral"} labelFirst />}
           intent="neutral"
+          accent="storage"
+          className="maintenance-kpi maintenance-kpi-reclaim-tables"
           title="Tables with reclaim have positive bytes removed or files removed. No-op runtime is the share of successful maintenance duration spent on runs that removed 0 bytes and 0 files."
         />
         <HealthStripCard
@@ -120,6 +129,8 @@ export function MaintenancePage({
           value={formatBytes(bytesReclaimed)}
           detail={<DetailMetric label="saved" value={formatBytes(Number(kpis.bytes_saved ?? 0))} tone="blue" labelFirst />}
           intent="neutral"
+          accent="storage"
+          className="maintenance-kpi maintenance-kpi-bytes"
           title="Observed maintenance storage evidence: sum of destination_bytes_removed. Bytes saved uses destination_bytes_saved when available."
         />
         <HealthStripCard
@@ -127,6 +138,8 @@ export function MaintenancePage({
           value={formatNumber(filesRemoved)}
           detail={<DetailMetric label="avg bytes/file" value={formatBytes(Number(kpis.avg_bytes_per_file_removed ?? 0))} tone="neutral" labelFirst />}
           intent="neutral"
+          accent="neutral"
+          className="maintenance-kpi maintenance-kpi-files"
           title="Files removed is destination_files_removed. Average bytes per removed file = bytes reclaimed / files removed."
         />
       </section>
@@ -135,8 +148,9 @@ export function MaintenancePage({
         <section className="monitoring-maintenance-primary-grid">
           <ReportPanel
             title="Maintenance status trend"
-            subtitle="runs by status over time"
+            className="monitoring-maintenance-status-trend-panel"
             titleTooltip="Stacked maintenance run counts by time bucket. Empty buckets are filled with zero using the current time grain."
+            headerAction={<MaintenanceStatusLegend />}
           >
             <ReportChart
               option={maintenanceStatusTrendOption(report, filters, timezoneName)}
@@ -145,8 +159,9 @@ export function MaintenancePage({
           </ReportPanel>
           <ReportPanel
             title="Storage reclaimed trend"
-            subtitle="bytes reclaimed and files removed"
+            className="monitoring-maintenance-reclaim-trend-panel"
             titleTooltip="Bars show observed bytes reclaimed. Line shows files removed. Tooltips separate bytes and files."
+            headerAction={<MaintenanceReclaimLegend />}
           >
             <ReportChart
               option={maintenanceReclaimTrendOption(report, filters, timezoneName)}
@@ -157,8 +172,7 @@ export function MaintenancePage({
 
         <section className="monitoring-maintenance-secondary-grid">
           <ReportPanel
-            title="Table reclaim outcome"
-            subtitle="all destination targets"
+            title="Reclaim by destination table"
             titleTooltip="One row per destination target, sorted by attention priority, reclaimed bytes, then latest evidence."
           >
             <ReportChart
@@ -169,9 +183,15 @@ export function MaintenancePage({
           </ReportPanel>
           <ReportPanel
             title="Table efficiency map"
+            className="monitoring-maintenance-efficiency-panel"
             subtitle={efficiencyScale === "log" ? "bytes reclaimed vs duration · log scale" : "bytes reclaimed vs duration · linear scale"}
             titleTooltip="Each point is a destination table. X = bytes reclaimed, Y = total maintenance duration, size = maintenance run count, color = table health. Log scale keeps zero, small, and large reclaim values visible together; tooltips always show raw values."
-            headerAction={<MaintenanceEfficiencyScaleToggle value={efficiencyScale} onChange={setEfficiencyScale} />}
+            headerAction={
+              <div className="monitoring-maintenance-efficiency-actions">
+                <MaintenanceHealthLegend />
+                <MaintenanceEfficiencyScaleToggle value={efficiencyScale} onChange={setEfficiencyScale} />
+              </div>
+            }
           >
             <ReportChart
               option={maintenanceEfficiencyOption(efficiencyRows, efficiencyScale)}
@@ -182,6 +202,7 @@ export function MaintenancePage({
 
         <ReportPanel
           title="Destination table maintenance registry"
+          subtitle={`${formatNumber(tableRows.length)} destinations · attention first`}
           className="monitoring-maintenance-runs-panel"
           titleTooltip="One row per destination table or destination asset. Dataflow maintenance runs are evidence behind the table-level health."
           headerAction={
@@ -202,6 +223,36 @@ export function MaintenancePage({
           <MaintenanceRegistryTable rows={visibleRows} timezoneName={timezoneName} onInspect={onInspect} />
         </ReportPanel>
       </div>
+    </div>
+  );
+}
+
+function MaintenanceStatusLegend() {
+  return <MaintenanceChartLegend label="Maintenance status legend" items={MAINTENANCE_STATUSES.map((status) => [statusLabel(status), statusColor(status)] as const)} />;
+}
+
+function MaintenanceReclaimLegend() {
+  return <MaintenanceChartLegend label="Storage reclaimed legend" items={[
+    ["Bytes reclaimed", reportChartPalette.teal],
+    ["Files removed", reportChartPalette.blue],
+  ]} />;
+}
+
+function MaintenanceHealthLegend() {
+  return <MaintenanceChartLegend label="Table health legend" items={[
+    ["Healthy", maintenanceTableHealthColor("healthy")],
+    ["Warning", maintenanceTableHealthColor("warning")],
+    ["Issues", maintenanceTableHealthColor("has_issues")],
+    ["No evidence", maintenanceTableHealthColor("no_evidence")],
+  ]} />;
+}
+
+function MaintenanceChartLegend({ label, items }: { label: string; items: ReadonlyArray<readonly [string, string]> }) {
+  return (
+    <div className="monitoring-maintenance-chart-legend" aria-label={label}>
+      {items.map(([itemLabel, color]) => (
+        <span key={itemLabel}><i style={{ backgroundColor: color }} aria-hidden="true" />{itemLabel}</span>
+      ))}
     </div>
   );
 }
@@ -254,15 +305,15 @@ function MaintenanceRegistryTable({
       rows={rows}
       columns={[
         { key: "target", label: "Destination table", sortable: true, minWidth: 180, fillPriority: "last", render: (row) => <MaintenanceTargetCell row={row} /> },
-        { key: "table_health", label: "Health", sortable: true, autoFit: true, minWidth: 86, maxWidth: 112, render: (row) => <MaintenanceTableHealthCell row={row} /> },
-        { key: "latest_maintenance_time", label: "Latest maint.", sortable: true, width: 164, render: (row) => <TableDateTimeValue value={row.latest_maintenance_time} timezoneName={timezoneName} /> },
-        { key: "latest_etl_write_time", label: "Latest ETL", sortable: true, width: 164, render: (row) => <TableDateTimeValue value={row.latest_etl_write_time} timezoneName={timezoneName} /> },
-        { key: "maintenance_lag_seconds", label: "Lag", sortable: true, autoFit: true, minWidth: 72, maxWidth: 92, render: (row) => <MaintenanceLagCell row={row} /> },
-        { key: "bytes_reclaimed", label: "Reclaim", sortable: true, width: 108, render: (row) => <MaintenanceReclaimCell row={row} /> },
-        { key: "bytes_reclaimed_per_second", label: "Efficiency", sortable: true, width: 104, render: (row) => <MaintenanceEfficiencyCell row={row} /> },
-        { key: "no_op_runs", label: "No-op", sortable: true, autoFit: true, minWidth: 88, maxWidth: 118, render: (row) => <MaintenanceNoOpCell row={row} /> },
-        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 86, maxWidth: 110, render: (row) => <MaintenanceRunsCell row={row} /> },
-        { key: "attention_reason", label: "Reason", minWidth: 130, fillPriority: "last", render: (row) => <MaintenanceReasonCell row={row} /> }
+        { key: "table_health", label: "Health", sortable: true, autoFit: true, minWidth: 86, maxWidth: 112, render: (row) => <MaintenanceTableHealthCell row={row} />, measureValue: (row) => maintenanceTableHealthLabel(String(row.table_health ?? row.status ?? "unknown")) },
+        { key: "latest_maintenance_time", label: "Latest maintenance", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_maintenance_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_maintenance_time, activeTimezone, "-") },
+        { key: "latest_etl_write_time", label: "Latest ETL", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_etl_write_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_etl_write_time, activeTimezone, "-") },
+        { key: "maintenance_lag_seconds", label: "Lag", sortable: true, autoFit: true, minWidth: 64, maxWidth: 88, render: (row) => <MaintenanceLagCell row={row} />, measureValue: (row) => formatMaintenanceLag(num(row, "maintenance_lag_seconds")) },
+        { key: "bytes_reclaimed", label: "Reclaim", sortable: true, autoFit: true, minWidth: 82, maxWidth: 124, render: (row) => <MaintenanceReclaimCell row={row} />, measureValue: (row) => maintenanceReclaimLines(row) },
+        { key: "bytes_reclaimed_per_second", label: "Efficiency", sortable: true, autoFit: true, minWidth: 86, maxWidth: 132, render: (row) => <MaintenanceEfficiencyCell row={row} />, measureValue: (row) => maintenanceEfficiencyLines(row) },
+        { key: "no_op_runs", label: "No-op", sortable: true, autoFit: true, minWidth: 68, maxWidth: 108, render: (row) => <MaintenanceNoOpCell row={row} />, measureValue: (row) => maintenanceNoOpLines(row) },
+        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 72, maxWidth: 108, render: (row) => <MaintenanceRunsCell row={row} />, measureValue: (row) => maintenanceRunLines(row) },
+        { key: "attention_reason", label: "Attention", minWidth: 140, fillPriority: "last", render: (row) => <MaintenanceReasonCell row={row} /> }
       ]}
       maxRows={rows.length}
       onRowClick={onInspect}
@@ -291,63 +342,60 @@ function MaintenanceTargetCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
-function maintenanceFormatIconKind(format: string): AssetIconKind {
-  const normalized = format.trim().toLowerCase();
-  if (normalized === "delta" || normalized === "deltalake" || normalized === "delta_lake") return "delta";
-  if (normalized === "iceberg" || normalized === "apache_iceberg") return "iceberg";
-  if (normalized === "parquet") return "parquet";
-  if (normalized === "csv") return "csv";
-  if (normalized === "json") return "json";
-  if (normalized === "excel" || normalized === "xlsx" || normalized === "xls") return "excel";
-  if (normalized === "sql" || normalized.includes("query")) return "sql";
-  if (normalized === "python" || normalized.includes("function")) return "python";
-  if (normalized === "api" || normalized.includes("rest")) return "api";
-  if (normalized === "database" || normalized === "lakehouse") return "database";
-  if (normalized === "file") return "file";
-  return "table";
-}
-
 function MaintenanceTableHealthCell({ row }: { row: MonitoringRecord }) {
   const health = String(row.table_health ?? row.status ?? "unknown");
   const reason = String(row.attention_reason ?? "");
   return (
-    <span className={`performance-reason ${maintenanceTableHealthClass(health)}`} title={reason || health}>
+    <span className={`maintenance-table-health-chip ${maintenanceTableHealthClass(health)}`} title={reason || health}>
       {maintenanceTableHealthLabel(health)}
     </span>
   );
 }
 
 function MaintenanceReclaimCell({ row }: { row: MonitoringRecord }) {
-  const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
-  const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
+  const [bytesLabel, filesLabel] = maintenanceReclaimLines(row);
   return (
-    <span className="monitor-stack-cell" title={`Bytes reclaimed: ${formatBytes(bytes)}\nFiles removed: ${formatNumber(files)}`}>
-      <strong>{formatBytes(bytes)}</strong>
-      <small>{formatNumber(files)} files</small>
+    <span className="monitor-stack-cell maintenance-reclaim-cell" title={`Bytes reclaimed: ${bytesLabel}\nFiles removed: ${filesLabel}`}>
+      <strong>{bytesLabel}</strong>
+      <small>{filesLabel}</small>
     </span>
   );
 }
 
+function maintenanceReclaimLines(row: MonitoringRecord): [string, string] {
+  const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
+  const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
+  return [formatBytes(bytes), `${formatNumber(files)} files`];
+}
+
 function MaintenanceEfficiencyCell({ row }: { row: MonitoringRecord }) {
-  const rate = num(row, "bytes_reclaimed_per_second") || num(row, "maintenance_bytes_per_second");
-  const duration = num(row, "duration_seconds");
+  const [rateLabel, durationLabel] = maintenanceEfficiencyLines(row);
   return (
-    <span className="monitor-stack-cell" title={`Bytes/sec: ${formatBytes(rate)}/s\nDuration: ${formatSeconds(duration)}`}>
-      <strong>{formatBytes(rate)}/s</strong>
-      <small>{formatSeconds(duration)}</small>
+    <span className="monitor-stack-cell" title={`Bytes/sec: ${rateLabel}\nDuration: ${durationLabel}`}>
+      <strong>{rateLabel}</strong>
+      <small>{durationLabel}</small>
     </span>
   );
+}
+
+function maintenanceEfficiencyLines(row: MonitoringRecord): [string, string] {
+  const rate = num(row, "bytes_reclaimed_per_second") || num(row, "maintenance_bytes_per_second");
+  return [`${formatBytes(rate)}/s`, formatSeconds(num(row, "duration_seconds"))];
 }
 
 function MaintenanceNoOpCell({ row }: { row: MonitoringRecord }) {
   const runs = num(row, "no_op_runs");
-  const duration = num(row, "no_op_duration_seconds");
+  const [runsLabel, durationLabel] = maintenanceNoOpLines(row);
   return (
-    <span className="monitor-stack-cell" title={`No-op runs: ${formatNumber(runs)}\nNo-op duration: ${formatSeconds(duration)}\nDefinition: succeeded maintenance runs with 0 bytes removed and 0 files removed.`}>
-      <strong>{formatNumber(runs)}</strong>
-      <small>{formatSeconds(duration)}</small>
+    <span className={`monitor-stack-cell maintenance-no-op-cell${runs > 0 ? " has-no-op" : ""}`} title={`No-op runs: ${runsLabel}\nNo-op duration: ${durationLabel}\nDefinition: succeeded maintenance runs with 0 bytes removed and 0 files removed.`}>
+      <strong>{runsLabel}</strong>
+      <small>{durationLabel}</small>
     </span>
   );
+}
+
+function maintenanceNoOpLines(row: MonitoringRecord): [string, string] {
+  return [formatNumber(num(row, "no_op_runs")), formatSeconds(num(row, "no_op_duration_seconds"))];
 }
 
 function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
@@ -359,15 +407,16 @@ function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
       className={warning ? "performance-reason performance-reason-warning" : ""}
       title={`Lag = latest ETL write time minus latest maintenance time. Warning only when lag is greater than ${thresholdDays} days.`}
     >
-      {lag > 0 ? formatSeconds(lag) : "-"}
+      {formatMaintenanceLag(lag)}
     </span>
   );
 }
 
 function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
+  const [runLabel] = maintenanceRunLines(row);
   return (
     <span className="monitor-stack-cell" title={`Runs: ${formatNumber(num(row, "run_count"))}\nSucceeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}`}>
-      <strong>{formatNumber(num(row, "run_count"))}</strong>
+      <strong>{runLabel}</strong>
       <small>
         <span style={{ color: reportChartPalette.success }}>{formatNumber(num(row, "succeeded"))}</span>
         {" / "}
@@ -379,9 +428,18 @@ function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
+function maintenanceRunLines(row: MonitoringRecord): [string, string] {
+  return [
+    formatNumber(num(row, "run_count")),
+    `${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}`,
+  ];
+}
+
 function MaintenanceReasonCell({ row }: { row: MonitoringRecord }) {
   const reason = String(row.attention_reason ?? row.maintenance_candidate_reason ?? "");
-  if (!reason) return <span className="performance-reason" title="No maintenance priority rule matched.">-</span>;
+  const health = String(row.table_health ?? "");
+  const priority = num(row, "attention_priority");
+  if (!reason || (health === "healthy" && priority <= 0)) return <span className="performance-reason" title="No maintenance attention rule matched.">-</span>;
   return <span className={`performance-reason ${maintenanceReasonClass(row)}`} title={reason}>{reason}</span>;
 }
 
@@ -407,9 +465,8 @@ function maintenanceStatusTrendOption(report: MonitoringReport, filters: Monitor
         ].filter(Boolean).join("<br/>");
       }
     },
-    legend: { top: 0, left: "center", itemWidth: 9, itemHeight: 9, textStyle: { fontSize: 10 } },
-    grid: reportChartGrid({ left: 34, right: 10, top: 28, containLabel: false }),
-    xAxis: { type: "category", data: visible.map((row) => String(row.bucket || row.date || "")), axisLabel: { fontSize: 10, hideOverlap: true }, axisTick: { show: false } },
+    grid: reportChartGrid({ left: 34, right: 10, top: 8, containLabel: false }),
+    xAxis: maintenanceBottomCategoryXAxis(visible.map((row) => String(row.bucket || row.date || ""))),
     yAxis: { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
     series: MAINTENANCE_STATUSES.map((status) => ({
       name: statusLabel(status),
@@ -441,18 +498,28 @@ function maintenanceReclaimTrendOption(report: MonitoringReport, filters: Monito
         ].filter(Boolean).join("<br/>");
       }
     },
-    legend: { top: 0, left: "center", itemWidth: 9, itemHeight: 9, textStyle: { fontSize: 10 } },
-    grid: reportChartGrid({ left: 42, right: 42, top: 28, containLabel: false }),
-    xAxis: { type: "category", data: visible.map((row) => String(row.bucket || row.date || "")), axisLabel: { fontSize: 10, hideOverlap: true }, axisTick: { show: false } },
+    grid: reportChartGrid({ left: 42, right: 42, top: 8, containLabel: false }),
+    xAxis: maintenanceBottomCategoryXAxis(visible.map((row) => String(row.bucket || row.date || ""))),
     yAxis: [
-      { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatBytesShort(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-      { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { show: false } }
+      { type: "value", min: 0, axisLabel: { fontSize: 10, formatter: (value: number) => formatBytesShort(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
+      { type: "value", min: 0, axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { show: false } }
     ],
     series: [
       { name: "Bytes reclaimed", type: "bar", itemStyle: { color: reportChartPalette.teal, borderRadius: [3, 3, 0, 0] }, data: visible.map((row) => num(row, "bytes_reclaimed")) },
       lineSeries("Files removed", visible.map((row) => num(row, "files_removed")), reportChartPalette.blue, 1)
     ]
   });
+}
+
+function maintenanceBottomCategoryXAxis(data: string[]) {
+  return {
+    type: "category" as const,
+    position: "bottom" as const,
+    data,
+    axisLine: { onZero: false },
+    axisLabel: { fontSize: 10, hideOverlap: true },
+    axisTick: { show: false },
+  };
 }
 
 function maintenanceEfficiencyOption(rows: Array<Record<string, unknown>>, scaleMode: EfficiencyScaleMode): EChartsOption {
@@ -678,21 +745,6 @@ function maintenanceHealthIntent(value: string): "neutral" | "bad" | "good" | "w
   if (value === "warning") return "warning";
   if (value === "healthy") return "good";
   return "neutral";
-}
-
-function maintenanceTableHealthLabel(value: string) {
-  if (value === "has_issues") return "Has issues";
-  if (value === "no_evidence") return "No evidence";
-  if (value === "warning") return "Warning";
-  if (value === "healthy") return "Healthy";
-  if (value === "missing") return "Missing";
-  return value || "-";
-}
-
-function maintenanceTableHealthClass(value: string) {
-  if (value === "has_issues") return "performance-reason-bad";
-  if (value === "warning" || value === "missing") return "performance-reason-warning";
-  return "";
 }
 
 function maintenanceTableHealthColor(value: string) {

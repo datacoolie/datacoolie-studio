@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AppShell } from "./app/AppShell";
 import { ModuleView } from "./app/ModuleView";
 import { environmentDefaultModule, isModuleKeyEnabled, monitoringDefaultPage } from "./app/moduleRegistry";
@@ -9,17 +9,21 @@ import { useStudioSettings } from "./features/settings/hooks/useStudioSettings";
 
 export function App() {
   const router = useStudioRouter();
-  const workspace = useStudioWorkspace(router);
   const modules = useStudioModules();
+  const workspaceRefreshRef = useRef<(() => Promise<void>) | null>(null);
   const settings = useStudioSettings({
     onSaved: () => {
       const { environmentId, module } = router.route;
       if (environmentId && (module === "monitoring" || module === "overview")) {
-        return workspace.refreshCurrentEnvironment();
+        return workspaceRefreshRef.current?.();
       }
       return undefined;
     }
   });
+  const workspace = useStudioWorkspace(router, {
+    sourceCheckIntervalSeconds: settings.settings?.source_check_interval_seconds
+  });
+  workspaceRefreshRef.current = workspace.refreshCurrentEnvironment;
 
   // Redirect away from disabled capability modules reached directly via URL.
   useEffect(() => {
@@ -40,14 +44,14 @@ export function App() {
       selectedEnvironmentId={router.route.environmentId}
       sidebarCollapsed={router.sidebarCollapsed}
       enabledCapabilities={modules.enabledCapabilities}
-      metadataSourceCount={workspace.metadataSources.length}
-      logPathCount={workspace.logPaths.length}
+      metadataSourceCount={workspace.environmentFreshness?.metadata_source_count ?? 0}
+      logPathCount={workspace.environmentFreshness?.etl_log_path_count ?? 0}
       freshness={workspace.environmentFreshness}
       error={error}
       onNavigate={router.navigate}
       onToggleSidebar={router.toggleSidebar}
       onProjectSelect={router.selectProject}
-      onEnvironmentSelect={router.selectEnvironment}
+      onOpenProject={router.openProject}
     >
       <ModuleView router={router} workspace={workspace} settings={settings} modules={modules} />
     </AppShell>

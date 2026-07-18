@@ -38,6 +38,7 @@ export interface FilteredMonitoringReport {
   slowestDataflows: MonitoringRecord[];
   performanceInvestigationQueue: MonitoringRecord[];
   volumeInvestigationQueue: MonitoringRecord[];
+  volumeDataflowRegistry: MonitoringRecord[];
 }
 
 export const DEFAULT_MONITORING_FILTERS: MonitoringFilters = {
@@ -121,7 +122,8 @@ export function filterReport(report: MonitoringReport, filters: MonitoringFilter
     failedRecords: report.failures.failed_records.filter((row) => matchesDataflow(row, filters, reportTimezone)),
     slowestDataflows: report.performance.slowest_dataflows.filter((row) => matchesDataflow(row, filters, reportTimezone)),
     performanceInvestigationQueue: (report.performance.investigation_queue ?? []).filter((row) => matchesDataflow(row, filters, reportTimezone)),
-    volumeInvestigationQueue: (report.volume.investigation_queue ?? []).filter((row) => matchesDataflow(row, filters, reportTimezone))
+    volumeInvestigationQueue: (report.volume.investigation_queue ?? []).filter((row) => matchesDataflow(row, filters, reportTimezone)),
+    volumeDataflowRegistry: (report.volume.dataflow_registry ?? []).filter((row) => matchesDataflow(row, filters, reportTimezone))
   };
 }
 

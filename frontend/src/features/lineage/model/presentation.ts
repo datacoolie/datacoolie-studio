@@ -115,6 +115,33 @@ export function assetIconKind(value: string): AssetIconKind {
   return "file";
 }
 
+export function referenceTypeAssetType(referenceType: string): string {
+  if (referenceType === "table_reference") return "table";
+  if (referenceType === "path_reference") return "path";
+  if (referenceType === "api_endpoint_reference") return "api";
+  return "unresolved";
+}
+
+export function assetTypeTone(assetType: LineageAsset["asset_type"] | string): string {
+  if (assetType === "table") return "table";
+  if (assetType === "path") return "path";
+  if (assetType === "sql_query") return "sql";
+  if (assetType === "python_function") return "python";
+  if (assetType === "api") return "api";
+  if (assetType === "unresolved") return "unresolved";
+  return "default";
+}
+
+export function assetTypeIconId(assetType: LineageAsset["asset_type"] | string): string {
+  if (assetType === "table") return "bx:table";
+  if (assetType === "path") return "octicon:rel-file-path-16";
+  if (assetType === "sql_query") return "carbon:sql";
+  if (assetType === "python_function") return "gravity-ui:function";
+  if (assetType === "api") return "gcp:api";
+  if (assetType === "unresolved") return "carbon:unknown";
+  return "carbon:data-base";
+}
+
 function isPresent(value: string | null | undefined): value is string {
   return Boolean(value);
 }

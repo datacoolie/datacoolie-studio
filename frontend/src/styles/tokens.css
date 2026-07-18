@@ -6,54 +6,59 @@
  * hard-coded values so the look stays consistent and themeable.
  */
 :root {
-  /* Brand + accent — "Slate Console": teal accent on a light data canvas */
-  --color-brand: #0c1322;
-  --color-accent: #0d9488;
-  --color-accent-strong: #0a766e;
-  --color-accent-soft: #e3f6f3;
-  --color-accent-soft-strong: #c7ece7;
-  --color-accent-ink: #04221f;
-  --gradient-accent: linear-gradient(135deg, #14c2b4 0%, #0ea5b8 100%);
-  --gradient-brand: linear-gradient(135deg, #14c2b4 0%, #0ea5b8 100%);
+  /* Brand + accent — "Data Control Surface": teal/cyan on a cool data canvas */
+  --color-brand: #08111f;
+  --color-brand-2: #0e1a2e;
+  --color-accent: #089b8f;
+  --color-accent-strong: #08756e;
+  --color-accent-muted: #2dd4bf;
+  --color-accent-soft: #dff7f3;
+  --color-accent-soft-strong: #b9eee7;
+  --color-accent-ink: #03201d;
+  --color-discovery: #7c3aed;
+  --color-discovery-soft: #f0eafe;
+  --gradient-accent: linear-gradient(135deg, #2dd4bf 0%, #06b6d4 100%);
+  --gradient-brand: linear-gradient(135deg, #2dd4bf 0%, #06b6d4 100%);
 
   /* Focus rings */
-  --ring-accent: 0 0 0 3px rgba(13, 148, 136, 0.30);
-  --ring-accent-soft: 0 0 0 3px rgba(13, 148, 136, 0.16);
+  --ring-accent: 0 0 0 3px rgba(8, 155, 143, 0.28);
+  --ring-accent-soft: 0 0 0 3px rgba(8, 155, 143, 0.14);
 
   /* Surfaces (light canvas) */
-  --color-bg: #eef1f6;
+  --color-bg: #f1f5f9;
   --color-surface: #ffffff;
-  --color-surface-muted: #f6f8fb;
-  --color-surface-sunken: #f1f4f9;
+  --color-surface-muted: #f7f9fc;
+  --color-surface-sunken: #eef3f8;
   --color-surface-raised: #ffffff;
+  --color-surface-grid: #e8eef6;
 
   /* Shell (dark sidebar) */
-  --color-sidebar: #0c1322;
-  --color-sidebar-2: #111a2e;
-  --color-sidebar-line: #1f2b44;
-  --color-sidebar-text: #c4cfe3;
-  --color-sidebar-text-dim: #7e8bab;
-  --color-sidebar-active: #15233f;
+  --color-sidebar: #08111f;
+  --color-sidebar-2: #0d1b2f;
+  --color-sidebar-line: #1a2b45;
+  --color-sidebar-text: #d8e3f6;
+  --color-sidebar-text-dim: #8fa0bd;
+  --color-sidebar-active: #10243d;
 
   /* Text */
-  --color-text: #18202f;
-  --color-text-muted: #5a657c;
-  --color-text-subtle: #8a94a8;
+  --color-text: #162033;
+  --color-text-muted: #536076;
+  --color-text-subtle: #8792a8;
   --color-text-inverse: #ffffff;
 
   /* Borders + lines */
-  --color-border: #e3e8f0;
-  --color-border-strong: #d2dae6;
+  --color-border: #dfe6f0;
+  --color-border-strong: #cbd6e5;
 
   /* Status */
-  --color-success: #18a571;
-  --color-success-soft: #e4f6ee;
-  --color-warning: #c77d10;
-  --color-warning-soft: #fbefdc;
-  --color-danger: #dc3b51;
-  --color-danger-soft: #fceaed;
-  --color-info: #2f7bf0;
-  --color-info-soft: #e7f0fe;
+  --color-success: #16855e;
+  --color-success-soft: #e5f5ee;
+  --color-warning: #b66a04;
+  --color-warning-soft: #fbefd8;
+  --color-danger: #cf3348;
+  --color-danger-soft: #fce8ec;
+  --color-info: #2563eb;
+  --color-info-soft: #e6efff;
 
   /* Spacing scale (4px base) */
   --space-1: 4px;
@@ -66,25 +71,34 @@
   --space-10: 40px;
 
   /* Radius */
-  --radius-sm: 8px;
-  --radius-md: 11px;
-  --radius-lg: 16px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
   --radius-pill: 999px;
 
-  /* Elevation — soft, layered */
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.05);
-  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 12px 28px rgba(15, 23, 42, 0.07);
-  --shadow-lg: 0 18px 48px rgba(15, 23, 42, 0.16);
-  --shadow-accent: 0 4px 14px rgba(13, 148, 136, 0.30);
+  /* Elevation — crisp, restrained, for operational software */
+  --shadow-sm: 0 1px 1px rgba(8, 17, 31, 0.04), 0 1px 2px rgba(8, 17, 31, 0.05);
+  --shadow-md: 0 8px 22px rgba(8, 17, 31, 0.08);
+  --shadow-lg: 0 20px 56px rgba(8, 17, 31, 0.18);
+  --shadow-accent: 0 5px 16px rgba(8, 155, 143, 0.24);
+  --shadow-inset-line: inset 0 1px 0 rgba(255, 255, 255, 0.62);
 
   /* Typography scale */
+  --font-sans: "IBM Plex Sans", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-size-2xs: 11px;
   --font-size-xs: 12px;
   --font-size-sm: 13px;
   --font-size-md: 14px;
   --font-size-lg: 16px;
   --font-size-xl: 20px;
+  --font-weight-normal: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --line-height-compact: 1.18;
+  --line-height-body: 1.42;
 
   /* Motion */
   --transition-fast: 120ms ease;

@@ -7,7 +7,7 @@ from datacoolie_studio.core.identity import name_to_uuid
 from datacoolie_studio.domains.assets.identifiers import build_asset_identifiers
 
 
-METADATA_NORMALIZER_VERSION = "metadata-normalizer-v3"
+METADATA_NORMALIZER_VERSION = "metadata-normalizer-v4"
 
 
 def normalize_metadata_document(source_id: int, source_uri: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -140,8 +140,10 @@ def _resolve_endpoint(raw_endpoint: dict[str, Any], connection_by_name: dict[str
     conn_name = endpoint.get("connection_name") or endpoint.get("connection")
     conn = dict(connection_by_name.get(conn_name, {})) if isinstance(conn_name, str) else {}
     configure = conn.get("configure") or {}
+    source_configure = endpoint.get("configure") or {}
     return {
         "connection_name": conn_name,
+        "connection_instance": conn.get("connection_instance") or configure.get("connection_instance"),
         "connection_type": conn.get("connection_type"),
         "format": conn.get("format"),
         "catalog": conn.get("catalog") or configure.get("catalog"),
@@ -151,16 +153,19 @@ def _resolve_endpoint(raw_endpoint: dict[str, Any], connection_by_name: dict[str
         "port": configure.get("port"),
         "workspace_id": conn.get("workspace_id") or configure.get("workspace_id"),
         "base_path": configure.get("base_path"),
+        "base_url": configure.get("base_url"),
         "schema_name": endpoint.get("schema_name") or endpoint.get("schema"),
         "table": endpoint.get("table"),
         "query": endpoint.get("query"),
         "python_function": endpoint.get("python_function"),
+        "api_endpoint": source_configure.get("endpoint"),
+        "method": source_configure.get("method", "GET"),
         "path": _endpoint_path(conn, endpoint),
         "load_type": endpoint.get("load_type"),
         "merge_keys": endpoint.get("merge_keys", []),
         "partition_columns": endpoint.get("partition_columns", []),
         "watermark_columns": endpoint.get("watermark_columns", []),
-        "configure": endpoint.get("configure", {}),
+        "configure": source_configure,
     }
 
 
@@ -207,6 +212,9 @@ def build_asset(endpoint: dict[str, Any], role: str) -> dict[str, Any]:
         "path": endpoint.get("path"),
         "query": endpoint.get("query"),
         "python_function": endpoint.get("python_function"),
+        "base_url": endpoint.get("base_url"),
+        "api_endpoint": endpoint.get("api_endpoint"),
+        "method": endpoint.get("method"),
     }
 
 
@@ -233,6 +241,13 @@ def _endpoint_locator(endpoint: dict[str, Any], identity_type: str, fallback: st
         return "SQL query"
     if endpoint.get("python_function"):
         return str(endpoint["python_function"])
+    if identity_type == "api_endpoint":
+        identifier = next(
+            (item for item in build_asset_identifiers(endpoint) if item["kind"] == "api_endpoint"),
+            None,
+        )
+        if identifier:
+            return identifier["display_value"]
     return str(table or fallback)
 
 
@@ -264,6 +279,12 @@ def _asset_identity(endpoint: dict[str, Any]) -> tuple[str, str, str]:
         value = str(endpoint["python_function"])
         digest = _computational_identity_digest(endpoint, "python_function")
         return "unresolved", f"function:{digest}", value
+    api_identifier = next(
+        (item for item in build_asset_identifiers(endpoint) if item["kind"] == "api_endpoint"),
+        None,
+    )
+    if api_identifier:
+        return "api_endpoint", f"api:{api_identifier['normalized_value']}", api_identifier["display_value"]
     table = endpoint.get("table")
     catalog = endpoint.get("catalog")
     database = endpoint.get("database")

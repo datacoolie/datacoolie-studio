@@ -13,3 +13,6 @@ frontend/dist/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+skills-lock.json
+.agents/
+.ruff_cache/

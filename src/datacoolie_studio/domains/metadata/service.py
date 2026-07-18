@@ -13,6 +13,8 @@ from datacoolie_studio.domains.metadata.normalizer import (
     normalize_metadata_document,
 )
 from datacoolie_studio.domains.metadata.reader import MetadataReadError, read_metadata_file
+from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
+from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.sync import service as sync
 
 
@@ -173,6 +175,7 @@ def _ensure_metadata_snapshot_result(
             message=error["message"],
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
         )
+        source_validation.validate_metadata_source(session, source)
         if latest is not None:
             return latest, error
         raise MetadataReadError(error["message"])
@@ -192,6 +195,11 @@ def _ensure_metadata_snapshot_result(
             message=str(exc),
             result={"status": "error", "message": str(exc), "revision": None, "error": error},
         )
+        source_validation.record_source_validation(
+            session,
+            source,
+            source_validation.source_validation_error(source, str(exc)),
+        )
         if latest is not None:
             return latest, error
         raise
@@ -203,6 +211,8 @@ def _ensure_metadata_snapshot_result(
         normalized_metadata_json=json.dumps(normalized, ensure_ascii=False),
     )
     session.add(snapshot)
+    if latest is None or not _same_revision_json(current, latest.source_revision_json):
+        invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     sync.record_source_revision(session, source=source, status="ok", revision=current, error=None, checked_at=utc_now())
     sync.finish_sync_job(
         session,
@@ -211,6 +221,7 @@ def _ensure_metadata_snapshot_result(
         message="Metadata source cache refreshed",
         result={"status": "ok", "message": "Metadata source cache refreshed", "revision": current, "error": None},
     )
+    source_validation.validate_metadata_source(session, source)
     return snapshot, None
 
 

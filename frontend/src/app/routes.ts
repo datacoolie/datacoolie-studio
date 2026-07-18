@@ -5,21 +5,24 @@ import {
   isMonitoringPageKey,
   moduleByKey,
   monitoringDefaultPage,
+  projectDefaultSection,
   type ModuleKey,
-  type MonitoringPageKey
+  type MonitoringPageKey,
+  type ProjectSectionKey
 } from "./moduleRegistry";
 
 export interface StudioRoute {
   projectId: number | null;
   environmentId: number | null;
   module: ModuleKey;
+  projectSection?: ProjectSectionKey;
   monitoringPage?: MonitoringPageKey;
   search?: string;
 }
 
 const routePattern = /^\/projects\/(\d+)\/envs\/(\d+)\/([a-z-]+)(?:\/([a-z-]+))?\/?$/;
 const projectPattern = /^\/projects\/(\d+)\/?$/;
-const projectEnvironmentsPattern = /^\/projects\/(\d+)\/environments\/?$/;
+const projectSectionPattern = /^\/projects\/(\d+)\/([a-z-]+)\/?$/;
 const projectsPattern = /^\/projects\/?$/;
 const settingsPattern = /^\/settings\/?$/;
 
@@ -32,11 +35,26 @@ export function parseRoute(pathname = defaultPathname(), search = defaultSearch(
   }
   const projectMatch = projectPattern.exec(pathname);
   if (projectMatch) {
-    return { projectId: Number(projectMatch[1]), environmentId: null, module: "project-overview", monitoringPage: monitoringDefaultPage, search };
+    return {
+      projectId: Number(projectMatch[1]),
+      environmentId: null,
+      module: "projects",
+      projectSection: projectDefaultSection,
+      monitoringPage: monitoringDefaultPage,
+      search
+    };
   }
-  const environmentsMatch = projectEnvironmentsPattern.exec(pathname);
-  if (environmentsMatch) {
-    return { projectId: Number(environmentsMatch[1]), environmentId: null, module: "environments", monitoringPage: monitoringDefaultPage, search };
+  const projectSectionMatch = projectSectionPattern.exec(pathname);
+  if (projectSectionMatch) {
+    const section = projectSection(projectSectionMatch[2]);
+    return {
+      projectId: Number(projectSectionMatch[1]),
+      environmentId: null,
+      module: "projects",
+      projectSection: section,
+      monitoringPage: monitoringDefaultPage,
+      search,
+    };
   }
   const match = routePattern.exec(pathname);
   if (match) {
@@ -81,11 +99,14 @@ function routePath(next: StudioRoute) {
   if (next.projectId && next.environmentId) {
     return `${modulePath(next.projectId, next.environmentId, next.module, next.monitoringPage ?? monitoringDefaultPage)}${search}`;
   }
-  if (next.projectId && next.module === "project-overview") {
+  if (next.projectId && next.module === "projects") {
+    if (next.projectSection === "environments") {
+      return `/projects/${next.projectId}/environments${search}`;
+    }
+    if (next.projectSection === "reference-mappings") {
+      return `/projects/${next.projectId}/reference-mappings${search}`;
+    }
     return `/projects/${next.projectId}${search}`;
-  }
-  if (next.projectId && next.module === "environments") {
-    return `/projects/${next.projectId}/environments${search}`;
   }
   if (next.module === "projects") {
     return `/projects${search}`;
@@ -99,6 +120,11 @@ function routePath(next: StudioRoute) {
 function normalizeSearch(search: string | undefined) {
   if (!search) return "";
   return search.startsWith("?") ? search : `?${search}`;
+}
+
+function projectSection(value: string | undefined): ProjectSectionKey {
+  if (value === "environments" || value === "reference-mappings") return value;
+  return projectDefaultSection;
 }
 
 function defaultPathname() {

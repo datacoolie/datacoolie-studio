@@ -25,10 +25,13 @@ def analyze_code_artifact_function(
             "message": str(exc),
         })
         return result
-    return analyze_python_function(
+    result = analyze_python_function(
         content,
         function_path,
         module_name=module_name,
         source_path=relative_path,
         context=context,
     )
+    for evidence in result.inputs:
+        evidence.details["code_artifact_source_id"] = source.id
+    return result

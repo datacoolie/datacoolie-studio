@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LineageAsset } from "../../../shared/api/types";
-import { presentLineageAsset } from "./presentation";
+import { assetTypeTone, presentLineageAsset, referenceTypeAssetType } from "./presentation";
 
 describe("lineage asset presentation", () => {
   it("uses the table as friendly title instead of a format-prefixed path", () => {
@@ -41,7 +41,7 @@ describe("lineage asset presentation", () => {
 
   it("gives a SQL query precedence over a configured table placeholder", () => {
     const asset = presentLineageAsset(node({
-      kind: "sql_query",
+      asset_type: "sql_query",
       query: "select * from raw.orders",
       table: "orders",
       endpoint_kind: "sql"
@@ -49,13 +49,30 @@ describe("lineage asset presentation", () => {
 
     expect(asset.locator).toBe("SQL query");
   });
+
+  it("maps reference types to the same object types used by asset icons", () => {
+    expect(referenceTypeAssetType("table_reference")).toBe("table");
+    expect(referenceTypeAssetType("path_reference")).toBe("path");
+    expect(referenceTypeAssetType("api_endpoint_reference")).toBe("api");
+    expect(referenceTypeAssetType("unknown")).toBe("unresolved");
+  });
+
+  it("uses stable visual tones for asset object types", () => {
+    expect(assetTypeTone("table")).toBe("table");
+    expect(assetTypeTone("path")).toBe("path");
+    expect(assetTypeTone("api")).toBe("api");
+    expect(assetTypeTone("sql_query")).toBe("sql");
+    expect(assetTypeTone("python_function")).toBe("python");
+    expect(assetTypeTone("unresolved")).toBe("unresolved");
+  });
 });
 
 function node(overrides: Partial<LineageAsset>): LineageAsset {
   return {
     id: "asset-1",
+    entity_type: "asset",
     label: "orders",
-    kind: "path",
+    asset_type: "path",
     display_name: "orders",
     declaration_status: "declared",
     connection_name: "local_parquet_dest",

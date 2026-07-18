@@ -6,8 +6,16 @@ from typing import Any, Literal
 
 AssetKind = Literal["table", "path", "sql_query", "python_function", "api", "unresolved"]
 DeclarationStatus = Literal["declared", "discovered_only"]
-ReferenceKind = Literal["table_reference", "path_reference", "dynamic_expression", "unknown"]
-ResolutionStatus = Literal["resolved", "discovered_only", "ambiguous", "unresolved"]
+ReferenceType = Literal["table_reference", "path_reference", "api_endpoint_reference", "unknown"]
+ReferenceGroupStatus = Literal[
+    "resolved_single",
+    "resolved_mixed",
+    "partially_resolved",
+    "ambiguous",
+    "unresolved",
+    "mapping_target_missing",
+]
+ResolutionStatus = Literal["resolved_auto", "resolved_manual", "ambiguous", "unresolved", "mapping_target_missing"]
 DependencyKind = Literal["reads", "uses"]
 Provenance = Literal["sql", "python", "python_sql"]
 
@@ -15,14 +23,42 @@ Provenance = Literal["sql", "python", "python_sql"]
 @dataclass(slots=True)
 class LineageReference:
     id: str
-    kind: ReferenceKind
+    reference_type: ReferenceType
     display_name: str
-    resolution_status: Literal["ambiguous", "unresolved"]
+    normalized_value: str
+    group_status: ReferenceGroupStatus
+    entity_type: Literal["reference"] = field(default="reference", init=False)
+    resolved_asset_id: str | None = None
+    resolved_asset_ids: list[str] = field(default_factory=list)
+    candidate_asset_ids: list[str] = field(default_factory=list)
+    occurrence_ids: list[str] = field(default_factory=list)
+    consumer_asset_ids: list[str] = field(default_factory=list)
+    provenances: list[Provenance] = field(default_factory=list)
+    dependency_count: int = 0
+    observations: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class LineageReferenceOccurrence:
+    id: str
+    reference_id: str
+    reference_type: ReferenceType
+    display_name: str
+    resolution_status: ResolutionStatus
     raw_value: str
+    normalized_value: str
+    context_scope: str | None
+    context_scope_source: Literal["detected", "metadata_context"] | None
+    source_location: dict[str, Any] | None
     provenance: Provenance
     target_asset_id: str
+    consumer_asset_id: str
+    resolved_asset_id: str | None = None
     candidate_asset_ids: list[str] = field(default_factory=list)
-    reason_code: str = "insufficient_identity"
+    resolution_method: str = "insufficient_identity"
     observations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -48,12 +84,15 @@ class LineageDataflow:
 @dataclass(slots=True)
 class LineageDependency:
     id: str
-    source: dict[str, str]
     target_asset_id: str
+    consumer_asset_id: str
     kind: DependencyKind
     provenance: Provenance
     resolution_status: ResolutionStatus
     resolution_method: str
+    reference_id: str
+    reference_occurrence_id: str
+    resolved_asset_id: str | None = None
     observations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

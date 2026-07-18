@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import type { MetadataEditorIssue } from "../../shared/api/types";
+import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 
 interface MetadataIssuesDrawerProps {
   issues: MetadataEditorIssue[];
@@ -10,6 +11,9 @@ interface MetadataIssuesDrawerProps {
 export function MetadataIssuesDrawer({ issues, onClose, onIssueClick }: MetadataIssuesDrawerProps) {
   const errorCount = issues.filter((issue) => issue.severity === "error").length;
   const warningCount = issues.filter((issue) => issue.severity === "warning").length;
+
+  useDrawerEscape(onClose);
+
   return (
     <div className="metadata-drawer-backdrop" onMouseDown={onClose}>
       <aside className="metadata-drawer metadata-issues-drawer" aria-label="Metadata issues" onMouseDown={(event) => event.stopPropagation()}>

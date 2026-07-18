@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
 import type { MonitoringFilters } from "../monitoringFilters";
 import {
@@ -8,6 +9,7 @@ import {
   RepeatedFailureTable,
   ReportChart,
   ReportPanel,
+  TablePager,
   WindowPairDetail,
   failureCategoryPhaseMatrixOption,
   failureCategoriesRuleTooltip,
@@ -17,6 +19,8 @@ import {
   formatPercent,
   monitoringTimezone
 } from "../monitoringShared";
+
+const FAILURE_QUEUE_PAGE_SIZE = 50;
 
 export function FailurePage({
   report,
@@ -40,6 +44,14 @@ export function FailurePage({
   const windows = report.operations.windows ?? {};
   const last24Window = (windows.last_24_hours ?? {}) as Record<string, number>;
   const last7Window = (windows.last_7_days ?? {}) as Record<string, number>;
+  const [queueOffset, setQueueOffset] = useState(0);
+  const [queueLimit, setQueueLimit] = useState(FAILURE_QUEUE_PAGE_SIZE);
+
+  useEffect(() => {
+    setQueueOffset(0);
+  }, [report]);
+
+  const queueLoadedRows = Math.min(queueLimit, Math.max(0, latestQueue.length - queueOffset));
   const failureRateTitle = [
     "Job failure rate = failed jobs / (succeeded jobs + failed jobs).",
     "A job is failed when at least one child dataflow failed.",
@@ -84,6 +96,7 @@ export function FailurePage({
             />
           }
           intent={Number(kpis.failed_jobs ?? 0) ? "bad" : "neutral"}
+          accent="intent"
           title="Failed job runs in current filters. Job failed is a rollup signal: at least one child dataflow failed."
         />
         <HealthStripCard
@@ -100,6 +113,7 @@ export function FailurePage({
             />
           }
           intent={Number(kpis.failed_dataflows ?? 0) ? "bad" : "neutral"}
+          accent="intent"
           title="Failed dataflow runs in current filters. Skipped is not counted as failure."
         />
         <HealthStripCard
@@ -107,6 +121,7 @@ export function FailurePage({
           value={`${formatPercent(Number(report.operations.kpis.job_failure_rate ?? 0))} job`}
           detail={<DetailMetric label="dataflow" value={formatPercent(Number(report.operations.dataflow_kpis.failure_rate ?? 0))} tone={Number(report.operations.dataflow_kpis.failure_rate ?? 0) > 0 ? "bad" : "neutral"} />}
           intent={Number(report.operations.kpis.job_failure_rate ?? 0) || Number(report.operations.dataflow_kpis.failure_rate ?? 0) ? "bad" : "neutral"}
+          accent="intent"
           title={failureRateTitle}
         />
         <HealthStripCard
@@ -120,6 +135,7 @@ export function FailurePage({
             </>
           }
           intent={Number(kpis.affected_job_shapes ?? kpis.affected_job_contexts ?? kpis.affected_stages ?? 0) || Number(kpis.affected_dataflows ?? 0) ? "warning" : "neutral"}
+          accent="intent"
           title={blastRadiusTitle}
         />
         <HealthStripCard
@@ -133,6 +149,7 @@ export function FailurePage({
             </>
           }
           intent={Number(kpis.repeated_signatures ?? 0) ? "warning" : "neutral"}
+          accent="intent"
           title={repeatedSignatureTitle}
         />
         <HealthStripCard
@@ -140,6 +157,7 @@ export function FailurePage({
           value={formatPercent(Number(kpis.top_cause_share ?? 0))}
           detail={<DetailMetric label={`${String(kpis.top_cause_category ?? "-")} / ${String(kpis.top_cause_phase ?? "-")}`} value={formatNumber(Number(kpis.top_cause_runs ?? 0))} tone={Number(kpis.top_cause_runs ?? 0) ? "bad" : "neutral"} />}
           intent={Number(kpis.top_cause_share ?? 0) >= 50 ? "bad" : Number(kpis.top_cause_share ?? 0) > 0 ? "warning" : "neutral"}
+          accent="intent"
           title={topCauseTitle}
         />
       </section>
@@ -150,8 +168,28 @@ export function FailurePage({
             title="Latest failed dataflow queue"
             subtitle="newest incidents first"
             titleTooltip="Operational queue of failed dataflow runs. Job failures are rollup context and are not listed as separate incidents."
+            headerAction={
+              <TablePager
+                limit={queueLimit}
+                offset={queueOffset}
+                loadedRows={queueLoadedRows}
+                totalRows={latestQueue.length}
+                loading={false}
+                onPageChange={setQueueOffset}
+                onPageSizeChange={(nextLimit) => {
+                  setQueueLimit(nextLimit);
+                  setQueueOffset(0);
+                }}
+              />
+            }
           >
-            <FailureQueueTable rows={latestQueue} maxRows={7} onInspect={onInspect} timezoneName={timezoneName} />
+            <FailureQueueTable
+              rows={latestQueue}
+              maxRows={queueLimit}
+              offset={queueOffset}
+              onInspect={onInspect}
+              timezoneName={timezoneName}
+            />
           </ReportPanel>
           <ReportPanel
             title="Failure trend"
@@ -196,7 +234,7 @@ export function FailurePage({
           </ReportPanel>
           <ReportPanel
             title="Top failing dataflows"
-            subtitle="failed run count"
+            subtitle="failed runs by phase"
             titleTooltip="Ranks dataflows by failed run count in the current filters. Tooltip includes latest stage and error context."
             className="monitoring-failure-records-panel"
           >
@@ -204,7 +242,7 @@ export function FailurePage({
           </ReportPanel>
           <ReportPanel
             title="Failure by stage"
-            subtitle="failed dataflow runs"
+            subtitle="failed runs by phase"
             titleTooltip="Counts failed dataflow runs by stage. Job-level failures without a dataflow stage are not included here."
           >
             <ReportChart option={failureHorizontalBarOption(stageRows as Array<Record<string, string | number>>, "name", "count", "Failed runs")} height="100%" wheelDataZoomStep={1} />

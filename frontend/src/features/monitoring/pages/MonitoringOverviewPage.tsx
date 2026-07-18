@@ -10,6 +10,7 @@ import {
   ReportChart,
   ReportPanel,
   RuntimePhaseContribution,
+  RuntimePhaseLegend,
   WorkloadVolumeContextPanel,
   attentionQueueRuleTooltip,
   dataflowStatusTrendOption,
@@ -71,8 +72,7 @@ export function MonitoringOverviewPage({
   const phaseHealthRows = report.operations.phase_health?.length
     ? report.operations.phase_health
     : report.operations.dataflow_status_by_stage ?? report.operations.status_by_stage ?? [];
-  const attentionItems = report.attention.slice(0, 6);
-  const hiddenAttentionCount = Math.max(0, report.attention.length - attentionItems.length);
+  const attentionItems = report.attention;
   return (
     <div className="monitoring-page monitoring-overview-report">
       <section className={`overview-health-strip health-${healthIntent}`}>
@@ -82,6 +82,7 @@ export function MonitoringOverviewPage({
           detail={`${healthReason.primary}${healthReason.additionalCount > 0 ? ` +${healthReason.additionalCount} reasons` : ""}`}
           title={healthReasonsTooltip(report.health.reasons)}
           intent={healthIntent}
+          accent="intent"
         />
         <HealthStripCard
           label="Today"
@@ -103,6 +104,7 @@ export function MonitoringOverviewPage({
           detail={<RateBreakdownDetail failedRate={kpis.job_failure_rate ?? 0} windowFailedRate={last7Window.job_failure_rate ?? 0} />}
           title="Job success rate = succeeded / (succeeded + failed). Skipped is not counted as failed."
           intent={jobRateIntent}
+          accent="intent"
           className="overview-health-card-rate"
         />
         <HealthStripCard
@@ -116,6 +118,7 @@ export function MonitoringOverviewPage({
           }
           title="Dataflow success rate = succeeded / (succeeded + failed). Skipped is not counted as failed."
           intent={dataflowRateIntent}
+          accent="intent"
           className="overview-health-card-rate"
         />
         <HealthStripCard
@@ -124,6 +127,7 @@ export function MonitoringOverviewPage({
           detail={durationPercentilesDetail(jobDurationStats)}
           title={durationStatsTitle("Job duration", jobDurationStats)}
           intent={jobDurationIntent}
+          accent="intent"
           className="overview-health-card-duration"
         />
         <HealthStripCard
@@ -132,6 +136,7 @@ export function MonitoringOverviewPage({
           detail={durationPercentilesDetail(dataflowDurationStats)}
           title={durationStatsTitle("Dataflow duration", dataflowDurationStats)}
           intent={dataflowDurationIntent}
+          accent="intent"
           className="overview-health-card-duration"
         />
       </section>
@@ -173,9 +178,10 @@ export function MonitoringOverviewPage({
           <ReportPanel
             title="Runtime phase contribution"
             titleTooltip="Includes all operation types. Operations without source or transform phases contribute only to phases they report."
+            headerAction={<RuntimePhaseLegend />}
           >
             {phaseHealthRows.length ? (
-              <RuntimePhaseContribution rows={phaseHealthRows} />
+              <RuntimePhaseContribution rows={phaseHealthRows} showLegend={false} />
             ) : (
               <div className="table-empty">No phase signals in current filters.</div>
             )}
@@ -185,8 +191,8 @@ export function MonitoringOverviewPage({
         <section className="overview-bottom-grid">
           <ReportPanel
             title="Input / output workload"
-            subtitle="rows plus lakehouse bytes"
-            titleTooltip="Rows read is actual source input. Rows output uses destination rows written when available; for successful non-lakehouse destinations without write metrics it estimates output from rows read. Lakehouse bytes added/removed come from destination file metrics."
+            subtitle="rows read, estimated write rows and lakehouse bytes"
+            titleTooltip="Rows read is actual source input. Estimated rows written preserves observed lakehouse destination rows and estimates successful non-lakehouse writes from rows read. Lakehouse bytes added/removed come from destination file metrics."
           >
             <WorkloadVolumeContextPanel
               report={report}
@@ -228,7 +234,6 @@ export function MonitoringOverviewPage({
               ) : (
                 <div className="table-empty">No immediate monitoring issues.</div>
               )}
-              {hiddenAttentionCount > 0 ? <div className="overview-attention-more">+{hiddenAttentionCount} more signals</div> : null}
             </div>
           </ReportPanel>
         </section>

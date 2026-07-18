@@ -1,46 +1,36 @@
 import { Activity, AlertTriangle, CheckCircle2, Database, GitBranch, SlidersHorizontal } from "lucide-react";
-import type { LineageResponse, MetadataResponse, MonitoringReport, SourcePath } from "../../shared/api/types";
+import type { EnvironmentOverview } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { RelativeTime } from "../../shared/components/RelativeTime";
-import { elapsedWholeDays, parseTimestamp } from "../../shared/time";
+import { elapsedWholeDays } from "../../shared/time";
 import type { ModuleKey } from "../../app/moduleRegistry";
 
 interface OverviewPageProps {
-  metadata: MetadataResponse | null;
-  lineage: LineageResponse | null;
-  monitoringReport: MonitoringReport | null;
-  metadataSources: SourcePath[];
-  logPaths: SourcePath[];
+  overview: EnvironmentOverview | null;
   loading: boolean;
   onNavigate: (module: ModuleKey, search?: string) => void;
 }
 
-export function OverviewPage({ metadata, lineage, monitoringReport, metadataSources, logPaths, loading, onNavigate }: OverviewPageProps) {
-  const enabledMetadataSources = metadataSources.filter((source) => source.enabled).length;
-  const enabledLogPaths = logPaths.filter((path) => path.enabled).length;
-  const failedJobs = Number(monitoringReport?.operations.kpis.total_failures ?? 0);
+export function OverviewPage({ overview, loading, onNavigate }: OverviewPageProps) {
+  const sources = overview?.sources;
+  const metadata = overview?.metadata;
+  const lineage = overview?.lineage;
+  const monitoring = overview?.monitoring;
+  const enabledMetadataSources = sources?.metadata.enabled ?? 0;
+  const metadataSourceCount = sources?.metadata.configured ?? 0;
+  const enabledLogPaths = sources?.logs.enabled ?? 0;
+  const logPathCount = sources?.logs.configured ?? 0;
+  const failedJobs = monitoring?.total_failures ?? 0;
   const metadataErrors = metadata?.errors.length ?? 0;
-  const lineageErrors = lineage?.diagnostics.filter((item) => item.severity === "error").length ?? 0;
-  const monitoringErrors = monitoringReport?.errors.length ?? 0;
-  const dataflowSuccessRate = monitoringReport?.operations.dataflow_kpis.success_rate ?? 0;
+  const lineageErrors = lineage?.error_count ?? 0;
+  const monitoringErrors = monitoring?.errors.length ?? 0;
+  const dataflowSuccessRate = monitoring?.dataflow_success_rate ?? 0;
   const readErrors = metadataErrors + lineageErrors + monitoringErrors;
   const now = Date.now();
-  const failedWindows = getFailedJobWindows(monitoringReport, now);
-  const logFreshness = getLogFreshness(monitoringReport, now);
-  const enabledConnections = enabledRecords(metadata?.connections ?? []);
-  const enabledDataflows = metadata?.dataflows.filter((dataflow) => dataflow.is_active !== false).length ?? 0;
-  const enabledSchemaHints = enabledRecords(metadata?.schema_hints ?? []);
-  const allSources = [...metadataSources, ...logPaths];
-  const sourceValidation = allSources.reduce(
-    (summary, source) => {
-      const status = String(source.latest_validation?.status ?? "").toLowerCase();
-      if (status === "error") summary.errors += 1;
-      if (status === "warning") summary.warnings += 1;
-      return summary;
-    },
-    { errors: 0, warnings: 0 }
-  );
-  const sourceValidationIntent: StatIntent = !allSources.length
+  const failedWindows = monitoring?.failed_job_windows ?? { last7: 0, last30: 0, last365: 0 };
+  const logFreshness = getLogFreshness(monitoring?.latest_log_at ?? null, now);
+  const sourceValidation = sources?.validation ?? { errors: 0, warnings: 0 };
+  const sourceValidationIntent: StatIntent = !metadataSourceCount && !logPathCount
     ? "neutral"
     : sourceValidation.errors > 0
       ? "bad"
@@ -50,9 +40,8 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
   const nextActions = getNextActions({
     enabledMetadataSources,
     enabledLogPaths,
-    metadata,
-    lineage,
-    monitoringReport,
+    metadataDataflows: metadata?.dataflows ?? 0,
+    lineageDataflows: lineage?.dataflows ?? 0,
     metadataErrors,
     lineageErrors,
     monitoringErrors,
@@ -65,24 +54,23 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
   const status = getEnvironmentStatus({
     enabledMetadataSources,
     enabledLogPaths,
-    dataflows: metadata?.dataflows.length ?? 0,
-    jobs: monitoringReport?.summary.job_records ?? 0,
+    dataflows: metadata?.dataflows ?? 0,
+    jobs: monitoring?.job_records ?? 0,
     readErrors,
     failedWindows,
     logFreshness,
     primaryAction
   });
-  const stageSummary = countAll(metadata?.dataflows.map((dataflow) => dataflow.stage || "unknown") ?? []);
-  const loadTypeSummary = countAll(metadata?.dataflows.map((dataflow) => dataflow.load_type || dataflow.destination?.load_type || "unknown") ?? []);
-  const lineageCoverage = metadata?.dataflows.length ? Math.round(((lineage?.dataflows.length ?? 0) / metadata.dataflows.length) * 100) : 0;
-  const dependencyCoverage = lineage?.summary.dependencies
+  const stageSummary = metadata?.stages ?? [];
+  const loadTypeSummary = metadata?.load_types ?? [];
+  const lineageCoverage = metadata?.dataflows ? Math.round(((lineage?.dataflows ?? 0) / metadata.dataflows) * 100) : 0;
+  const dependencyCoverage = lineage?.dependencies
     ? Math.round(
-      ((lineage.summary.resolved_dependencies + lineage.summary.discovered_only_dependencies)
-        / lineage.summary.dependencies) * 100
+      (lineage.resolved_dependencies / lineage.dependencies) * 100
     )
     : 100;
 
-  if (!metadataSources.length && !logPaths.length && !loading) {
+  if (!metadataSourceCount && !logPathCount && !loading) {
     return (
       <EmptyState
         icon={<SlidersHorizontal size={24} />}
@@ -107,8 +95,8 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
           title="Sources"
           moduleStatus={enabledMetadataSources + enabledLogPaths > 0 ? "ready" : "empty"}
           metrics={[
-            { label: "metadata", value: metadataSources.length },
-            { label: "log paths", value: logPaths.length },
+            { label: "metadata", value: metadataSourceCount },
+            { label: "log paths", value: logPathCount },
             { label: "enabled", value: enabledMetadataSources + enabledLogPaths }
           ]}
           onClick={() => onNavigate("sources")}
@@ -116,10 +104,10 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
         <ModuleSnapshot
           icon={<Database size={18} />}
           title="Metadata"
-          moduleStatus={(metadata?.dataflows.length ?? 0) > 0 ? (metadataErrors > 0 ? "warning" : "ready") : "empty"}
+          moduleStatus={(metadata?.dataflows ?? 0) > 0 ? (metadataErrors > 0 ? "warning" : "ready") : "empty"}
           metrics={[
-            { label: "dataflows", value: metadata?.dataflows.length ?? 0 },
-            { label: "connections", value: metadata?.connections.length ?? 0 },
+            { label: "dataflows", value: metadata?.dataflows ?? 0 },
+            { label: "connections", value: metadata?.connections ?? 0 },
             { label: "errors", value: metadataErrors }
           ]}
           onClick={() => onNavigate("metadata")}
@@ -127,10 +115,10 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
         <ModuleSnapshot
           icon={<GitBranch size={18} />}
           title="Lineage"
-          moduleStatus={(lineage?.assets.length ?? 0) > 0 ? (lineageErrors > 0 ? "warning" : "ready") : "empty"}
+          moduleStatus={(lineage?.assets ?? 0) > 0 ? (lineageErrors > 0 ? "warning" : "ready") : "empty"}
           metrics={[
-            { label: "assets", value: lineage?.assets.length ?? 0 },
-            { label: "dataflows", value: lineage?.dataflows.length ?? 0 },
+            { label: "assets", value: lineage?.assets ?? 0 },
+            { label: "dataflows", value: lineage?.dataflows ?? 0 },
             { label: "coverage", value: `${lineageCoverage}%` }
           ]}
           onClick={() => onNavigate("lineage")}
@@ -138,9 +126,9 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
         <ModuleSnapshot
           icon={<Activity size={18} />}
           title="Monitoring"
-          moduleStatus={(monitoringReport?.summary.job_records ?? 0) > 0 ? (failedWindows.last7 > 0 ? "warning" : "ready") : "empty"}
+          moduleStatus={(monitoring?.job_records ?? 0) > 0 ? (failedWindows.last7 > 0 ? "warning" : "ready") : "empty"}
           metrics={[
-            { label: "jobs", value: monitoringReport?.summary.job_records ?? 0 },
+            { label: "jobs", value: monitoring?.job_records ?? 0 },
             { label: "success rate", value: `${dataflowSuccessRate}%` },
             { label: "failed 7d", value: failedWindows.last7 }
           ]}
@@ -151,8 +139,8 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
       {/* ── Detail panels ─────────────────────────────────────────── */}
       <div className="overview-panel-grid">
         <OverviewPanel title="Setup and readiness">
-          <RatioStat label="Metadata configured" enabled={enabledMetadataSources} total={metadataSources.length} suffix="enabled" />
-          <RatioStat label="ETL logs configured" enabled={enabledLogPaths} total={logPaths.length} suffix="enabled" />
+          <RatioStat label="Metadata configured" enabled={enabledMetadataSources} total={metadataSourceCount} suffix="enabled" />
+          <RatioStat label="ETL logs configured" enabled={enabledLogPaths} total={logPathCount} suffix="enabled" />
           <CompactStat
             label="Source validation"
             value={`${sourceValidation.errors} errors, ${sourceValidation.warnings} warnings`}
@@ -187,15 +175,15 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
         </OverviewPanel>
 
         <OverviewPanel title="Data estate">
-          <RatioStat label="Connections" enabled={enabledConnections} total={metadata?.connections.length ?? 0} suffix="enabled" />
-          <RatioStat label="Dataflows" enabled={enabledDataflows} total={metadata?.dataflows.length ?? 0} suffix="enabled" />
-          <RatioStat label="Schema hints" enabled={enabledSchemaHints} total={metadata?.schema_hints.length ?? 0} suffix="enabled" />
+          <RatioStat label="Connections" enabled={metadata?.enabled_connections ?? 0} total={metadata?.connections ?? 0} suffix="enabled" />
+          <RatioStat label="Dataflows" enabled={metadata?.enabled_dataflows ?? 0} total={metadata?.dataflows ?? 0} suffix="enabled" />
+          <RatioStat label="Schema hints" enabled={metadata?.enabled_schema_hints ?? 0} total={metadata?.schema_hints ?? 0} suffix="enabled" />
           <CompactStat label="Lineage coverage" value={`${lineageCoverage}%`} />
           <CompactStat label="Dependency coverage" value={`${dependencyCoverage}%`} />
           <CompactStat
             label="Input attention"
-            value={`${lineage?.summary.ambiguous_dependencies ?? 0} ambiguous, ${lineage?.summary.unresolved_dependencies ?? 0} unresolved`}
-            intent={(lineage?.summary.ambiguous_dependencies ?? 0) + (lineage?.summary.unresolved_dependencies ?? 0) ? "warning" : "good"}
+            value={`${lineage?.ambiguous_dependencies ?? 0} ambiguous, ${lineage?.unresolved_dependencies ?? 0} unresolved`}
+            intent={(lineage?.ambiguous_dependencies ?? 0) + (lineage?.unresolved_dependencies ?? 0) ? "warning" : "good"}
           />
           <PillSummary label="Stages" items={stageSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
           <PillSummary label="Load types" items={loadTypeSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
@@ -205,22 +193,22 @@ export function OverviewPage({ metadata, lineage, monitoringReport, metadataSour
           <CompactStat label="Failed last 7 days" value={failedWindows.last7} intent={failedWindows.last7 ? "bad" : "good"} />
           <CompactStat label="Failed last 30 days" value={failedWindows.last30} intent={failedWindows.last30 ? "warning" : "good"} />
           <CompactStat label="Failed last 1 year" value={failedWindows.last365} intent={failedWindows.last365 ? "warning" : "good"} />
-          <RatioStat label="Failed jobs" enabled={failedJobs} total={monitoringReport?.summary.job_records ?? 0} suffix="failed" reverse />
+          <RatioStat label="Failed jobs" enabled={failedJobs} total={monitoring?.job_records ?? 0} suffix="failed" reverse />
           <CompactStat label="Success rate" value={`${dataflowSuccessRate}%`} />
-          <CompactStat label="Active engines" value={monitoringReport?.summary.active_engines ?? 0} />
+          <CompactStat label="Active engines" value={monitoring?.active_engines ?? 0} />
           <CompactStat
             label="Latest log"
             value={<RelativeTime value={logFreshness.latestAt} titlePrefix="Latest log" />}
             intent={logFreshness.intent}
           />
-          <CompactStat label="Date range" value={formatDateRange(monitoringReport)} />
+          <CompactStat label="Date range" value={formatDateRange(monitoring?.date_range)} />
         </OverviewPanel>
       </div>
 
-      {metadata?.errors.length || monitoringReport?.errors.length ? (
+      {metadata?.errors.length || monitoring?.errors.length ? (
         <div className="error-list">
           {metadata?.errors.map((error, index) => <code key={`metadata-${index}`}>{JSON.stringify(error)}</code>)}
-          {monitoringReport?.errors.map((error, index) => <code key={`monitoring-${index}`}>{JSON.stringify(error)}</code>)}
+          {monitoring?.errors.map((error, index) => <code key={`monitoring-${index}`}>{JSON.stringify(error)}</code>)}
         </div>
       ) : null}
     </div>
@@ -332,24 +320,10 @@ function openDataflowMetadataFilter(onNavigate: (module: ModuleKey, search?: str
   onNavigate("metadata", `?${params.toString()}`);
 }
 
-function formatDateRange(report: MonitoringReport | null) {
-  if (!report?.summary.date_range.min && !report?.summary.date_range.max) return "-";
-  if (report.summary.date_range.min === report.summary.date_range.max) return report.summary.date_range.min ?? "-";
-  return `${report.summary.date_range.min ?? "-"} to ${report.summary.date_range.max ?? "-"}`;
-}
-
-function countAll(values: string[]) {
-  const counts = new Map<string, number>();
-  for (const value of values) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .map(([name, count]) => ({ name, count }));
-}
-
-function enabledRecords(records: Array<Record<string, unknown>>) {
-  return records.filter((record) => record.enabled !== false && record.is_active !== false).length;
+function formatDateRange(dateRange: { min?: string | null; max?: string | null } | undefined) {
+  if (!dateRange?.min && !dateRange?.max) return "-";
+  if (dateRange.min === dateRange.max) return dateRange.min ?? "-";
+  return `${dateRange.min ?? "-"} to ${dateRange.max ?? "-"}`;
 }
 
 type StatIntent = "neutral" | "good" | "warning" | "bad";
@@ -371,28 +345,7 @@ function ratioIntent(value: number, total: number, reverse = false): StatIntent 
   return "bad";
 }
 
-function getFailedJobWindows(report: MonitoringReport | null, now: number) {
-  return {
-    last7: countFailedJobsInWindow(report, 7, now),
-    last30: countFailedJobsInWindow(report, 30, now),
-    last365: countFailedJobsInWindow(report, 365, now)
-  };
-}
-
-function countFailedJobsInWindow(report: MonitoringReport | null, days: number, now: number) {
-  if (!report?.operations.jobs_by_date_status.length) return 0;
-  const windowStart = now - days * 24 * 60 * 60 * 1000;
-  return report.operations.jobs_by_date_status.reduce((sum, row) => {
-    const rowDate = String(row.date || "").slice(0, 10);
-    const rowStart = parseTimestamp(`${rowDate}T00:00:00.000Z`);
-    const rowEnd = parseTimestamp(`${rowDate}T23:59:59.999Z`);
-    if (rowStart === null || rowEnd === null || rowEnd < windowStart || rowStart > now) return sum;
-    return sum + Number(row.failed ?? 0);
-  }, 0);
-}
-
-function getLogFreshness(report: MonitoringReport | null, now: number): LogFreshness {
-  const latestAt = report?.summary.latest_log_at ?? null;
+function getLogFreshness(latestAt: string | null, now: number): LogFreshness {
   const ageDays = elapsedWholeDays(latestAt, now);
   if (ageDays === null) return { latestAt, ageDays: null, intent: "neutral" };
   return {
@@ -496,9 +449,8 @@ function getEnvironmentStatus(input: {
 function getNextActions(input: {
   enabledMetadataSources: number;
   enabledLogPaths: number;
-  metadata: MetadataResponse | null;
-  lineage: LineageResponse | null;
-  monitoringReport: MonitoringReport | null;
+  metadataDataflows: number;
+  lineageDataflows: number;
   metadataErrors: number;
   lineageErrors: number;
   monitoringErrors: number;
@@ -516,7 +468,7 @@ function getNextActions(input: {
   if (input.metadataErrors) {
     actions.push({ label: "Review metadata errors", detail: `${input.metadataErrors} read errors`, module: "metadata" });
   }
-  if ((input.metadata?.dataflows.length ?? 0) > 0 && !(input.lineage?.dataflows.length ?? 0)) {
+  if (input.metadataDataflows > 0 && !input.lineageDataflows) {
     actions.push({ label: "Inspect lineage inputs", detail: "Metadata loaded but no dataflows", module: "metadata" });
   }
   if (input.lineageErrors) {

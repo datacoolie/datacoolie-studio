@@ -1,11 +1,13 @@
-import { History, Search, X } from "lucide-react";
+import { History, Save, Search, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { SheetKey } from "./metadataSheetTypes";
 
 interface MetadataSheetToolbarProps {
   activeSheet: SheetKey;
   busy: boolean;
-  dirty: boolean;
+  hasLocalChanges: boolean;
+  hasSourceChanges: boolean;
+  hasStoredDraft: boolean;
   filteredRowCount: number;
   totalRowCount: number;
   mode: "view" | "edit";
@@ -33,7 +35,9 @@ const sheets = [
 export function MetadataSheetToolbar({
   activeSheet,
   busy,
-  dirty,
+  hasLocalChanges,
+  hasSourceChanges,
+  hasStoredDraft,
   filteredRowCount,
   totalRowCount,
   mode,
@@ -75,7 +79,6 @@ export function MetadataSheetToolbar({
         <span title={sourceUri}>
           {sourceFormat === "merged" ? "Merged sources" : `${sourceFormat.toUpperCase()} · ${shortPath(sourceUri)}`}
           {readOnly ? " · save disabled" : ""}
-          {dirty ? " · unsaved changes" : ""}
         </span>
       </div>
       <div className={`metadata-sheet-controls${mode === "edit" ? " edit-mode" : ""}`}>
@@ -101,26 +104,33 @@ export function MetadataSheetToolbar({
             <div className="metadata-edit-actions">
               {!readOnly ? (
                 <>
-                  <button className="text-action primary" type="button" onClick={onSave} disabled={!dirty || busy}>
-                    Save changes
+                  <button className="text-action primary" type="button" onClick={() => onSave()} disabled={!hasSourceChanges || busy}>
+                    <Save size={14} />
+                    Save to source
                   </button>
-                  <button className="text-action" type="button" onClick={onSaveDraft} disabled={!dirty || busy}>
+                  <button className="text-action" type="button" onClick={() => onSaveDraft()} disabled={!hasLocalChanges || busy}>
                     Save draft
                   </button>
                 </>
               ) : null}
-              <button className="text-action" type="button" onClick={onValidate} disabled={busy}>
+              <button className="text-action" type="button" onClick={() => onValidate()} disabled={busy}>
                 Validate
               </button>
-              <button className="text-action" type="button" onClick={onDiscard} disabled={!dirty || busy}>
+              <button className="text-action" type="button" onClick={onDiscard} disabled={!hasLocalChanges || busy}>
                 Discard
               </button>
               {!readOnly ? (
-                <button className="text-action" type="button" onClick={onDiscardDraft} disabled={busy}>
+                <button className="text-action" type="button" onClick={onDiscardDraft} disabled={!hasStoredDraft || busy}>
                   Clear draft
                 </button>
               ) : null}
             </div>
+          ) : null}
+          {mode === "view" && !readOnly && hasSourceChanges ? (
+            <button className="text-action primary metadata-save-source-action" type="button" onClick={() => onSave()} disabled={busy}>
+              <Upload size={14} />
+              Save to source
+            </button>
           ) : null}
           {!readOnly ? (
             <button className="text-action metadata-history-action" type="button" onClick={onHistoryOpen} disabled={busy}>

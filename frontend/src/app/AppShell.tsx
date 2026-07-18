@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Environment, EnvironmentFreshness, Project } from "../shared/api/types";
+import { useDrawerEscape } from "../shared/hooks/useDrawerEscape";
 import { ContextBar } from "./ContextBar";
 import { SidebarNav } from "./SidebarNav";
 import type { CapabilityKey, ModuleKey, ModuleScope } from "./moduleRegistry";
@@ -21,7 +22,7 @@ interface AppShellProps {
   onNavigate: (module: ModuleKey) => void;
   onToggleSidebar: () => void;
   onProjectSelect: (projectId: number | null) => void;
-  onEnvironmentSelect: (environmentId: number | null) => void;
+  onOpenProject: (projectId: number) => void;
 }
 
 export function AppShell({
@@ -41,8 +42,13 @@ export function AppShell({
   onNavigate,
   onToggleSidebar,
   onProjectSelect,
-  onEnvironmentSelect
+  onOpenProject
 }: AppShellProps) {
+  useDrawerEscape(
+    onToggleSidebar,
+    () => !sidebarCollapsed && window.matchMedia("(max-width: 620px)").matches
+  );
+
   const shellClassName = [
     "app-shell",
     sidebarCollapsed ? "sidebar-collapsed" : "",
@@ -73,7 +79,7 @@ export function AppShell({
           logPathCount={logPathCount}
           freshness={freshness}
           onProjectSelect={onProjectSelect}
-          onEnvironmentSelect={onEnvironmentSelect}
+          onOpenProject={onOpenProject}
         />
         {error ? <div className="app-error">{error}</div> : null}
         <section className={`content-area content-${activeModule} content-scope-${activeScope}`}>{children}</section>

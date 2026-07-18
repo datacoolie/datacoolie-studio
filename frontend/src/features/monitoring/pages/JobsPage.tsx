@@ -105,6 +105,7 @@ export function JobsPage({
             />
           }
           intent={jobRateIntent}
+          accent="intent"
           title="Job execution success rate = succeeded / (succeeded + failed). Skipped is excluded. Windows use rolling last 24 hours and last 7 * 24 hours."
           className="overview-health-card-rate"
         />
@@ -122,6 +123,7 @@ export function JobsPage({
             />
           }
           intent={(last24Window.job_failed ?? 0) || (last7Window.job_failed ?? 0) || (kpis.total_failures ?? 0) ? "bad" : "neutral"}
+          accent="intent"
           title={latestFailedTime ? `Latest failed job time: ${formatTimestampForDisplay(latestFailedTime, timezoneName)}` : "No failed jobs in current filters."}
         />
         <HealthStripCard
@@ -138,6 +140,7 @@ export function JobsPage({
             />
           }
           intent={(kpis.total_running ?? 0) || (kpis.total_pending ?? 0) ? "warning" : "neutral"}
+          accent="intent"
           title="Child dataflow totals from job log fields: total_running / total_pending / total_skipped. These are not recalculated from dataflow logs."
         />
         <HealthStripCard
@@ -149,6 +152,7 @@ export function JobsPage({
             p99_duration_seconds: jobP99Duration
           })}
           intent={durationIntent(jobDurationStats, kpis.avg_duration_seconds ?? 0, kpis.p95_duration_seconds ?? 0)}
+          accent="intent"
           title={durationStatsTitle("Job duration", jobDurationStats)}
           className="overview-health-card-duration"
         />
@@ -163,6 +167,7 @@ export function JobsPage({
             />
           }
           intent={(dataflowKpis.failed ?? 0) ? "bad" : childMismatchCount ? "warning" : "neutral"}
+          accent="intent"
           title="Dataflow impact is calculated from dataflow logs linked by job_id. Reconciliation mismatch checks compare job-log totals (total_dataflows, total_failed, total_skipped, total_succeeded) with child dataflow rollups by job_id."
         />
       </section>

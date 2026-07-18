@@ -4,21 +4,36 @@ import json
 import re
 import hashlib
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.core.time import parse_utc_datetime
-from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest
 from datacoolie_studio.domains.logs.cache import (
     cached_dataflow_logs,
+    cached_monitoring_summary,
     cached_monitoring_rows,
     query_cached_dataflow_logs,
     query_cached_filter_values,
     query_cached_job_logs,
+    query_cached_latest_dataflow_runs,
+    query_cached_monitoring_rows,
 )
 from datacoolie_studio.domains.logs.reader import read_dataflow_logs, read_job_logs
+from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
+from datacoolie_studio.domains.read_models.cache import (
+    cached_read_model,
+    empty_parameters_fingerprint,
+    fingerprint,
+    read_model_build_lock,
+    replace_read_model,
+)
+from datacoolie_studio.domains.read_models.keys import LINEAGE_LATEST_RUNS
 
 
 _DATE_GRAINS = ("hour", "day", "week", "month")
@@ -26,102 +41,406 @@ _STATUS_KEYS = ("succeeded", "failed", "skipped", "running", "pending", "unknown
 _FRESHNESS_STALE_DAYS = 7
 _SKIPPED_STREAK_RUNS = 3
 _MAINTENANCE_LAG_WARNING_DAYS = 7
+_LATEST_RUNS_PRODUCER_VERSION = "lineage-latest-runs-v1"
+
+_DATAFLOW_SUMMARY_COLUMNS = (
+    "job_id",
+    "dataflow_id",
+    "dataflow_run_id",
+    "dataflow_name",
+    "stage",
+    "status",
+    "start_time",
+    "end_time",
+    "duration_seconds",
+    "operation_type",
+    "source_name",
+    "source_connection_type",
+    "source_format",
+    "source_status",
+    "source_duration_seconds",
+    "source_rows_read",
+    "transform_status",
+    "transform_duration_seconds",
+    "destination_name",
+    "destination_connection_type",
+    "destination_format",
+    "destination_status",
+    "destination_duration_seconds",
+    "destination_operation_type",
+    "destination_rows_written",
+    "destination_bytes_added",
+    "destination_bytes_removed",
+    "overhead_duration_seconds",
+)
+
+_JOB_SUMMARY_COLUMNS = (
+    "job_id",
+    "status",
+    "start_time",
+    "end_time",
+    "duration_seconds",
+    "engine_name",
+    "metadata_provider_name",
+    "platform_name",
+    "total_dataflows",
+    "total_failed",
+    "total_skipped",
+    "total_succeeded",
+)
+
+_DATAFLOW_REPORT_COLUMNS = tuple(dict.fromkeys((
+    *_DATAFLOW_SUMMARY_COLUMNS,
+    "workspace_id", "source_id", "destination_id", "destination_load_type",
+    "source_catalog", "source_database", "source_schema", "source_table",
+    "source_full_table", "source_path", "source_watermark_before",
+    "source_watermark_after", "source_watermark_effective", "source_action",
+    "destination_catalog", "destination_database", "destination_schema",
+    "destination_table", "destination_full_table", "destination_path",
+    "destination_rows_inserted", "destination_rows_updated", "destination_rows_deleted",
+    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
+    "destination_operation_details", "error_message", "retry_attempts",
+    "source_error_message", "transform_error_message", "destination_error_message",
+)))
+
+_JOB_REPORT_COLUMNS = tuple(dict.fromkeys((
+    *_JOB_SUMMARY_COLUMNS,
+    "workspace_id", "job_index", "job_num", "error_message", "dry_run",
+    "stop_on_error", "max_workers", "retry_count", "retry_delay",
+    "total_running", "total_pending", "total_rows_read", "total_rows_written",
+    "total_rows_inserted", "total_rows_updated", "total_rows_deleted",
+    "total_files_added", "total_files_removed", "total_bytes_added",
+    "total_bytes_removed", "operation_types",
+)))
+
+_PERFORMANCE_COLUMNS = tuple(dict.fromkeys((
+    *_DATAFLOW_SUMMARY_COLUMNS,
+    "destination_rows_inserted", "destination_rows_updated", "destination_rows_deleted",
+    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
+    "source_full_table", "source_table", "source_path",
+    "destination_full_table", "destination_table", "destination_path",
+    "error_message", "source_error_message", "transform_error_message",
+    "destination_error_message",
+)))
+_VOLUME_COLUMNS = tuple(dict.fromkeys((
+    *_DATAFLOW_SUMMARY_COLUMNS,
+    "destination_load_type", "destination_rows_inserted", "destination_rows_updated",
+    "destination_rows_deleted", "destination_files_added", "destination_files_removed",
+    "destination_bytes_saved", "source_full_table", "source_table", "source_path",
+    "destination_full_table", "destination_table", "destination_path",
+)))
+_MAINTENANCE_COLUMNS = tuple(dict.fromkeys((
+    *_DATAFLOW_SUMMARY_COLUMNS,
+    "destination_full_table", "destination_table", "destination_path",
+    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
+    "destination_operation_details",
+)))
+_FRESHNESS_COLUMNS = tuple(dict.fromkeys((
+    *_DATAFLOW_SUMMARY_COLUMNS,
+    "source_full_table", "source_table", "source_path", "source_watermark_before",
+    "source_watermark_after", "source_watermark_effective", "source_action",
+    "destination_full_table", "destination_table", "destination_path",
+    "error_message", "source_error_message", "transform_error_message",
+    "destination_error_message",
+)))
+_DATAFLOW_PAGE_COLUMNS = {
+    "performance": _PERFORMANCE_COLUMNS,
+    "volume": _VOLUME_COLUMNS,
+    "maintenance": _MAINTENANCE_COLUMNS,
+    "freshness": _FRESHNESS_COLUMNS,
+    "diagnostics": _DATAFLOW_SUMMARY_COLUMNS,
+}
 
 
-def monitoring_report(
+def cached_environment_overview_summary(
+    session: Session,
     paths: list[EnvironmentSource],
-    filters: dict[str, str] | None = None,
-    session: Session | None = None,
-    timezone_info: tzinfo | None = None,
-    timezone_label: str | None = None,
-    timezone_source: str = "server_default",
-) -> dict[str, Any]:
-    active_timezone = timezone_info or timezone.utc
-    active_timezone_label = timezone_label or "UTC"
-    filters = _normalize_monitoring_filters_for_timezone(filters or {}, timezone_info=active_timezone)
-    rows, jobs, errors = _monitoring_rows(paths, session=session)
-    rows = _filter_log_rows(rows, filters, include_dataflow_filters=True)
-    jobs = _filter_log_rows(jobs, filters, include_dataflow_filters=False)
-    jobs = _filter_jobs_for_dataflow_scope(jobs, rows, filters)
-    trend_context = _trend_context(filters, [*rows, *jobs], active_timezone)
-    operations = _operations_page(rows, jobs, timezone_info=active_timezone, trend_context=trend_context)
-    failures = _failures_page(rows, jobs)
-    performance = _performance_page(rows)
-    volume = _volume_page(rows, jobs, trend_context=trend_context)
-    maintenance = _maintenance_page(rows, trend_context=trend_context)
-    freshness = _freshness_page(rows, trend_context=trend_context)
-    coverage = _coverage_page(paths, rows, jobs, errors)
-    reconciliation = _reconciliation_page(rows, jobs)
-    diagnostics = _diagnostics_page(rows, jobs, errors, reconciliation, trend_context=trend_context)
-    health = _health_page(rows, jobs, operations, maintenance, coverage, reconciliation)
+    *,
+    timezone_info: tzinfo,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return Environment Overview Monitoring metrics without materializing runs.
+
+    The typed DuckDB cache is an optimization, not a source-of-truth contract:
+    callers receive ``None`` when it cannot answer and keep their direct-reader
+    fallback.
+    """
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    local_boundary = now_utc.astimezone(timezone_info).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    cutoff = (local_boundary - timedelta(days=30)).astimezone(timezone.utc)
+    timezone_name = timezone_info.key if isinstance(timezone_info, ZoneInfo) else None
+    now_offset = now_utc.astimezone(timezone_info).utcoffset()
+    cutoff_offset = cutoff.astimezone(timezone_info).utcoffset()
+    if not timezone_name and now_offset != cutoff_offset:
+        return None
+    cached = cached_monitoring_summary(
+        session,
+        paths,
+        cutoff=cutoff,
+        timezone_name=timezone_name,
+        utc_offset_seconds=int(now_offset.total_seconds()) if now_offset else 0,
+        local_today=now_utc.astimezone(timezone_info).date(),
+    )
+    if cached is None:
+        return None
+
+    summary, errors = cached
+    succeeded = int(summary["dataflow_succeeded"] or 0)
+    failed = int(summary["dataflow_failed"] or 0)
+    latest_log_at = parse_utc_datetime(summary["latest_log_at"])
     return {
-        "summary": {
-            "dataflow_records": len(rows),
-            "job_records": len(jobs),
-            "date_range": _date_range([*rows, *jobs]),
-            "latest_log_at": _latest_log_at([*rows, *jobs]),
-            "latest_job_log_at": _latest_log_at(jobs),
-            "latest_dataflow_log_at": _latest_log_at(rows),
-            "timezone": active_timezone_label,
-            "timezone_source": timezone_source,
-            "requested_grain": trend_context["requested_grain"],
-            "effective_grain": trend_context["effective_grain"],
-            "active_engines": len({job.get("engine_name") for job in jobs if job.get("engine_name")}),
-            "active_metadata_providers": len(
-                {job.get("metadata_provider_name") for job in jobs if job.get("metadata_provider_name")}
-            ),
-            "log_paths": len([path for path in paths if path.enabled]),
+        "job_records": int(summary["job_records"] or 0),
+        "total_failures": int(summary["total_failures"] or 0),
+        "dataflow_success_rate": _rate(succeeded, succeeded + failed),
+        "failed_job_windows": {
+            "last7": int(summary["failed_last7"] or 0),
+            "last30": int(summary["failed_last30"] or 0),
+            "last365": int(summary["failed_last365"] or 0),
         },
-        "health": health,
-        "attention": _attention_queue(rows, jobs, failures, performance, maintenance, coverage, reconciliation, freshness, health),
-        "coverage": coverage,
-        "reconciliation": reconciliation,
-        "diagnostics": diagnostics,
-        "metric_definitions": _metric_definitions(),
-        "operations": operations,
-        "failures": failures,
-        "performance": performance,
-        "volume": volume,
-        "maintenance": maintenance,
-        "freshness": freshness,
+        "active_engines": int(summary["active_engines"] or 0),
+        "latest_log_at": latest_log_at.isoformat() if latest_log_at else None,
+        "date_range": {
+            "min": str(summary["date_min"]) if summary["date_min"] else None,
+            "max": str(summary["date_max"]) if summary["date_max"] else None,
+        },
         "errors": errors,
     }
 
 
-def monitoring_overview(
-    paths: list[EnvironmentSource],
-    filters: dict[str, str] | None = None,
-    session: Session | None = None,
-    timezone_info: tzinfo | None = None,
-    timezone_label: str | None = None,
-    timezone_source: str = "server_default",
-) -> dict[str, Any]:
-    report = monitoring_report(
-        paths,
-        filters=filters,
-        session=session,
-        timezone_info=timezone_info,
-        timezone_label=timezone_label,
-        timezone_source=timezone_source,
-    )
-    operations = report["operations"]
-    performance = report["performance"]
-    failures = report["failures"]
+def _empty_health_page() -> dict[str, Any]:
+    return {"status": "unknown", "label": "Unknown", "reasons": []}
+
+
+def _empty_operations_page() -> dict[str, Any]:
     return {
-        "summary": {
-            "records": report["summary"]["dataflow_records"],
-            "succeeded": operations["dataflow_kpis"]["succeeded"],
-            "failed": operations["dataflow_kpis"]["failed"],
-            "skipped": operations["dataflow_kpis"]["skipped"],
-            "success_rate": operations["dataflow_kpis"]["success_rate"],
-            "log_paths": report["summary"]["log_paths"],
-        },
-        "failed_dataflows": failures["failed_records"][:50],
-        "slowest_dataflows": performance["slowest_dataflows"],
-        "duration_by_stage": performance["duration_by_stage"],
-        "status_by_stage": operations["status_by_stage"],
-        "errors": report["errors"],
+        "kpis": {},
+        "windows": {},
+        "job_status_distribution": [],
+        "jobs_by_date_status": [],
+        "dataflows_by_date_status": [],
+        "failed_jobs": [],
+        "dataflow_kpis": {},
+        "status_by_stage": [],
     }
+
+
+def _empty_failures_page() -> dict[str, Any]:
+    return {
+        "failed_by_stage": [],
+        "failed_by_source_connection_type": [],
+        "top_failing_dataflows": [],
+        "error_categories": [],
+        "failure_trend_by_date": [],
+        "failed_records": [],
+    }
+
+
+def _empty_performance_page() -> dict[str, Any]:
+    return {
+        "duration_breakdown": [],
+        "duration_vs_rows": [],
+        "slowest_dataflows": [],
+        "duration_by_stage": [],
+        "engine_stage_matrix": [],
+    }
+
+
+def _empty_volume_page() -> dict[str, Any]:
+    return {
+        "kpis": {},
+        "rows_by_date": [],
+        "bytes_by_date": [],
+        "volume_by_load_type": [],
+        "top_dataflows_by_rows_written": [],
+    }
+
+
+def _empty_maintenance_page() -> dict[str, Any]:
+    return {
+        "kpis": {},
+        "bytes_reclaimed_by_table": [],
+        "format_comparison": [],
+        "per_table": [],
+        "duration_vs_files_removed": [],
+        "bytes_reclaimed_by_date": [],
+    }
+
+
+def _empty_freshness_page() -> dict[str, Any]:
+    return {
+        "kpis": {},
+        "latest_freshness_by_dataflow": [],
+        "watermark_movement": [],
+        "stale_candidates": [],
+        "skipped_patterns": [],
+    }
+
+
+def _empty_diagnostics_page() -> dict[str, Any]:
+    return {"kpis": {}, "job_id_evidence": [], "read_errors": []}
+
+
+def _dataflows_operations_page(
+    rows: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    timezone_info: tzinfo,
+    trend_context: dict[str, Any],
+) -> dict[str, Any]:
+    result = _empty_operations_page()
+    statuses = Counter(_status(row) for row in rows)
+    executable = [row for row in rows if _status(row) in {"succeeded", "failed"}]
+    durations = [_num(row, "duration_seconds") for row in executable]
+    executable_count = statuses.get("succeeded", 0) + statuses.get("failed", 0)
+    result.update({
+        "windows": _operation_windows(rows, jobs, timezone_info=timezone_info),
+        "dataflows_by_date_status": _status_by_date(rows, trend_context=trend_context),
+        "dataflow_duration_by_stage": _dataflow_duration_by_group(
+            rows,
+            "stage",
+            lambda row: str(row.get("stage") or "unknown"),
+            limit=100,
+        ),
+        "dataflow_duration_stats": _duration_stats(executable),
+        "phase_health_by_stage": _phase_health_by_stage(rows),
+        "dataflow_endpoint_health": _dataflow_endpoint_health(rows),
+        "dataflow_name_status_health": _dataflow_name_status_health(rows),
+        "dataflow_kpis": {
+            "total_dataflows": len(rows),
+            "succeeded": statuses.get("succeeded", 0),
+            "failed": statuses.get("failed", 0),
+            "skipped": statuses.get("skipped", 0),
+            "pending": statuses.get("pending", 0),
+            "running": statuses.get("running", 0),
+            "success_rate": _rate(statuses.get("succeeded", 0), executable_count),
+            "failure_rate": _rate(statuses.get("failed", 0), executable_count),
+            "skip_rate": _rate(statuses.get("skipped", 0), len(rows)),
+            "pending_rate": _rate(statuses.get("pending", 0), len(rows)),
+            "running_rate": _rate(statuses.get("running", 0), len(rows)),
+            "total_bytes_written": _sum(rows, "destination_bytes_added"),
+            "avg_duration_seconds": _avg(durations),
+            "p95_duration_seconds": _percentile_clean(durations, 0.95),
+            "active_engines": len({row.get("engine_name") for row in rows if row.get("engine_name")}),
+        },
+    })
+    return result
+
+
+def _environment_overview_operations_page(
+    rows: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    trend_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Return only the monitoring fields consumed by Environment Overview."""
+    result = _empty_operations_page()
+    job_statuses = Counter(_status(job) for job in jobs)
+    dataflow_statuses = Counter(_status(row) for row in rows)
+    executable_dataflows = dataflow_statuses.get("succeeded", 0) + dataflow_statuses.get("failed", 0)
+    result["kpis"] = {"total_failures": job_statuses.get("failed", 0)}
+    result["dataflow_kpis"] = {
+        "success_rate": _rate(dataflow_statuses.get("succeeded", 0), executable_dataflows),
+    }
+    result["jobs_by_date_status"] = _status_by_date(jobs, trend_context=trend_context)
+    return result
+
+
+def _dataflows_volume_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    result = _empty_volume_page()
+    bytes_added = _sum(rows, "destination_bytes_added")
+    bytes_removed = _sum(rows, "destination_bytes_removed")
+    result["kpis"] = {
+        "total_rows_read": _sum(rows, "source_rows_read"),
+        "total_rows_written": _sum(rows, "destination_rows_written"),
+        "net_bytes_change": bytes_added - bytes_removed,
+    }
+    return result
+
+
+def _overview_volume_page(
+    rows: list[dict[str, Any]],
+    trend_context: dict[str, Any],
+) -> dict[str, Any]:
+    result = _empty_volume_page()
+    result["rows_by_date"] = _rows_by_date(rows, trend_context=trend_context)
+    result["bytes_by_date"] = _bytes_by_date(rows, trend_context=trend_context)
+    return result
+
+
+def _overview_performance_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute only the performance signals consumed by the Overview attention queue."""
+    executable = [
+        row
+        for row in rows
+        if _status(row) in {"succeeded", "failed"} and _num(row, "duration_seconds") is not None
+    ]
+    duration_stats = _duration_stats(executable)
+    thresholds_by_operation = _performance_thresholds_by_operation(executable)
+    candidate_count = sum(
+        1
+        for row in executable
+        if _performance_enriched_run(
+            row,
+            thresholds_by_operation.get(
+                _dataflow_operation_type(row),
+                thresholds_by_operation["__all__"],
+            ),
+        ).get("performance_candidate_code")
+    )
+    result = _empty_performance_page()
+    result["kpis"] = {
+        "p50_duration_seconds": duration_stats.get("p50_duration_seconds", 0),
+        "p95_duration_seconds": duration_stats.get("p95_duration_seconds", 0),
+        "duration_pressure_ratio": _safe_ratio(
+            duration_stats.get("p95_duration_seconds", 0) or 0,
+            duration_stats.get("p50_duration_seconds", 0) or 0,
+        ),
+        "optimization_candidate_count": candidate_count,
+    }
+    result["duration_by_stage"] = _duration_by_stage(executable)
+    return result
+
+
+def _overview_freshness_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute only freshness signals consumed by Overview attention."""
+    etl_rows = [row for row in rows if _dataflow_operation_type(row) == "etl"]
+    freshness_rows = [row for row in etl_rows if _status(row) in {"succeeded", "skipped"}]
+    latest_freshness = _latest_freshness_by_dataflow(freshness_rows)
+    stale_candidates = _stale_freshness_candidates_from_latest(
+        latest_freshness,
+        days=_FRESHNESS_STALE_DAYS,
+    )
+    unchanged_watermarks = sum(
+        1
+        for row in etl_rows
+        if _has_watermark(row) and _watermark_movement_row(row)["movement"] == "unchanged"
+    )
+    result = _empty_freshness_page()
+    result["kpis"] = {
+        "stale_candidates": len(stale_candidates),
+        "watermark_unchanged_runs": unchanged_watermarks,
+    }
+    return result
+
+
+def _overview_diagnostics_page(
+    rows: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Compute only linkage/cache signals consumed by Overview attention."""
+    context = _diagnostics_context(rows, jobs)
+    source_coverage = _diagnostics_source_coverage(rows, jobs, errors)
+    result = _empty_diagnostics_page()
+    result["kpis"] = {
+        "orphan_dataflow_job_ids": len(context["orphan_job_ids"]),
+        "jobs_without_dataflow_records": len(context["job_only_ids"]),
+        "cache_warning_count": sum(1 for row in source_coverage if row.get("warning_count")),
+    }
+    return result
 
 
 def dataflow_logs(
@@ -153,7 +472,7 @@ def dataflow_logs(
                 "errors": errors,
                 "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
             }
-    enabled_paths = [path.uri for path in paths if path.enabled]
+    enabled_paths = _enabled_etl_paths(paths)
     rows, errors = read_dataflow_logs(enabled_paths)
     jobs, job_errors = read_job_logs(enabled_paths)
     job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
@@ -194,7 +513,7 @@ def job_logs(
                 "errors": errors,
                 "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
             }
-    enabled_paths = [path.uri for path in paths if path.enabled]
+    enabled_paths = _enabled_etl_paths(paths)
     rows, errors = read_job_logs(enabled_paths)
     all_dataflow_rows, dataflow_errors = read_dataflow_logs(enabled_paths)
     dataflow_rows: list[dict[str, Any]] = []
@@ -210,23 +529,70 @@ def job_logs(
 
 
 def latest_status(paths: list[EnvironmentSource], session: Session | None = None) -> dict[str, Any]:
-    if session is not None:
-        cached = cached_dataflow_logs(session, paths)
-        if cached is not None:
-            rows, errors = cached
+    environment_id = paths[0].environment_id if paths else None
+    parameters_fingerprint = empty_parameters_fingerprint()
+    input_fingerprint = _latest_runs_input_fingerprint(session, paths) if session is not None else ""
+    if session is not None and environment_id is not None:
+        cached_model = cached_read_model(
+            session,
+            environment_id=environment_id,
+            model_key=LINEAGE_LATEST_RUNS,
+            parameters_fingerprint=parameters_fingerprint,
+            input_fingerprint=input_fingerprint,
+            producer_version=_LATEST_RUNS_PRODUCER_VERSION,
+        )
+        if cached_model is not None:
+            return cached_model.payload
+
+    build_key = f"{environment_id}:{LINEAGE_LATEST_RUNS}:{parameters_fingerprint}"
+    lock = read_model_build_lock(build_key) if session is not None and environment_id is not None else nullcontext()
+    with lock:
+        if session is not None and environment_id is not None:
+            input_fingerprint = _latest_runs_input_fingerprint(session, paths)
+            cached_model = cached_read_model(
+                session,
+                environment_id=environment_id,
+                model_key=LINEAGE_LATEST_RUNS,
+                parameters_fingerprint=parameters_fingerprint,
+                input_fingerprint=input_fingerprint,
+                producer_version=_LATEST_RUNS_PRODUCER_VERSION,
+            )
+            if cached_model is not None:
+                return cached_model.payload
+            focused = query_cached_latest_dataflow_runs(session, paths)
         else:
-            enabled_paths = [path.uri for path in paths if path.enabled]
-            rows, errors = read_dataflow_logs(enabled_paths)
-    else:
-        enabled_paths = [path.uri for path in paths if path.enabled]
-        rows, errors = read_dataflow_logs(enabled_paths)
-    latest: dict[str, dict[str, Any]] = {}
+            focused = None
+        if focused is not None:
+            rows, ambiguous_names, errors = focused
+        else:
+            rows, errors = read_dataflow_logs(_enabled_etl_paths(paths))
+            ambiguous_names = None
+        response = _latest_runs_response(rows, errors, ambiguous_names)
+        if session is not None and environment_id is not None:
+            replace_read_model(
+                session,
+                environment_id=environment_id,
+                model_key=LINEAGE_LATEST_RUNS,
+                parameters_fingerprint=parameters_fingerprint,
+                input_fingerprint=input_fingerprint,
+                producer_version=_LATEST_RUNS_PRODUCER_VERSION,
+                payload=response,
+            )
+        return response
+
+
+def latest_status_etag(session: Session, paths: list[EnvironmentSource]) -> str:
+    return f'"{_latest_runs_input_fingerprint(session, paths)}:{_LATEST_RUNS_PRODUCER_VERSION}"'
+
+
+def _latest_runs_response(
+    rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    known_ambiguous_names: list[str] | None,
+) -> dict[str, Any]:
     latest_by_id: dict[str, dict[str, Any]] = {}
     rows_by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = row.get("dataflow_name") or row.get("dataflow_id")
-        if key and (key not in latest or _is_later(row, latest[key])):
-            latest[key] = row
         dataflow_id = row.get("dataflow_id")
         if dataflow_id and (
             str(dataflow_id) not in latest_by_id
@@ -238,23 +604,55 @@ def latest_status(paths: list[EnvironmentSource], session: Session | None = None
             rows_by_name[str(dataflow_name)].append(row)
 
     latest_by_name: dict[str, dict[str, Any]] = {}
-    ambiguous_names = []
+    ambiguous_names = set(known_ambiguous_names or [])
     for name, items in rows_by_name.items():
         ids = {str(item["dataflow_id"]) for item in items if item.get("dataflow_id")}
-        if len(ids) > 1:
-            ambiguous_names.append(name)
+        if name in ambiguous_names or len(ids) > 1:
+            ambiguous_names.add(name)
             continue
         latest_by_name[name] = max(
             items,
             key=lambda item: _time_value(item.get("end_time") or item.get("start_time")),
         )
     return {
-        "latest": latest,
         "latest_by_id": latest_by_id,
         "latest_by_name": latest_by_name,
         "ambiguous_names": sorted(ambiguous_names),
         "errors": errors,
     }
+
+
+def monitoring_input_fingerprint(session: Session, paths: list[EnvironmentSource]) -> str:
+    enabled = sorted((path for path in paths if path.enabled), key=lambda item: item.id)
+    source_ids = [path.id for path in enabled]
+    manifests = [] if not source_ids else list(
+        session.scalars(
+            select(LogFileManifest)
+            .where(LogFileManifest.source_id.in_(source_ids))
+            .order_by(LogFileManifest.source_id, LogFileManifest.file_uri, LogFileManifest.id)
+        )
+    )
+    return fingerprint({
+        "sources": [
+            {"id": path.id, "uri": path.uri, "config": path.source_config_json}
+            for path in enabled
+        ],
+        "manifests": [
+            {
+                "id": item.id,
+                "source_id": item.source_id,
+                "file_uri": item.file_uri,
+                "revision": item.revision_json,
+                "row_count": item.row_count,
+                "status": item.status,
+            }
+            for item in manifests
+        ],
+    })
+
+
+def _latest_runs_input_fingerprint(session: Session, paths: list[EnvironmentSource]) -> str:
+    return monitoring_input_fingerprint(session, paths)
 
 
 def monitoring_filter_options(paths: list[EnvironmentSource], session: Session | None = None) -> dict[str, Any]:
@@ -290,15 +688,25 @@ def _normalize_monitoring_filters_for_timezone(
 ) -> dict[str, str]:
     normalized = dict(filters)
     range_value = (normalized.get("range") or "").strip().lower()
-    if range_value != "today":
-        return normalized
-
     active_timezone = timezone_info or timezone.utc
     now_value = now or datetime.now(active_timezone)
     if now_value.tzinfo is None:
         now_value = now_value.replace(tzinfo=active_timezone)
     else:
         now_value = now_value.astimezone(active_timezone)
+    if range_value in {"24h", "3d", "7d", "30d", "90d"}:
+        days = {"24h": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}[range_value]
+        boundary = (
+            now_value.replace(minute=0, second=0, microsecond=0)
+            if range_value == "24h"
+            else now_value.replace(hour=0, minute=0, second=0, microsecond=0)
+        )
+        normalized["_relativeStartTime"] = (
+            boundary - timedelta(days=days)
+        ).astimezone(timezone.utc).isoformat()
+        return normalized
+    if range_value != "today":
+        return normalized
 
     start_local = now_value.replace(hour=0, minute=0, second=0, microsecond=0)
     end_local = start_local + timedelta(days=1) - timedelta(microseconds=1)
@@ -318,7 +726,9 @@ def _matches_log_filters(row: dict[str, Any], filters: dict[str, str], include_d
             return False
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc) > timedelta(days=days):
+        relative_start = parse_utc_datetime(filters.get("_relativeStartTime"))
+        cutoff = relative_start or datetime.now(timezone.utc) - timedelta(days=days)
+        if timestamp.astimezone(timezone.utc) < cutoff:
             return False
     elif range_value == "custom":
         timestamp = _row_timestamp(row)
@@ -631,11 +1041,12 @@ def _tail_path(path: str) -> str:
 
 
 def _phase_health(row: dict[str, Any]) -> str:
-    phases = ("source", "transform", "destination")
-    for phase in phases:
+    execution_phases = ("source", "transform", "destination")
+    for phase in execution_phases:
         if str(row.get(f"{phase}_status") or "").lower() == "failed" or row.get(f"{phase}_error_message"):
             return f"{phase}_failed"
-    durations = {phase: _num(row, f"{phase}_duration_seconds") or 0 for phase in phases}
+    phases = (*execution_phases, "overhead")
+    durations = {phase: _performance_phase_duration(row, phase) for phase in phases}
     if any(durations.values()):
         slowest = max(durations.items(), key=lambda item: item[1])
         return f"{slowest[0]}_bottleneck"
@@ -774,21 +1185,66 @@ def _is_later(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
 def _monitoring_rows(
     paths: list[EnvironmentSource],
     session: Session | None = None,
+    enrich_for_investigation: bool = True,
+    filters: dict[str, str] | None = None,
+    report_columns: bool = False,
+    page: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     if session is not None:
-        cached = cached_monitoring_rows(session, paths)
+        dataflow_columns = _DATAFLOW_PAGE_COLUMNS.get(
+            page or "",
+            _DATAFLOW_REPORT_COLUMNS if report_columns else _DATAFLOW_SUMMARY_COLUMNS,
+        )
+        job_columns = (
+            _JOB_REPORT_COLUMNS
+            if page in {"jobs", "failures"} or (page is None and report_columns)
+            else _JOB_SUMMARY_COLUMNS
+        )
+        cached = (
+            query_cached_monitoring_rows(
+                session,
+                paths,
+                filters,
+                dataflow_columns=dataflow_columns,
+                job_columns=job_columns,
+            )
+            if filters is not None
+            else cached_monitoring_rows(
+                session,
+                paths,
+                dataflow_columns=_DATAFLOW_REPORT_COLUMNS if report_columns else (_DATAFLOW_SUMMARY_COLUMNS if not enrich_for_investigation else None),
+                job_columns=_JOB_REPORT_COLUMNS if report_columns else (_JOB_SUMMARY_COLUMNS if not enrich_for_investigation else None),
+            )
+        )
         if cached is not None:
             rows, jobs, errors = cached
+            if not enrich_for_investigation:
+                return rows, jobs, errors
             rows = [_enrich_dataflow_run_for_investigation(row) for row in rows]
             jobs = _enrich_job_runs_for_investigation(jobs, rows)
             return rows, jobs, errors
-    enabled_paths = [path.uri for path in paths if path.enabled]
+    enabled_paths = _enabled_etl_paths(paths)
     rows, dataflow_errors = read_dataflow_logs(enabled_paths)
     jobs, job_errors = read_job_logs(enabled_paths)
     job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
-    enriched = [_enrich_dataflow_run_for_investigation(_enrich_dataflow(row, job_by_id.get(row.get("job_id")))) for row in rows]
+    enriched = [_enrich_dataflow(row, job_by_id.get(row.get("job_id"))) for row in rows]
+    if filters is not None:
+        enriched = _filter_log_rows(enriched, filters, include_dataflow_filters=True)
+        jobs = _filter_log_rows(jobs, filters, include_dataflow_filters=False)
+    if not enrich_for_investigation:
+        return enriched, jobs, [*dataflow_errors, *job_errors]
+    enriched = [_enrich_dataflow_run_for_investigation(row) for row in enriched]
     jobs = _enrich_job_runs_for_investigation(jobs, enriched)
     return enriched, jobs, [*dataflow_errors, *job_errors]
+
+
+def _enabled_etl_paths(paths: list[EnvironmentSource]) -> list[str]:
+    return [
+        resolved.etl_logs_uri or path.uri
+        for path in paths
+        if path.enabled
+        for resolved in [resolve_log_source_paths(path)]
+    ]
 
 
 def _enrich_dataflow(row: dict[str, Any], job: dict[str, Any] | None) -> dict[str, Any]:
@@ -1286,11 +1742,49 @@ def _failure_phase_and_message(row: dict[str, Any]) -> tuple[str, str]:
     for phase, message in phase_messages:
         if _has_value(message):
             return phase, str(message)
+
+    top_level_message = ""
     for message_key in ("error_messages", "error_message"):
         message = row.get(message_key)
         if _has_value(message):
-            return "overhead", str(message)
+            top_level_message = str(message)
+            break
+
+    for phase in ("source", "transform", "destination"):
+        if str(row.get(f"{phase}_status") or "").strip().lower() == "failed":
+            return phase, top_level_message
+
+    if top_level_message:
+        return _failure_phase_from_message(top_level_message), top_level_message
     return "unknown", ""
+
+
+def _failure_phase_from_message(message: str) -> str:
+    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+    phase_patterns = {
+        "source": (
+            r"\bfailed to (?:read|load|fetch) (?:the )?source\b",
+            r"\bsource (?:read|load|fetch)(?: operation)? (?:failed|failure|error)\b",
+        ),
+        "transform": (
+            r"\bfailed to transform\b",
+            r"\btransform(?:er|ation)?(?: pipeline)? (?:failed|failure|error)\b",
+        ),
+        "destination": (
+            r"\bfailed to (?:write|load|save) (?:the )?destination\b",
+            r"\bdestination (?:write|load|save)(?: operation)? (?:failed|failure|error)\b",
+        ),
+        "overhead": (
+            r"\bscheduler\b",
+            r"\borchestrat(?:e|or|ion|ing)\b",
+            r"\bdispatch(?:er|ing)?\b",
+            r"\b(?:runtime|executor) (?:setup|initialization)\b",
+        ),
+    }
+    for phase, patterns in phase_patterns.items():
+        if any(re.search(pattern, text) for pattern in patterns):
+            return phase
+    return "unknown"
 
 
 def _failure_signature(category: str, phase: str, message: str) -> str:
@@ -1457,31 +1951,38 @@ def _failure_phase_value(row: dict[str, Any], phases: tuple[str, ...]) -> str:
     return phase if phase in phases else "unknown"
 
 
-def _performance_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    completed = [row for row in rows if _num(row, "duration_seconds") is not None]
-    durations = [_num(row, "duration_seconds") or 0 for row in completed]
-    duration_stats = _duration_stats(completed)
-    rows_processed_values = [_performance_rows_processed(row) for row in completed]
-    rows_processed_clean = [value for value in rows_processed_values if value > 0]
-    thresholds = {
-        "duration_p75_seconds": duration_stats.get("q3_duration_seconds", 0) or 0,
-        "duration_p95_seconds": duration_stats.get("p95_duration_seconds", 0) or 0,
-        "rows_processed_p50": _percentile(rows_processed_clean, 0.50),
-    }
-    completed = [_performance_enriched_run(row, thresholds) for row in completed]
+def _performance_page(
+    rows: list[dict[str, Any]],
+    trend_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    executable = [
+        row
+        for row in rows
+        if _status(row) in {"succeeded", "failed"} and _num(row, "duration_seconds") is not None
+    ]
+    durations = [_num(row, "duration_seconds") or 0 for row in executable]
+    duration_stats = _duration_stats(executable)
+    thresholds_by_operation = _performance_thresholds_by_operation(executable)
+    executable = [
+        _performance_enriched_run(
+            row,
+            thresholds_by_operation.get(_dataflow_operation_type(row), thresholds_by_operation["__all__"]),
+        )
+        for row in executable
+    ]
     candidate_counts: Counter[str] = Counter()
-    for row in completed:
+    for row in executable:
         for code in row.get("performance_candidate_codes") or []:
             candidate_counts[str(code)] += 1
-    phase_totals = _performance_phase_totals(completed)
+    phase_totals = _performance_phase_totals(executable)
     phase_total_duration = sum(phase_totals.values())
     bottleneck_phase = max(phase_totals.items(), key=lambda item: item[1])[0] if phase_total_duration > 0 else "unknown"
-    throughput_duration = sum(_num(row, "duration_seconds") or 0 for row in completed)
-    total_rows_read = _sum(completed, "source_rows_read")
-    total_rows_written = _sum(completed, "destination_rows_written")
+    throughput_duration = sum(_num(row, "duration_seconds") or 0 for row in executable)
+    total_rows_read = _sum(executable, "source_rows_read")
+    total_rows_written = _sum(executable, "destination_rows_written")
     return {
         "kpis": {
-            "run_count": len(completed),
+            "run_count": len(executable),
             "avg_duration_seconds": duration_stats.get("avg_duration_seconds", 0),
             "p50_duration_seconds": duration_stats.get("p50_duration_seconds", 0),
             "p75_duration_seconds": duration_stats.get("q3_duration_seconds", 0),
@@ -1492,10 +1993,10 @@ def _performance_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 duration_stats.get("p95_duration_seconds", 0) or 0,
                 duration_stats.get("p50_duration_seconds", 0) or 0,
             ),
-            "duration_outlier_count": sum(int(row.get("outlier_count") or 0) for row in _performance_duration_distribution_by_stage(completed, limit=None)),
+            "duration_outlier_count": sum(int(row.get("outlier_count") or 0) for row in _performance_duration_distribution_by_stage(executable, limit=None)),
             "slowest_run_duration_seconds": round(max(durations), 3) if durations else 0,
-            "slowest_run_dataflow_name": (max(completed, key=lambda row: _num(row, "duration_seconds") or 0).get("dataflow_name") if completed else None),
-            "slowest_run_stage": (max(completed, key=lambda row: _num(row, "duration_seconds") or 0).get("stage") if completed else None),
+            "slowest_run_dataflow_name": (max(executable, key=lambda row: _num(row, "duration_seconds") or 0).get("dataflow_name") if executable else None),
+            "slowest_run_stage": (max(executable, key=lambda row: _num(row, "duration_seconds") or 0).get("stage") if executable else None),
             "bottleneck_phase": bottleneck_phase,
             "source_duration_percent": _rate(phase_totals["source"], phase_total_duration),
             "transform_duration_percent": _rate(phase_totals["transform"], phase_total_duration),
@@ -1504,24 +2005,29 @@ def _performance_page(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "rows_read_per_second": _safe_ratio(total_rows_read, throughput_duration),
             "total_rows_read": total_rows_read,
             "total_rows_written": total_rows_written,
-            "optimization_candidate_count": sum(1 for row in completed if row.get("performance_candidate_code")),
+            "optimization_candidate_count": sum(1 for row in executable if row.get("performance_candidate_code")),
             "slow_small_workload_count": candidate_counts.get("slow_small_workload", 0),
+            "slow_small_maintenance_count": candidate_counts.get("slow_small_maintenance", 0),
             "high_overhead_count": candidate_counts.get("high_overhead", 0),
             "phase_skew_count": candidate_counts.get("phase_skew", 0),
         },
-        "duration_distribution_by_stage": _performance_duration_distribution_by_stage(completed),
-        "phase_contribution_by_stage_operation": _performance_phase_contribution_by_stage_operation(completed),
-        "workload_efficiency_points": _performance_workload_efficiency_points(completed),
-        "slowest_dataflow_profiles": _performance_slowest_dataflow_profiles(completed),
-        "runtime_context_profiles": _performance_runtime_context_profiles(completed),
-        "investigation_queue": _performance_investigation_queue(completed),
-        "duration_breakdown": _duration_breakdown(completed),
-        "duration_vs_rows": _duration_vs_rows(completed),
-        "slowest_dataflows": sorted(completed, key=lambda row: _num(row, "duration_seconds") or 0, reverse=True)[:25],
-        "slowest_dataflows_by_p95": _slowest_dataflows_by_p95(completed),
+        "duration_distribution_by_stage": _performance_duration_distribution_by_stage(executable),
+        "phase_contribution_by_stage_operation": _performance_phase_contribution_by_stage_operation(executable),
+        "workload_efficiency_points": _performance_workload_efficiency_points(executable),
+        "slowest_dataflow_profiles": _performance_slowest_dataflow_profiles(executable),
+        "runtime_context_profiles": _performance_runtime_context_profiles(executable),
+        "performance_trend": _performance_trend(executable, trend_context=trend_context),
+        "investigation_queue": [_compact_performance_evidence(row) for row in _performance_investigation_queue(executable)],
+        "duration_breakdown": _duration_breakdown(executable),
+        "duration_vs_rows": _duration_vs_rows(executable),
+        "slowest_dataflows": [
+            _compact_performance_evidence(row)
+            for row in sorted(executable, key=lambda row: _num(row, "duration_seconds") or 0, reverse=True)[:25]
+        ],
+        "slowest_dataflows_by_p95": _slowest_dataflows_by_p95(executable),
         "overview_p95_duration_seconds": _percentile(durations, 0.95),
-        "duration_by_stage": _duration_by_stage(completed),
-        "engine_stage_matrix": _engine_stage_matrix(completed),
+        "duration_by_stage": _duration_by_stage(executable),
+        "engine_stage_matrix": _engine_stage_matrix(executable),
     }
 
 
@@ -1538,6 +2044,8 @@ def _volume_page(rows: list[dict[str, Any]], jobs: list[dict[str, Any]], trend_c
     bytes_removed = _sum(rows, "destination_bytes_removed")
     lakehouse_runs = sum(1 for row in rows if _is_lakehouse_destination(row))
     high_volume_queue = _volume_investigation_queue(rows)
+    dataflow_registry = _volume_dataflow_registry(rows, high_volume_queue)
+    candidate_dataflows = [row for row in dataflow_registry if row.get("volume_candidate_priority", 0) > 0]
     return {
         "kpis": {
             "total_rows_read": rows_read_total,
@@ -1557,6 +2065,8 @@ def _volume_page(rows: list[dict[str, Any]], jobs: list[dict[str, Any]], trend_c
             "net_bytes_change": bytes_added - bytes_removed,
             "avg_bytes_per_file_added": round(bytes_added / files_added, 3) if files_added else 0,
             "high_volume_run_count": len(high_volume_queue),
+            "high_volume_dataflow_count": len(candidate_dataflows),
+            "high_volume_candidate_run_count": len(high_volume_queue),
             "high_volume_rows_count": sum(1 for row in high_volume_queue if row.get("volume_candidate_kind") == "read"),
             "high_volume_est_rows_count": sum(1 for row in high_volume_queue if row.get("volume_candidate_kind") == "est_rows"),
             "high_volume_lakehouse_rows_count": sum(1 for row in high_volume_queue if row.get("volume_candidate_kind") == "lakehouse_rows"),
@@ -1575,7 +2085,7 @@ def _volume_page(rows: list[dict[str, Any]], jobs: list[dict[str, Any]], trend_c
         "top_dataflows_by_rows_written": _top_dataflow_sum(rows, "destination_rows_written", limit=20),
         "top_dataflows_by_bytes_added": _top_dataflow_sum(rows, "destination_bytes_added", limit=20),
         "top_dataflows_by_net_bytes": _top_dataflow_net_bytes(rows, limit=20),
-        "investigation_queue": high_volume_queue,
+        "dataflow_registry": [_compact_volume_registry_row(row) for row in dataflow_registry],
     }
 
 
@@ -1607,7 +2117,6 @@ def _maintenance_page(rows: list[dict[str, Any]], trend_context: dict[str, Any] 
         lagged_tables=lagged_tables,
     )
     table_attention = _maintenance_table_attention(table_registry)
-    investigation_queue = _maintenance_investigation_queue(maintenance)
     return {
         "kpis": {
             "total_maintenance_runs": len(maintenance),
@@ -1643,13 +2152,8 @@ def _maintenance_page(rows: list[dict[str, Any]], trend_context: dict[str, Any] 
         "reclaim_by_date": _maintenance_reclaim_by_date(maintenance, trend_context=trend_context),
         "table_registry": table_registry,
         "table_attention": table_attention,
-        "table_outcome": table_registry,
-        "efficiency_points": _maintenance_table_efficiency_points(table_registry),
         "table_efficiency_points": _maintenance_table_efficiency_points(table_registry),
-        "investigation_queue": investigation_queue,
         "format_comparison": _maintenance_format_comparison(maintenance),
-        "per_table": table_registry,
-        "duration_vs_files_removed": _maintenance_table_efficiency_points(table_registry),
         "bytes_reclaimed_by_date": _maintenance_reclaim_by_date(maintenance, trend_context=trend_context),
     }
 
@@ -1845,7 +2349,13 @@ def _diagnostics_page(
     job_only_count = len(context["job_only_ids"])
     matched_count = len(context["matched_ids"])
     union_count = len(context["all_job_ids"])
-    field_issues = sum(1 for row in field_completeness if float(row.get("completeness_rate") or 100) < 95)
+    field_issues = sum(
+        1
+        for row in field_completeness
+        if row.get("actionable")
+        and float(row.get("completeness_rate") if row.get("completeness_rate") is not None else 100) < 95
+    )
+    conditional_evidence_groups = sum(1 for row in field_completeness if row.get("applicability") == "conditional")
     cache_partial_sources = sum(1 for row in source_coverage if row.get("warning_count"))
     health_status = _diagnostics_health_status(
         rows,
@@ -1869,6 +2379,7 @@ def _diagnostics_page(
             "cache_warning_count": cache_partial_sources,
             "field_readiness_rate": _diagnostics_field_readiness_rate(field_completeness),
             "field_readiness_issues": field_issues,
+            "conditional_evidence_groups": conditional_evidence_groups,
         },
         "record_evidence_by_date": record_evidence,
         "job_linkage_summary": _diagnostics_job_linkage_summary(context),
@@ -2048,6 +2559,8 @@ def _diagnostics_bucket_label(value: datetime, grain: str) -> str:
 
 
 def _diagnostics_job_linkage_summary(context: dict[str, Any]) -> list[dict[str, Any]]:
+    orphan_count = len(context["orphan_job_ids"])
+    job_only_count = len(context["job_only_ids"])
     return [
         {
             "category": "matched",
@@ -2059,16 +2572,16 @@ def _diagnostics_job_linkage_summary(context: dict[str, Any]) -> list[dict[str, 
         {
             "category": "orphan_dataflow_job_id",
             "label": "Orphan dataflow job IDs",
-            "count": len(context["orphan_job_ids"]),
-            "share": _rate(len(context["orphan_job_ids"]), len(context["all_job_ids"])),
-            "severity": "bad",
+            "count": orphan_count,
+            "share": _rate(orphan_count, len(context["all_job_ids"])),
+            "severity": "bad" if orphan_count else "good",
         },
         {
             "category": "job_without_dataflow_records",
             "label": "Job-only IDs",
-            "count": len(context["job_only_ids"]),
-            "share": _rate(len(context["job_only_ids"]), len(context["all_job_ids"])),
-            "severity": "warning",
+            "count": job_only_count,
+            "share": _rate(job_only_count, len(context["all_job_ids"])),
+            "severity": "warning" if job_only_count else "good",
         },
     ]
 
@@ -2098,21 +2611,21 @@ def _diagnostics_reconciliation_by_metric(reconciliation: dict[str, Any]) -> lis
 
 def _diagnostics_field_completeness(rows: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups = [
-        ("identity/linkage", "dataflow", rows, ("job_id", "dataflow_id", "dataflow_run_id", "dataflow_name")),
-        ("time/status", "dataflow", rows, ("status", "start_time", "end_time")),
-        ("runtime duration", "dataflow", rows, ("duration_seconds", "source_duration_seconds", "transform_duration_seconds", "destination_duration_seconds")),
-        ("source evidence", "dataflow", rows, ("source_name", "source_connection_type", "source_rows_read")),
-        ("destination evidence", "dataflow", rows, ("destination_name", "destination_connection_type", "destination_load_type")),
-        ("watermark evidence", "dataflow", rows, ("source_watermark_columns", "source_watermark_before", "source_watermark_after")),
-        ("maintenance evidence", "dataflow", rows, ("destination_operation_type", "destination_files_removed", "destination_bytes_removed")),
-        ("identity/linkage", "job", jobs, ("job_id",)),
-        ("time/status", "job", jobs, ("status", "start_time", "end_time")),
-        ("runtime duration", "job", jobs, ("duration_seconds",)),
-        ("job totals", "job", jobs, ("total_dataflows", "total_succeeded", "total_failed", "total_skipped")),
-        ("runtime context", "job", jobs, ("engine_name", "metadata_provider_name", "platform_name")),
+        ("identity/linkage", "dataflow", rows, ("job_id", "dataflow_id", "dataflow_run_id", "dataflow_name"), "universal"),
+        ("time/status", "dataflow", rows, ("status", "start_time", "end_time"), "universal"),
+        ("runtime duration", "dataflow", rows, ("duration_seconds", "source_duration_seconds", "transform_duration_seconds", "destination_duration_seconds"), "universal"),
+        ("source evidence", "dataflow", rows, ("source_name", "source_connection_type", "source_rows_read"), "universal"),
+        ("destination evidence", "dataflow", rows, ("destination_name", "destination_connection_type", "destination_load_type"), "universal"),
+        ("watermark evidence", "dataflow", rows, ("source_watermark_columns", "source_watermark_before", "source_watermark_after"), "conditional"),
+        ("maintenance evidence", "dataflow", rows, ("destination_operation_type", "destination_files_removed", "destination_bytes_removed"), "conditional"),
+        ("identity/linkage", "job", jobs, ("job_id",), "universal"),
+        ("time/status", "job", jobs, ("status", "start_time", "end_time"), "universal"),
+        ("runtime duration", "job", jobs, ("duration_seconds",), "universal"),
+        ("job totals", "job", jobs, ("total_dataflows", "total_succeeded", "total_failed", "total_skipped"), "universal"),
+        ("runtime context", "job", jobs, ("engine_name", "metadata_provider_name", "platform_name"), "universal"),
     ]
     result = []
-    for group, record_type, items, fields in groups:
+    for group, record_type, items, fields, applicability in groups:
         total_slots = len(items) * len(fields)
         present = sum(1 for item in items for field in fields if _has_value(item.get(field)))
         missing = max(0, total_slots - present)
@@ -2127,6 +2640,8 @@ def _diagnostics_field_completeness(rows: list[dict[str, Any]], jobs: list[dict[
             "missing_values": missing,
             "completeness_rate": completeness,
             "severity": _diagnostics_completeness_severity(completeness, len(items)),
+            "applicability": applicability,
+            "actionable": applicability == "universal",
         })
     return result
 
@@ -2269,6 +2784,8 @@ def _diagnostics_investigation_queue(
             action_hint="Inspect the job drawer and child dataflow records.",
         ))
     for row in field_completeness:
+        if not row.get("actionable"):
+            continue
         severity = str(row.get("severity") or "good")
         if severity not in {"bad", "warning"}:
             continue
@@ -2438,29 +2955,33 @@ def _attention_queue(
     reconciliation: dict[str, Any],
     freshness: dict[str, Any],
     health: dict[str, Any],
+    operations: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     repeated_failure_min_errors = 3
     stale_log_warning_days = 7
     slow_stage_info_min_p95_seconds = 60
     max_attention_items = 8
     items = []
+    operations = operations or {}
+    diagnostics = diagnostics or {}
     if coverage.get("read_errors"):
-        items.append(_attention("bad", "log_read_errors", "Review log read errors", f"{coverage['read_errors']} read errors were found.", "diagnostics"))
+        items.append(_attention("bad", "log_read_errors", "Review log read errors", f"{coverage['read_errors']} read errors were found.", "diagnostics", {"impact": coverage["read_errors"]}))
     failed_jobs_3 = int(health.get("failed_jobs_last_3_days") or 0)
     failed_jobs_7 = int(health.get("failed_jobs_last_7_days") or 0)
     failed_dataflows_3 = int(health.get("failed_dataflows_last_3_days") or 0)
     failed_dataflows_7 = int(health.get("failed_dataflows_last_7_days") or 0)
     if failed_jobs_3:
-        items.append(_attention("bad", "recent_failed_jobs", "Review recent failed jobs", f"{failed_jobs_3} jobs failed in the last 3 days.", "jobs"))
+        items.append(_attention("bad", "recent_failed_jobs", "Review recent failed jobs", f"{failed_jobs_3} jobs failed in the last 3 days.", "jobs", {"impact": failed_jobs_3}))
     elif failed_jobs_7:
-        items.append(_attention("warning", "recent_failed_jobs", "Review recent failed jobs", f"{failed_jobs_7} jobs failed in the last 7 days.", "jobs"))
+        items.append(_attention("warning", "recent_failed_jobs", "Review recent failed jobs", f"{failed_jobs_7} jobs failed in the last 7 days.", "jobs", {"impact": failed_jobs_7}))
     if failed_dataflows_3:
-        items.append(_attention("bad", "recent_failed_dataflows", "Review recent failed dataflows", f"{failed_dataflows_3} dataflow runs failed in the last 3 days.", "failures"))
+        items.append(_attention("bad", "recent_failed_dataflows", "Review recent failed dataflows", f"{failed_dataflows_3} dataflow runs failed in the last 3 days.", "failures", {"impact": failed_dataflows_3}))
     elif failed_dataflows_7:
-        items.append(_attention("warning", "recent_failed_dataflows", "Review recent failed dataflows", f"{failed_dataflows_7} dataflow runs failed in the last 7 days.", "failures"))
+        items.append(_attention("warning", "recent_failed_dataflows", "Review recent failed dataflows", f"{failed_dataflows_7} dataflow runs failed in the last 7 days.", "failures", {"impact": failed_dataflows_7}))
     top_failure = _first(failures.get("top_failing_dataflows"))
     if top_failure and int(top_failure.get("error_count") or 0) >= repeated_failure_min_errors:
-        items.append(_attention("bad", "repeated_failure", "Repeated dataflow failure", f"{top_failure.get('dataflow_name')} failed {top_failure.get('error_count')} times.", "failures", top_failure))
+        items.append(_attention("bad", "repeated_failure", "Repeated dataflow failure", f"{top_failure.get('dataflow_name')} failed {top_failure.get('error_count')} times.", "failures", {**top_failure, "impact": top_failure.get("error_count")}))
     if health.get("status") == "no_log_evidence":
         items.append(_attention("warning", "no_log_evidence", "No log evidence", "No monitoring logs were found in current filters.", "overview"))
     if health.get("latest_log_age_days") and health["latest_log_age_days"] > stale_log_warning_days:
@@ -2474,19 +2995,72 @@ def _attention_queue(
         items.append(_attention("warning", "maintenance_failed", "Review failed maintenance", f"{maintenance_failed_14} maintenance operations failed in the last 14 days.", "maintenance"))
     if maintenance_skipped_7:
         items.append(_attention("warning", "maintenance_skipped", "Review skipped maintenance", f"{maintenance_skipped_7} maintenance operations were skipped in the last 7 days.", "maintenance"))
+    maintenance_kpis = maintenance.get("kpis", {})
+    maintenance_missing = int(maintenance_kpis.get("coverage_missing_tables") or 0)
+    maintenance_lagged = int(maintenance_kpis.get("lagged_tables") or 0)
+    maintenance_active = int(maintenance_kpis.get("latest_active_tables") or 0)
+    if maintenance_missing:
+        items.append(_attention("warning", "maintenance_coverage", "Review maintenance coverage", f"{maintenance_missing} active lakehouse tables have no maintenance evidence.", "maintenance", {"impact": maintenance_missing}))
+    if maintenance_lagged:
+        items.append(_attention("warning", "maintenance_lag", "Review maintenance lag", f"{maintenance_lagged} tables exceed the maintenance lag threshold.", "maintenance", {"impact": maintenance_lagged}))
+    if maintenance_active:
+        items.append(_attention("info", "maintenance_active", "Inspect active maintenance", f"{maintenance_active} table maintenance targets are running or pending.", "maintenance", {"impact": maintenance_active}))
     freshness_kpis = freshness.get("kpis", {})
     if freshness_kpis.get("stale_candidates"):
         items.append(_attention("warning", "stale_dataflows", "Review stale dataflows", f"{freshness_kpis['stale_candidates']} stale dataflow candidates were detected.", "freshness"))
     if freshness_kpis.get("watermark_unchanged_runs"):
         items.append(_attention("warning", "watermark_not_advanced", "Review unchanged watermarks", f"{freshness_kpis['watermark_unchanged_runs']} runs did not advance watermark values.", "freshness"))
+    performance_kpis = performance.get("kpis", {})
+    pressure_ratio = _num(performance_kpis, "duration_pressure_ratio") or 0
+    pressure_p95 = _num(performance_kpis, "p95_duration_seconds") or 0
+    pressure_severity = "bad" if pressure_ratio >= 10 and pressure_p95 >= 60 else "warning" if pressure_ratio >= 5 and pressure_p95 >= 30 else None
+    if pressure_severity:
+        items.append(_attention(pressure_severity, "performance_pressure", "Review performance pressure", f"P95 is {round(pressure_ratio, 1)}x P50 at {_format_seconds(pressure_p95)}.", "performance", {"impact": pressure_ratio, "p95_duration_seconds": pressure_p95}))
+    optimization_candidates = int(performance_kpis.get("optimization_candidate_count") or 0)
+    if optimization_candidates:
+        items.append(_attention("warning", "optimization_candidates", "Review optimization candidates", f"{optimization_candidates} dataflow runs match performance optimization rules.", "performance", {"impact": optimization_candidates}))
     slowest_stage = _first(performance.get("duration_by_stage"))
-    if slowest_stage and (_num(slowest_stage, "p95_duration_seconds") or 0) >= slow_stage_info_min_p95_seconds:
+    if not pressure_severity and slowest_stage and (_num(slowest_stage, "p95_duration_seconds") or 0) >= slow_stage_info_min_p95_seconds:
         items.append(_attention("info", "slowest_stage", "Inspect slowest stage", f"{slowest_stage.get('stage')} has p95 duration {_format_seconds(_num(slowest_stage, 'p95_duration_seconds') or 0)}.", "performance", slowest_stage))
     if reconciliation.get("mismatch_count"):
         items.append(_attention("warning", "log_reconciliation", "Review log consistency", f"{reconciliation['mismatch_count']} job totals differ from dataflow rollups.", "diagnostics"))
-    if not items and (rows or jobs):
-        items.append(_attention("good", "no_immediate_issues", "No immediate monitoring issues", "The current log evidence does not show urgent failures.", "overview"))
-    return items[:max_attention_items]
+    diagnostics_kpis = diagnostics.get("kpis", {})
+    linkage_gaps = int(diagnostics_kpis.get("orphan_dataflow_job_ids") or 0) + int(diagnostics_kpis.get("jobs_without_dataflow_records") or 0)
+    if linkage_gaps:
+        items.append(_attention("bad", "job_linkage_gaps", "Review job linkage gaps", f"{linkage_gaps} job IDs are not linked across job and dataflow logs.", "diagnostics", {"impact": linkage_gaps}))
+    cache_warnings = int(diagnostics_kpis.get("cache_warning_count") or 0)
+    if cache_warnings:
+        items.append(_attention("warning", "log_cache_warnings", "Review log cache warnings", f"{cache_warnings} log sources have partial cache or read coverage.", "diagnostics", {"impact": cache_warnings}))
+    dataflow_kpis = operations.get("dataflow_kpis", {})
+    active_dataflows = int(dataflow_kpis.get("running") or 0) + int(dataflow_kpis.get("pending") or 0)
+    if active_dataflows:
+        items.append(_attention("info", "active_dataflows", "Inspect active dataflows", f"{active_dataflows} dataflow runs are running or pending in the current filters.", "dataflows", {"impact": active_dataflows}))
+    runtime_contexts = operations.get("jobs_by_engine_provider", [])
+    unhealthy_contexts = [context for context in runtime_contexts if int(context.get("failed") or 0) > 0 and (_num(context, "success_rate") or 0) < 95]
+    if unhealthy_contexts:
+        context = min(unhealthy_contexts, key=lambda item: (_num(item, "success_rate") or 0, -int(item.get("failed") or 0)))
+        context_name = " / ".join(str(context.get(key) or "unknown") for key in ("engine_name", "metadata_provider_name"))
+        context_success_rate = round(_num(context, "success_rate") or 0, 1)
+        items.append(_attention("warning", "runtime_context_health", "Review runtime context health", f"{context_name} is at {context_success_rate}% success.", "jobs", {**context, "impact": context.get("failed")}))
+    return _prioritize_attention(items, limit=max_attention_items)
+
+
+def _prioritize_attention(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    severity_rank = {"bad": 0, "warning": 1, "info": 2, "good": 3}
+    by_code: dict[str, dict[str, Any]] = {}
+    for item in items:
+        code = str(item.get("code") or "")
+        current = by_code.get(code)
+        if current is None or severity_rank.get(str(item.get("severity")), 4) < severity_rank.get(str(current.get("severity")), 4):
+            by_code[code] = item
+    return sorted(
+        by_code.values(),
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity")), 4),
+            -float((item.get("evidence") or {}).get("impact") or 0),
+            str(item.get("title") or ""),
+        ),
+    )[:limit]
 
 
 def _attention(
@@ -2533,6 +3107,7 @@ def _metric_definitions() -> dict[str, dict[str, str]]:
 
 def _performance_enriched_run(row: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
     rows_processed = _performance_rows_processed(row)
+    maintenance_bytes, maintenance_files = _performance_maintenance_workload(row)
     source_duration = _performance_phase_duration(row, "source")
     transform_duration = _performance_phase_duration(row, "transform")
     destination_duration = _performance_phase_duration(row, "destination")
@@ -2548,6 +3123,9 @@ def _performance_enriched_run(row: dict[str, Any], thresholds: dict[str, float])
     matched_reasons = _performance_candidate_reasons(
         duration=duration,
         rows_processed=rows_processed,
+        operation_type=_dataflow_operation_type(row),
+        maintenance_bytes=maintenance_bytes,
+        maintenance_files=maintenance_files,
         phase_totals=phase_totals,
         thresholds=thresholds,
     )
@@ -2555,6 +3133,8 @@ def _performance_enriched_run(row: dict[str, Any], thresholds: dict[str, float])
     return {
         **row,
         "rows_processed": rows_processed,
+        "maintenance_bytes_processed": maintenance_bytes,
+        "maintenance_files_processed": maintenance_files,
         "rows_read_per_second": _safe_ratio(_num(row, "source_rows_read") or 0, duration),
         "lakehouse_bytes_moved": (_num(row, "destination_bytes_added") or 0) + (_num(row, "destination_bytes_removed") or 0),
         "source_duration_seconds": source_duration,
@@ -2563,6 +3143,7 @@ def _performance_enriched_run(row: dict[str, Any], thresholds: dict[str, float])
         "overhead_duration_seconds": overhead_duration,
         "performance_bottleneck_phase": bottleneck_phase,
         "performance_candidate_codes": [reason[0] for reason in matched_reasons],
+        "performance_candidate_reasons": [reason[1] for reason in matched_reasons],
         "performance_candidate_code": primary_reason[0],
         "performance_candidate_reason": primary_reason[1],
         "performance_candidate_priority": primary_reason[2],
@@ -2573,25 +3154,75 @@ def _performance_candidate_reasons(
     *,
     duration: float,
     rows_processed: float,
+    operation_type: str,
+    maintenance_bytes: float,
+    maintenance_files: float,
     phase_totals: dict[str, float],
     thresholds: dict[str, float],
 ) -> list[tuple[str, str, int]]:
     duration_p75 = thresholds.get("duration_p75_seconds", 0) or 0
     duration_p95 = thresholds.get("duration_p95_seconds", 0) or 0
     rows_p50 = thresholds.get("rows_processed_p50", 0) or 0
+    maintenance_bytes_p50 = thresholds.get("maintenance_bytes_p50", 0) or 0
+    maintenance_files_p50 = thresholds.get("maintenance_files_p50", 0) or 0
     total_phase_duration = sum(phase_totals.values())
     overhead_share = _safe_ratio(phase_totals.get("overhead", 0), total_phase_duration)
     largest_phase = max(phase_totals.items(), key=lambda item: item[1]) if total_phase_duration > 0 else ("unknown", 0)
     largest_phase_share = _safe_ratio(largest_phase[1], total_phase_duration)
 
     reasons: list[tuple[str, str, int]] = []
-    if rows_p50 > 0 and rows_processed <= rows_p50 and duration_p95 > 0 and duration >= duration_p95:
+    is_maintenance = operation_type == "maintenance"
+    if not is_maintenance and rows_p50 > 0 and 0 < rows_processed <= rows_p50 and duration_p95 > 0 and duration >= duration_p95:
         reasons.append(("slow_small_workload", "Slow small workload", 300))
+    maintenance_is_small = (
+        maintenance_bytes_p50 > 0 and 0 < maintenance_bytes <= maintenance_bytes_p50
+    ) or (
+        maintenance_bytes <= 0
+        and maintenance_files_p50 > 0
+        and 0 < maintenance_files <= maintenance_files_p50
+    )
+    if is_maintenance and maintenance_is_small and duration_p95 > 0 and duration >= duration_p95:
+        reasons.append(("slow_small_maintenance", "Slow small maintenance workload", 300))
     if duration_p75 > 0 and duration >= duration_p75 and overhead_share >= 0.20:
         reasons.append(("high_overhead", "High overhead", 200))
-    if duration_p75 > 0 and duration >= duration_p75 and largest_phase_share >= 0.90:
+    if not is_maintenance and duration_p75 > 0 and duration >= duration_p75 and largest_phase_share >= 0.90:
         reasons.append(("phase_skew", f"{_title_word(largest_phase[0])} phase skew", 100))
     return sorted(reasons, key=lambda reason: reason[2], reverse=True)
+
+
+def _performance_thresholds_by_operation(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        buckets[_dataflow_operation_type(row)].append(row)
+
+    def thresholds(items: list[dict[str, Any]]) -> dict[str, float]:
+        durations = [_num(item, "duration_seconds") for item in items if _num(item, "duration_seconds") is not None]
+        rows_processed = [_performance_rows_processed(item) for item in items]
+        maintenance_workload = [_performance_maintenance_workload(item) for item in items]
+        return {
+            "duration_p75_seconds": _percentile_clean(durations, 0.75),
+            "duration_p95_seconds": _percentile_clean(durations, 0.95),
+            "rows_processed_p50": _percentile_clean([value for value in rows_processed if value > 0], 0.50),
+            "maintenance_bytes_p50": _percentile_clean([value[0] for value in maintenance_workload if value[0] > 0], 0.50),
+            "maintenance_files_p50": _percentile_clean([value[1] for value in maintenance_workload if value[1] > 0], 0.50),
+        }
+
+    return {
+        "__all__": thresholds(rows),
+        **{operation_type: thresholds(items) for operation_type, items in buckets.items()},
+    }
+
+
+def _performance_maintenance_workload(row: dict[str, Any]) -> tuple[float, float]:
+    bytes_processed = sum(
+        _num(row, field) or 0
+        for field in ("destination_bytes_added", "destination_bytes_removed", "destination_bytes_saved")
+    )
+    files_processed = sum(
+        _num(row, field) or 0
+        for field in ("destination_files_added", "destination_files_removed")
+    )
+    return max(0.0, bytes_processed), max(0.0, files_processed)
 
 
 def _performance_rows_processed(row: dict[str, Any]) -> float:
@@ -2704,7 +3335,7 @@ def _performance_duration_distribution(
             "unknown": statuses.get("unknown", 0),
             "operation_mix": ", ".join(f"{name}: {count}" for name, count in sorted(operation_mix.items())),
             "outlier_count": len(outliers),
-            "outliers": sorted(outliers, key=lambda item: float(item["duration_seconds"]), reverse=True)[:40],
+            "outliers": sorted(outliers, key=lambda item: float(item["duration_seconds"]), reverse=True)[:8],
         })
     sorted_result = sorted(
         result,
@@ -2768,7 +3399,7 @@ def _performance_phase_contribution(
     return sorted_result[:limit] if limit is not None else sorted_result
 
 
-def _performance_workload_efficiency_points(rows: list[dict[str, Any]], limit: int = 600) -> list[dict[str, Any]]:
+def _performance_workload_efficiency_points(rows: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
     def sort_key(row: dict[str, Any]) -> tuple[int, float, float]:
         return (
             int(row.get("performance_candidate_priority") or 0),
@@ -2776,8 +3407,20 @@ def _performance_workload_efficiency_points(rows: list[dict[str, Any]], limit: i
             _performance_rows_processed(row),
         )
 
+    ranked = sorted(rows, key=sort_key, reverse=True)
+    maintenance = [row for row in ranked if _dataflow_operation_type(row) == "maintenance"]
+    pipeline = [row for row in ranked if _dataflow_operation_type(row) != "maintenance"]
+    if maintenance and pipeline:
+        maintenance_limit = max(1, limit // 4)
+        selected = [*pipeline[: limit - maintenance_limit], *maintenance[:maintenance_limit]]
+        selected_ids = {id(row) for row in selected}
+        selected.extend(row for row in ranked if id(row) not in selected_ids and len(selected) < limit)
+        selected.sort(key=sort_key, reverse=True)
+    else:
+        selected = ranked[:limit]
+
     points = []
-    for row in sorted(rows, key=sort_key, reverse=True)[:limit]:
+    for row in selected:
         duration = _num(row, "duration_seconds") or 0
         rows_processed = _performance_rows_processed(row)
         points.append({
@@ -2796,7 +3439,10 @@ def _performance_workload_efficiency_points(rows: list[dict[str, Any]], limit: i
             "destination_bytes_removed": _num(row, "destination_bytes_removed") or 0,
             "performance_bottleneck_phase": row.get("performance_bottleneck_phase") or "unknown",
             "performance_candidate_reason": row.get("performance_candidate_reason"),
+            "performance_candidate_reasons": row.get("performance_candidate_reasons") or [],
             "performance_candidate_priority": row.get("performance_candidate_priority") or 0,
+            "maintenance_bytes_processed": row.get("maintenance_bytes_processed") or 0,
+            "maintenance_files_processed": row.get("maintenance_files_processed") or 0,
         })
     return points
 
@@ -2877,6 +3523,36 @@ def _performance_runtime_context_profiles(rows: list[dict[str, Any]], limit: int
     return sorted_result[:limit] if limit is not None else sorted_result
 
 
+def _performance_trend(
+    rows: list[dict[str, Any]],
+    trend_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    trend_context = trend_context or _trend_context({}, rows, timezone.utc)
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    bucket_metadata: dict[str, dict[str, str | None]] = {}
+    for row in rows:
+        bucket = _date_bucket(row, trend_context)
+        buckets[str(bucket["bucket"])].append(row)
+        bucket_metadata[str(bucket["bucket"])] = bucket
+
+    result: list[dict[str, Any]] = []
+    for bucket_key, items in buckets.items():
+        durations = [_num(item, "duration_seconds") for item in items if _num(item, "duration_seconds") is not None]
+        bucket_info = bucket_metadata.get(bucket_key, {"bucket_start": None, "bucket_end": None})
+        result.append({
+            "date": bucket_key,
+            "bucket": bucket_key,
+            "bucket_start": bucket_info["bucket_start"],
+            "bucket_end": bucket_info["bucket_end"],
+            "grain": trend_context["effective_grain"],
+            "run_count": len(items),
+            "p50_duration_seconds": _percentile_clean(durations, 0.50),
+            "p95_duration_seconds": _percentile_clean(durations, 0.95),
+            "candidate_count": sum(1 for item in items if item.get("performance_candidate_code")),
+        })
+    return sorted(result, key=lambda item: str(item["bucket_start"] or item["bucket"]))
+
+
 def _performance_investigation_queue(rows: list[dict[str, Any]], limit: int = 500) -> list[dict[str, Any]]:
     def sort_key(row: dict[str, Any]) -> tuple[int, float, datetime]:
         return (
@@ -2886,6 +3562,58 @@ def _performance_investigation_queue(rows: list[dict[str, Any]], limit: int = 50
         )
 
     return sorted(rows, key=sort_key, reverse=True)[:limit]
+
+
+_PERFORMANCE_EVIDENCE_FIELDS = {
+    "job_id", "dataflow_id", "dataflow_run_id", "dataflow_name", "stage",
+    "status", "start_time", "end_time", "duration_seconds", "operation_type",
+    "engine_name", "metadata_provider_name", "platform_name",
+    "source_name", "source_connection_type", "source_format", "source_full_table",
+    "source_table", "source_path", "source_status", "source_duration_seconds",
+    "source_rows_read", "source_error_message",
+    "transform_status", "transform_duration_seconds", "transform_error_message",
+    "destination_name", "destination_connection_type", "destination_format",
+    "destination_full_table", "destination_table", "destination_path",
+    "destination_load_type", "destination_status", "destination_duration_seconds",
+    "destination_rows_written", "destination_bytes_added", "destination_bytes_removed",
+    "destination_error_message", "overhead_duration_seconds", "error_message",
+    "error_preview", "failure_phase", "failure_message", "phase_health",
+    "performance_bottleneck_phase", "performance_candidate_code",
+    "performance_candidate_codes", "performance_candidate_reason",
+    "performance_candidate_reasons", "performance_candidate_priority",
+    "performance_rows_processed", "performance_rows_per_second",
+    "performance_overhead_ratio", "performance_dominant_phase_ratio",
+}
+
+
+def _compact_performance_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    evidence = _failure_enriched_dataflow(row) if _status(row) == "failed" else row
+    compact = {key: value for key, value in evidence.items() if key in _PERFORMANCE_EVIDENCE_FIELDS}
+    compact["error_preview"] = _error_preview(evidence)
+    compact["phase_health"] = _phase_health(evidence)
+    return compact
+
+
+_VOLUME_REGISTRY_BASE_FIELDS = {
+    "job_id", "dataflow_id", "dataflow_run_id", "dataflow_name", "stage",
+    "status", "start_time", "end_time", "duration_seconds", "operation_type",
+    "source_name", "source_connection_type", "source_format", "source_full_table",
+    "source_table", "source_path", "destination_name", "destination_connection_type",
+    "destination_format", "destination_full_table", "destination_table",
+    "destination_path", "destination_load_type", "latest_run_at", "latest_run_status",
+    "run_count", "candidate_run_count", "candidate_run_reasons",
+}
+
+
+def _compact_volume_registry_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in row.items()
+        if key in _VOLUME_REGISTRY_BASE_FIELDS
+        or key.startswith("volume_")
+        or key.startswith("peak_")
+        or key.startswith("p95_")
+    }
 
 
 def _safe_ratio(numerator: float | int | None, denominator: float | int | None) -> float:
@@ -2932,7 +3660,7 @@ def _duration_vs_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "status": _status(row),
             "performance_bottleneck_phase": row.get("performance_bottleneck_phase") or "unknown",
         })
-    return sorted(points, key=lambda item: item["duration_seconds"], reverse=True)[:500]
+    return sorted(points, key=lambda item: item["duration_seconds"], reverse=True)[:200]
 
 
 def _duration_by_stage(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3327,6 +4055,118 @@ def _enrich_volume_candidate(row: dict[str, Any], thresholds: dict[str, float]) 
     }
 
 
+def _volume_dataflow_registry(
+    rows: list[dict[str, Any]],
+    run_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        dataflow_id = _dataflow_id(row)
+        if dataflow_id:
+            grouped[dataflow_id].append(row)
+
+    candidate_runs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in run_candidates:
+        dataflow_id = _dataflow_id(row)
+        if dataflow_id:
+            candidate_runs[dataflow_id].append(row)
+
+    registry: list[dict[str, Any]] = []
+    for dataflow_id, items in grouped.items():
+        ordered = sorted(items, key=lambda item: _time_value(item.get("end_time") or item.get("start_time")), reverse=True)
+        latest = ordered[0]
+        durations = [value for item in items if (value := _num(item, "duration_seconds")) is not None]
+        rows_read_values = [(_num(item, "source_rows_read") or 0) for item in items]
+        est_rows_values = [_estimated_rows_written(item) for item in items]
+        lakehouse_rows_values = [(_num(item, "destination_rows_written") or 0) for item in items]
+        bytes_added = _sum(items, "destination_bytes_added")
+        bytes_removed = _sum(items, "destination_bytes_removed")
+        files_added = _sum(items, "destination_files_added")
+        files_removed = _sum(items, "destination_files_removed")
+        matched_run_reasons = sorted({str(item.get("volume_candidate_reason")) for item in candidate_runs[dataflow_id] if item.get("volume_candidate_reason")})
+        registry.append({
+            **latest,
+            "dataflow_id": dataflow_id,
+            "latest_run_at": latest.get("end_time") or latest.get("start_time"),
+            "latest_run_status": _status(latest),
+            "run_count": len(items),
+            "candidate_run_count": len(candidate_runs[dataflow_id]),
+            "candidate_run_reasons": matched_run_reasons,
+            "volume_rows_read": sum(rows_read_values),
+            "volume_est_rows_written": round(sum(est_rows_values), 3),
+            "volume_lakehouse_rows_written": sum(lakehouse_rows_values),
+            "volume_rows_inserted": _sum(items, "destination_rows_inserted"),
+            "volume_rows_updated": _sum(items, "destination_rows_updated"),
+            "volume_rows_deleted": _sum(items, "destination_rows_deleted"),
+            "volume_bytes_added": bytes_added,
+            "volume_bytes_removed": bytes_removed,
+            "volume_net_bytes": bytes_added - bytes_removed,
+            "volume_files_added": files_added,
+            "volume_files_removed": files_removed,
+            "volume_files_changed": files_added + files_removed,
+            "avg_rows_read": round(sum(rows_read_values) / len(items), 3),
+            "avg_est_rows_written": round(sum(est_rows_values) / len(items), 3),
+            "peak_rows_read": max(rows_read_values, default=0),
+            "peak_est_rows_written": max(est_rows_values, default=0),
+            "peak_lakehouse_rows_written": max(lakehouse_rows_values, default=0),
+            "p95_rows_read": _percentile_clean(rows_read_values, 0.95),
+            "p95_est_rows_written": _percentile_clean(est_rows_values, 0.95),
+            "p95_lakehouse_rows_written": _percentile_clean(lakehouse_rows_values, 0.95),
+            "avg_duration_seconds": round(sum(durations) / len(durations), 3) if durations else 0,
+            "p95_duration_seconds": _percentile_clean(durations, 0.95),
+        })
+
+    threshold_fields = {
+        "read": "volume_rows_read",
+        "est_rows": "volume_est_rows_written",
+        "lakehouse_rows": "volume_lakehouse_rows_written",
+        "bytes": "volume_net_bytes",
+        "files": "volume_files_changed",
+    }
+    thresholds = {
+        kind: _percentile([abs(float(row.get(field) or 0)) for row in registry if abs(float(row.get(field) or 0)) > 0], 0.95)
+        for kind, field in threshold_fields.items()
+    }
+    labels = {
+        "read": "High rows read",
+        "est_rows": "High estimated rows written",
+        "lakehouse_rows": "High lakehouse rows written",
+        "bytes": "High lakehouse net bytes",
+        "files": "High lakehouse file churn",
+    }
+    result: list[dict[str, Any]] = []
+    for row in registry:
+        matched = []
+        for kind, field in threshold_fields.items():
+            value = abs(float(row.get(field) or 0))
+            threshold = float(thresholds.get(kind) or 0)
+            if threshold > 0 and value > 0 and value >= threshold:
+                matched.append({
+                    "kind": kind,
+                    "label": labels[kind],
+                    "value": value,
+                    "threshold": threshold,
+                    "ratio": round(value / threshold, 3),
+                })
+        primary = max(matched, key=lambda item: float(item["ratio"]), default=None)
+        result.append({
+            **row,
+            "volume_candidate_kind": primary["kind"] if primary else "none",
+            "volume_candidate_reason": primary["label"] if primary else "",
+            "volume_candidate_priority": primary["ratio"] if primary else 0,
+            "volume_candidate_signals": matched,
+        })
+    return sorted(
+        result,
+        key=lambda row: (
+            -float(row.get("volume_candidate_priority") or 0),
+            -float(row.get("volume_rows_read") or 0),
+            -float(row.get("volume_est_rows_written") or 0),
+            str(row.get("dataflow_name") or row.get("dataflow_id") or ""),
+        ),
+    )
+
+
 def _maintenance_health_status(
     maintenance: list[dict[str, Any]],
     *,
@@ -3492,6 +4332,7 @@ def _maintenance_table_registry(all_rows: list[dict[str, Any]], maintenance_rows
             latest_maintenance=latest_maintenance,
             maintenance_lag_seconds=maintenance_lag_seconds,
         )
+        upstream_dataflows = _maintenance_upstream_dataflows(etl_items)
         result.append({
             "target": target,
             "target_display": _maintenance_target_display(target),
@@ -3531,6 +4372,8 @@ def _maintenance_table_registry(all_rows: list[dict[str, Any]], maintenance_rows
             "table_health": health,
             "attention_reason": reason,
             "attention_priority": priority,
+            "upstream_dataflows": upstream_dataflows,
+            "upstream_run_count": len(etl_items),
         })
     return sorted(
         result,
@@ -3542,6 +4385,38 @@ def _maintenance_table_registry(all_rows: list[dict[str, Any]], maintenance_rows
             str(item["target"]),
         ),
     )
+
+
+def _maintenance_upstream_dataflows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = _dataflow_id(row) or str(row.get("dataflow_name") or "unknown")
+        buckets[key].append(row)
+    result = []
+    for dataflow_id, items in buckets.items():
+        latest = max(items, key=lambda item: _time_value(item.get("end_time") or item.get("start_time")))
+        source_connection = latest.get("source_name") or latest.get("source_connection_name") or "unknown"
+        source_object = (
+            latest.get("source_full_table")
+            or latest.get("source_table")
+            or latest.get("source_path")
+            or latest.get("source_python_function")
+            or latest.get("source_query")
+            or "-"
+        )
+        result.append({
+            "dataflow_id": dataflow_id,
+            "dataflow_name": latest.get("dataflow_name") or dataflow_id,
+            "stage": latest.get("stage") or "unknown",
+            "operation_type": latest.get("operation_type") or "unknown",
+            "source": f"{source_connection} · {source_object}",
+            "load_type": latest.get("destination_load_type") or latest.get("destination_operation_type") or "-",
+            "latest_status": _status(latest),
+            "latest_time": latest.get("end_time") or latest.get("start_time"),
+            "run_count": len(items),
+            "rows_read": _sum(items, "source_rows_read"),
+        })
+    return sorted(result, key=lambda item: str(item["dataflow_name"]))
 
 
 def _maintenance_table_health(

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LineageAsset, LineageResponse } from "../../../shared/api/types";
-import { createLineageGraphIndex, searchLineage, selectVisibleLineage } from "./graphIndex";
+import { createLineageGraphIndex, findLineageDataflowByMetadataIdentity, groupRelationsByNeighbor, referenceNeighborAttentionStatus, searchLineage, selectVisibleLineage } from "./graphIndex";
 
 const lineage: LineageResponse = {
   schema_version: "lineage.v2",
@@ -11,18 +11,40 @@ const lineage: LineageResponse = {
     asset("b", "warehouse", "B", "delta"),
     asset("c", "mart", "C", "parquet"),
     asset("d", "sibling", "D", "json"),
-    { ...asset("q", "warehouse", "Query orders", "sql"), kind: "sql_query", query: "select * from B" }
+    { ...asset("q", "warehouse", "Query orders", "sql"), asset_type: "sql_query", query: "select * from B" }
   ],
   references: [{
     id: "r",
-    kind: "table_reference",
+    entity_type: "reference",
+    reference_type: "table_reference",
+    display_name: "unknown.orders",
+    normalized_value: "unknown.orders",
+    group_status: "unresolved",
+    resolved_asset_id: null,
+    resolved_asset_ids: [],
+    candidate_asset_ids: [],
+    occurrence_ids: ["ro"],
+    consumer_asset_ids: ["q"],
+    provenances: ["sql"],
+    dependency_count: 1,
+    observations: []
+  }],
+  reference_occurrences: [{
+    id: "ro",
+    reference_id: "r",
+    reference_type: "table_reference",
     display_name: "unknown.orders",
     resolution_status: "unresolved",
     raw_value: "unknown.orders",
+    normalized_value: "unknown.orders",
+    context_scope: "catalog:main:warehouse",
+    context_scope_source: "metadata_context",
     provenance: "sql",
     target_asset_id: "q",
+    consumer_asset_id: "q",
+    resolved_asset_id: null,
     candidate_asset_ids: [],
-    reason_code: "not_found",
+    resolution_method: "not_found",
     observations: []
   }],
   dataflows: [
@@ -31,8 +53,8 @@ const lineage: LineageResponse = {
     flow("ad", "A to D", "a", "d", "ingest")
   ],
   dependencies: [
-    dependency("bq", "asset", "b", "q", "resolved"),
-    dependency("rq", "reference", "r", "q", "unresolved")
+    dependency("bq", "b", "reference:bq", "q", "resolved_auto"),
+    dependency("rq", null, "r", "q", "unresolved")
   ]
 };
 
@@ -40,6 +62,44 @@ const noFilters = { connections: [], stages: [], formats: [], resolutions: [] };
 
 describe("typed lineage traces", () => {
   const index = createLineageGraphIndex(lineage);
+
+  it("indexes reference occurrences for dependency inspection", () => {
+    expect(index.occurrenceById.get("ro")?.raw_value).toBe("unknown.orders");
+  });
+
+  it("resolves a dataflow focus by metadata source and dataflow identity", () => {
+    expect(findLineageDataflowByMetadataIdentity(index, {
+      metadataSourceId: 1,
+      dataflowId: "ab",
+      name: "wrong fallback",
+    })?.id).toBe("ab");
+  });
+
+  it("does not guess an ambiguous dataflow name", () => {
+    const ambiguousIndex = createLineageGraphIndex({
+      ...lineage,
+      dataflows: [...lineage.dataflows, { ...lineage.dataflows[0], id: "ab-copy" }],
+    });
+    expect(findLineageDataflowByMetadataIdentity(ambiguousIndex, {
+      metadataSourceId: 1,
+      name: "A to B",
+    })).toBeNull();
+  });
+
+  it("groups parallel relations beneath one neighboring entity", () => {
+    const relation = index.relations.find((item) => item.id === "ab")!;
+    const groups = groupRelationsByNeighbor([relation, { ...relation, id: "ab-copy" }], "source");
+    expect(groups).toHaveLength(1);
+    expect(groups[0].entityId).toBe("a");
+    expect(groups[0].relations.map((item) => item.id)).toEqual(["ab", "ab-copy"]);
+  });
+
+  it("shows dependency attention on a reference neighbor but not its consumer asset", () => {
+    const relation = index.relations.find((item) => item.id === "rq")!;
+
+    expect(referenceNeighborAttentionStatus(index.entityById.get("r"), [relation])).toBe("unresolved");
+    expect(referenceNeighborAttentionStatus(index.entityById.get("q"), [relation])).toBeNull();
+  });
 
   it("keeps dataflow and dependency ancestors without sibling branches", () => {
     const visible = selectVisibleLineage(index, noFilters, [{ kind: "asset", id: "b" }], "both", false);
@@ -65,6 +125,20 @@ describe("typed lineage traces", () => {
     expect(compact.issueCountByAsset.get("q")).toBe(1);
     expect(expanded.entities.map((item) => item.id)).toContain("r");
     expect(expanded.dependencies.map((item) => item.id).sort()).toEqual(["bq", "rq"]);
+  });
+
+  it("counts repeated attention dependencies for one canonical reference once", () => {
+    const repeatedReference: LineageResponse = {
+      ...lineage,
+      dependencies: [
+        ...lineage.dependencies,
+        { ...lineage.dependencies.find((item) => item.id === "rq")!, id: "rq-repeat", reference_occurrence_id: "ro-repeat" }
+      ]
+    };
+    const repeatedIndex = createLineageGraphIndex(repeatedReference);
+    const visible = selectVisibleLineage(repeatedIndex, noFilters, [], "both", false);
+
+    expect(visible.issueCountByAsset.get("q")).toBe(1);
   });
 
   it("applies filters before tracing", () => {
@@ -120,8 +194,9 @@ describe("lineage search", () => {
 function asset(id: string, connection: string, locator: string, format: string): LineageAsset {
   return {
     id,
+    entity_type: "asset",
     label: locator,
-    kind: "path",
+    asset_type: "path",
     display_name: locator,
     declaration_status: "declared",
     display_label: locator,
@@ -150,19 +225,22 @@ function flow(id: string, name: string, source: string, target: string, stage: s
 
 function dependency(
   id: string,
-  entityType: "asset" | "reference",
-  source: string,
+  resolvedAssetId: string | null,
+  referenceId: string,
   target: string,
-  status: "resolved" | "unresolved"
+  status: "resolved_auto" | "unresolved"
 ) {
   return {
     id,
-    source: { entity_type: entityType, id: source },
     target_asset_id: target,
+    consumer_asset_id: target,
     kind: "reads" as const,
     provenance: "sql" as const,
     resolution_status: status,
     resolution_method: "test",
+    reference_id: referenceId,
+    reference_occurrence_id: referenceId === "r" ? "ro" : "reference-occurrence:bq",
+    resolved_asset_id: resolvedAssetId,
     observations: []
   };
 }
@@ -175,11 +253,12 @@ function summary(overrides: Partial<LineageResponse["summary"]>): LineageRespons
     dependencies: 0,
     stitched_assets: 0,
     declared_assets: 0,
-    discovered_only_assets: 0,
+    resolved_auto_dependencies: 0,
     resolved_dependencies: 0,
-    discovered_only_dependencies: 0,
+    resolved_manual_dependencies: 0,
     ambiguous_dependencies: 0,
     unresolved_dependencies: 0,
+    mapping_target_missing_dependencies: 0,
     diagnostics: 0,
     ...overrides
   };

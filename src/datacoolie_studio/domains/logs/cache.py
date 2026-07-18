@@ -24,8 +24,10 @@ from datacoolie_studio.domains.logs.reader import (
     read_job_logs,
 )
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
+from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, require_local_path
 from datacoolie_studio.domains.sync import service as sync
+from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 
 
 STUDIO_CACHE_COLUMNS = {
@@ -58,6 +60,15 @@ DATAFLOW_SORT_COLUMNS = {
     "destination_name": "d.destination_name",
     "source_rows_read": "d.source_rows_read",
     "destination_rows_written": "d.destination_rows_written",
+    "destination_rows_inserted": "d.destination_rows_inserted",
+    "destination_files_added": "d.destination_files_added",
+    "destination_bytes_added": "d.destination_bytes_added - COALESCE(d.destination_bytes_removed, 0)",
+    "error_message": "COALESCE(d.error_message, d.destination_error_message, d.transform_error_message, d.source_error_message, '')",
+    "error_preview": "COALESCE(d.error_message, d.destination_error_message, d.transform_error_message, d.source_error_message, '')",
+    "source": "COALESCE(d.source_name, '') || ' ' || COALESCE(d.source_full_table, d.source_table, d.source_path, '')",
+    "volume_est_rows_written": "CASE WHEN lower(COALESCE(d.destination_connection_type, '') || ' ' || COALESCE(d.destination_format, '') || ' ' || COALESCE(d.destination_name, '') || ' ' || COALESCE(d.destination_path, '')) SIMILAR TO '%(lakehouse|delta|iceberg|onelake|deltalake)%' THEN COALESCE(d.destination_rows_written, 0) WHEN lower(COALESCE(d.status, '')) = 'succeeded' THEN COALESCE(d.source_rows_read, d.destination_rows_written, 0) ELSE COALESCE(d.destination_rows_written, 0) END",
+    "movement_state": "CASE WHEN NULLIF(CAST(d.source_watermark_after AS VARCHAR), '') IS NULL AND NULLIF(CAST(d.source_watermark_before AS VARCHAR), '') IS NULL THEN 'unknown' WHEN NULLIF(CAST(d.source_watermark_before AS VARCHAR), '') IS NULL THEN 'initialized' WHEN CAST(d.source_watermark_after AS VARCHAR) = CAST(d.source_watermark_before AS VARCHAR) THEN 'unchanged' ELSE 'advanced' END",
+    "phase_health": "COALESCE(d.source_status, '') || ' ' || COALESCE(d.transform_status, '') || ' ' || COALESCE(d.destination_status, '')",
     "engine_name": "COALESCE(j.engine_name, 'unknown')",
 }
 
@@ -257,6 +268,56 @@ def analytics_cache_stats() -> dict[str, Any]:
     return stats
 
 
+def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
+    """Describe exactly the files that the log cache is allowed to ingest."""
+    base_revision = sync.stat_source(source, include_content_hash=False)
+    if not base_revision.get("exists") or base_revision.get("object_type") == "provider_not_enabled":
+        return base_revision
+
+    paths = resolve_log_source_paths(source)
+    try:
+        etl_path = require_local_path(paths.etl_logs_uri or source.uri)
+        system_path = require_local_path(paths.system_logs_uri) if paths.system_logs_uri else None
+    except StorageProviderNotEnabled:
+        return base_revision
+
+    file_uris = {
+        *discover_dataflow_parquet_files(etl_path.as_posix()),
+        *discover_job_jsonl_files(etl_path.as_posix()),
+        *discover_system_jsonl_files(system_path.as_posix() if system_path else None),
+    }
+    stats = [Path(file_uri).stat() for file_uri in file_uris]
+    fallback_mtime = etl_path.stat().st_mtime_ns if etl_path.exists() else base_revision.get("max_mtime_ns")
+    return {
+        **base_revision,
+        "object_type": "directory",
+        "file_count": len(stats),
+        "total_size": sum(item.st_size for item in stats),
+        "max_mtime_ns": max((item.st_mtime_ns for item in stats), default=fallback_mtime),
+    }
+
+
+def cached_source_stats(source_id: int) -> dict[str, int]:
+    """Return the Studio-owned analytics rows associated with one log source."""
+    stats = {
+        "dataflow_row_count": 0,
+        "job_row_count": 0,
+        "filter_value_count": 0,
+    }
+    path = analytics_database_path()
+    if not path.exists():
+        return stats
+    _ensure_duckdb_cache_ready(path)
+    conn = duckdb.connect(database=str(path), read_only=True)
+    try:
+        stats["dataflow_row_count"] = _table_source_row_count(conn, DATAFLOW_TABLE, source_id)
+        stats["job_row_count"] = _table_source_row_count(conn, JOB_TABLE, source_id)
+        stats["filter_value_count"] = _table_source_row_count(conn, FILTER_VALUES_TABLE, source_id)
+    finally:
+        conn.close()
+    return stats
+
+
 def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     unique_ids = sorted({int(source_id) for source_id in source_ids if int(source_id) > 0})
     if not unique_ids:
@@ -279,11 +340,16 @@ def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     }
 
 
-def refresh_log_source_cache(session: Session, source: EnvironmentSource) -> dict[str, Any]:
+def refresh_log_source_cache(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    job_type: str = "force_refresh",
+) -> dict[str, Any]:
     if source.source_kind != "logs":
         raise ValueError("Source is not a log source")
 
-    job = sync.begin_sync_job(session, source, "force_refresh")
+    job = sync.begin_sync_job(session, source, job_type)
     checked_at = utc_now()
     revision = sync.stat_source(source)
     error = _revision_error(source, revision)
@@ -297,6 +363,7 @@ def refresh_log_source_cache(session: Session, source: EnvironmentSource) -> dic
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
             completed_at=checked_at,
         )
+        source_validation.validate_log_source(session, source)
         return sync.source_sync_status(session, source, job)
 
     log_paths = resolve_log_source_paths(source)
@@ -314,6 +381,7 @@ def refresh_log_source_cache(session: Session, source: EnvironmentSource) -> dic
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
             completed_at=checked_at,
         )
+        source_validation.validate_log_source(session, source)
         return sync.source_sync_status(session, source, job)
     dataflow_files = discover_dataflow_parquet_files(etl_path.as_posix())
     job_files = discover_job_jsonl_files(etl_path.as_posix())
@@ -356,6 +424,8 @@ def refresh_log_source_cache(session: Session, source: EnvironmentSource) -> dic
     file_row_counts.update(upsert_result["file_row_counts"])
     errors.extend(upsert_result["errors"])
     _upsert_manifest(session, source.id, changed_files, removed_files, file_row_counts, checked_at)
+    if changed_files or removed_files:
+        invalidate_environment_derived_caches(session, source.environment_id, structural=False)
 
     status = "warning" if errors else "ok"
     message = "Log source cache refreshed" if changed_files or removed_files else "Log source cache is current"
@@ -385,12 +455,16 @@ def refresh_log_source_cache(session: Session, source: EnvironmentSource) -> dic
         },
         completed_at=checked_at,
     )
+    source_validation.validate_log_source(session, source)
     return sync.source_sync_status(session, source, job)
 
 
 def cached_monitoring_rows(
     session: Session,
     paths: list[EnvironmentSource],
+    *,
+    dataflow_columns: tuple[str, ...] | None = None,
+    job_columns: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]] | None:
     enabled = [path for path in paths if path.enabled]
     if not enabled:
@@ -408,7 +482,11 @@ def cached_monitoring_rows(
         return None
 
     missing = [path for path in enabled if path.id not in cached_ids]
-    rows, jobs = _read_duckdb_rows(sorted(cached_ids))
+    rows, jobs = _read_duckdb_rows(
+        sorted(cached_ids),
+        dataflow_columns=dataflow_columns,
+        job_columns=job_columns,
+    )
     if cached_ids and not rows and not jobs:
         return None
     job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
@@ -418,6 +496,134 @@ def cached_monitoring_rows(
         for path in missing
     ]
     return enriched, jobs, errors
+
+
+def cached_monitoring_summary(
+    session: Session,
+    paths: list[EnvironmentSource],
+    *,
+    cutoff: datetime,
+    timezone_name: str | None,
+    utc_offset_seconds: int | None,
+    local_today: date,
+) -> tuple[dict[str, Any], list[dict[str, str]]] | None:
+    """Aggregate the fixed Environment Overview Monitoring read model in DuckDB.
+
+    A ``None`` result deliberately means that the typed cache cannot answer.
+    Callers must then retain the existing source-reader fallback rather than
+    silently reporting an empty Monitoring state.
+    """
+    context = _cached_source_context(session, paths)
+    if context is None:
+        return None
+    source_ids, errors = context
+    if not source_ids:
+        return {
+            "dataflow_records": 0,
+            "job_records": 0,
+            "dataflow_succeeded": 0,
+            "dataflow_failed": 0,
+            "total_failures": 0,
+            "active_engines": 0,
+            "failed_last7": 0,
+            "failed_last30": 0,
+            "failed_last365": 0,
+            "latest_log_at": None,
+            "date_min": None,
+            "date_max": None,
+        }, errors
+
+    path = analytics_database_path()
+    if not path.exists():
+        return None
+    _ensure_duckdb_cache_ready(path)
+    conn = duckdb.connect(database=str(path), read_only=True)
+    try:
+        if not _table_exists(conn, DATAFLOW_TABLE) or not _table_exists(conn, JOB_TABLE):
+            return None
+        if timezone_name:
+            local_date_sql = "CAST(timezone(?, event_time) AS DATE)"
+            local_date_param: str | int = timezone_name
+        elif utc_offset_seconds is not None:
+            local_date_sql = "CAST(event_time + (? * INTERVAL 1 SECOND) AS DATE)"
+            local_date_param = utc_offset_seconds
+        else:
+            return None
+        placeholders = ", ".join("?" for _ in source_ids)
+        result = conn.execute(
+            f"""
+            WITH dataflows AS (
+              SELECT
+                status,
+                COALESCE(end_time, start_time) AS event_time,
+                COALESCE(__run_date, CAST(timezone('UTC', COALESCE(end_time, start_time)) AS DATE)) AS run_date
+              FROM {DATAFLOW_TABLE}
+              WHERE _source_id IN ({placeholders})
+                AND COALESCE(end_time, start_time) >= ?
+            ),
+            jobs AS (
+              SELECT
+                status,
+                engine_name,
+                COALESCE(
+                  TRY_CAST(end_time AS TIMESTAMPTZ),
+                  TRY_CAST(start_time AS TIMESTAMPTZ)
+                ) AS event_time
+              FROM {JOB_TABLE}
+              WHERE _source_id IN ({placeholders})
+                AND COALESCE(
+                  TRY_CAST(end_time AS TIMESTAMPTZ),
+                  TRY_CAST(start_time AS TIMESTAMPTZ)
+                ) >= ?
+            ),
+            jobs_with_dates AS (
+              SELECT *, {local_date_sql} AS local_date
+              FROM jobs
+            ),
+            timeline AS (
+              SELECT event_time, run_date FROM dataflows
+              UNION ALL
+              SELECT event_time, CAST(timezone('UTC', event_time) AS DATE) AS run_date FROM jobs
+            )
+            SELECT
+              (SELECT COUNT(*) FROM dataflows) AS dataflow_records,
+              (SELECT COUNT(*) FROM jobs_with_dates) AS job_records,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) FROM dataflows) AS dataflow_succeeded,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) FROM dataflows) AS dataflow_failed,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) FROM jobs_with_dates) AS total_failures,
+              (SELECT COUNT(DISTINCT engine_name) FROM jobs_with_dates WHERE engine_name IS NOT NULL AND engine_name <> '') AS active_engines,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'failed' AND local_date BETWEEN ? - 7 AND ? THEN 1 ELSE 0 END), 0) FROM jobs_with_dates) AS failed_last7,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'failed' AND local_date BETWEEN ? - 30 AND ? THEN 1 ELSE 0 END), 0) FROM jobs_with_dates) AS failed_last30,
+              (SELECT COALESCE(SUM(CASE WHEN status = 'failed' AND local_date BETWEEN ? - 365 AND ? THEN 1 ELSE 0 END), 0) FROM jobs_with_dates) AS failed_last365,
+              (SELECT MAX(event_time) FROM timeline) AS latest_log_at,
+              (SELECT MIN(run_date) FROM timeline) AS date_min,
+              (SELECT MAX(run_date) FROM timeline) AS date_max
+            """,
+            [
+                *source_ids,
+                cutoff,
+                *source_ids,
+                cutoff,
+                local_date_param,
+                local_today,
+                local_today,
+                local_today,
+                local_today,
+                local_today,
+                local_today,
+            ],
+        )
+        row = result.fetchone()
+        columns = [description[0] for description in result.description]
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    summary = dict(zip(columns, row))
+    if not summary["dataflow_records"] and not summary["job_records"]:
+        return None
+    return summary, errors
 
 
 def cached_dataflow_logs(
@@ -430,6 +636,87 @@ def cached_dataflow_logs(
         return None
     rows, _, errors = cached
     return rows[:limit], errors
+
+
+def query_cached_latest_dataflow_runs(
+    session: Session,
+    paths: list[EnvironmentSource],
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]] | None:
+    """Return one narrow latest row per stable Dataflow identity from DuckDB."""
+    context = _cached_source_context(session, paths)
+    if context is None:
+        return None
+    source_ids, errors = context
+    if not source_ids:
+        return [], [], errors
+    path = analytics_database_path()
+    if not path.exists():
+        return None
+    _ensure_duckdb_cache_ready(path)
+    conn = duckdb.connect(database=str(path), read_only=True)
+    try:
+        if not _table_exists(conn, DATAFLOW_TABLE):
+            return None
+        if not _table_has_source_rows(conn, DATAFLOW_TABLE, source_ids):
+            return None
+        placeholders = ", ".join("?" for _ in source_ids)
+        result = conn.execute(
+            f"""
+            WITH candidates AS (
+              SELECT
+                CAST(dataflow_id AS VARCHAR) AS dataflow_id,
+                CAST(dataflow_name AS VARCHAR) AS dataflow_name,
+                CAST(status AS VARCHAR) AS status,
+                start_time,
+                end_time,
+                duration_seconds,
+                CAST(dataflow_run_id AS VARCHAR) AS dataflow_run_id,
+                CASE
+                  WHEN NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
+                    THEN 'id:' || CAST(dataflow_id AS VARCHAR)
+                  ELSE 'name:' || COALESCE(CAST(dataflow_name AS VARCHAR), '')
+                END AS identity_key,
+                COALESCE(
+                  TRY_CAST(end_time AS TIMESTAMPTZ),
+                  TRY_CAST(start_time AS TIMESTAMPTZ),
+                  TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                ) AS event_time
+              FROM {DATAFLOW_TABLE}
+              WHERE _source_id IN ({placeholders})
+                AND (NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
+                  OR NULLIF(CAST(dataflow_name AS VARCHAR), '') IS NOT NULL)
+            ), ranked AS (
+              SELECT *, row_number() OVER (
+                PARTITION BY identity_key
+                ORDER BY event_time DESC, COALESCE(dataflow_run_id, '') DESC
+              ) AS row_number
+              FROM candidates
+            )
+            SELECT dataflow_id, dataflow_name, status, start_time, end_time,
+                   duration_seconds, dataflow_run_id
+            FROM ranked
+            WHERE row_number = 1
+            ORDER BY identity_key
+            """,
+            source_ids,
+        )
+        rows = _result_rows(result)
+        ambiguous_rows = conn.execute(
+            f"""
+            SELECT CAST(dataflow_name AS VARCHAR)
+            FROM {DATAFLOW_TABLE}
+            WHERE _source_id IN ({placeholders})
+              AND NULLIF(CAST(dataflow_name AS VARCHAR), '') IS NOT NULL
+              AND NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
+            GROUP BY dataflow_name
+            HAVING count(DISTINCT CAST(dataflow_id AS VARCHAR)) > 1
+            ORDER BY dataflow_name
+            """,
+            source_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    return rows, [str(row[0]) for row in ambiguous_rows], errors
 
 
 def cached_job_logs(
@@ -450,6 +737,7 @@ def system_log_records(
     *,
     job_id: str,
     dataflow_id: str | None = None,
+    include_dataflow_logs: bool = False,
     level: str | None = None,
     q: str | None = None,
     limit: int = 500,
@@ -478,6 +766,7 @@ def system_log_records(
             file.file_uri,
             job_id=job_id,
             dataflow_id=dataflow_id,
+            include_dataflow_logs=include_dataflow_logs,
             level=level,
             q=q,
             limit=limit - len(records),
@@ -669,6 +958,100 @@ def query_cached_job_logs(
     return rows, total, errors
 
 
+def query_cached_monitoring_rows(
+    session: Session,
+    paths: list[EnvironmentSource],
+    filters: dict[str, str],
+    *,
+    dataflow_columns: tuple[str, ...] | None = None,
+    job_columns: tuple[str, ...] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]] | None:
+    """Read only filtered Monitoring rows from the typed DuckDB cache.
+
+    This is the transitional row contract for page calculators. Predicates and
+    column projection execute in DuckDB so Python never receives rows outside
+    the active report scope.
+    """
+    context = _cached_source_context(session, paths)
+    if context is None:
+        return None
+    source_ids, errors = context
+    if not source_ids:
+        return [], [], errors
+    path = analytics_database_path()
+    if not path.exists():
+        return None
+    _ensure_duckdb_cache_ready(path)
+    conn = duckdb.connect(database=str(path), read_only=True)
+    try:
+        if not _table_exists(conn, DATAFLOW_TABLE) or not _table_exists(conn, JOB_TABLE):
+            return None
+        if not _table_has_source_rows(conn, DATAFLOW_TABLE, source_ids) and not _table_has_source_rows(conn, JOB_TABLE, source_ids):
+            return None
+
+        source_placeholders = ", ".join("?" for _ in source_ids)
+        job_lookup_sql = (
+            f"""
+            SELECT
+              _source_id,
+              job_id,
+              ANY_VALUE(engine_name) AS engine_name,
+              ANY_VALUE(metadata_provider_name) AS metadata_provider_name,
+              ANY_VALUE(platform_name) AS platform_name
+            FROM {JOB_TABLE}
+            WHERE _source_id IN ({source_placeholders})
+              AND job_id IS NOT NULL
+            GROUP BY _source_id, job_id
+            """
+        )
+
+        dataflow_available = set(_table_columns(conn, DATAFLOW_TABLE))
+        requested_dataflow_columns = list(dataflow_columns or tuple(DATAFLOW_COLUMN_TYPES))
+        selected_dataflow_columns = [column for column in requested_dataflow_columns if column in dataflow_available]
+        dataflow_select_sql = _select_alias_columns("d", selected_dataflow_columns)
+        dataflow_where_sql, dataflow_filter_params = _monitoring_filter_sql(filters, "d", "j")
+        dataflow_result = conn.execute(
+            f"""
+            SELECT
+              {dataflow_select_sql},
+              COALESCE(j.engine_name, 'unknown') AS engine_name,
+              COALESCE(j.metadata_provider_name, 'unknown') AS metadata_provider_name,
+              COALESCE(j.platform_name, 'unknown') AS platform_name
+            FROM {DATAFLOW_TABLE} d
+            LEFT JOIN ({job_lookup_sql}) j
+              ON j._source_id = d._source_id AND j.job_id = d.job_id
+            WHERE d._source_id IN ({source_placeholders}){dataflow_where_sql}
+            ORDER BY TRY_CAST(COALESCE(d.end_time, d.start_time) AS TIMESTAMPTZ) DESC NULLS LAST
+            """,
+            [*source_ids, *source_ids, *dataflow_filter_params],
+        )
+        dataflows = _result_rows(dataflow_result)
+
+        job_available = set(_table_columns(conn, JOB_TABLE))
+        requested_job_columns = list(job_columns or tuple(JOB_COLUMN_TYPES))
+        selected_job_columns = [column for column in requested_job_columns if column in job_available]
+        job_select_sql = _select_alias_columns("j", selected_job_columns)
+        job_where_sql, job_filter_params = _monitoring_filter_sql(
+            filters,
+            "j",
+            "j",
+            include_dataflow_filters=False,
+        )
+        job_result = conn.execute(
+            f"""
+            SELECT {job_select_sql}
+            FROM {JOB_TABLE} j
+            WHERE j._source_id IN ({source_placeholders}){job_where_sql}
+            ORDER BY TRY_CAST(COALESCE(j.end_time, j.start_time) AS TIMESTAMPTZ) DESC NULLS LAST
+            """,
+            [*source_ids, *job_filter_params],
+        )
+        jobs = _result_rows(job_result)
+    finally:
+        conn.close()
+    return dataflows, jobs, errors
+
+
 def query_cached_filter_values(
     session: Session,
     paths: list[EnvironmentSource],
@@ -754,7 +1137,12 @@ def _upsert_duckdb_rows(
     }
 
 
-def _read_duckdb_rows(source_ids: list[int]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _read_duckdb_rows(
+    source_ids: list[int],
+    *,
+    dataflow_columns: tuple[str, ...] | None = None,
+    job_columns: tuple[str, ...] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     path = analytics_database_path()
     if not path.exists():
         return [], []
@@ -762,8 +1150,20 @@ def _read_duckdb_rows(source_ids: list[int]) -> tuple[list[dict[str, Any]], list
     conn = duckdb.connect(database=str(path), read_only=True)
     try:
         placeholders = ", ".join("?" for _ in source_ids)
-        dataflows = _select_typed_rows(conn, DATAFLOW_TABLE, placeholders, source_ids)
-        jobs = _select_typed_rows(conn, JOB_TABLE, placeholders, source_ids)
+        dataflows = _select_typed_rows(
+            conn,
+            DATAFLOW_TABLE,
+            placeholders,
+            source_ids,
+            columns=dataflow_columns,
+        )
+        jobs = _select_typed_rows(
+            conn,
+            JOB_TABLE,
+            placeholders,
+            source_ids,
+            columns=job_columns,
+        )
     finally:
         conn.close()
     dataflows.sort(key=lambda row: _sort_time(row.get("end_time") or row.get("start_time")), reverse=True)
@@ -811,7 +1211,10 @@ def _monitoring_filter_sql(
     if range_value in {"24h", "3d", "7d", "30d", "90d"}:
         days = {"24h": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}[range_value]
         clauses.append(f"{timestamp_expression} >= ?")
-        params.append(datetime.now(timezone.utc) - timedelta(days=days))
+        params.append(
+            _parse_filter_datetime(filters.get("_relativeStartTime"))
+            or datetime.now(timezone.utc) - timedelta(days=days)
+        )
     elif range_value == "custom":
         start_time = _parse_filter_datetime(filters.get("startTime"))
         end_time = _parse_filter_datetime(filters.get("endTime"))
@@ -1053,11 +1456,18 @@ def _parse_filter_datetime(value: str | None) -> datetime | None:
 
 def _result_rows(result) -> list[dict[str, Any]]:
     names = [desc[0] for desc in result.description]
-    rows = []
-    for values in result.fetchall():
-        row = _json_ready(dict(zip(names, values)))
-        rows.append(row)
-    return rows
+    temporal_indexes = {
+        index
+        for index, desc in enumerate(result.description)
+        if str(desc[1]).startswith(("DATE", "TIMESTAMP"))
+    }
+    return [
+        {
+            name: (value.isoformat() if index in temporal_indexes and value is not None else value)
+            for index, (name, value) in enumerate(zip(names, values))
+        }
+        for values in result.fetchall()
+    ]
 
 
 def _select_alias_columns(alias: str, columns: list[str], exclude: set[str] | None = None) -> str:
@@ -1439,10 +1849,23 @@ def _insert_dataflow_file(conn, source_id: int, file_uri: str, file_kind: str, r
     return int(row_count)
 
 
-def _select_typed_rows(conn, table_name: str, placeholders: str, source_ids: list[int]) -> list[dict[str, Any]]:
+def _select_typed_rows(
+    conn,
+    table_name: str,
+    placeholders: str,
+    source_ids: list[int],
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
     if not _table_exists(conn, table_name):
         return []
-    result = conn.execute(f"SELECT * FROM {table_name} WHERE _source_id IN ({placeholders})", source_ids)
+    available = set(_table_columns(conn, table_name))
+    selected = [column for column in (columns or ()) if column in available]
+    column_sql = ", ".join(_quote_identifier(column) for column in selected) if selected else "*"
+    result = conn.execute(
+        f"SELECT {column_sql} FROM {table_name} WHERE _source_id IN ({placeholders})",
+        source_ids,
+    )
     names = [desc[0] for desc in result.description]
     rows = []
     for values in result.fetchall():
@@ -1696,6 +2119,18 @@ def _table_row_count(conn, table_name: str) -> int:
     if not _table_exists(conn, table_name):
         return 0
     return int(conn.execute(f"SELECT count(*) FROM {table_name}").fetchone()[0])
+
+
+def _table_source_row_count(conn, table_name: str, source_id: int) -> int:
+    if not _table_exists(conn, table_name) or "_source_id" not in _table_columns(conn, table_name):
+        return 0
+    return int(
+        conn.execute(
+            f"SELECT count(*) FROM {table_name} WHERE _source_id = ?",
+            [source_id],
+        ).fetchone()[0]
+        or 0
+    )
 
 
 def _table_source_ids(conn, table_name: str) -> list[int]:

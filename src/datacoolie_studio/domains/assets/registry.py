@@ -39,7 +39,7 @@ class AssetRegistry:
 
         group = self._groups[next(iter(matched_ids))] if matched_ids else None
         if group is not None and _has_identity_conflict(group.identifiers, identifiers):
-            return self._record_conflict(node, source_id, source_uri, {group.id}, "logical table or physical path conflicts")
+            return self._record_conflict(node, source_id, source_uri, {group.id}, "asset identifiers conflict")
 
         if group is None:
             primary = _primary_identifier(node, identifiers)
@@ -91,29 +91,6 @@ class AssetRegistry:
         group = self._groups.get(asset_id)
         if group is not None:
             group.observations.append(observation)
-
-    def add_discovered_asset(
-        self,
-        node: dict[str, Any],
-        identifier: dict[str, str],
-        observation: dict[str, Any],
-    ) -> str:
-        existing = self.resolve_identifier(identifier["kind"], identifier["normalized_value"])
-        if existing:
-            self.add_observation(existing, observation)
-            return existing
-        group_id = canonical_asset_id(self.environment_id, identifier)
-        group = _AssetGroup(
-            id=group_id,
-            node={**node, "id": group_id, "identity": group_id, "role": "source"},
-        )
-        key = (identifier["kind"], identifier["normalized_value"])
-        group.identifiers[key] = identifier
-        group.roles.add("source")
-        group.observations.append(observation)
-        self._groups[group_id] = group
-        self._identifier_to_group[key] = group_id
-        return group_id
 
     def nodes(self) -> list[dict[str, Any]]:
         nodes = []
@@ -179,7 +156,11 @@ def _identifier_map(identifiers: list[dict[str, str]]) -> dict[tuple[str, str], 
 
 
 def _primary_identifier(node: dict[str, Any], identifiers: dict[tuple[str, str], dict[str, str]]) -> dict[str, str]:
-    for kind in ("logical_table", "physical_path"):
+    preferred_kind = str(node.get("identity_type") or "")
+    for (identifier_kind, _), identifier in identifiers.items():
+        if identifier_kind == preferred_kind:
+            return identifier
+    for kind in ("api_endpoint", "logical_table", "physical_path"):
         for (identifier_kind, _), identifier in identifiers.items():
             if identifier_kind == kind:
                 return identifier
@@ -196,7 +177,7 @@ def _has_identity_conflict(
     existing: dict[tuple[str, str], dict[str, str]],
     incoming: dict[tuple[str, str], dict[str, str]],
 ) -> bool:
-    for kind in ("logical_table", "physical_path"):
+    for kind in ("api_endpoint", "logical_table", "physical_path"):
         existing_values = {value for (item_kind, value) in existing if item_kind == kind}
         incoming_values = {value for (item_kind, value) in incoming if item_kind == kind}
         if existing_values and incoming_values and existing_values.isdisjoint(incoming_values):

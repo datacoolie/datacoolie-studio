@@ -1,19 +1,37 @@
-import { ArrowLeft, Check, Copy, FileText, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
 import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api } from "../../shared/api/client";
-import type { MonitoringRecord, SystemLogResponse } from "../../shared/api/types";
+import type { MonitoringRecord } from "../../shared/api/types";
+import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatTimestampForDisplay, isTimestampFieldName } from "../../shared/time";
+import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableSort } from "./MonitoringCharts";
-import { TablePager } from "./monitoringShared";
+import {
+  diagnosticsCategoryLabel,
+  diagnosticsEvidenceItems,
+  diagnosticsInvestigationActions,
+  diagnosticsRuleDescription,
+  diagnosticsSeverityPresentation,
+} from "./diagnosticsPresentation";
+import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
+import { formatPhasePercent, TablePager } from "./monitoringShared";
+import { SystemLogViewer } from "./SystemLogViewer";
 
-export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "diagnostics";
+export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";
 
 interface MonitoringDetailDrawerProps {
   kind: MonitoringDetailKind;
   row: Record<string, unknown>;
   environmentId?: number | null;
   relatedDataflows?: MonitoringRecord[];
+  relatedDataflowsTotal?: number;
+  relatedDataflowsOffset?: number;
+  relatedDataflowsLimit?: number;
+  relatedDataflowsSort?: TableSort;
+  relatedDataflowsLoading?: boolean;
+  onRelatedDataflowsPageChange?: (offset: number) => void;
+  onRelatedDataflowsPageSizeChange?: (limit: number) => void;
+  onRelatedDataflowsSort?: (sort: TableSort) => void;
   reconciliationChecks?: Array<Record<string, string | number>>;
   timezoneName?: string | null;
   onOpenDataflow?: (row: MonitoringRecord) => void;
@@ -138,11 +156,21 @@ const JSON_BLOCK_FIELDS = new Set([
   "destination_operation_details",
 ]);
 
+const DEFAULT_RELATED_DATAFLOW_SORT: TableSort = { sortBy: "start_time", sortDir: "desc" };
+
 export function MonitoringDetailDrawer({
   kind,
   row,
   environmentId,
   relatedDataflows = [],
+  relatedDataflowsTotal = relatedDataflows.length,
+  relatedDataflowsOffset = 0,
+  relatedDataflowsLimit = 100,
+  relatedDataflowsSort = DEFAULT_RELATED_DATAFLOW_SORT,
+  relatedDataflowsLoading = false,
+  onRelatedDataflowsPageChange,
+  onRelatedDataflowsPageSizeChange,
+  onRelatedDataflowsSort,
   reconciliationChecks = [],
   timezoneName,
   onOpenDataflow,
@@ -151,54 +179,31 @@ export function MonitoringDetailDrawer({
   onClose,
 }: MonitoringDetailDrawerProps) {
   const title = detailTitle(row, kind);
-  const [childDataflowSort, setChildDataflowSort] = useState<TableSort>({ sortBy: "start_time", sortDir: "desc" });
-  const [childDataflowOffset, setChildDataflowOffset] = useState(0);
-  const [childDataflowLimit, setChildDataflowLimit] = useState(50);
   const [headerCopied, setHeaderCopied] = useState(false);
   const [systemLogsOpen, setSystemLogsOpen] = useState(false);
-  const [systemLogsLoading, setSystemLogsLoading] = useState(false);
-  const [systemLogs, setSystemLogs] = useState<SystemLogResponse | null>(null);
-  const [systemLogsError, setSystemLogsError] = useState<string | null>(null);
-  const sortedRelatedDataflows = useMemo(
-    () => sortRows(relatedDataflows, childDataflowSort),
-    [relatedDataflows, childDataflowSort]
+
+  useDrawerEscape(onClose, !systemLogsOpen);
+
+  const sortableRelatedDataflows = useMemo(
+    () => kind === "volume"
+      ? relatedDataflows.map((item) => ({ ...item, volume_est_rows_written: volumeRunEstRowsWritten(item) }))
+      : relatedDataflows,
+    [kind, relatedDataflows]
   );
-  useEffect(() => {
-    if (childDataflowOffset >= sortedRelatedDataflows.length) setChildDataflowOffset(0);
-  }, [childDataflowOffset, sortedRelatedDataflows.length]);
   const handleChildDataflowSort = (nextSort: TableSort) => {
-    setChildDataflowSort(nextSort);
-    setChildDataflowOffset(0);
+    onRelatedDataflowsSort?.(nextSort);
   };
   const copyTitle = headerCopyValue(row, kind, title);
-  const copyLabel = kind === "job" || kind === "dataflow" ? `${kindLabel(kind)} id` : `${kindLabel(kind)} title`;
+  const copyLabel = kind === "job" ? "job id" : kind === "dataflow" ? "dataflow run id" : `${kindLabel(kind)} title`;
   const jobId = typeof row.job_id === "string" ? row.job_id : "";
   const dataflowId = kind === "dataflow" && typeof row.dataflow_id === "string" ? row.dataflow_id : "";
-  async function toggleSystemLogs() {
-    if (!environmentId || !jobId) return;
-    const nextOpen = !systemLogsOpen;
-    setSystemLogsOpen(nextOpen);
-    if (!nextOpen || systemLogs || systemLogsLoading) return;
-    setSystemLogsLoading(true);
-    setSystemLogsError(null);
-    try {
-      setSystemLogs(
-        await api.getMonitoringSystemLogs(environmentId, {
-          job_id: jobId,
-          dataflow_id: dataflowId || undefined,
-          limit: 500,
-          offset: 0,
-        })
-      );
-    } catch (err) {
-      setSystemLogsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSystemLogsLoading(false);
-    }
-  }
+  const drawerStatusClass = kind === "job" || kind === "dataflow" ? jobStatusTone(row.status) : "";
+  const freshnessHealthClass = kind === "freshness" ? ` is-freshness-${freshnessDrawerHealth(row).tone}` : "";
+  const maintenanceHealthClass = kind === "maintenance" ? ` is-maintenance-health-${maintenanceTableHealthTone(row.table_health)}` : "";
+  const diagnosticsHealthClass = kind === "diagnostics" ? ` is-diagnostics-${diagnosticsSeverityPresentation(row.severity).tone}` : "";
   return createPortal(
     <div className="metadata-drawer-backdrop monitoring-detail-backdrop" onMouseDown={onClose}>
-      <aside className="metadata-drawer monitoring-detail-drawer" aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
+      <aside className={`metadata-drawer monitoring-detail-drawer is-${kind}${drawerStatusClass ? ` ${drawerStatusClass}` : ""}${freshnessHealthClass}${maintenanceHealthClass}${diagnosticsHealthClass}`} aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
         <header className="metadata-drawer-header">
           {onBack ? (
             <button className="icon-action monitoring-detail-back" type="button" aria-label="Back to previous monitoring detail" onClick={onBack}>
@@ -206,38 +211,106 @@ export function MonitoringDetailDrawer({
             </button>
           ) : null}
           <div className="monitoring-detail-heading">
-            <span>{kindLabel(kind)}</span>
-            <div className="monitoring-detail-title-row">
-              <h2>{title}</h2>
-              {copyTitle ? (
-                <button
-                  className="icon-action monitoring-detail-copy"
-                  type="button"
-                  aria-label={`Copy ${copyLabel}`}
-                  title={`Copy ${copyTitle}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void copyToClipboard(copyTitle, setHeaderCopied);
-                  }}
-                >
-                  {headerCopied ? <Check size={14} /> : <Copy size={14} />}
-                </button>
-              ) : null}
-              {environmentId && jobId ? (
-                <button
-                  className="icon-action monitoring-detail-copy"
-                  type="button"
-                  aria-label="Show system logs"
-                  title={systemLogsOpen ? "Hide system logs" : "Show system logs"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void toggleSystemLogs();
-                  }}
-                >
-                  <FileText size={14} />
-                </button>
-              ) : null}
-            </div>
+            {kind === "freshness" ? (
+              <>
+                <div className="monitoring-detail-title-row monitoring-freshness-title-row">
+                  <Clock3 className="monitoring-detail-kind-icon" size={14} aria-hidden="true" />
+                  <span className="monitoring-detail-kind-label">Freshness</span>
+                  <h2>{title}</h2>
+                  {copyTitle ? (
+                    <button
+                      className="icon-action monitoring-detail-copy"
+                      type="button"
+                      aria-label={`Copy ${copyLabel}`}
+                      title={`Copy ${copyTitle}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copyToClipboard(copyTitle, setHeaderCopied);
+                      }}
+                    >
+                      {headerCopied ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  ) : null}
+                </div>
+                <FreshnessHeaderChips row={row} />
+              </>
+            ) : kind === "diagnostics" ? (
+              <>
+                <div className="monitoring-detail-kind-row monitoring-diagnostics-kind-row">
+                  <SearchCheck className="monitoring-detail-kind-icon" size={15} aria-hidden="true" />
+                  <span className="monitoring-detail-kind-label">Diagnostics finding</span>
+                  <span className="monitoring-diagnostics-category">{diagnosticsCategoryLabel(row.category)}</span>
+                  <DiagnosticsSeverityLabel value={String(row.severity ?? "info")} />
+                </div>
+                <div className="monitoring-detail-title-row">
+                  <h2>{title}</h2>
+                  {copyTitle ? (
+                    <button
+                      className="icon-action monitoring-detail-copy"
+                      type="button"
+                      aria-label={`Copy ${copyLabel}`}
+                      title={`Copy ${copyTitle}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copyToClipboard(copyTitle, setHeaderCopied);
+                      }}
+                    >
+                      {headerCopied ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="monitoring-detail-kind-row">
+                  {kind === "job" ? <BriefcaseBusiness className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
+                  {kind === "dataflow" ? <Workflow className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
+                  {kind === "volume" ? <Boxes className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
+                  {kind === "maintenance" ? (
+                    <LineageFormatIcon
+                      kind={maintenanceFormatIconKind(row.destination_format ?? row.format ?? row.destination_connection_type)}
+                      label={String(row.destination_format ?? row.format ?? "destination table")}
+                      size={16}
+                    />
+                  ) : null}
+                  <span className="monitoring-detail-kind-label">{kind === "job" ? "Job run" : kind === "dataflow" ? "Dataflow run" : kind === "volume" ? "Volume" : kind === "maintenance" ? "Destination table" : kindLabel(kind)}</span>
+                  {kind === "job" || kind === "dataflow" ? <StatusCell row={row} /> : null}
+                  {kind === "maintenance" ? <MaintenanceHealthChip health={row.table_health} reason={row.attention_reason} /> : null}
+                </div>
+                <div className="monitoring-detail-title-row">
+                  <h2>{title}</h2>
+                  {copyTitle ? (
+                    <button
+                      className="icon-action monitoring-detail-copy"
+                      type="button"
+                      aria-label={`Copy ${copyLabel}`}
+                      title={`Copy ${copyTitle}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copyToClipboard(copyTitle, setHeaderCopied);
+                      }}
+                    >
+                      {headerCopied ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  ) : null}
+                  {environmentId && jobId && kind !== "volume" && kind !== "maintenance" ? (
+                    <button
+                      className="icon-action monitoring-detail-copy"
+                      type="button"
+                      aria-label="View system logs"
+                      title="View system logs"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSystemLogsOpen(true);
+                      }}
+                    >
+                      <FileText size={14} />
+                    </button>
+                  ) : null}
+                </div>
+                {kind === "maintenance" ? <MaintenanceHeaderContext row={row} title={title} /> : null}
+              </>
+            )}
           </div>
           <button className="icon-action" type="button" aria-label="Close monitoring details" onClick={onClose}>
             <X size={18} />
@@ -253,23 +326,43 @@ export function MonitoringDetailDrawer({
           ) : kind === "freshness" ? (
             <FreshnessDetailSections
               row={row}
-              relatedDataflows={sortedRelatedDataflows}
-              offset={childDataflowOffset}
-              limit={childDataflowLimit}
-              sort={childDataflowSort}
+              relatedDataflows={sortableRelatedDataflows}
+              total={relatedDataflowsTotal}
+              offset={relatedDataflowsOffset}
+              limit={relatedDataflowsLimit}
+              sort={relatedDataflowsSort}
               onSort={handleChildDataflowSort}
-              onPageChange={setChildDataflowOffset}
-              onPageSizeChange={(nextLimit) => {
-                setChildDataflowLimit(nextLimit);
-                setChildDataflowOffset(0);
-              }}
+              onPageChange={(offset) => onRelatedDataflowsPageChange?.(offset)}
+              onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
+              onOpenDataflow={onOpenDataflow}
+              timezoneName={timezoneName}
+            />
+          ) : kind === "volume" ? (
+            <VolumeDetailSections
+              row={row}
+              relatedDataflows={sortableRelatedDataflows}
+              total={relatedDataflowsTotal}
+              offset={relatedDataflowsOffset}
+              limit={relatedDataflowsLimit}
+              sort={relatedDataflowsSort}
+              onSort={handleChildDataflowSort}
+              onPageChange={(offset) => onRelatedDataflowsPageChange?.(offset)}
+              onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
               onOpenDataflow={onOpenDataflow}
               timezoneName={timezoneName}
             />
           ) : kind === "maintenance" ? (
             <MaintenanceDetailSections
               row={row}
-              relatedDataflows={sortedRelatedDataflows}
+              relatedDataflows={sortableRelatedDataflows}
+              total={relatedDataflowsTotal}
+              loading={relatedDataflowsLoading}
+              offset={relatedDataflowsOffset}
+              limit={relatedDataflowsLimit}
+              sort={relatedDataflowsSort}
+              onSort={handleChildDataflowSort}
+              onPageChange={(offset) => onRelatedDataflowsPageChange?.(offset)}
+              onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
               onOpenDataflow={onOpenDataflow}
               timezoneName={timezoneName}
             />
@@ -281,10 +374,7 @@ export function MonitoringDetailDrawer({
           {kind === "dataflow" && row.job_id ? (
             <LinkedJobSection row={row} onOpenJob={onOpenJob} />
           ) : null}
-          {systemLogsOpen ? (
-            <SystemLogsSection logs={systemLogs} loading={systemLogsLoading} error={systemLogsError} dataflowScoped={Boolean(dataflowId)} timezoneName={timezoneName} />
-          ) : null}
-          {kind !== "job" && kind !== "dataflow" && kind !== "freshness" && kind !== "maintenance" && kind !== "diagnostics" ? (
+          {kind !== "job" && kind !== "dataflow" && kind !== "freshness" && kind !== "volume" && kind !== "maintenance" && kind !== "diagnostics" ? (
             <>
               <DetailSection title="Source runtime" row={row} fields={SOURCE_FIELDS} timezoneName={timezoneName} />
               <DetailSection title="Transform runtime" row={row} fields={TRANSFORM_FIELDS} timezoneName={timezoneName} />
@@ -293,14 +383,24 @@ export function MonitoringDetailDrawer({
               <DetailSection title="Errors and notes" row={row} fields={ERROR_FIELDS} wide timezoneName={timezoneName} />
             </>
           ) : null}
-          {kind === "job" && relatedDataflows.length ? (
+          {kind === "job" && (relatedDataflows.length || relatedDataflowsLoading) ? (
             <section className="monitoring-detail-section">
-              <div className="monitoring-detail-section-header monitoring-child-dataflows-header">
-                <h3>Child dataflows</h3>
-                <small>{relatedDataflows.length} dataflow runs</small>
+              <div className="monitoring-detail-section-header monitoring-freshness-runs-header monitoring-child-dataflows-section-header">
+                <div className="monitoring-child-dataflows-header">
+                  <h3>Child dataflows</h3>
+                </div>
+                <TablePager
+                  limit={relatedDataflowsLimit}
+                  offset={relatedDataflowsOffset}
+                  loadedRows={relatedDataflows.length}
+                  totalRows={relatedDataflowsTotal}
+                  loading={relatedDataflowsLoading}
+                  onPageChange={(offset) => onRelatedDataflowsPageChange?.(offset)}
+                  onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
+                />
               </div>
               <DataTable
-                rows={sortedRelatedDataflows}
+                rows={sortableRelatedDataflows}
                 columns={[
                   { key: "dataflow_name", label: "Dataflow", sortable: true, width: 160 },
                   { key: "stage", label: "Stage", sortable: true, autoFit: true, minWidth: 64, maxWidth: 132 },
@@ -311,9 +411,10 @@ export function MonitoringDetailDrawer({
                   { key: "destination_rows_written", label: "Rows written", sortable: true, autoFit: true, minWidth: 98, maxWidth: 144 },
                   { key: "error_preview", label: "Issue", sortable: true, width: 240, className: "monitoring-child-issue-column", render: (child) => <IssueCell row={child} /> },
                 ]}
-                maxRows={relatedDataflows.length}
+                maxRows={relatedDataflowsLimit}
+                offset={0}
                 onRowClick={onOpenDataflow}
-                sort={childDataflowSort}
+                sort={relatedDataflowsSort}
                 onSort={handleChildDataflowSort}
                 fixedLayout
                 className="monitoring-child-dataflows-table"
@@ -337,9 +438,18 @@ export function MonitoringDetailDrawer({
               />
             </section>
           ) : null}
-          <RawPayloadSection row={row} />
+          <RawPayloadSection row={row} label={kind === "diagnostics" ? "Full evidence" : "Raw payload"} />
         </div>
       </aside>
+      {systemLogsOpen && environmentId && jobId ? (
+        <SystemLogViewer
+          environmentId={environmentId}
+          jobId={jobId}
+          dataflowId={dataflowId || undefined}
+          timezoneName={timezoneName}
+          onClose={() => setSystemLogsOpen(false)}
+        />
+      ) : null}
     </div>,
     document.body
   );
@@ -353,66 +463,25 @@ const WATERMARK_FIELDS = [
   "source_watermark_columns",
 ];
 
-function SystemLogsSection({
-  logs,
-  loading,
-  error,
-  dataflowScoped,
-  timezoneName,
-}: {
-  logs: SystemLogResponse | null;
-  loading: boolean;
-  error: string | null;
-  dataflowScoped: boolean;
-  timezoneName?: string | null;
-}) {
-  const records = logs?.records ?? [];
-  return (
-    <section className="monitoring-detail-section">
-      <div className="monitoring-detail-section-header monitoring-child-dataflows-header">
-        <h3>System logs</h3>
-        <small>{loading ? "Loading..." : `${logs?.total ?? 0} records · ${logs?.files.length ?? 0} files${dataflowScoped ? " · dataflow scoped" : ""}`}</small>
-      </div>
-      {error ? <p className="monitoring-detail-error-message">System log read failed: {error}</p> : null}
-      {!loading && !error && logs && !logs.files.length ? (
-        <p className="monitoring-detail-muted">No system log file is indexed for this job. Run Sync on the log source first.</p>
-      ) : null}
-      {logs?.errors?.length ? (
-        <p className="monitoring-detail-muted">{logs.errors.length} read warnings while loading system logs.</p>
-      ) : null}
-      {records.length ? (
-        <DataTable
-          rows={records}
-          columns={[
-            { key: "ts", label: "Time", sortable: true, width: 184, render: (item) => detailValue(item, "ts", timezoneName) },
-            { key: "level", label: "Level", sortable: true, autoFit: true, minWidth: 64, maxWidth: 92 },
-            { key: "logger", label: "Logger", sortable: true, width: 160 },
-            { key: "dataflow_id", label: "Dataflow", sortable: true, width: 140 },
-            { key: "msg", label: "Message", sortable: true, minWidth: 260, fillPriority: "last", render: (item) => <SystemLogMessage row={item} /> },
-          ]}
-          maxRows={Math.min(200, Math.max(1, records.length))}
-          fixedLayout
-          timezoneName={timezoneName}
-          className="monitoring-child-dataflows-table"
-        />
-      ) : loading ? (
-        <p className="monitoring-detail-muted">Loading system logs...</p>
-      ) : null}
-    </section>
-  );
-}
-
-function SystemLogMessage({ row }: { row: Record<string, unknown> }) {
-  const message = String(row.msg ?? row.message ?? "-");
-  const title = JSON.stringify(row, null, 2);
-  return <span className="monitoring-child-issue-cell" title={title}>{message}</span>;
-}
-
 function firstValue(row: Record<string, unknown>, fields: string[]) {
   for (const field of fields) {
     if (hasValue(row[field])) return row[field];
   }
   return null;
+}
+
+function jobStatusTone(value: unknown) {
+  const status = String(value ?? "unknown").trim().toLowerCase();
+  if (status === "succeeded" || status === "success") return "is-succeeded";
+  if (status === "failed" || status === "error") return "is-failed";
+  if (status === "skipped" || status === "warning") return "is-skipped";
+  if (status === "running") return "is-running";
+  if (status === "pending") return "is-pending";
+  return "is-unknown";
+}
+
+export function phaseRuntimeStatusClass(value: unknown) {
+  return `monitoring-dataflow-runtime-card ${jobStatusTone(value)}`;
 }
 
 function reconciliationSummary(row: Record<string, unknown>) {
@@ -441,6 +510,7 @@ function JobDetailSections({
         <div className="monitoring-job-detail-grid">
           <GroupedDetailCard
             title="Identity"
+            className="monitoring-job-identity-card"
             rows={[
               ["Workspace ID", row.workspace_id],
               ["Num", firstValue(row, ["job_num", "job_number", "num"])],
@@ -452,6 +522,7 @@ function JobDetailSections({
           />
           <GroupedDetailCard
             title="Execution"
+            className="monitoring-job-execution-card"
             rows={[
               ["Status", <StatusCell row={row} />],
               ["Start", row.start_time, "start_time"],
@@ -462,6 +533,7 @@ function JobDetailSections({
           />
           <GroupedDetailCard
             title="Runtime context"
+            className="monitoring-job-runtime-card"
             rows={[
               ["Platform", row.platform_name],
               ["Engine", row.engine_name],
@@ -473,6 +545,7 @@ function JobDetailSections({
           />
           <GroupedDetailCard
             title="Run config"
+            className="monitoring-job-config-card"
             rows={[
               ["Dry run", row.dry_run],
               ["Stop on error", row.stop_on_error],
@@ -554,14 +627,119 @@ function formatListLikeValue(value: unknown) {
   return textValue.split(",").map((item) => item.trim()).filter(Boolean).join(", ");
 }
 
+function DataflowRunSummary({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
+  const source = dataflowEndpointSummary(row, "source");
+  const destination = dataflowEndpointSummary(row, "destination");
+  const loadType = firstValue(row, ["destination_load_type", "load_type", "destination_operation_type"]);
+  const bytesAdded = num(row, "destination_bytes_added");
+  const bytesRemoved = num(row, "destination_bytes_removed");
+  const bottleneck = dataflowPhaseBottleneck(row);
+  return (
+    <section className="monitoring-detail-section monitoring-dataflow-summary-section">
+      <div className="monitoring-dataflow-route-card">
+        <DataflowRouteEndpoint direction="source" endpoint={source} />
+        <ArrowRight className="monitoring-dataflow-route-arrow" size={18} aria-hidden="true" />
+        <DataflowRouteEndpoint direction="destination" endpoint={destination} />
+        <div className="monitoring-dataflow-route-context">
+          <span>{String(row.stage || "unknown stage")}</span>
+          <span>{String(row.operation_type || "unknown operation")}</span>
+          <span>{String(loadType || "unknown load type")}</span>
+        </div>
+      </div>
+      <div className="monitoring-dataflow-summary-grid">
+        <GroupedDetailCard
+          title="Execution"
+          className="monitoring-dataflow-execution-card"
+          rows={[
+            ["Status", <StatusCell row={row} />],
+            ["Run ID", row.dataflow_run_id],
+            ["Start", row.start_time, "start_time"],
+            ["End", row.end_time, "end_time"],
+            ["Duration", row.duration_seconds, "duration_seconds"],
+            ["Retry attempts", row.retry_attempts],
+          ]}
+          showEmpty
+          timezoneName={timezoneName}
+        />
+        <GroupedDetailCard
+          title="Phase health"
+          className={`monitoring-dataflow-phase-card${bottleneck ? ` phase-health-${bottleneck.phase}` : ""}`}
+          rows={[
+            ["Bottleneck", <DataflowPhaseBottleneck row={row} />],
+            ["Contribution", <DataflowPhaseContribution row={row} />, "phase_contribution"],
+            ["Source", row.source_duration_seconds, "source_duration_seconds"],
+            ["Transform", row.transform_duration_seconds, "transform_duration_seconds"],
+            ["Destination", row.destination_duration_seconds, "destination_duration_seconds"],
+            ["Overhead", row.overhead_duration_seconds, "overhead_duration_seconds"],
+          ]}
+          showEmpty
+          timezoneName={timezoneName}
+        />
+        <GroupedDetailCard
+          title="Workload"
+          className="monitoring-dataflow-workload-card"
+          rows={[
+            ["Rows read", row.source_rows_read, "source_rows_read"],
+            ["Rows written", row.destination_rows_written, "destination_rows_written"],
+            ["Bytes added", row.destination_bytes_added, "destination_bytes_added"],
+            ["Bytes removed", row.destination_bytes_removed, "destination_bytes_removed"],
+            ["Net bytes", bytesAdded - bytesRemoved, "net_bytes"],
+            ["Watermark", row.movement_state],
+          ]}
+          showEmpty
+          timezoneName={timezoneName}
+        />
+      </div>
+    </section>
+  );
+}
+
+function dataflowEndpointSummary(row: Record<string, unknown>, direction: "source" | "destination") {
+  const sourceQuery = direction === "source" ? firstValue(row, ["source_query"]) : null;
+  const sourcePythonFunction = direction === "source" ? firstValue(row, ["source_python_function"]) : null;
+  const asset = direction === "source"
+    ? sourceQuery
+      ? "SQL query"
+      : sourcePythonFunction || firstValue(row, ["source_table", "source_name"])
+    : firstValue(row, ["destination_table", "destination_name"]);
+  const connection = firstValue(row, [`${direction}_connection_name`, `${direction}_name`]);
+  const format = firstValue(row, [`${direction}_format`, `${direction}_connection_type`]);
+  return {
+    asset: String(asset || (direction === "source" ? "Unknown source" : "Unknown destination")),
+    connection: String(connection || "unknown connection"),
+    format: String(format || "unknown format"),
+  };
+}
+
+function DataflowRouteEndpoint({
+  direction,
+  endpoint,
+}: {
+  direction: "source" | "destination";
+  endpoint: { asset: string; connection: string; format: string };
+}) {
+  return (
+    <div className={`monitoring-dataflow-route-endpoint is-${direction}`}>
+      <span>{direction}</span>
+      <strong>{endpoint.asset}</strong>
+      <small>{endpoint.connection} · {endpoint.format}</small>
+    </div>
+  );
+}
+
 function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
   return (
     <>
-      <section className="monitoring-detail-section">
-        <h3>Dataflow</h3>
+      <DataflowRunSummary row={row} timezoneName={timezoneName} />
+
+      <FailureEvidenceSections row={row} timezoneName={timezoneName} />
+
+      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-configuration">
+        <h3>Dataflow configuration</h3>
         <div className="monitoring-dataflow-detail-grid">
           <GroupedDetailCard
-            title="Master data"
+            title="Identity and configuration"
+            className="monitoring-dataflow-config-card"
             rows={[
               ["Dataflow ID", row.dataflow_id],
               ["Workspace ID", row.workspace_id],
@@ -577,28 +755,10 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
             showEmpty
             timezoneName={timezoneName}
           />
-          <GroupedDetailCard
-            title="Runtime info"
-            rows={[
-              ["Run ID", row.dataflow_run_id],
-              ["Operation", row.operation_type],
-              ["Start", row.start_time, "start_time"],
-              ["End", row.end_time, "end_time"],
-              ["Duration", row.duration_seconds, "duration_seconds"],
-              ["Status", <StatusCell row={row} />],
-              ["Phase bottleneck", <DataflowPhaseBottleneck row={row} />],
-              ["Phase contribution", <DataflowPhaseContribution row={row} />, "phase_contribution"],
-              ["Retry attempts", row.retry_attempts],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
         </div>
       </section>
 
-      <FailureEvidenceSections row={row} timezoneName={timezoneName} />
-
-      <section className="monitoring-detail-section">
+      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-source">
         <h3>Source</h3>
         <div className="monitoring-dataflow-detail-grid">
           <GroupedDetailCard
@@ -625,6 +785,7 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
           />
           <GroupedDetailCard
             title="Runtime info"
+            className={phaseRuntimeStatusClass(row.source_status)}
             rows={[
               ["Start", row.source_start_time, "source_start_time"],
               ["End", row.source_end_time, "source_end_time"],
@@ -643,7 +804,7 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
         </div>
       </section>
 
-      <section className="monitoring-detail-section">
+      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-transform">
         <h3>Transform</h3>
         <div className="monitoring-dataflow-detail-grid">
           <GroupedDetailCard
@@ -661,6 +822,7 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
           />
           <GroupedDetailCard
             title="Runtime info"
+            className={phaseRuntimeStatusClass(row.transform_status)}
             rows={[
               ["Start", row.transform_start_time, "transform_start_time"],
               ["End", row.transform_end_time, "transform_end_time"],
@@ -675,7 +837,7 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
         </div>
       </section>
 
-      <section className="monitoring-detail-section">
+      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-destination">
         <h3>Destination</h3>
         <div className="monitoring-dataflow-detail-grid">
           <GroupedDetailCard
@@ -701,6 +863,7 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
           />
           <GroupedDetailCard
             title="Runtime info"
+            className={phaseRuntimeStatusClass(row.destination_status)}
             rows={[
               ["Start", row.destination_start_time, "destination_start_time"],
               ["End", row.destination_end_time, "destination_end_time"],
@@ -731,119 +894,177 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
 function MaintenanceDetailSections({
   row,
   relatedDataflows,
+  total,
+  loading,
+  offset,
+  limit,
+  sort,
+  onSort,
+  onPageChange,
+  onPageSizeChange,
   onOpenDataflow,
   timezoneName,
 }: {
   row: Record<string, unknown>;
   relatedDataflows: MonitoringRecord[];
+  total: number;
+  loading: boolean;
+  offset: number;
+  limit: number;
+  sort: TableSort;
+  onSort: (sort: TableSort) => void;
+  onPageChange: (offset: number) => void;
+  onPageSizeChange: (limit: number) => void;
   onOpenDataflow?: (row: MonitoringRecord) => void;
   timezoneName?: string | null;
 }) {
-  const nonMaintenanceRuns = relatedDataflows.filter((item) => !isMaintenanceRun(item));
-  const destinationRuns = relatedDataflows
-    .slice()
-    .sort((left, right) => timeValue(right.end_time ?? right.start_time) - timeValue(left.end_time ?? left.start_time));
-  const contributingDataflows = maintenanceContributingDataflows(nonMaintenanceRuns);
+  const destinationRuns = relatedDataflows;
+  const contributingDataflows = Array.isArray(row.upstream_dataflows)
+    ? row.upstream_dataflows as MonitoringRecord[]
+    : [];
+  const upstreamRunCount = Number(row.upstream_run_count ?? 0);
   return (
     <>
-      <section className="monitoring-detail-section">
-        <h3>Destination table</h3>
-        <div className="monitoring-job-detail-grid">
+      <section className="monitoring-detail-section monitoring-maintenance-summary-section">
+        <div className="monitoring-maintenance-summary-grid">
           <GroupedDetailCard
             title="Health"
             rows={[
-              ["Status", row.table_health],
+              ["Status", <MaintenanceHealthChip key="health" health={row.table_health} reason={row.attention_reason} />],
               ["Health reason", row.attention_reason],
               ["Latest maintenance", row.latest_maintenance_time, "latest_maintenance_time"],
               ["Latest ETL write", row.latest_etl_write_time, "latest_etl_write_time"],
-              ["Lag", row.maintenance_lag_seconds, "maintenance_lag_seconds"],
+              ["Lag", formatMaintenanceLag(num(row, "maintenance_lag_seconds"))],
             ]}
             showEmpty
             timezoneName={timezoneName}
+            className={`monitoring-maintenance-health-card ${maintenanceTableHealthClass(row.table_health)}`}
           />
           <GroupedDetailCard
-            title="Target identity"
+            title="Run outcome"
             rows={[
-              ["Target", row.target],
-              ["Display target", row.target_display],
-              ["Destination table", row.destination_table],
-              ["Full table", row.destination_full_table],
-              ["Path", row.destination_path],
-              ["Connection", firstValue(row, ["destination_name", "destination_connection_name"])],
-              ["Connection type", row.destination_connection_type],
-              ["Format", row.destination_format ?? row.format],
+              ["Runs", row.run_count, "run_count"],
+              ["Succeeded", row.succeeded, "succeeded"],
+              ["Failed", row.failed, "failed"],
+              ["Skipped", row.skipped, "skipped"],
+              ["No-op runs", <MaintenanceMetricValue key="no-op-runs" tone="warning" value={formatNumber(num(row, "no_op_runs"))} />],
+              ["No-op duration", <MaintenanceMetricValue key="no-op-duration" tone="warning" value={formatSeconds(num(row, "no_op_duration_seconds"))} />],
             ]}
             showEmpty
             timezoneName={timezoneName}
+            className="monitoring-maintenance-outcome-card"
           />
           <GroupedDetailCard
-            title="Maintenance evidence"
+            title="Storage impact"
             rows={[
-              ["Runs", row.run_count],
-              ["Succeeded", row.succeeded],
-              ["Failed", row.failed],
-              ["Skipped", row.skipped],
-              ["Bytes reclaimed", row.bytes_reclaimed, "bytes_reclaimed"],
-              ["Files removed", row.files_removed],
-              ["Bytes saved", row.bytes_saved, "bytes_saved"],
+              ["Bytes reclaimed", <MaintenanceMetricValue key="bytes-reclaimed" tone="reclaim" value={formatBytes(num(row, "bytes_reclaimed"))} />],
+              ["Files removed", <MaintenanceMetricValue key="files-removed" tone="files" value={formatNumber(num(row, "files_removed"))} />],
+              ["Bytes saved", <MaintenanceMetricValue key="bytes-saved" tone="reclaim" value={formatBytes(num(row, "bytes_saved"))} />],
               ["Efficiency", `${formatBytes(num(row, "bytes_reclaimed_per_second"))}/s`],
-              ["No-op runs", row.no_op_runs],
-              ["No-op duration", row.no_op_duration_seconds, "no_op_duration_seconds"],
             ]}
             showEmpty
             timezoneName={timezoneName}
+            className="monitoring-maintenance-storage-card"
           />
         </div>
       </section>
 
       <section className="monitoring-detail-section">
         <div className="monitoring-detail-section-header monitoring-child-dataflows-header">
-          <h3>Contributing dataflows</h3>
-          <small>{contributingDataflows.length} dataflows · {nonMaintenanceRuns.length} non-maintenance runs</small>
+          <h3>Upstream dataflows</h3>
+          <small>{`${contributingDataflows.length} dataflows · ${upstreamRunCount} ETL runs`}</small>
         </div>
-        <DataTable
-          rows={contributingDataflows}
-          columns={[
-            { key: "dataflow_name", label: "Dataflow", sortable: true, width: 150 },
-            { key: "context", label: "Context", sortable: true, sortKey: "stage", width: 100, render: (item) => <MaintenanceContextCell row={item} /> },
-            { key: "source", label: "Source", sortable: true, width: 140, fillPriority: "last", render: (item) => <MaintenanceSourceCell row={item} /> },
-            { key: "load_type", label: "Load", sortable: true, autoFit: true, minWidth: 72, maxWidth: 112 },
-            { key: "latest_status", label: "Latest", sortable: true, sortKey: "latest_time", width: 176, render: (item) => <MaintenanceLatestCell row={item} timezoneName={timezoneName} /> },
-            { key: "run_count", label: "Runs / rows", sortable: true, width: 112, render: (item) => <MaintenanceContributingVolumeCell row={item} /> },
-          ]}
-          maxRows={Math.max(1, contributingDataflows.length)}
-          fixedLayout
-          timezoneName={timezoneName}
-          className="monitoring-child-dataflows-table"
-        />
+        {loading ? <MaintenanceRelatedLoading /> : (
+          <DataTable
+            rows={contributingDataflows}
+            columns={[
+              { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 180, fillPriority: "normal", render: (item) => <MaintenanceDataflowCell row={item} /> },
+              { key: "source", label: "Source", sortable: true, minWidth: 150, fillPriority: "last", render: (item) => <MaintenanceSourceCell row={item} /> },
+              { key: "load_type", label: "Load", sortable: true, autoFit: true, minWidth: 72, maxWidth: 112 },
+              { key: "latest_status", label: "Latest", sortable: true, sortKey: "latest_time", minWidth: 164, maxWidth: 184, render: (item) => <MaintenanceLatestCell row={item} timezoneName={timezoneName} /> },
+              { key: "run_count", label: "Runs / rows", sortable: true, autoFit: true, minWidth: 104, maxWidth: 128, render: (item) => <MaintenanceContributingVolumeCell row={item} /> },
+            ]}
+            maxRows={Math.max(1, contributingDataflows.length)}
+            fixedLayout
+            timezoneName={timezoneName}
+            className="monitoring-child-dataflows-table monitoring-maintenance-upstream-table"
+          />
+        )}
       </section>
 
       <section className="monitoring-detail-section">
-        <div className="monitoring-detail-section-header monitoring-child-dataflows-header">
-          <h3>Destination runs</h3>
-          <small>{destinationRuns.length} dataflow runs into this destination</small>
+        <div className="monitoring-detail-section-header monitoring-freshness-runs-header monitoring-child-dataflows-section-header">
+          <div className="monitoring-child-dataflows-header">
+            <h3>Run history</h3>
+            <small>{loading ? "Loading destination runs…" : `${total} runs into this destination`}</small>
+          </div>
+          {!loading ? (
+            <TablePager
+              limit={limit}
+              offset={offset}
+              loadedRows={destinationRuns.length}
+              totalRows={total}
+              loading={loading}
+              onPageChange={onPageChange}
+              onPageSizeChange={onPageSizeChange}
+            />
+          ) : null}
         </div>
-        <DataTable
-          rows={destinationRuns}
-          columns={[
-            { key: "dataflow_name", label: "Dataflow", sortable: true, width: 150 },
-            { key: "context", label: "Context", sortable: true, sortKey: "stage", width: 100, render: (item) => <MaintenanceContextCell row={item} /> },
-            { key: "source", label: "Source", sortable: true, width: 140, fillPriority: "last", render: (item) => <MaintenanceSourceCell row={item} /> },
-            { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (item) => <StatusCell row={item} /> },
-            { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (item) => formatSeconds(num(item, "duration_seconds")) },
-            { key: "volume", label: "Volume", sortable: true, sortKey: "source_rows_read", width: 126, render: (item) => <MaintenanceRunVolumeCell row={item} /> },
-            { key: "end_time", label: "End", sortable: true, width: 176, render: (item) => detailValue(item, "end_time", timezoneName) },
-            { key: "error_message", label: "Issue", sortable: true, minWidth: 120, fillPriority: "last", render: (item) => <IssueCell row={item} /> },
-          ]}
-          maxRows={Math.min(100, Math.max(1, destinationRuns.length))}
-          onRowClick={onOpenDataflow}
-          fixedLayout
-          timezoneName={timezoneName}
-          className="monitoring-child-dataflows-table"
-        />
+        {loading ? <MaintenanceRelatedLoading /> : (
+          <DataTable
+            rows={destinationRuns}
+            columns={[
+              { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 180, fillPriority: "normal", render: (item) => <MaintenanceDataflowCell row={item} /> },
+              { key: "source", label: "Source", sortable: true, minWidth: 150, maxWidth: 190, fillPriority: "normal", render: (item) => <MaintenanceSourceCell row={item} /> },
+              { key: "latest", label: "Latest", sortable: true, sortKey: "end_time", autoFit: true, minWidth: 156, maxWidth: 184, render: (item) => <MaintenanceLatestCell row={item} timezoneName={timezoneName} /> },
+              { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (item) => formatSeconds(num(item, "duration_seconds")) },
+              { key: "volume", label: "Volume", sortable: true, sortKey: "source_rows_read", minWidth: 116, maxWidth: 136, render: (item) => <MaintenanceRunVolumeCell row={item} /> },
+              { key: "error_message", label: "Issue", sortable: true, minWidth: 140, fillPriority: "last", render: (item) => <IssueCell row={item} /> },
+            ]}
+            maxRows={limit}
+            offset={0}
+            onRowClick={onOpenDataflow}
+            sort={sort}
+            onSort={onSort}
+            fixedLayout
+            timezoneName={timezoneName}
+            className="monitoring-child-dataflows-table monitoring-maintenance-run-history-table"
+          />
+        )}
       </section>
     </>
   );
+}
+
+function MaintenanceHeaderContext({ row, title }: { row: Record<string, unknown>; title: string }) {
+  const canonicalTarget = String(row.target ?? title);
+  const connection = String(firstValue(row, ["destination_name", "destination_connection_name"]) ?? "unknown connection");
+  const connectionType = String(row.destination_connection_type ?? "unknown");
+  const format = String(row.destination_format ?? row.format ?? "table");
+  const normalize = (value: string) => value.replace(/`/g, "").trim().toLowerCase();
+  const showCanonicalTarget = Boolean(canonicalTarget && normalize(canonicalTarget) !== normalize(title));
+  return (
+    <div className="monitoring-maintenance-header-context">
+      <span>{connection} · {connectionType} · {format}</span>
+      {showCanonicalTarget ? <code title={canonicalTarget}>{canonicalTarget}</code> : null}
+    </div>
+  );
+}
+
+function MaintenanceHealthChip({ health, reason }: { health: unknown; reason?: unknown }) {
+  return (
+    <span className={`maintenance-table-health-chip ${maintenanceTableHealthClass(health)}`} title={String(reason ?? maintenanceTableHealthLabel(health))}>
+      {maintenanceTableHealthLabel(health)}
+    </span>
+  );
+}
+
+function MaintenanceMetricValue({ tone, value }: { tone: "reclaim" | "files" | "warning"; value: string }) {
+  return <span className={`monitoring-maintenance-metric-value is-${tone}`}>{value}</span>;
+}
+
+function MaintenanceRelatedLoading() {
+  return <div className="table-empty monitoring-maintenance-related-loading">Loading related evidence…</div>;
 }
 
 function isMaintenanceRun(row: Record<string, unknown>) {
@@ -852,10 +1073,12 @@ function isMaintenanceRun(row: Record<string, unknown>) {
   return operationType === "maintenance" || ["compact", "cleanup", "maintenance"].includes(destinationOperationType);
 }
 
-function MaintenanceContextCell({ row }: { row: Record<string, unknown> }) {
+function MaintenanceDataflowCell({ row }: { row: Record<string, unknown> }) {
+  const name = String(row.dataflow_name ?? row.dataflow_id ?? "unknown dataflow");
   const stage = String(row.stage ?? "unknown");
   const operation = String(row.operation_type ?? "unknown");
   const destinationOperation = String(row.destination_operation_type ?? "-");
+  const context = [stage, operation, destinationOperation !== "-" && destinationOperation !== operation ? destinationOperation : ""].filter(Boolean).join(" · ");
   return (
     <span
       className="freshness-run-stack-cell"
@@ -865,8 +1088,8 @@ function MaintenanceContextCell({ row }: { row: Record<string, unknown> }) {
         `Destination operation: ${destinationOperation}`,
       ].join("\n")}
     >
-      <strong>{stage}</strong>
-      <small>{operation}</small>
+      <strong>{name}</strong>
+      <small>{context}</small>
     </span>
   );
 }
@@ -889,7 +1112,8 @@ function MaintenanceSourceCell({ row }: { row: Record<string, unknown> }) {
 
 function MaintenanceLatestCell({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
   const status = String(row.latest_status ?? row.status ?? "unknown");
-  const latest = detailValue(row, "latest_time", timezoneName);
+  const latestField = hasValue(row.latest_time) ? "latest_time" : hasValue(row.end_time) ? "end_time" : "start_time";
+  const latest = detailValue(row, latestField, timezoneName);
   return (
     <span
       className="freshness-run-stack-cell"
@@ -957,36 +1181,6 @@ function MaintenanceRunVolumeCell({ row }: { row: Record<string, unknown> }) {
   );
 }
 
-function maintenanceContributingDataflows(rows: MonitoringRecord[]) {
-  const buckets = new Map<string, MonitoringRecord[]>();
-  rows.forEach((row) => {
-    const key = String(row.dataflow_id ?? row.dataflow_name ?? "unknown");
-    const items = buckets.get(key) ?? [];
-    items.push(row);
-    buckets.set(key, items);
-  });
-  return Array.from(buckets.entries()).map(([dataflowId, items]) => {
-    const latest = items.slice().sort((left, right) => timeValue(right.end_time ?? right.start_time) - timeValue(left.end_time ?? left.start_time))[0] ?? {};
-    return {
-      dataflow_id: dataflowId,
-      dataflow_name: latest.dataflow_name ?? dataflowId,
-      stage: latest.stage ?? "unknown",
-      operation_type: latest.operation_type ?? "unknown",
-      source: maintenanceSourceLabel(latest),
-      load_type: latest.destination_load_type ?? latest.destination_operation_type ?? "-",
-      latest_status: latest.status ?? "unknown",
-      latest_time: latest.end_time ?? latest.start_time,
-      run_count: items.length,
-      rows_read: items.reduce((sum, item) => sum + num(item, "source_rows_read"), 0),
-    };
-  }).sort((left, right) => String(left.dataflow_name).localeCompare(String(right.dataflow_name)));
-}
-
-function maintenanceSourceLabel(row: Record<string, unknown>) {
-  const source = maintenanceSourceParts(row);
-  return `${source.connection} · ${source.object}`;
-}
-
 function maintenanceSourceParts(row: Record<string, unknown>) {
   if (hasValue(row.source)) {
     const [connection, ...rest] = String(row.source).split(" · ");
@@ -1003,11 +1197,6 @@ function maintenanceSourceParts(row: Record<string, unknown>) {
   };
 }
 
-function timeValue(value: unknown) {
-  const parsed = Date.parse(String(value ?? ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function DiagnosticsDetailSections({
   row,
   timezoneName,
@@ -1017,82 +1206,53 @@ function DiagnosticsDetailSections({
 }) {
   const evidence = evidenceObject(row.evidence);
   const category = String(row.category ?? "diagnostics");
-  const severity = String(row.severity ?? "info");
-  const actionItems = diagnosticsActions(row, evidence);
-  const impactRows = diagnosticsImpactRows(category, row, evidence);
+  const actionItems = diagnosticsInvestigationActions(row, evidence);
+  const evidenceItems = diagnosticsEvidenceItems(category, row, evidence);
   return (
     <>
       <section className="monitoring-detail-section monitoring-diagnostics-finding">
-        <div className="monitoring-detail-section-header">
-          <h3>Finding summary</h3>
-          <DiagnosticsSeverityLabel value={severity} />
-        </div>
-        <div className="monitoring-diagnostics-summary-grid">
-          <GroupedDetailCard
-            title="Issue"
-            rows={[
-              ["Category", humanize(category)],
-              ["Target", row.target],
-              ["Latest", row.latest_time, "latest_time"],
-              ["Rule", diagnosticsRuleDescription(category)],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-          <GroupedDetailCard
-            title="What happened"
-            rows={[
-              ["Issue", row.issue],
-              ["Action hint", row.action_hint],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
+        <h3>What happened</h3>
+        <div className="monitoring-diagnostics-finding-callout">
+          <strong>{display(row, "issue")}</strong>
+          <p>{diagnosticsRuleDescription(category)}</p>
+          {hasValue(row.latest_time) ? (
+            <small>Latest observed · {renderGroupedValue(row.latest_time, timezoneName, "latest_time")}</small>
+          ) : null}
         </div>
       </section>
-
-      {impactRows.length ? (
-        <section className="monitoring-detail-section">
-          <h3>Impact scope</h3>
-          <div className="monitoring-diagnostics-impact-grid">
-            {impactRows.map(([label, value, field]) => (
-              <div key={label} className="monitoring-diagnostics-impact-card">
-                <span>{label}</span>
-                <strong>{renderGroupedValue(value, timezoneName, field)}</strong>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
 
       <section className="monitoring-detail-section">
         <h3>Evidence</h3>
-        <div className="monitoring-job-detail-grid monitoring-diagnostics-evidence-grid">
-          {diagnosticsEvidenceCards(category, evidence, timezoneName)}
+        <div className="monitoring-diagnostics-evidence-grid">
+          {evidenceItems.map((item) => (
+            <div
+              key={item.label}
+              className={`monitoring-diagnostics-evidence-card${item.intent && item.intent !== "neutral" ? ` is-${item.intent}` : ""}${item.wide ? " is-wide" : ""}${item.primary ? " is-primary" : ""}`}
+            >
+              <span>{item.label}</span>
+              <strong>{renderGroupedValue(item.value, timezoneName, item.field)}</strong>
+            </div>
+          ))}
         </div>
       </section>
 
-      <section className="monitoring-detail-section">
-        <h3>Investigation path</h3>
-        <ol className="monitoring-diagnostics-action-list">
-          {actionItems.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ol>
-      </section>
-
-      <section className="monitoring-detail-section">
-        <h3>Raw evidence</h3>
-        <JsonBlock value={evidence} />
-      </section>
+      {actionItems.length ? (
+        <section className="monitoring-detail-section">
+          <h3>Investigation path</h3>
+          <ol className="monitoring-diagnostics-action-list">
+            {actionItems.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
     </>
   );
 }
 
 function DiagnosticsSeverityLabel({ value }: { value: string }) {
-  const normalized = value.toLowerCase();
-  const intent = normalized === "bad" || normalized === "error" ? "bad" : normalized;
-  return <span className={`diagnostics-severity diagnostics-${intent}`}>{value}</span>;
+  const presentation = diagnosticsSeverityPresentation(value);
+  return <span className={`diagnostics-severity diagnostics-${presentation.tone}`}>{presentation.label}</span>;
 }
 
 function evidenceObject(value: unknown): Record<string, unknown> {
@@ -1104,219 +1264,52 @@ function evidenceObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function diagnosticsRuleDescription(category: string) {
-  switch (category) {
-    case "read/cache warning":
-      return "A log source emitted a read or cache warning.";
-    case "orphan dataflow job id":
-      return "Dataflow logs reference a job_id that is missing from job logs.";
-    case "job without dataflows":
-      return "A job log exists but no child dataflow records were found.";
-    case "reconciliation mismatch":
-      return "A job total does not match the child dataflow rollup.";
-    case "field completeness":
-      return "A Monitoring evidence-field group is below completeness threshold.";
-    case "source coverage":
-      return "A log source has warning evidence in the current filter.";
-    default:
-      return "Diagnostics evidence needs review.";
-  }
+type FreshnessDrawerHealthTone = "success" | "warning" | "failed" | "neutral";
+
+export function freshnessDrawerHealth(row: Record<string, unknown>): { label: string; tone: FreshnessDrawerHealthTone } {
+  const hasEvidence = hasValue(row.latest_freshness_at) || hasValue(row.latest_run_at) || num(row, "run_count") > 0;
+  if (!hasEvidence) return { label: "No evidence", tone: "neutral" };
+  const latestStatus = String(firstValue(row, ["latest_run_status", "latest_freshness_status"]) ?? "").trim().toLowerCase();
+  const watermarkState = String(firstValue(row, ["movement_state", "coverage_state"]) ?? "").trim().toLowerCase();
+  if (latestStatus === "failed" || watermarkState === "invalid") return { label: "Needs review", tone: "failed" };
+  if (["running", "pending"].includes(latestStatus) || watermarkState === "incomplete") return { label: "Needs review", tone: "warning" };
+  const ageDays = Number(row.age_days ?? (Number(row.age_seconds) / 86_400));
+  if (Number.isFinite(ageDays) && ageDays > 7) return { label: "Stale", tone: "warning" };
+  return { label: "Current", tone: "success" };
 }
 
-function diagnosticsImpactRows(category: string, row: Record<string, unknown>, evidence: Record<string, unknown>): DetailRow[] {
-  if (category === "reconciliation mismatch") {
-    return [
-      ["Job ID", evidence.job_id ?? row.target],
-      ["Metric", evidence.metric],
-      ["Expected", evidence.expected],
-      ["Observed", evidence.observed],
-      ["Difference", evidence.difference],
-    ];
-  }
-  if (category === "field completeness") {
-    return [
-      ["Record type", evidence.record_type],
-      ["Group", evidence.group],
-      ["Records", evidence.records],
-      ["Required fields", evidence.required_fields],
-      ["Present values", evidence.present_values],
-      ["Missing values", evidence.missing_values],
-      ["Completeness", hasValue(evidence.completeness_rate) ? `${evidence.completeness_rate}%` : null],
-    ];
-  }
-  if (category === "source coverage") {
-    return [
-      ["Source", evidence.source ?? row.target],
-      ["File kind", evidence.file_kind],
-      ["Files", evidence.file_count],
-      ["Records", evidence.records],
-      ["Job records", evidence.job_records],
-      ["Dataflow records", evidence.dataflow_records],
-      ["Warnings", evidence.warning_count],
-      ["Latest log", evidence.latest_log_at, "latest_log_at"],
-      ["Latest ingested", evidence.latest_ingested_at, "latest_ingested_at"],
-    ];
-  }
-  if (category === "orphan dataflow job id" || category === "job without dataflows") {
-    return [
-      ["Job ID", evidence.job_id ?? row.target],
-      ["Dataflow records", evidence.dataflow_records],
-      ["Job total dataflows", evidence.job_total_dataflows],
-      ["Latest", row.latest_time, "latest_time"],
-    ];
-  }
-  if (category === "read/cache warning") {
-    return [
-      ["Source/path", evidence.uri ?? evidence.path ?? row.target],
-      ["Status", evidence.status ?? evidence.severity],
-      ["Message", evidence.message ?? evidence.error],
-    ];
-  }
-  return [
-    ["Target", row.target],
-    ["Latest", row.latest_time, "latest_time"],
-  ];
-}
-
-function diagnosticsEvidenceCards(category: string, evidence: Record<string, unknown>, timezoneName?: string | null) {
-  if (category === "reconciliation mismatch") {
-    return (
-      <>
-        <GroupedDetailCard
-          title="Reconciliation"
-          rows={[
-            ["Severity", evidence.severity],
-            ["Metric", evidence.metric],
-            ["Expected", evidence.expected],
-            ["Observed", evidence.observed],
-            ["Difference", evidence.difference],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-        <GroupedDetailCard
-          title="Job evidence"
-          rows={[
-            ["Job ID", evidence.job_id],
-            ["Status", evidence.status],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-      </>
-    );
-  }
-  if (category === "field completeness") {
-    return (
-      <>
-        <GroupedDetailCard
-          title="Completeness"
-          rows={[
-            ["Record type", evidence.record_type],
-            ["Group", evidence.group],
-            ["Completeness", hasValue(evidence.completeness_rate) ? `${evidence.completeness_rate}%` : null],
-            ["Missing values", evidence.missing_values],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-        <GroupedDetailCard
-          title="Fields"
-          rows={[
-            ["Fields", evidence.fields],
-            ["Records", evidence.records],
-            ["Required fields", evidence.required_fields],
-            ["Present values", evidence.present_values],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-      </>
-    );
-  }
-  if (category === "source coverage") {
-    return (
-      <>
-        <GroupedDetailCard
-          title="Source"
-          rows={[
-            ["Source", evidence.source],
-            ["Source ID", evidence.source_id],
-            ["File kind", evidence.file_kind],
-            ["Files", evidence.file_count],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-        <GroupedDetailCard
-          title="Coverage"
-          rows={[
-            ["Records", evidence.records],
-            ["Job records", evidence.job_records],
-            ["Dataflow records", evidence.dataflow_records],
-            ["Warning count", evidence.warning_count],
-            ["Latest log", evidence.latest_log_at, "latest_log_at"],
-            ["Latest ingested", evidence.latest_ingested_at, "latest_ingested_at"],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-      </>
-    );
-  }
-  if (category === "read/cache warning") {
-    return (
-      <GroupedDetailCard
-        title="Read/cache warning"
-        rows={[
-          ["Path", evidence.path ?? evidence.uri],
-          ["Status", evidence.status ?? evidence.severity],
-          ["Message", evidence.message ?? evidence.error],
-        ]}
-        showEmpty
-        timezoneName={timezoneName}
-      />
-    );
-  }
+function FreshnessHeaderChips({ row }: { row: Record<string, unknown> }) {
+  const health = freshnessDrawerHealth(row);
+  const latestStatus = String(firstValue(row, ["latest_run_status", "latest_freshness_status"]) ?? "unknown").toLowerCase();
+  const watermarkState = String(firstValue(row, ["movement_state", "coverage_state"]) ?? "not_configured").toLowerCase();
   return (
-    <GroupedDetailCard
-      title="Evidence fields"
-      rows={Object.entries(evidence).slice(0, 12).map(([key, value]) => [humanize(key), value, key] as DetailRow)}
-      showEmpty
-      timezoneName={timezoneName}
-    />
+    <div className="monitoring-freshness-header-chips" aria-label="Freshness status summary">
+      <span className={`monitoring-freshness-header-chip is-${health.tone}`}>{health.label}</span>
+      <span className="monitoring-freshness-header-chip">age: {formatFreshnessAge(row.age_seconds, row.age_days)}</span>
+      <span className={`monitoring-freshness-header-chip is-${statusHeaderTone(latestStatus)}`}>latest: {humanize(latestStatus)}</span>
+      <span className={`monitoring-freshness-header-chip is-${watermarkHeaderTone(watermarkState)}`}>watermark: {humanize(watermarkState)}</span>
+    </div>
   );
 }
 
-function diagnosticsActions(row: Record<string, unknown>, evidence: Record<string, unknown>) {
-  const category = String(row.category ?? "");
-  const primary = String(row.action_hint ?? "").trim();
-  const actions = primary ? [primary] : [];
-  if (category === "read/cache warning") {
-    actions.push("Validate the source path, storage credentials, and file format.");
-    actions.push("Run sync again after fixing the source issue.");
-  } else if (category === "orphan dataflow job id") {
-    actions.push("Check whether job_run_log files exist for the same run window.");
-    actions.push("Compare the job_id in dataflow logs with cached job logs.");
-  } else if (category === "job without dataflows") {
-    actions.push("Check whether dataflow_run_log files were written and cached for this job_id.");
-    actions.push("Inspect the ETL log source coverage for missing dataflow files.");
-  } else if (category === "reconciliation mismatch") {
-    actions.push("Open the job drawer and compare job totals with child dataflow rows.");
-    actions.push(`Review metric ${String(evidence.metric ?? "mismatch")} for this job.`);
-  } else if (category === "field completeness") {
-    actions.push("Confirm the ETL log version emits this field group.");
-    actions.push("Treat this as evidence coverage; it does not determine Diagnostics health.");
-  } else if (category === "source coverage") {
-    actions.push("Open Sources and validate or sync the affected ETL log path.");
-    actions.push("Check latest log and latest ingested timestamps for stale cache evidence.");
-  }
-  return Array.from(new Set(actions)).filter(Boolean);
+function statusHeaderTone(status: string): FreshnessDrawerHealthTone {
+  if (status === "succeeded") return "success";
+  if (status === "failed") return "failed";
+  if (["skipped", "running", "pending"].includes(status)) return "warning";
+  return "neutral";
 }
 
-function FreshnessDetailSections({
+function watermarkHeaderTone(status: string): FreshnessDrawerHealthTone {
+  if (["advanced", "initialized"].includes(status)) return "success";
+  if (["unchanged", "incomplete"].includes(status)) return "warning";
+  if (status === "invalid") return "failed";
+  return "neutral";
+}
+
+function VolumeDetailSections({
   row,
   relatedDataflows,
+  total,
   offset,
   limit,
   sort,
@@ -1328,6 +1321,7 @@ function FreshnessDetailSections({
 }: {
   row: Record<string, unknown>;
   relatedDataflows: MonitoringRecord[];
+  total: number;
   offset: number;
   limit: number;
   sort: TableSort;
@@ -1337,42 +1331,247 @@ function FreshnessDetailSections({
   onOpenDataflow?: (row: MonitoringRecord) => void;
   timezoneName?: string | null;
 }) {
+  const hasVolumeEvidence = num(row, "candidate_run_count") > 0
+    || hasValue(row.volume_candidate_reason)
+    || (Array.isArray(row.volume_candidate_signals) && row.volume_candidate_signals.length > 0);
   return (
     <>
-      <section className="monitoring-detail-section">
-        <h3>Freshness summary</h3>
-        <div className="monitoring-freshness-summary-grid">
+      <FreshnessIdentitySection row={row} />
+      <section className="monitoring-detail-section monitoring-volume-summary-section">
+        <h3>Volume summary</h3>
+        <div className="monitoring-freshness-summary-grid monitoring-volume-summary-grid">
           <GroupedDetailCard
-            title="Freshness"
+            title="Workload totals"
             rows={[
-              ["Latest freshness", row.latest_freshness_at, "latest_freshness_at"],
-              ["Latest freshness status", row.latest_freshness_status, "status"],
+              ["Runs", formatNumber(num(row, "run_count"))],
+              ["Rows read", formatNumber(num(row, "volume_rows_read"))],
+              ["Est rows written", formatNumber(num(row, "volume_est_rows_written"))],
+              ["Observed lakehouse rows", formatNumber(num(row, "volume_lakehouse_rows_written"))],
+            ]}
+            showEmpty
+            className="monitoring-volume-summary-card is-workload"
+          />
+          <GroupedDetailCard
+            title="Lakehouse changes"
+            rows={[
+              ["Inserted / updated / deleted", <VolumeAggregateRowChanges row={row} />],
+              ["Files added / removed", <VolumeAggregateFiles row={row} />],
+              ["Bytes added / removed", <VolumeAggregateBytes row={row} />],
+              ["Net bytes", <VolumeNetBytes value={num(row, "volume_net_bytes")} />],
+            ]}
+            showEmpty
+            className="monitoring-volume-summary-card is-storage"
+          />
+          <GroupedDetailCard
+            title="Per-run profile"
+            rows={[
+              ["Average rows read", formatNumber(num(row, "avg_rows_read"))],
+              ["Average est rows written", formatNumber(num(row, "avg_est_rows_written"))],
+              ["Peak rows read", formatNumber(num(row, "peak_rows_read"))],
+              ["P95 rows read", formatNumber(num(row, "p95_rows_read"))],
+              ["Average duration", formatSeconds(num(row, "avg_duration_seconds"))],
+              ["P95 duration", formatSeconds(num(row, "p95_duration_seconds"))],
+            ]}
+            showEmpty
+            className="monitoring-volume-summary-card is-profile"
+          />
+          <GroupedDetailCard
+            title="Volume evidence"
+            rows={[
+              ["Primary signal", row.volume_candidate_reason || "No P95 aggregate signal"],
+              ["Candidate runs", formatNumber(num(row, "candidate_run_count"))],
+              ["Matched signals", <VolumeSignalList value={row.volume_candidate_signals} />],
+            ]}
+            showEmpty
+            className={`monitoring-volume-summary-card is-evidence${hasVolumeEvidence ? " has-evidence" : ""}`}
+          />
+        </div>
+      </section>
+      <section className="monitoring-detail-section monitoring-freshness-runs-section">
+        <div className="monitoring-detail-section-header monitoring-freshness-runs-header">
+          <h3>Dataflow runs</h3>
+          <TablePager
+            limit={limit}
+            offset={offset}
+            loadedRows={relatedDataflows.length}
+            totalRows={total}
+            loading={false}
+            onPageChange={onPageChange}
+            onPageSizeChange={onPageSizeChange}
+          />
+        </div>
+        <DataTable
+          rows={relatedDataflows}
+          columns={[
+            { key: "start_time", label: "Time", sortable: true, autoFit: true, minWidth: 144, maxWidth: 216, render: (run) => <FreshnessRunTimeCell row={run} timezoneName={timezoneName} /> },
+            { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (run) => <StatusCell row={run} /> },
+            { key: "source_rows_read", label: "Rows read", sortable: true, autoFit: true, minWidth: 82, maxWidth: 128, render: (run) => formatNumber(num(run, "source_rows_read")) },
+            { key: "volume_est_rows_written", label: "Est rows written", sortable: true, autoFit: true, minWidth: 104, maxWidth: 148, render: (run) => formatNumber(num(run, "volume_est_rows_written")) },
+            { key: "destination_rows_inserted", label: "Row changes", sortable: true, autoFit: true, minWidth: 104, maxWidth: 148, render: (run) => <VolumeRunRowChangesCell row={run} /> },
+            { key: "destination_files_added", label: "Files + / −", sortable: true, autoFit: true, minWidth: 84, maxWidth: 112, render: (run) => <VolumeRunFilesCell row={run} /> },
+            { key: "destination_bytes_added", label: "Net bytes", sortable: true, autoFit: true, minWidth: 86, maxWidth: 124, render: (run) => formatBytes(num(run, "destination_bytes_added") - num(run, "destination_bytes_removed")) },
+            { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (run) => formatSeconds(num(run, "duration_seconds")) },
+          ]}
+          maxRows={limit}
+          offset={0}
+          onRowClick={onOpenDataflow}
+          sort={sort}
+          onSort={onSort}
+          fixedLayout
+          className="monitoring-child-dataflows-table monitoring-volume-run-table"
+          timezoneName={timezoneName}
+        />
+      </section>
+    </>
+  );
+}
+
+function VolumeAggregateRowChanges({ row }: { row: Record<string, unknown> }) {
+  const inserted = formatNumber(num(row, "volume_rows_inserted"));
+  const updated = formatNumber(num(row, "volume_rows_updated"));
+  const deleted = formatNumber(num(row, "volume_rows_deleted"));
+  return (
+    <span className="monitoring-volume-change-values" title={`Inserted / updated / deleted: ${inserted} / ${updated} / ${deleted}`}>
+      <span className="is-positive">{inserted}</span><i>/</i>
+      <span className="is-warning">{updated}</span><i>/</i>
+      <span className="is-negative">{deleted}</span>
+    </span>
+  );
+}
+
+function VolumeAggregateFiles({ row }: { row: Record<string, unknown> }) {
+  const added = formatNumber(num(row, "volume_files_added"));
+  const removed = formatNumber(num(row, "volume_files_removed"));
+  return (
+    <span className="monitoring-volume-change-values" title={`Files added / removed: ${added} / ${removed}`}>
+      <span className="is-positive">{added}</span><i>/</i>
+      <span className="is-negative">{removed}</span>
+    </span>
+  );
+}
+
+function VolumeAggregateBytes({ row }: { row: Record<string, unknown> }) {
+  const added = formatBytes(num(row, "volume_bytes_added"));
+  const removed = formatBytes(num(row, "volume_bytes_removed"));
+  return (
+    <span className="monitoring-volume-change-values" title={`Bytes added / removed: ${added} / ${removed}`}>
+      <span className="is-positive">{added}</span><i>/</i>
+      <span className="is-negative">{removed}</span>
+    </span>
+  );
+}
+
+function VolumeNetBytes({ value }: { value: number }) {
+  const tone = value > 0 ? "is-positive" : value < 0 ? "is-negative" : "is-neutral";
+  return <span className={`monitoring-volume-net-bytes ${tone}`}>{formatBytes(value)}</span>;
+}
+
+function VolumeSignalList({ value }: { value: unknown }) {
+  if (!Array.isArray(value) || !value.length) return <span>-</span>;
+  return (
+    <span className="monitoring-volume-signal-list">
+      {value.map((signal, index) => {
+        const item = signal && typeof signal === "object" ? signal as Record<string, unknown> : {};
+        const label = String(item.label ?? item.kind ?? "Signal");
+        const ratio = Number(item.ratio ?? 0);
+        return <span key={`${label}-${index}`}>{label}{ratio > 0 ? ` · ${ratio.toFixed(2)}× P95` : ""}</span>;
+      })}
+    </span>
+  );
+}
+
+function volumeRunEstRowsWritten(row: MonitoringRecord) {
+  const observed = num(row, "destination_rows_written");
+  const destinationIdentity = [row.destination_connection_type, row.destination_format, row.destination_name, row.destination_path]
+    .map((value) => String(value ?? "").toLowerCase())
+    .join(" ");
+  const isLakehouse = ["lakehouse", "delta", "iceberg", "onelake", "deltalake"].some((token) => destinationIdentity.includes(token));
+  return !isLakehouse && String(row.status ?? "").toLowerCase() === "succeeded" ? num(row, "source_rows_read") || observed : observed;
+}
+
+function VolumeRunRowChangesCell({ row }: { row: MonitoringRecord }) {
+  const inserted = num(row, "destination_rows_inserted");
+  const updated = num(row, "destination_rows_updated");
+  const deleted = num(row, "destination_rows_deleted");
+  const value = `${formatNumber(inserted)} / ${formatNumber(updated)} / ${formatNumber(deleted)}`;
+  return (
+    <span className="volume-row-changes-inline" title={`Inserted / updated / deleted: ${value}`}>
+      <span className="is-insert">{formatNumber(inserted)}</span><i>/</i>
+      <span className="is-update">{formatNumber(updated)}</span><i>/</i>
+      <span className="is-delete">{formatNumber(deleted)}</span>
+    </span>
+  );
+}
+
+function VolumeRunFilesCell({ row }: { row: MonitoringRecord }) {
+  const added = num(row, "destination_files_added");
+  const removed = num(row, "destination_files_removed");
+  const title = `Files added / removed: ${formatNumber(added)} / ${formatNumber(removed)}`;
+  return (
+    <span className="volume-files-changed-inline" title={title}>
+      <span className="is-added">{formatNumber(added)}</span><i>/</i>
+      <span className="is-removed">{formatNumber(removed)}</span>
+    </span>
+  );
+}
+
+function FreshnessDetailSections({
+  row,
+  relatedDataflows,
+  total,
+  offset,
+  limit,
+  sort,
+  onSort,
+  onPageChange,
+  onPageSizeChange,
+  onOpenDataflow,
+  timezoneName,
+}: {
+  row: Record<string, unknown>;
+  relatedDataflows: MonitoringRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+  sort: TableSort;
+  onSort: (sort: TableSort) => void;
+  onPageChange: (offset: number) => void;
+  onPageSizeChange: (limit: number) => void;
+  onOpenDataflow?: (row: MonitoringRecord) => void;
+  timezoneName?: string | null;
+}) {
+  const watermarkConfigured = isFreshnessWatermarkConfigured(row);
+  return (
+    <>
+      <FreshnessIdentitySection row={row} />
+
+      <section className="monitoring-detail-section monitoring-freshness-health-section">
+        <h3>Freshness health</h3>
+        <div className={`monitoring-freshness-summary-grid${watermarkConfigured ? " has-configured-watermark" : ""}`}>
+          <GroupedDetailCard
+            title="Freshness evidence"
+            rows={[
+              ["Latest check", row.latest_freshness_at, "latest_freshness_at"],
               ["Age", formatFreshnessAge(row.age_seconds, row.age_days)],
-              ["Latest run", row.latest_run_at, "latest_run_at"],
-              ["Latest run status", row.latest_run_status, "status"],
-              ["Skipped streak", row.skipped_streak, "skipped_streak"],
+              ["Basis status", row.latest_freshness_status, "status"],
             ]}
             showEmpty
             timezoneName={timezoneName}
           />
           <GroupedDetailCard
-            title="Run counts in filter"
+            title="Latest run"
             rows={[
-              ["Runs", row.run_count, "run_count"],
-              ["Succeeded", row.succeeded_count, "succeeded_count"],
-              ["Failed", row.failed_count, "failed_count"],
-              ["Skipped", row.skipped_count, "skipped_count"],
-              ["Running", row.running_count, "running_count"],
-              ["Pending", row.pending_count, "pending_count"],
-              ["Last success", row.last_success_at, "last_success_at"],
-              ["Last failed", row.last_failed_at, "last_failed_at"],
+              ["Time", row.latest_run_at, "latest_run_at"],
+              ["Status", row.latest_run_status, "status"],
+              ["Skipped streak", row.skipped_streak, "skipped_streak"],
+              ["Runs in filter", <FreshnessRunMix row={row} />],
             ]}
             showEmpty
             timezoneName={timezoneName}
           />
           <GroupedDetailCard
             title="Watermark"
-            rows={[
+            rows={watermarkConfigured ? [
               ["Coverage", row.coverage_state],
               ["Movement", row.movement_state],
               ["Adjustment", row.adjustment_state],
@@ -1381,34 +1580,44 @@ function FreshnessDetailSections({
               ["Before", row.source_watermark_before, "source_watermark_before"],
               ["Effective", row.source_watermark_effective, "source_watermark_effective"],
               ["After", row.source_watermark_after, "source_watermark_after"],
-            ]}
-            showEmpty
+            ] : [["State", <span className="monitor-mini-badge badge-neutral">Not configured</span>]]}
             timezoneName={timezoneName}
             className="monitoring-freshness-watermark-card"
           />
         </div>
       </section>
 
-      <section className="monitoring-detail-section">
-        <h3>Latest metadata</h3>
+      {hasValue(row.latest_error_message) ? (
+        <section className="monitoring-detail-section monitoring-error-message-section">
+          <h3>Latest error message</h3>
+          <ErrorMessageBlock value={detailValue(row, "latest_error_message", timezoneName)} />
+        </section>
+      ) : null}
+
+      <section className="monitoring-detail-section monitoring-freshness-metadata-details">
+        <h3>Metadata context</h3>
         <div className="monitoring-dataflow-detail-grid monitoring-latest-metadata-grid">
           <GroupedDetailCard
             title="Dataflow"
+            className="monitoring-freshness-metadata-card is-dataflow"
             rows={[
               ["Dataflow ID", row.dataflow_id],
               ["Workspace ID", row.workspace_id],
               ["Name", row.dataflow_name],
               ["Description", row.dataflow_description],
               ["Stage", row.stage],
-              ["Operation", row.operation_type],
+              ["Group number", row.group_number],
+              ["Execution order", row.execution_order],
               ["Processing mode", row.processing_mode],
               ["Active", row.is_active],
+              ["Configure", row.configure, "configure"],
             ]}
             showEmpty
             timezoneName={timezoneName}
           />
           <GroupedDetailCard
             title="Source"
+            className="monitoring-freshness-metadata-card is-source"
             rows={[
               ["Source ID", row.source_id],
               ["Source name", firstValue(row, ["source_name", "source_connection_name"])],
@@ -1422,6 +1631,7 @@ function FreshnessDetailSections({
               ["Path", row.source_path],
               ["Query", row.source_query, "source_query"],
               ["Python function", row.source_python_function],
+              ["Watermark columns", row.source_watermark_columns, "source_watermark_columns"],
               ["Filter", row.source_filter_expression, "source_filter_expression"],
               ["Configure", row.source_configure, "source_configure"],
             ]}
@@ -1430,6 +1640,7 @@ function FreshnessDetailSections({
           />
           <GroupedDetailCard
             title="Transform"
+            className="monitoring-freshness-metadata-card is-transform"
             rows={[
               ["Deduplicate", row.transform_deduplicate_columns, "transform_deduplicate_columns"],
               ["Latest data", row.transform_latest_data_columns, "transform_latest_data_columns"],
@@ -1443,6 +1654,7 @@ function FreshnessDetailSections({
           />
           <GroupedDetailCard
             title="Destination"
+            className="monitoring-freshness-metadata-card is-destination"
             rows={[
               ["Destination ID", row.destination_id],
               ["Destination name", firstValue(row, ["destination_name", "destination_connection_name"])],
@@ -1454,7 +1666,6 @@ function FreshnessDetailSections({
               ["Table", row.destination_table],
               ["Full table", row.destination_full_table],
               ["Path", row.destination_path],
-              ["Target", row.target],
               ["Load type", row.destination_load_type],
               ["Merge keys", row.destination_merge_keys, "destination_merge_keys"],
               ["Partition columns", row.destination_partition_columns, "destination_partition_columns"],
@@ -1466,24 +1677,14 @@ function FreshnessDetailSections({
         </div>
       </section>
 
-      {hasValue(row.latest_error_message) ? (
-        <section className="monitoring-detail-section monitoring-error-message-section">
-          <h3>Latest error message</h3>
-          <ErrorMessageBlock value={detailValue(row, "latest_error_message", timezoneName)} />
-        </section>
-      ) : null}
-
-      <section className="monitoring-detail-section">
+      <section className="monitoring-detail-section monitoring-freshness-runs-section">
         <div className="monitoring-detail-section-header monitoring-freshness-runs-header">
-          <div className="monitoring-child-dataflows-header">
-            <h3>Dataflow runs</h3>
-            <small>{relatedDataflows.length} runs in current filter</small>
-          </div>
+          <h3>Dataflow runs</h3>
           <TablePager
             limit={limit}
             offset={offset}
-            loadedRows={Math.min(limit, Math.max(0, relatedDataflows.length - offset))}
-            totalRows={relatedDataflows.length}
+            loadedRows={relatedDataflows.length}
+            totalRows={total}
             loading={false}
             onPageChange={onPageChange}
             onPageSizeChange={onPageSizeChange}
@@ -1492,27 +1693,101 @@ function FreshnessDetailSections({
         <DataTable
           rows={relatedDataflows}
           columns={[
-            { key: "dataflow_run_id", label: "Run", sortable: true, width: 120, render: (run) => compactRunId(run.dataflow_run_id) },
-            { key: "context", label: "Context", sortable: true, sortKey: "stage", width: 112, render: (run) => <FreshnessRunContextCell row={run} /> },
-            { key: "start_time", label: "Time", sortable: true, width: 180, render: (run) => <FreshnessRunTimeCell row={run} timezoneName={timezoneName} /> },
-            { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (run) => <StatusCell row={run} /> },
-            { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (run) => formatSeconds(num(run, "duration_seconds")) },
-            { key: "volume", label: "Volume", sortable: true, sortKey: "source_rows_read", autoFit: true, minWidth: 90, maxWidth: 150, render: (run) => <FreshnessRunVolumeCell row={run} /> },
-            { key: "movement_state", label: "Watermark", sortable: true, autoFit: true, minWidth: 106, maxWidth: 150, render: (run) => <DrawerWatermarkBadge row={run} /> },
-            { key: "phase_health", label: "Phase", sortable: true, width: 100, render: (run) => <FreshnessRunPhaseCell row={run} /> },
-            { key: "error_preview", label: "Issue", sortable: true, width: 220, fillPriority: "last", className: "monitoring-child-issue-column", render: (run) => <IssueCell row={run} /> },
+            {
+              key: "start_time",
+              label: "Time",
+              sortable: true,
+              autoFit: true,
+              minWidth: 144,
+              maxWidth: 216,
+              render: (run) => <FreshnessRunTimeCell row={run} timezoneName={timezoneName} />,
+              measureValue: (run, activeTimezone) => freshnessRunTimeLines(run, activeTimezone),
+            },
+            { key: "status", label: "Status", sortable: true, width: 82, render: (run) => <StatusCell row={run} /> },
+            { key: "duration_seconds", label: "Duration", sortable: true, width: 78, render: (run) => formatSeconds(num(run, "duration_seconds")) },
+            { key: "volume", label: "Volume", sortable: true, sortKey: "source_rows_read", width: 104, render: (run) => <FreshnessRunVolumeCell row={run} /> },
+            { key: "movement_state", label: "Watermark", sortable: true, width: 110, render: (run) => <DrawerWatermarkBadge row={run} /> },
+            { key: "phase_health", label: "Phase", sortable: true, width: 108, render: (run) => <FreshnessRunPhaseCell row={run} /> },
+            { key: "error_preview", label: "Issue", sortable: true, width: 154, fillPriority: "last", className: "monitoring-child-issue-column", render: (run) => <IssueCell row={run} /> },
           ]}
           maxRows={limit}
-          offset={offset}
+          offset={0}
           onRowClick={onOpenDataflow}
           sort={sort}
           onSort={onSort}
           fixedLayout
-          className="monitoring-child-dataflows-table"
+          className="monitoring-child-dataflows-table monitoring-freshness-run-table"
           timezoneName={timezoneName}
         />
       </section>
     </>
+  );
+}
+
+function FreshnessIdentitySection({ row }: { row: Record<string, unknown> }) {
+  const source = dataflowEndpointSummary(row, "source");
+  const destination = dataflowEndpointSummary(row, "destination");
+  const context = [row.stage, row.operation_type, row.processing_mode, row.destination_load_type]
+    .filter(hasValue)
+    .map(String);
+  return (
+    <section className="monitoring-detail-section monitoring-freshness-identity">
+      <div className="monitoring-dataflow-route-card">
+        <DataflowRouteEndpoint direction="source" endpoint={source} />
+        <ArrowRight className="monitoring-dataflow-route-arrow" size={18} aria-hidden="true" />
+        <DataflowRouteEndpoint direction="destination" endpoint={destination} />
+        <div className="monitoring-freshness-dataflow-id">
+          <span>Dataflow ID</span>
+          <strong>{String(row.dataflow_id ?? "-")}</strong>
+        </div>
+        {context.length ? (
+          <div className="monitoring-dataflow-route-context">
+            {context.map((value, index) => <span key={`${value}-${index}`}>{value}</span>)}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+export function freshnessEndpointLabel(row: Record<string, unknown>, side: "source" | "destination") {
+  const connection = firstValue(row, [`${side}_connection_name`, `${side}_name`]);
+  const format = String(row[`${side}_format`] ?? "").trim().toLowerCase();
+  let asset: unknown;
+  if (format.includes("sql") || (side === "source" && hasValue(row.source_query))) asset = "sql query";
+  else if (format.includes("function") || (side === "source" && hasValue(row.source_python_function))) asset = "python function";
+  else asset = firstValue(row, [`${side}_table`, `${side}_full_table`, `${side}_path`, side === "destination" ? "target" : "source_name"]);
+  return [connection, asset].filter(hasValue).map(String).join(" - ") || "-";
+}
+
+export function isFreshnessWatermarkConfigured(row: Record<string, unknown>) {
+  const coverage = String(row.coverage_state ?? "").trim().toLowerCase();
+  const movement = String(row.movement_state ?? "").trim().toLowerCase();
+  if ([coverage, movement].some((value) => value === "not_configured" || value === "not configured")) return false;
+  return [
+    row.source_watermark_columns,
+    row.source_watermark_before,
+    row.source_watermark_effective,
+    row.source_watermark_after,
+    row.watermark_time,
+  ].some(hasValue) || Boolean(coverage || movement);
+}
+
+function FreshnessRunMix({ row }: { row: Record<string, unknown> }) {
+  return (
+    <span className="monitoring-freshness-run-mix" title="Succeeded / failed / skipped / running / pending">
+      <strong>{formatNumber(num(row, "run_count"))}</strong><span>total</span><i>·</i>
+      <span>S</span>
+      <strong className="is-success">{formatNumber(num(row, "succeeded_count"))}</strong>
+      <span>F</span>
+      <strong className="is-failed">{formatNumber(num(row, "failed_count"))}</strong>
+      <span>Skip</span>
+      <strong className="is-warning">{formatNumber(num(row, "skipped_count"))}</strong>
+      <span>Run</span>
+      <strong>{formatNumber(num(row, "running_count"))}</strong>
+      <span>Pend</span>
+      <strong>{formatNumber(num(row, "pending_count"))}</strong>
+    </span>
   );
 }
 
@@ -1543,46 +1818,26 @@ function FailureEvidenceSections({ row, timezoneName }: { row: Record<string, un
   );
 }
 
-function compactRunId(value: unknown) {
-  const textValue = String(value ?? "").trim();
-  if (!textValue) return "-";
-  return textValue.length > 18 ? `${textValue.slice(0, 8)}...${textValue.slice(-6)}` : textValue;
-}
-
 function FreshnessRunTimeCell({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
-  const start = detailValue(row, "start_time", timezoneName);
-  const end = detailValue(row, "end_time", timezoneName);
+  const [start, end] = freshnessRunTimeLines(row, timezoneName);
   return (
     <span
       className="freshness-run-stack-cell"
       title={[
-        `Start: ${String(start ?? "-")}`,
-        `End: ${String(end ?? "-")}`,
+        `Start: ${start}`,
+        `End: ${end.slice(2)}`,
       ].join("\n")}
     >
       <strong>{start}</strong>
-      <small>{`→ ${end}`}</small>
+      <small><span>{end}</span></small>
     </span>
   );
 }
 
-function FreshnessRunContextCell({ row }: { row: Record<string, unknown> }) {
-  const stage = String(row.stage || "unknown");
-  const operation = String(row.operation_type || "unknown");
-  return (
-    <span
-      className="freshness-run-stack-cell"
-      title={[
-        `Stage: ${stage}`,
-        `Operation: ${operation}`,
-        `Destination operation: ${row.destination_operation_type ?? "-"}`,
-        `Load type: ${row.destination_load_type ?? row.load_type ?? "-"}`,
-      ].join("\n")}
-    >
-      <strong>{stage}</strong>
-      <small>{operation}</small>
-    </span>
-  );
+export function freshnessRunTimeLines(row: Record<string, unknown>, timezoneName?: string | null) {
+  const start = formatTimestampForDisplay(row.start_time, timezoneName, "-");
+  const end = formatTimestampForDisplay(row.end_time, timezoneName, "-");
+  return [start, `→ ${end}`];
 }
 
 function FreshnessRunPhaseCell({ row }: { row: Record<string, unknown> }) {
@@ -1756,10 +2011,6 @@ function phaseShortLabel(phase: DataflowPhaseKey) {
   if (phase === "transform") return "T";
   if (phase === "destination") return "D";
   return "O";
-}
-
-function formatPhasePercent(value: number) {
-  return `${Math.round(value * 100) / 100}%`;
 }
 
 function ErrorMessageSection({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
@@ -2079,27 +2330,23 @@ function LinkedJobSection({
     platform_name: row.platform_name,
   };
   return (
-    <section className="monitoring-detail-section">
-      <div className="monitoring-detail-section-header">
-        <h3>Linked job</h3>
-        <button className="text-action" type="button" onClick={() => onOpenJob?.(jobRow)}>
-          Open job
-        </button>
-      </div>
-      <div className="monitoring-detail-grid">
-        <div className="monitoring-detail-item">
-          <span>Job</span>
+    <section className="monitoring-detail-section monitoring-linked-job-section">
+      <h3>Linked job</h3>
+      <button
+        className="monitoring-linked-job-row"
+        type="button"
+        onClick={() => onOpenJob?.(jobRow)}
+        disabled={!onOpenJob}
+      >
+        <BriefcaseBusiness size={15} aria-hidden="true" />
+        <span className="monitoring-linked-job-identity">
           <strong>{jobId}</strong>
-        </div>
-        <div className="monitoring-detail-item">
-          <span>Status</span>
-          <strong><StatusCell row={jobRow} /></strong>
-        </div>
-        <div className="monitoring-detail-item">
-          <span>Duration</span>
-          <strong>{formatSeconds(num(jobRow, "duration_seconds"))}</strong>
-        </div>
-      </div>
+          <small>Parent job run</small>
+        </span>
+        <StatusCell row={jobRow} />
+        <span className="monitoring-linked-job-duration">{formatSeconds(num(jobRow, "duration_seconds"))}</span>
+        <ChevronRight size={16} aria-hidden="true" />
+      </button>
     </section>
   );
 }
@@ -2177,17 +2424,17 @@ function isErrorField(field: string) {
   return normalized.includes("error") || normalized.includes("issue") || normalized === "last_error";
 }
 
-function RawPayloadSection({ row }: { row: Record<string, unknown> }) {
+function RawPayloadSection({ row, label = "Raw payload" }: { row: Record<string, unknown>; label?: string }) {
   const [copied, setCopied] = useState(false);
   const payload = JSON.stringify(row, null, 2);
   return (
     <details className="monitoring-raw-detail">
-      <summary>Raw payload</summary>
+      <summary>{label}</summary>
       <div className="monitoring-json-box monitoring-raw-json-box">
         <button
           className="icon-action small monitoring-json-copy"
           type="button"
-          aria-label="Copy raw payload JSON"
+          aria-label={`Copy ${label.toLowerCase()} JSON`}
           title="Copy JSON"
           onClick={(event) => {
             event.preventDefault();
@@ -2245,28 +2492,6 @@ function fallbackCopyToClipboard(value: string) {
   textarea.select();
   document.execCommand("copy");
   document.body.removeChild(textarea);
-}
-
-function sortRows<T extends Record<string, unknown>>(rows: T[], sort: TableSort) {
-  return [...rows].sort((left, right) => {
-    const leftValue = left[sort.sortBy];
-    const rightValue = right[sort.sortBy];
-    const result = compareValues(leftValue, rightValue);
-    return sort.sortDir === "desc" ? -result : result;
-  });
-}
-
-function compareValues(left: unknown, right: unknown) {
-  if (left === right) return 0;
-  if (!hasValue(left)) return -1;
-  if (!hasValue(right)) return 1;
-  const leftNumber = Number(left);
-  const rightNumber = Number(right);
-  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
-  const leftTime = typeof left === "string" ? Date.parse(left) : Number.NaN;
-  const rightTime = typeof right === "string" ? Date.parse(right) : Number.NaN;
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime - rightTime;
-  return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
 }
 
 function hasValue(value: unknown) {

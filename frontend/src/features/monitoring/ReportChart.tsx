@@ -89,6 +89,8 @@ export const reportChartPalette = {
   unknown: "#8b95a5",
   teal: "#155e59",
   blue: "#3d6fa8",
+  written: "#16805c",
+  read: "#2563eb",
   amber: "#c77d2f",
   grid: "#e8edf3",
   text: "#303846",

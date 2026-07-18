@@ -3,12 +3,12 @@ import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 import type { ModuleInfo, StudioSettings } from "../../shared/api/types";
 import { Tag } from "../../shared/components/Tag";
 import { Toggle } from "../../shared/components/Toggle";
+import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 
 interface SettingsPageProps {
   settings: StudioSettings | null;
   busy: boolean;
-  onSaveTimezone: (timezone: string | null) => Promise<void>;
-  onReload: () => Promise<void>;
+  onSaveSettings: (changes: { timezone: string | null; source_check_interval_seconds: number }) => Promise<void>;
   modules: ModuleInfo[];
   modulesBusyKey: string | null;
   onToggleModule: (key: string, enabled: boolean) => Promise<void>;
@@ -76,10 +76,12 @@ const FALLBACK_TIMEZONE_NAMES = [
   "Pacific/Auckland"
 ] as const;
 
-export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules, modulesBusyKey, onToggleModule }: SettingsPageProps) {
+export function SettingsPage({ settings, busy, onSaveSettings, modules, modulesBusyKey, onToggleModule }: SettingsPageProps) {
   const [timezoneInput, setTimezoneInput] = useState("");
-  const [timezoneDrawerOpen, setTimezoneDrawerOpen] = useState(false);
+  const [sourceCheckIntervalInput, setSourceCheckIntervalInput] = useState("30");
+  const [configurationDrawerOpen, setConfigurationDrawerOpen] = useState(false);
   const [timezoneMenuOpen, setTimezoneMenuOpen] = useState(false);
+  const [useServerDefaultTimezone, setUseServerDefaultTimezone] = useState(false);
   const [activeTimezoneIndex, setActiveTimezoneIndex] = useState(0);
   const timezonePickerRef = useRef<HTMLDivElement | null>(null);
   const timezoneOptions = useMemo(buildTimezoneOptions, []);
@@ -98,6 +100,10 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
   }, [settings?.timezone]);
 
   useEffect(() => {
+    setSourceCheckIntervalInput(String(settings?.source_check_interval_seconds ?? 30));
+  }, [settings?.source_check_interval_seconds]);
+
+  useEffect(() => {
     setActiveTimezoneIndex(0);
   }, [timezoneInput]);
 
@@ -111,66 +117,51 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
     return () => document.removeEventListener("pointerdown", closeMenuOnOutsideClick);
   }, []);
 
-  useEffect(() => {
-    if (!timezoneDrawerOpen) return;
-    function closeOnEscape(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (timezoneMenuOpen) {
-          setTimezoneMenuOpen(false);
-          return;
-        }
-        closeTimezoneDrawer();
-      }
-    }
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [timezoneDrawerOpen, timezoneMenuOpen]);
+  useDrawerEscape(closeConfigurationDrawer, configurationDrawerOpen);
 
-  async function submitTimezone(event: FormEvent) {
+  async function submitConfiguration(event: FormEvent) {
     event.preventDefault();
     const timezone = timezoneInput.trim();
-    if (!timezone) return;
-    await onSaveTimezone(timezone);
-    setTimezoneInput(timezone);
-    closeTimezoneDrawer();
+    const intervalSeconds = Number(sourceCheckIntervalInput);
+    if ((!useServerDefaultTimezone && !timezone) || !isValidSourceCheckInterval(intervalSeconds)) return;
+    await onSaveSettings({
+      timezone: useServerDefaultTimezone ? null : timezone,
+      source_check_interval_seconds: intervalSeconds,
+    });
+    closeConfigurationDrawer();
   }
 
-  async function useServerDefaultTimezone() {
-    await onSaveTimezone(null);
-    closeTimezoneDrawer();
-  }
-
-  async function reloadSettings() {
-    await onReload();
+  function openConfigurationDrawer() {
+    setTimezoneInput(settings?.timezone ?? "");
+    setSourceCheckIntervalInput(String(settings?.source_check_interval_seconds ?? 30));
+    setUseServerDefaultTimezone(settings?.timezone_source === "server_default");
     setTimezoneMenuOpen(false);
+    setConfigurationDrawerOpen(true);
   }
 
-  function openTimezoneDrawer() {
-    setTimezoneDrawerOpen(true);
-  }
-
-  function closeTimezoneDrawer() {
+  function closeConfigurationDrawer() {
     setTimezoneMenuOpen(false);
-    setTimezoneDrawerOpen(false);
+    setConfigurationDrawerOpen(false);
   }
 
   function openTimezoneMenu() {
-    if (!timezoneOptions.length) return;
+    if (!timezoneOptions.length || useServerDefaultTimezone) return;
     setTimezoneMenuOpen(true);
   }
 
   function toggleTimezoneMenu() {
-    if (!timezoneOptions.length) return;
+    if (!timezoneOptions.length || useServerDefaultTimezone) return;
     setTimezoneMenuOpen((open) => !open);
   }
 
   function selectTimezone(option: TimezoneOption) {
+    setUseServerDefaultTimezone(false);
     setTimezoneInput(option.name);
     setTimezoneMenuOpen(false);
   }
 
   function onTimezoneInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (useServerDefaultTimezone) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       openTimezoneMenu();
@@ -191,10 +182,6 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
       if (selected) selectTimezone(selected);
       return;
     }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setTimezoneMenuOpen(false);
-    }
   }
 
   const workspaceDatabase = settings?.storage?.workspace_database;
@@ -203,103 +190,122 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
   return (
     <div className="settings-layout settings-layout-single">
 
-      {/* ── Studio info: grouped stat cards ──────────────────────── */}
       <section className="table-panel studio-settings-panel">
         <div className="panel-toolbar">
           <div>
-            <h2>Studio settings</h2>
+            <h2>Studio configuration</h2>
             <span>Global runtime</span>
           </div>
+          <button type="button" className="settings-stat-edit" onClick={openConfigurationDrawer}>Edit configuration</button>
         </div>
 
-        <div className="settings-stat-grid">
-
-          {/* API */}
-          <div className="settings-stat-card">
-            <p className="settings-stat-label">API</p>
-            <dl className="settings-stat-dl">
-              <div className="settings-stat-row">
-                <dt>Prefix</dt>
-                <dd><code>/api/v1</code></dd>
-              </div>
-            </dl>
+        <section className="settings-section" aria-labelledby="configurable-settings-heading">
+          <div className="settings-section-heading">
+            <h3 id="configurable-settings-heading">Configurable settings</h3>
+            <span>Changes apply to this Studio.</span>
           </div>
-
-          {/* Timezone */}
-          <div className="settings-stat-card">
-            <div className="settings-stat-card-hd">
+          <div className="settings-stat-grid">
+            <div className="settings-stat-card">
               <p className="settings-stat-label">Timezone</p>
-              <button type="button" className="settings-stat-edit" onClick={openTimezoneDrawer}>Edit</button>
-            </div>
-            <dl className="settings-stat-dl">
-              <div className="settings-stat-row">
-                <dt>Active</dt>
-                <dd>{settings?.timezone ?? "—"}</dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Source</dt>
-                <dd>{settings?.timezone_source === "configured" ? "Studio override" : "Server default"}</dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* Workspace database */}
-          <div className="settings-stat-card">
-            <p className="settings-stat-label">Workspace database</p>
-            <dl className="settings-stat-dl">
-              <div className="settings-stat-row">
-                <dt>Path</dt>
-                <dd><code className="settings-path-value">{workspaceDatabase?.path ?? "—"}</code></dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Size</dt>
-                <dd>{formatBytes(workspaceDatabase?.size_bytes)}</dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* Analytics cache */}
-          <div className="settings-stat-card">
-            <p className="settings-stat-label">Analytics cache</p>
-            <dl className="settings-stat-dl">
-              <div className="settings-stat-row">
-                <dt>Scope</dt>
-                <dd>{analyticsCache?.scope === "studio" ? "Studio-level" : "—"}</dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Path</dt>
-                <dd><code className="settings-path-value">{analyticsCache?.path ?? "—"}</code></dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Size</dt>
-                <dd>{formatBytes(analyticsCache?.size_bytes)}</dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Rows</dt>
-                <dd>
-                  {analyticsCache
-                    ? `${formatCount(analyticsCache.dataflow_row_count)} df · ${formatCount(analyticsCache.job_row_count)} jobs`
-                    : "—"}
-                </dd>
-              </div>
-              <div className="settings-stat-row">
-                <dt>Sources</dt>
-                <dd>
-                  {analyticsCache
-                    ? `${formatCount(analyticsCache.active_source_count)} active / ${formatCount(analyticsCache.cached_source_count)} total`
-                    : "—"}
-                </dd>
-              </div>
-              {analyticsCache?.orphan_source_ids?.length ? (
+              <dl className="settings-stat-dl">
                 <div className="settings-stat-row">
-                  <dt>Orphans</dt>
-                  <dd><code className="settings-path-value">{analyticsCache.orphan_source_ids.join(", ")}</code></dd>
+                  <dt>Active</dt>
+                  <dd>{settings?.timezone ?? "—"}</dd>
                 </div>
-              ) : null}
-            </dl>
-          </div>
+                <div className="settings-stat-row">
+                  <dt>Source</dt>
+                  <dd>{settings?.timezone_source === "configured" ? "Studio override" : "Server default"}</dd>
+                </div>
+              </dl>
+            </div>
 
-        </div>
+            <div className="settings-stat-card">
+              <p className="settings-stat-label">Source change check</p>
+              <dl className="settings-stat-dl">
+                <div className="settings-stat-row">
+                  <dt>Check every</dt>
+                  <dd>{settings?.source_check_interval_seconds ?? 30} seconds</dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Mode</dt>
+                  <dd>Revision-aware</dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-section" aria-labelledby="system-information-heading">
+          <div className="settings-section-heading">
+            <h3 id="system-information-heading">System information</h3>
+            <span>Read-only runtime and storage details.</span>
+          </div>
+          <div className="settings-stat-grid">
+            <div className="settings-stat-card">
+              <p className="settings-stat-label">API</p>
+              <dl className="settings-stat-dl">
+                <div className="settings-stat-row">
+                  <dt>Prefix</dt>
+                  <dd><code>/api/v1</code></dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="settings-stat-card">
+              <p className="settings-stat-label">Workspace database</p>
+              <dl className="settings-stat-dl">
+                <div className="settings-stat-row">
+                  <dt>Path</dt>
+                  <dd><code className="settings-path-value">{workspaceDatabase?.path ?? "—"}</code></dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Size</dt>
+                  <dd>{formatBytes(workspaceDatabase?.size_bytes)}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="settings-stat-card">
+              <p className="settings-stat-label">Analytics cache</p>
+              <dl className="settings-stat-dl">
+                <div className="settings-stat-row">
+                  <dt>Scope</dt>
+                  <dd>{analyticsCache?.scope === "studio" ? "Studio-level" : "—"}</dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Path</dt>
+                  <dd><code className="settings-path-value">{analyticsCache?.path ?? "—"}</code></dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Size</dt>
+                  <dd>{formatBytes(analyticsCache?.size_bytes)}</dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Rows</dt>
+                  <dd>
+                    {analyticsCache
+                      ? `${formatCount(analyticsCache.dataflow_row_count)} df · ${formatCount(analyticsCache.job_row_count)} jobs`
+                      : "—"}
+                  </dd>
+                </div>
+                <div className="settings-stat-row">
+                  <dt>Sources</dt>
+                  <dd>
+                    {analyticsCache
+                      ? `${formatCount(analyticsCache.active_source_count)} active / ${formatCount(analyticsCache.cached_source_count)} total`
+                      : "—"}
+                  </dd>
+                </div>
+                {analyticsCache?.orphan_source_ids?.length ? (
+                  <div className="settings-stat-row">
+                    <dt>Orphans</dt>
+                    <dd><code className="settings-path-value">{analyticsCache.orphan_source_ids.join(", ")}</code></dd>
+                  </div>
+                ) : null}
+              </dl>
+            </div>
+          </div>
+        </section>
       </section>
 
       <section className="table-panel">
@@ -346,11 +352,11 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
         </div>
       </section>
 
-      {timezoneDrawerOpen ? (
-        <div className="metadata-drawer-backdrop" onMouseDown={closeTimezoneDrawer}>
+      {configurationDrawerOpen ? (
+        <div className="metadata-drawer-backdrop" onMouseDown={closeConfigurationDrawer}>
           <aside
             className="metadata-drawer settings-timezone-drawer"
-            aria-label="Studio timezone settings"
+            aria-label="Studio configuration"
             onMouseDown={(event) => event.stopPropagation()}
           >
             <header className="metadata-drawer-header">
@@ -363,21 +369,23 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
                     : `Current default: ${settings?.timezone ?? "-"} (server timezone)`}
                 </small>
               </div>
-              <button className="icon-action small" type="button" onClick={closeTimezoneDrawer} aria-label="Close timezone settings">
+              <button className="icon-action small" type="button" onClick={closeConfigurationDrawer} aria-label="Close Studio configuration">
                 <X size={16} />
               </button>
             </header>
             <div className="metadata-drawer-body settings-timezone-drawer-body">
-              <form className="settings-timezone-drawer-form" onSubmit={submitTimezone}>
+              <form className="settings-timezone-drawer-form" onSubmit={submitConfiguration}>
                 <label htmlFor="studio-timezone-input" className="studio-timezone-field">
                   Global timezone (IANA)
                   <div className="studio-timezone-combobox" ref={timezonePickerRef}>
                     <input
                       id="studio-timezone-input"
                       value={timezoneInput}
+                      disabled={useServerDefaultTimezone}
                       onFocus={openTimezoneMenu}
                       onClick={openTimezoneMenu}
                       onChange={(event) => {
+                        setUseServerDefaultTimezone(false);
                         setTimezoneInput(event.target.value);
                         openTimezoneMenu();
                       }}
@@ -392,6 +400,7 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
                       type="button"
                       className={`studio-timezone-trigger${timezoneMenuOpen ? " open" : ""}`}
                       onClick={toggleTimezoneMenu}
+                      disabled={useServerDefaultTimezone}
                       aria-label={timezoneMenuOpen ? "Close timezone options" : "Open timezone options"}
                     >
                       <ChevronDown size={14} />
@@ -426,16 +435,42 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
                       </div>
                     ) : null}
                   </div>
+                  {useServerDefaultTimezone ? (
+                    <span className="settings-field-hint">This Studio will follow the server timezone when saved.</span>
+                  ) : null}
+                </label>
+                <label htmlFor="source-check-interval-input" className="studio-timezone-field">
+                  Source change check (seconds)
+                  <input
+                    id="source-check-interval-input"
+                    type="number"
+                    min="5"
+                    max="3600"
+                    step="1"
+                    value={sourceCheckIntervalInput}
+                    onChange={(event) => setSourceCheckIntervalInput(event.target.value)}
+                  />
                 </label>
                 <div className="settings-timezone-drawer-actions">
-                  <button type="submit" disabled={busy || !timezoneInput.trim()}>
-                    Save timezone
+                  <button
+                    type="submit"
+                    disabled={busy || (!useServerDefaultTimezone && !timezoneInput.trim()) || !isValidSourceCheckInterval(Number(sourceCheckIntervalInput))}
+                  >
+                    Save changes
                   </button>
-                  <button type="button" className="text-action" onClick={useServerDefaultTimezone} disabled={busy}>
-                    Use server default
+                  <button
+                    type="button"
+                    className="text-action"
+                    onClick={() => {
+                      setUseServerDefaultTimezone((value) => !value);
+                      setTimezoneMenuOpen(false);
+                    }}
+                    disabled={busy}
+                  >
+                    {useServerDefaultTimezone ? "Set Studio override" : "Use server default"}
                   </button>
-                  <button type="button" className="text-action" onClick={reloadSettings} disabled={busy}>
-                    Reload
+                  <button type="button" className="text-action" onClick={closeConfigurationDrawer} disabled={busy}>
+                    Cancel
                   </button>
                 </div>
               </form>
@@ -445,6 +480,10 @@ export function SettingsPage({ settings, busy, onSaveTimezone, onReload, modules
       ) : null}
     </div>
   );
+}
+
+function isValidSourceCheckInterval(value: number) {
+  return Number.isInteger(value) && value >= 5 && value <= 3600;
 }
 
 function formatCount(value: number | null | undefined): string {

@@ -11,6 +11,7 @@ import {
   ReportChart,
   ReportPanel,
   RuntimePhaseContribution,
+  RuntimePhaseLegend,
   type TableSort,
   TablePager,
   WindowPairDetail,
@@ -97,6 +98,7 @@ export function DataflowsPage({
             />
           }
           intent={rateIntent}
+          accent="intent"
           title="Execution success rate = succeeded / (succeeded + failed). Skipped runs are not counted as failed."
         />
         <HealthStripCard
@@ -113,6 +115,7 @@ export function DataflowsPage({
             />
           }
           intent={(kpis.failed ?? 0) ? "bad" : "neutral"}
+          accent="intent"
           title="Failed dataflow run records in the current filters."
         />
         <HealthStripCard
@@ -129,6 +132,7 @@ export function DataflowsPage({
             />
           }
           intent={(kpis.running ?? 0) || (kpis.pending ?? 0) ? "warning" : "neutral"}
+          accent="intent"
           title="Skipped means no new data or no processing needed. It is tracked separately from failed."
         />
         <HealthStripCard
@@ -136,6 +140,7 @@ export function DataflowsPage({
           value={<DurationHeadline avgSeconds={avgDuration} p50Seconds={p50Duration} />}
           detail={durationPercentilesDetail(durationStats)}
           intent={durationHealthIntent}
+          accent="intent"
           title={durationStatsTitle("Dataflow duration", durationStats)}
           className="overview-health-card-duration"
         />
@@ -181,13 +186,14 @@ export function DataflowsPage({
         <section className="monitoring-dataflow-secondary-grid">
           <ReportPanel
             title="Stage phase contribution"
-            subtitle="source, transform, destination"
             titleTooltip="Shows source, transform, and destination runtime contribution for dataflow runs grouped by stage. Stage is used as a diagnosis category; the underlying grain remains dataflow runs."
+            headerAction={<RuntimePhaseLegend />}
           >
             <RuntimePhaseContribution
               rows={phaseStageRows}
               labelKey="stage"
               emptyText="No stage phase duration signals in current filters."
+              showLegend={false}
             />
           </ReportPanel>
           <ReportPanel

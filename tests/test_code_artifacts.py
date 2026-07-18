@@ -72,24 +72,36 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
         assert artifact["source_config"]["artifact_type"] == "directory"
         assert artifact["source_config"]["module_roots"] == ["src"]
 
-        validation = client.post(f"/api/v1/code-artifacts/{artifact['id']}/validate").json()
-        assert validation["status"] == "ok"
-        assert validation["record_counts"] == {"python_files": 2, "modules": 2}
-
-        refreshed = client.post(f"/api/v1/code-artifacts/{artifact['id']}/refresh").json()
+        refreshed = client.post(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}/refresh").json()
         assert refreshed["status"] == "ok"
         assert refreshed["revision"]["artifact_type"] == "directory"
         assert refreshed["revision"]["python_files"] == 2
 
         listed = client.get(f"/api/v1/environments/{environment['id']}/code-artifacts").json()
+        assert listed[0]["latest_validation"]["status"] == "ok"
         assert listed[0]["latest_validation"]["record_counts"]["modules"] == 2
+
+        validation = client.post(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}/validate").json()
+        assert validation["status"] == "ok"
+        assert validation["record_counts"] == {"python_files": 2, "modules": 2}
 
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 1
             assert connection.execute("select count(*) from source_revisions").fetchone()[0] == 1
-            assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 1
+            # Initial auto-materialization plus the explicit manual refresh.
+            assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
 
-        response = client.delete(f"/api/v1/code-artifacts/{artifact['id']}")
+        impact = client.get(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}/delete-impact")
+        assert impact.status_code == 200
+        impact_body = impact.json()
+        assert impact_body["metadata_file_deleted"] is False
+        assert "original code artifact will not be deleted" in impact_body["summary"]
+        impact_counts = {item["kind"]: item["count"] for item in impact_body["impacts"]}
+        assert impact_counts["snapshot"] == 1
+        assert impact_counts["source_revision"] == 1
+        assert impact_counts["sync_job"] == 2
+
+        response = client.delete(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}")
         assert response.status_code == 204
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 0

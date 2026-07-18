@@ -1,9 +1,14 @@
 import type {
   Environment,
+  EnvironmentOverview,
   EnvironmentFreshness,
   JobRecord,
   AssetDetailResponse,
-  AssetsResponse,
+  AssetInventoryResponse,
+  AssetReferenceDetailResponse,
+  AssetReferenceListResponse,
+  AssetSourceResponse,
+  ReferenceOccurrenceSourceResponse,
   LatestStatusResponse,
   LineageResponse,
   MetadataBackup,
@@ -13,6 +18,7 @@ import type {
   MonitoringRecord,
   MonitoringRecordsResponse,
   MonitoringReport,
+  ProjectReferenceMapping,
   Project,
   ProjectSummary,
   SourceReadCheckResult,
@@ -23,6 +29,8 @@ import type {
   StudioSettings,
   ModuleInfo,
   SystemLogResponse,
+  ReferenceType,
+  TargetIdentifierKind,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -69,9 +77,17 @@ function queryString(params: Record<string, string | number | undefined>) {
   return value ? `?${value}` : "";
 }
 
+function environmentSourcePath(
+  environmentId: number,
+  collection: "metadata-sources" | "log-sources" | "code-artifacts",
+  sourceId: number
+) {
+  return `${API_PREFIX}/environments/${environmentId}/${collection}/${sourceId}`;
+}
+
 export const api = {
   getStudioSettings: () => request<StudioSettings>(`${API_PREFIX}/studio/settings`),
-  updateStudioSettings: (payload: { timezone: string | null }) =>
+  updateStudioSettings: (payload: { timezone?: string | null; source_check_interval_seconds?: number }) =>
     request<StudioSettings>(`${API_PREFIX}/studio/settings`, {
       method: "PATCH",
       body: JSON.stringify(payload)
@@ -86,6 +102,43 @@ export const api = {
   listProjectSummaries: () => request<ProjectSummary[]>(`${API_PREFIX}/projects/summary`),
   createProject: (payload: { name: string; description?: string }) =>
     request<Project>(`${API_PREFIX}/projects`, { method: "POST", body: JSON.stringify(payload) }),
+  deleteProject: (projectId: number) =>
+    request<void>(`${API_PREFIX}/projects/${projectId}`, { method: "DELETE" }),
+  listProjectReferenceMappings: (projectId: number) =>
+    request<ProjectReferenceMapping[]>(`${API_PREFIX}/projects/${projectId}/reference-mappings`),
+  createProjectReferenceMapping: (
+    projectId: number,
+    payload: {
+      reference_type: ReferenceType;
+      reference_value: string;
+      target_identifier_kind: TargetIdentifierKind;
+      target_value: string;
+      target_display_value?: string | null;
+      note?: string | null;
+    }
+  ) =>
+    request<ProjectReferenceMapping>(`${API_PREFIX}/projects/${projectId}/reference-mappings`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateProjectReferenceMapping: (
+    projectId: number,
+    mappingId: number,
+    payload: {
+      reference_type?: ReferenceType;
+      reference_value?: string | null;
+      target_identifier_kind?: TargetIdentifierKind;
+      target_value?: string | null;
+      target_display_value?: string | null;
+      note?: string | null;
+    }
+  ) =>
+    request<ProjectReferenceMapping>(
+      `${API_PREFIX}/projects/${projectId}/reference-mappings/${mappingId}`,
+      { method: "PATCH", body: JSON.stringify(payload) }
+    ),
+  deleteProjectReferenceMapping: (projectId: number, mappingId: number) =>
+    request<void>(`${API_PREFIX}/projects/${projectId}/reference-mappings/${mappingId}`, { method: "DELETE" }),
   listEnvironments: (projectId: number) => request<Environment[]>(`${API_PREFIX}/projects/${projectId}/environments`),
   createEnvironment: (projectId: number, payload: { name: string }) =>
     request<Environment>(`${API_PREFIX}/projects/${projectId}/environments`, { method: "POST", body: JSON.stringify(payload) }),
@@ -122,25 +175,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  updateMetadataSource: (sourceId: number, payload: { uri?: string; label?: string | null; enabled?: boolean; sync_schedule_enabled?: boolean; sync_interval_minutes?: number | null }) =>
-    request<SourcePath>(`${API_PREFIX}/metadata-sources/${sourceId}`, {
+  updateMetadataSource: (environmentId: number, sourceId: number, payload: { uri?: string; label?: string | null; enabled?: boolean; sync_schedule_enabled?: boolean; sync_interval_minutes?: number | null }) =>
+    request<SourcePath>(environmentSourcePath(environmentId, "metadata-sources", sourceId), {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
-  deleteMetadataSource: (sourceId: number) =>
-    request<void>(`${API_PREFIX}/metadata-sources/${sourceId}`, {
+  deleteMetadataSource: (environmentId: number, sourceId: number) =>
+    request<void>(environmentSourcePath(environmentId, "metadata-sources", sourceId), {
       method: "DELETE"
     }),
-  getMetadataSourceDeleteImpact: (sourceId: number) =>
-    request<SourceDeleteImpact>(`${API_PREFIX}/metadata-sources/${sourceId}/delete-impact`),
-  validateMetadataSource: (sourceId: number) =>
-    request<SourceReadCheckResult>(`${API_PREFIX}/metadata-sources/${sourceId}/validate`, {
+  getMetadataSourceDeleteImpact: (environmentId: number, sourceId: number) =>
+    request<SourceDeleteImpact>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/delete-impact`),
+  validateMetadataSource: (environmentId: number, sourceId: number) =>
+    request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/validate`, {
       method: "POST"
     }),
-  getMetadataSourceSyncStatus: (sourceId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/metadata-sources/${sourceId}/sync-status`),
-  refreshMetadataSource: (sourceId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/metadata-sources/${sourceId}/refresh`, {
+  getMetadataSourceSyncStatus: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/sync-status`),
+  refreshMetadataSource: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/refresh`, {
       method: "POST"
     }),
   listLogSources: (environmentId: number) => request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/log-sources`),
@@ -153,6 +206,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   updateLogSource: (
+    environmentId: number,
     pathId: number,
     payload: {
       uri?: string;
@@ -163,22 +217,24 @@ export const api = {
       sync_interval_minutes?: number | null;
     }
   ) =>
-    request<SourcePath>(`${API_PREFIX}/log-sources/${pathId}`, {
+    request<SourcePath>(environmentSourcePath(environmentId, "log-sources", pathId), {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
-  deleteLogSource: (pathId: number) =>
-    request<void>(`${API_PREFIX}/log-sources/${pathId}`, {
+  deleteLogSource: (environmentId: number, pathId: number) =>
+    request<void>(environmentSourcePath(environmentId, "log-sources", pathId), {
       method: "DELETE"
     }),
-  validateLogSource: (pathId: number) =>
-    request<SourceReadCheckResult>(`${API_PREFIX}/log-sources/${pathId}/validate`, {
+  getLogSourceDeleteImpact: (environmentId: number, pathId: number) =>
+    request<SourceDeleteImpact>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/delete-impact`),
+  validateLogSource: (environmentId: number, pathId: number) =>
+    request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/validate`, {
       method: "POST"
     }),
-  getLogSourceSyncStatus: (pathId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/log-sources/${pathId}/sync-status`),
-  refreshLogSource: (pathId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/log-sources/${pathId}/refresh`, {
+  getLogSourceSyncStatus: (environmentId: number, pathId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/sync-status`),
+  refreshLogSource: (environmentId: number, pathId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/refresh`, {
       method: "POST"
     }),
   listCodeArtifacts: (environmentId: number) =>
@@ -192,6 +248,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   updateCodeArtifact: (
+    environmentId: number,
     sourceId: number,
     payload: {
       uri?: string;
@@ -202,20 +259,22 @@ export const api = {
       sync_interval_minutes?: number | null;
     }
   ) =>
-    request<SourcePath>(`${API_PREFIX}/code-artifacts/${sourceId}`, {
+    request<SourcePath>(environmentSourcePath(environmentId, "code-artifacts", sourceId), {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
-  deleteCodeArtifact: (sourceId: number) =>
-    request<void>(`${API_PREFIX}/code-artifacts/${sourceId}`, { method: "DELETE" }),
-  validateCodeArtifact: (sourceId: number) =>
-    request<SourceReadCheckResult>(`${API_PREFIX}/code-artifacts/${sourceId}/validate`, {
+  deleteCodeArtifact: (environmentId: number, sourceId: number) =>
+    request<void>(environmentSourcePath(environmentId, "code-artifacts", sourceId), { method: "DELETE" }),
+  getCodeArtifactDeleteImpact: (environmentId: number, sourceId: number) =>
+    request<SourceDeleteImpact>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/delete-impact`),
+  validateCodeArtifact: (environmentId: number, sourceId: number) =>
+    request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/validate`, {
       method: "POST"
     }),
-  getCodeArtifactSyncStatus: (sourceId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/code-artifacts/${sourceId}/sync-status`),
-  refreshCodeArtifact: (sourceId: number) =>
-    request<SourceSyncStatus>(`${API_PREFIX}/code-artifacts/${sourceId}/refresh`, {
+  getCodeArtifactSyncStatus: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/sync-status`),
+  refreshCodeArtifact: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/refresh`, {
       method: "POST"
     }),
   getMetadata: (environmentId: number) => request<MetadataResponse>(`${API_PREFIX}/environments/${environmentId}/metadata`),
@@ -267,11 +326,31 @@ export const api = {
       method: "DELETE"
     }),
   getLineage: (environmentId: number) => request<LineageResponse>(`${API_PREFIX}/environments/${environmentId}/lineage`),
-  getAssets: (environmentId: number) => request<AssetsResponse>(`${API_PREFIX}/environments/${environmentId}/assets`),
-  getAsset: (environmentId: number, assetId: string) =>
-    request<AssetDetailResponse>(`${API_PREFIX}/environments/${environmentId}/assets/${encodeURIComponent(assetId)}`),
-  getMonitoringReport: (environmentId: number, params: Record<string, string | number | undefined> = {}) =>
-    request<MonitoringReport>(`${API_PREFIX}/environments/${environmentId}/monitoring/overview${queryString(params)}`),
+  getEnvironmentOverview: (environmentId: number) => request<EnvironmentOverview>(`${API_PREFIX}/environments/${environmentId}/overview`),
+  getAssets: (environmentId: number, params: Record<string, string | number | undefined> = {}) =>
+      request<AssetInventoryResponse>(`${API_PREFIX}/environments/${environmentId}/assets${queryString(params)}`),
+  getAssetReferences: (environmentId: number, params: Record<string, string | number | undefined> = {}) =>
+      request<AssetReferenceListResponse>(`${API_PREFIX}/environments/${environmentId}/asset-references${queryString(params)}`),
+  getAssetReference: (environmentId: number, referenceId: string) =>
+    request<AssetReferenceDetailResponse>(
+      `${API_PREFIX}/environments/${environmentId}/asset-references/${encodeURIComponent(referenceId)}`,
+    ),
+    getAsset: (environmentId: number, assetId: string) =>
+      request<AssetDetailResponse>(`${API_PREFIX}/environments/${environmentId}/assets/${encodeURIComponent(assetId)}`),
+    getAssetSource: (environmentId: number, assetId: string) =>
+      request<AssetSourceResponse>(`${API_PREFIX}/environments/${environmentId}/assets/${encodeURIComponent(assetId)}/source`),
+  getReferenceOccurrenceSource: (environmentId: number, occurrenceId: string) =>
+    request<ReferenceOccurrenceSourceResponse>(
+      `${API_PREFIX}/environments/${environmentId}/reference-occurrences/${encodeURIComponent(occurrenceId)}/source`,
+    ),
+  getEnvironmentOverviewReport: (environmentId: number) =>
+    request<MonitoringReport>(`${API_PREFIX}/environments/${environmentId}/monitoring/pages/environment-overview`),
+  getMonitoringPage: (environmentId: number, page: string, params: Record<string, string | number | undefined> = {}) =>
+    request<MonitoringReport>(`${API_PREFIX}/environments/${environmentId}/monitoring/pages/${page}${queryString(params)}`),
+  getMonitoringPageEvidence: (environmentId: number, page: string, params: Record<string, string | number | undefined>) =>
+    request<MonitoringRecordsResponse<MonitoringRecord>>(
+      `${API_PREFIX}/environments/${environmentId}/monitoring/pages/${page}/evidence${queryString(params)}`
+    ),
   getMonitoringFilterOptions: (environmentId: number) =>
     request<MonitoringFilterOptionsResponse>(`${API_PREFIX}/environments/${environmentId}/monitoring/filter-options`),
   getMonitoringJobs: (environmentId: number, params: Record<string, string | number | undefined>) =>

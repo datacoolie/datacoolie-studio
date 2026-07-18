@@ -99,4 +99,31 @@ describe("monitoring trend buckets", () => {
     expect(rows.find((row) => row.bucket === "2026-06-20")?.failed_dataflows).toBe(3);
     expect(rows.filter((row) => row.bucket !== "2026-06-20").every((row) => row.failed_jobs === 0 && row.failed_dataflows === 0)).toBe(true);
   });
+
+  it("uses estimated rows written for the Overview workload series", () => {
+    const option = monitoringTrendBucketTestUtils.workloadVolumeTrendOption(
+      [
+        {
+          date: "2026-06-20",
+          bucket: "2026-06-20",
+          grain: "day",
+          rows_read: 120,
+          rows_written: 40,
+          est_rows_written: 110,
+          rows_output: 75,
+          rows_output_estimated: 35
+        }
+      ],
+      [],
+      { ...DEFAULT_MONITORING_FILTERS, range: "custom", grain: "day", startTime: "2026-06-20", endTime: "2026-06-20" },
+      { min: "2026-06-20", max: "2026-06-20" },
+      "Asia/Saigon",
+      "day"
+    );
+    const series = (option?.series ?? []) as Array<{ name?: string; data?: number[] }>;
+    const estimatedSeries = series.find((item) => item.name === "Est rows written");
+
+    expect(estimatedSeries?.data).toEqual([110]);
+    expect(series.some((item) => item.name === "Rows output")).toBe(false);
+  });
 });

@@ -3,7 +3,7 @@ import type {
   LineageAsset,
   LineageDataflow,
   LineageDependency,
-  LineageReference
+  LineageReference,
 } from "../../../shared/api/types";
 import type { AssetIconKind } from "./presentation";
 
@@ -11,10 +11,15 @@ export type TraceDirection = "upstream" | "both" | "downstream";
 export type LineageEntity = LineageAsset | LineageReference;
 export type LineageRelation = LineageDataflow | LineageDependency;
 
+export function isLineageAsset(entity: LineageEntity | undefined): entity is LineageAsset {
+  return entity?.entity_type === "asset";
+}
+
 export type LineageFocus =
   { kind: "asset" | "reference" | "dataflow" | "dependency"; id: string };
 
 export type LineageSelection = LineageFocus | null;
+export type LineageSelectionState = "none" | "selected" | "input" | "output" | "both";
 
 export interface LineageFilters {
   connections: string[];
@@ -49,12 +54,15 @@ export interface LineageAssetNodeData extends Record<string, unknown> {
   connection: string;
   badge: string;
   iconKind: AssetIconKind;
+  assetType?: LineageAsset["asset_type"];
+  referenceType?: LineageReference["reference_type"];
   fullIdentity: string;
   focused: boolean;
   issueCount: number;
   declarationStatus?: "declared" | "discovered_only";
-  referenceStatus?: "ambiguous" | "unresolved";
+  referenceStatus?: string;
   nodeWidth: number;
+  selectionState: LineageSelectionState;
 }
 
 export interface LineageDataflowEdgeData extends Record<string, unknown> {
@@ -62,11 +70,14 @@ export interface LineageDataflowEdgeData extends Record<string, unknown> {
   label: string;
   status: string;
   labelSegment: "source" | "target" | "longest";
+  selectionState: LineageSelectionState;
 }
 
 export interface LineageDependencyEdgeData extends Record<string, unknown> {
   relationType: "dependency";
   resolutionStatus: string;
+  routeLane: number;
+  selectionState: LineageSelectionState;
 }
 
 export type LineageAssetFlowNode = FlowNode<LineageAssetNodeData, "lineageAsset">;

@@ -1,30 +1,60 @@
 import { Activity, Check, ChevronDown, FilterX, GitBranch, LocateFixed, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { LatestStatusResponse, LineageResponse } from "../../shared/api/types";
+import type { AssetInventoryItem, LatestStatusResponse, LineageDataflow, LineageResponse, MetadataEditorDocument, ProjectReferenceMapping } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
+import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
+import { lineageDataflowFocusFromSearch, type LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
+import { MetadataDataflowDrawer } from "../dataflows/MetadataDataflowDrawer";
+import {
+  buildMetadataDataflowRecords,
+  findMetadataDataflowRecord,
+  isEditableMetadataDataflowRecord,
+  type MetadataDataflowSelection,
+  updateMetadataDataflowRow,
+} from "../dataflows/metadataDataflowModel";
+import { metadataSaveConfirmation } from "../metadata-explorer/metadataSaveConfirmation";
+import { MetadataSourceSaveConfirmationDialog } from "../metadata-explorer/MetadataSourceSaveConfirmationDialog";
 import { LineageCanvas } from "./components/LineageCanvas";
 import { LineageDetailsDrawer } from "./components/LineageDetailsDrawer";
 import { LineageSearch } from "./components/LineageSearch";
+import { disposeLineageLayoutWorker } from "./layout/elkLayout";
 import {
   createLineageGraphIndex,
+  findLineageDataflowByMetadataIdentity,
   lineageFilterOptions,
   searchLineage,
   selectVisibleLineage
 } from "./model/graphIndex";
 import { presentLineageAsset } from "./model/presentation";
-import type { LineageFilters, LineageFocus, LineageSearchResult, LineageSelection, TraceDirection } from "./model/types";
-import { latestRun } from "./model/flow";
+import { isLineageAsset, type LineageFilters, type LineageFocus, type LineageSearchResult, type LineageSelection, type TraceDirection } from "./model/types";
+import type { ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 
 interface LineageViewProps {
+  environmentId: number;
   lineage: LineageResponse | null;
   latestStatus: LatestStatusResponse | null;
+  onEnsureLatestRuns: () => Promise<void>;
+  metadataEditorDocument: MetadataEditorDocument | null;
+  metadataEditorDraft: MetadataEditorDocument | null;
+  onEnsureMetadataEditor: () => Promise<void>;
+  busy: boolean;
+  onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   loading: boolean;
   routeSearch?: string;
+  onOpenMetadata: (target: MetadataNavigationTarget) => void;
+  projectMappings: ProjectReferenceMapping[];
+  onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
+  onUpdateReferenceMapping: (mappingId: number, payload: ReferenceMappingPayload) => Promise<unknown>;
+  onDeleteReferenceMapping: (mappingId: number) => Promise<unknown>;
+  onRefreshReferenceMappings: () => Promise<void>;
 }
 
 const EMPTY_FILTERS: LineageFilters = { connections: [], stages: [], formats: [], resolutions: [] };
+const LINEAGE_DATAFLOW_HISTORY_KEY = "datacoolieLineageDataflowDrawer";
 
-export function LineageView({ lineage, latestStatus, loading, routeSearch }: LineageViewProps) {
+export function LineageView({ environmentId, lineage, latestStatus, onEnsureLatestRuns, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, loading, routeSearch, onOpenMetadata, projectMappings, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping, onRefreshReferenceMappings }: LineageViewProps) {
   const [query, setQuery] = useState("");
   const [focuses, setFocuses] = useState<LineageFocus[]>([]);
   const [direction, setDirection] = useState<TraceDirection>("both");
@@ -33,27 +63,56 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
   const [statusOverlay, setStatusOverlay] = useState(false);
   const [showReferences, setShowReferences] = useState(false);
   const [selection, setSelection] = useState<LineageSelection>(null);
+  const [selectedMetadataDataflow, setSelectedMetadataDataflow] = useState<MetadataDataflowSelection | null>(null);
+  const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
   const index = useMemo(() => createLineageGraphIndex(lineage), [lineage]);
+  const activeMetadataDocument = metadataEditorDraft ?? metadataEditorDocument;
+  const metadataDataflowRecords = useMemo(
+    () => buildMetadataDataflowRecords(activeMetadataDocument),
+    [activeMetadataDocument],
+  );
+  const metadataDataflowIds = useMemo(
+    () => new Set(index.dataflows.map((dataflow) => dataflow.id)),
+    [index.dataflows],
+  );
+  const selectedMetadataDataflowRecord = useMemo(
+    () => findMetadataDataflowRecord(metadataDataflowRecords, selectedMetadataDataflow),
+    [metadataDataflowRecords, selectedMetadataDataflow],
+  );
+  const selectedMetadataDataflowEditable = isEditableMetadataDataflowRecord(activeMetadataDocument, selectedMetadataDataflowRecord);
+  const sourceSaveConfirmation = pendingMetadataSave ? metadataSaveConfirmation(metadataEditorDocument, pendingMetadataSave) : null;
+
+  useEffect(() => () => disposeLineageLayoutWorker(), []);
+
+  useEffect(() => {
+    if (!selectedMetadataDataflow || activeMetadataDocument) return;
+    void onEnsureMetadataEditor();
+    // The workspace callback is intentionally excluded: drawer identity, not
+    // parent renders, controls this action-driven resource load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [environmentId, selectedMetadataDataflow?.metadataSourceId, selectedMetadataDataflow?.rowIndex, selectedMetadataDataflow?.dataflowId, selectedMetadataDataflow?.name, activeMetadataDocument]);
   const options = useMemo(() => lineageFilterOptions(index), [index]);
   const searchResults = useMemo(() => searchLineage(index, query), [index, query]);
   const visible = useMemo(
     () => selectVisibleLineage(index, filters, focuses, direction, showReferences),
     [index, filters, focuses, direction, showReferences]
   );
-  const selectedEntity = selection?.kind === "asset" || selection?.kind === "reference"
-    ? index.entityById.get(selection.id) ?? null
-    : null;
-  const selectedDataflow = selection?.kind === "dataflow" ? index.dataflowById.get(selection.id) ?? null : null;
-  const selectedDependency = selection?.kind === "dependency" ? index.dependencyById.get(selection.id) ?? null : null;
-  const selectedRun = selectedDataflow
-    ? latestRun(latestStatus, selectedDataflow.dataflow_id, selectedDataflow.name)
-    : null;
   const filtersActive = filters.connections.length > 0
     || filters.stages.length > 0
     || filters.formats.length > 0
     || filters.resolutions.length > 0;
-  const visibleAssetCount = visible.entities.filter((entity) => "declaration_status" in entity).length;
-  const visibleReferenceCount = visible.entities.length - visibleAssetCount;
+  const activeFilterCount = filters.connections.length + filters.stages.length + filters.formats.length + filters.resolutions.length;
+  const visibleAssetCount = visible.entities.filter(isLineageAsset).length;
+  const visibleUnresolvedCount = visible.dependencies.filter((dependency) => dependency.resolution_status === "unresolved").length;
+  const unresolvedCount = focuses.length || filtersActive || showReferences
+    ? visibleUnresolvedCount
+    : lineage?.summary.unresolved_dependencies ?? 0;
+  const traceKey = useMemo(
+    () => focuses.length
+      ? [direction, ...focuses.map((focus) => `${focus.kind}:${focus.id}`)].join("|")
+      : "",
+    [direction, focuses]
+  );
   const layoutKey = useMemo(
     () => [
       direction,
@@ -80,17 +139,36 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
   }, [selection, visible]);
 
   useEffect(() => {
+    if (selectedMetadataDataflow && !selectedMetadataDataflowRecord) setSelectedMetadataDataflow(null);
+  }, [selectedMetadataDataflow, selectedMetadataDataflowRecord]);
+
+  useEffect(() => {
+    function handlePopState(event: PopStateEvent) {
+      setSelectedMetadataDataflow(metadataDataflowSelectionFromHistory(event.state));
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
     const params = new URLSearchParams(routeSearch ?? "");
     const nextQuery = params.get("q");
     if (nextQuery !== null) {
       setQuery(nextQuery);
+    }
+    const focusDataflow = findLineageDataflowByMetadataIdentity(index, lineageDataflowFocusFromSearch(routeSearch ?? ""));
+    if (focusDataflow) {
+      setFocuses([{ kind: "dataflow", id: focusDataflow.id }]);
+      setDirection("both");
+      setSelection({ kind: "dataflow", id: focusDataflow.id });
+      return;
     }
     const focusAsset = params.get("focusAsset");
     if (!focusAsset) {
       return;
     }
     const entity = index.entityById.get(focusAsset);
-    if (!entity || !("declaration_status" in entity)) {
+    if (!isLineageAsset(entity)) {
       return;
     }
     setFocuses([{ kind: "asset", id: focusAsset }]);
@@ -114,11 +192,85 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
     setSelection({ kind: result.kind, id: result.id });
   }
 
+  function openMetadataDataflow(dataflow: LineageDataflow) {
+    void onEnsureLatestRuns();
+    const nextSelection = dataflowSelection(dataflow);
+    const historyState = window.history.state && typeof window.history.state === "object"
+      ? { ...(window.history.state as Record<string, unknown>) }
+      : {};
+    window.history.pushState({ ...historyState, [LINEAGE_DATAFLOW_HISTORY_KEY]: nextSelection }, "", window.location.href);
+    setSelectedMetadataDataflow(nextSelection);
+  }
+
+  function closeMetadataDataflow() {
+    if (metadataDataflowSelectionFromHistory(window.history.state)) {
+      window.history.back();
+      return;
+    }
+    setSelectedMetadataDataflow(null);
+  }
+
+  function focusMetadataDataflow(target: LineageDataflowFocusTarget) {
+    const dataflow = findLineageDataflowByMetadataIdentity(index, target);
+    if (!dataflow) return;
+    setFocuses([{ kind: "dataflow", id: dataflow.id }]);
+    setDirection("both");
+    setSelection({ kind: "dataflow", id: dataflow.id });
+    closeMetadataDataflow();
+  }
+
+  function selectedDataflowDocument(nextRow: Record<string, unknown>) {
+    if (!activeMetadataDocument || !selectedMetadataDataflowRecord || !selectedMetadataDataflowEditable) return null;
+    return updateMetadataDataflowRow(activeMetadataDocument, selectedMetadataDataflowRecord.rowIndex, nextRow);
+  }
+
+  async function validateSelectedDataflow(nextRow: Record<string, unknown>) {
+    const nextDocument = selectedDataflowDocument(nextRow);
+    if (!nextDocument) return;
+    try {
+      return await onValidateMetadata(nextDocument);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function saveSelectedDataflowDraft(nextRow: Record<string, unknown>) {
+    const nextDocument = selectedDataflowDocument(nextRow);
+    if (!nextDocument) return;
+    try {
+      return await onSaveMetadataDraft(nextDocument);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function saveSelectedDataflow(nextRow: Record<string, unknown>) {
+    const nextDocument = selectedDataflowDocument(nextRow);
+    if (!nextDocument) return;
+    setPendingMetadataSave(nextDocument);
+  }
+
+  async function confirmMetadataSave() {
+    if (!pendingMetadataSave) return;
+    try {
+      const saved = await onSaveMetadata(pendingMetadataSave);
+      if (saved) {
+        setPendingMetadataSave(null);
+        closeMetadataDataflow();
+      }
+      return saved;
+    } catch {
+      return undefined;
+    }
+  }
+
   function resetView() {
     setQuery("");
     setFocuses([]);
     setFilters(EMPTY_FILTERS);
     setDirection("both");
+    setShowReferences(false);
+    setOpenFilter(null);
     setSelection(null);
   }
 
@@ -130,7 +282,7 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
   function focusLabel(focus: LineageFocus) {
     if (focus.kind === "asset" || focus.kind === "reference") {
       const entity = index.entityById.get(focus.id);
-      return entity && "declaration_status" in entity
+      return isLineageAsset(entity)
         ? presentLineageAsset(entity).fullIdentity
         : entity?.display_name || focus.id;
     }
@@ -139,12 +291,7 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
     return dependency ? `${dependency.provenance.replace(/_/g, " ")} ${dependency.kind}` : focus.id;
   }
 
-  const relationCount = visible.dataflows.length + visible.dependencies.length;
-  const resultTitle = focuses.length
-    ? `${visibleAssetCount} assets · ${relationCount} relations in ${focuses.length} trace${focuses.length > 1 ? "s" : ""}`
-    : filtersActive
-      ? `${visibleAssetCount} assets · ${visible.dataflows.length} filtered dataflows`
-      : `Full lineage · ${visibleAssetCount} assets · ${visible.dataflows.length} dataflows`;
+  const resultHeading = focuses.length ? "Trace lineage" : filtersActive ? "Filtered lineage" : "Full lineage";
 
   return (
     <div className="lineage-layout">
@@ -155,7 +302,7 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
               <h3 id="lineage-filter-title">Explore lineage</h3>
               <p>Search by name, connection, path, or canonical identity to open its complete trace.</p>
             </div>
-            <LocateFixed size={17} aria-hidden="true" />
+            <span className="lineage-panel-heading-icon is-explore"><LocateFixed size={16} aria-hidden="true" /></span>
           </div>
           <LineageSearch
             query={query}
@@ -168,7 +315,7 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
           {focuses.length ? (
             <div className="lineage-focus-chips" aria-label="Focused lineage items">
               {focuses.map((focus) => (
-                <button key={`${focus.kind}:${focus.id}`} type="button" title={focus.id} onClick={() => removeFocus(focus)}>
+                <button className={`kind-${focus.kind}`} key={`${focus.kind}:${focus.id}`} type="button" title={focus.id} onClick={() => removeFocus(focus)}>
                   <span>{focusLabel(focus)}</span>
                   <X size={12} aria-hidden="true" />
                 </button>
@@ -185,18 +332,18 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
               ))}
             </div>
           </div>
-          <span className="lineage-filter-section-label">Filters</span>
+          <span className="lineage-filter-section-label">Filters{filtersActive ? <span className="lineage-filter-count">{activeFilterCount}</span> : null}</span>
           <div className="lineage-filter-fields">
             <FilterMultiSelect label="Connection" values={filters.connections} options={options.connections} emptyLabel="All connections" open={openFilter === "connection"} onOpenChange={(open) => setOpenFilter(open ? "connection" : null)} onChange={(connections) => setFilters((current) => ({ ...current, connections }))} />
             <FilterMultiSelect label="Stage" values={filters.stages} options={options.stages} emptyLabel="All stages" open={openFilter === "stage"} onOpenChange={(open) => setOpenFilter(open ? "stage" : null)} onChange={(stages) => setFilters((current) => ({ ...current, stages }))} />
             <FilterMultiSelect label="Format" values={filters.formats} options={options.formats} emptyLabel="All formats" open={openFilter === "format"} onOpenChange={(open) => setOpenFilter(open ? "format" : null)} onChange={(formats) => setFilters((current) => ({ ...current, formats }))} />
             <FilterMultiSelect label="Resolution" values={filters.resolutions} options={options.resolutions} emptyLabel="All resolution states" open={openFilter === "resolution"} onOpenChange={(open) => setOpenFilter(open ? "resolution" : null)} onChange={(resolutions) => setFilters((current) => ({ ...current, resolutions }))} />
           </div>
-          <label className="lineage-status-toggle">
+          <label className={`lineage-status-toggle lineage-reference-toggle${showReferences ? " is-active" : ""}`}>
             <input type="checkbox" checked={showReferences} onChange={(event) => setShowReferences(event.target.checked)} />
             <span>Show unresolved references</span>
           </label>
-          <button className="lineage-clear-button" type="button" disabled={!focuses.length && !filtersActive && direction === "both"} onClick={resetView}>
+          <button className="lineage-clear-button" type="button" disabled={!focuses.length && !filtersActive && direction === "both" && !showReferences} onClick={resetView}>
             <FilterX size={14} />
             Reset lineage view
           </button>
@@ -208,43 +355,58 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
               <h3 id="lineage-evidence-title">Run evidence</h3>
               <p>Latest run status colors dataflow arrows only.</p>
             </div>
-            <Activity size={17} aria-hidden="true" />
+            <span className="lineage-panel-heading-icon is-evidence"><Activity size={16} aria-hidden="true" /></span>
           </div>
-          <label className="lineage-status-toggle">
-            <input type="checkbox" checked={statusOverlay} onChange={(event) => setStatusOverlay(event.target.checked)} />
+          <label className={`lineage-status-toggle lineage-run-toggle${statusOverlay ? " is-active" : ""}`}>
+            <input type="checkbox" checked={statusOverlay} onChange={(event) => {
+              const enabled = event.target.checked;
+              setStatusOverlay(enabled);
+              if (enabled) void onEnsureLatestRuns();
+            }} />
             <span>Color by latest known run</span>
           </label>
           {statusOverlay ? <StatusLegend /> : null}
         </section>
-
-        <div className="lineage-summary-compact" aria-label="Visible lineage summary">
-          <Metric label="Assets" value={`${visibleAssetCount}/${lineage.summary.assets}`} />
-          <Metric label="Dataflows" value={`${visible.dataflows.length}/${lineage.summary.dataflows}`} />
-          <Metric label="Unresolved" value={visibleReferenceCount || lineage.summary.references} />
-        </div>
       </aside>
 
       <section className="lineage-workspace">
         <div className="lineage-result-bar" aria-live="polite">
-          <div><strong>{resultTitle}</strong>{focuses.length ? <span> · {direction} trace</span> : null}</div>
+          <div className="lineage-result-summary">
+            <strong>{resultHeading}</strong>
+            <span className="lineage-result-stat">· {visibleAssetCount} assets</span>
+            <span className="lineage-result-stat">· {visible.dataflows.length} dataflows</span>
+            <span className={`lineage-result-stat${unresolvedCount ? " is-attention" : ""}`}>· {unresolvedCount} unresolved</span>
+            {focuses.length ? <span className="lineage-result-context">· {direction} trace</span> : null}
+          </div>
           <span>{lineage.diagnostics.length ? `${lineage.diagnostics.length} diagnostics` : "Resolved lineage graph"}</span>
         </div>
         <div className={`lineage-canvas${selection ? " has-details" : ""}`}>
           <LineageCanvas
+            environmentId={environmentId}
             visible={visible}
             latestStatus={latestStatus}
             statusOverlay={statusOverlay}
             selection={selection}
             layoutKey={layoutKey}
+            traceKey={traceKey}
             onSelectionChange={setSelection}
             onReset={resetView}
           />
           <LineageDetailsDrawer
-            entity={selectedEntity}
-            dataflow={selectedDataflow}
-            dependency={selectedDependency}
-            run={selectedRun}
-            entityById={index.entityById}
+            environmentId={environmentId}
+            selection={selection}
+            index={index}
+            latestStatus={latestStatus}
+            metadataDataflowIds={metadataDataflowIds}
+            mappingAssets={lineage.assets as unknown as AssetInventoryItem[]}
+            mappings={projectMappings}
+            mappingBusy={busy}
+            onCreateReferenceMapping={onCreateReferenceMapping}
+            onUpdateReferenceMapping={onUpdateReferenceMapping}
+            onDeleteReferenceMapping={onDeleteReferenceMapping}
+            onRefreshReferenceMappings={onRefreshReferenceMappings}
+            suspended={Boolean(selectedMetadataDataflowRecord)}
+            onOpenDataflowDetails={openMetadataDataflow}
             onClose={() => setSelection(null)}
             onFocusItem={(focus) => {
               setFocuses((current) => current.some((item) => item.kind === focus.kind && item.id === focus.id)
@@ -254,8 +416,52 @@ export function LineageView({ lineage, latestStatus, loading, routeSearch }: Lin
           />
         </div>
       </section>
+      {selectedMetadataDataflowRecord ? (
+        <MetadataDataflowDrawer
+          record={selectedMetadataDataflowRecord}
+          editable={selectedMetadataDataflowEditable}
+          readOnly={Boolean(activeMetadataDocument?.source.read_only)}
+          busy={busy}
+          connectionRows={activeMetadataDocument?.sheets.connections?.rows ?? []}
+          connectionColumns={activeMetadataDocument?.sheets.connections?.columns ?? []}
+          onSave={saveSelectedDataflow}
+          onSaveDraft={saveSelectedDataflowDraft}
+          onValidate={validateSelectedDataflow}
+          onBack={closeMetadataDataflow}
+          onClose={closeMetadataDataflow}
+          onFocusInLineage={focusMetadataDataflow}
+          onOpenMetadata={onOpenMetadata}
+        />
+      ) : null}
+      {pendingMetadataSave && sourceSaveConfirmation ? (
+        <MetadataSourceSaveConfirmationDialog
+          busy={busy}
+          confirmation={sourceSaveConfirmation}
+          onCancel={() => setPendingMetadataSave(null)}
+          onConfirm={() => void confirmMetadataSave()}
+        />
+      ) : null}
     </div>
   );
+}
+
+function dataflowSelection(dataflow: LineageDataflow): MetadataDataflowSelection {
+  return {
+    metadataSourceId: dataflow.metadata_source_id,
+    dataflowId: dataflow.dataflow_id,
+    name: dataflow.name,
+  };
+}
+
+function metadataDataflowSelectionFromHistory(state: unknown): MetadataDataflowSelection | null {
+  if (!state || typeof state !== "object") return null;
+  const value = (state as Record<string, unknown>)[LINEAGE_DATAFLOW_HISTORY_KEY];
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const metadataSourceId = typeof record.metadataSourceId === "number" ? record.metadataSourceId : null;
+  const dataflowId = typeof record.dataflowId === "string" ? record.dataflowId : null;
+  const name = typeof record.name === "string" ? record.name : null;
+  return dataflowId || name ? { metadataSourceId, dataflowId, name } : null;
 }
 
 function FilterMultiSelect({ label, values, options, emptyLabel, open, onOpenChange, onChange }: {
@@ -302,7 +508,7 @@ function FilterMultiSelect({ label, values, options, emptyLabel, open, onOpenCha
   }
 
   return (
-    <div className="lineage-filter-multiselect" ref={rootRef}>
+    <div className={`lineage-filter-multiselect${values.length ? " has-value" : ""}`} ref={rootRef}>
       <div className="lineage-filter-label-row">
         <span>{label}</span>
         {values.length ? (
@@ -366,8 +572,4 @@ function StatusLegend() {
       <span><i className="lineage-legend-dot status-bg-unknown" />No log</span>
     </div>
   );
-}
-
-function Metric({ label, value }: { label: string; value: number | string }) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
 }

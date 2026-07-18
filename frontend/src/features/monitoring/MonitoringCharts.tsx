@@ -23,6 +23,7 @@ export interface TableColumn<T extends Record<string, unknown>> {
   minWidth?: number;
   maxWidth?: number;
   fillPriority?: "normal" | "last";
+  measureValue?: (row: T, timezoneName?: string | null) => string | string[];
 }
 
 export interface TableSort {
@@ -203,15 +204,20 @@ export function DataTable<T extends Record<string, unknown>>({
   useEffect(() => {
     const element = tableContainerRef.current;
     if (!element) return;
+    const observedElement = element;
 
-    function measure() {
-      setContainerWidth(element?.clientWidth ?? 0);
+    function measure(entry?: ResizeObserverEntry) {
+      setContainerWidth(
+        normalizeTableContainerWidth(
+          entry?.contentRect.width ?? measureElementContentWidth(observedElement)
+        )
+      );
     }
 
     measure();
-    const animationFrame = window.requestAnimationFrame(measure);
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
+    const animationFrame = window.requestAnimationFrame(() => measure());
+    const observer = new ResizeObserver((entries) => measure(entries[0]));
+    observer.observe(observedElement);
     return () => {
       window.cancelAnimationFrame(animationFrame);
       observer.disconnect();
@@ -222,7 +228,7 @@ export function DataTable<T extends Record<string, unknown>>({
     const element = tableContainerRef.current;
     if (!element) return;
     const animationFrame = window.requestAnimationFrame(() => {
-      setContainerWidth(element.clientWidth);
+      setContainerWidth(normalizeTableContainerWidth(measureElementContentWidth(element)));
     });
     return () => window.cancelAnimationFrame(animationFrame);
   }, [rows, columns.length, tableWidth]);
@@ -307,7 +313,7 @@ export function DataTable<T extends Record<string, unknown>>({
                       <span aria-hidden="true">{active ? (activeSort?.sortDir === "desc" ? "↓" : "↑") : "↕"}</span>
                     </button>
                   ) : (
-                    column.label
+                    <span className="table-static-header">{column.label}</span>
                   )}
                   <span
                     className="table-column-resizer"
@@ -418,6 +424,41 @@ export function formatNumber(value: number) {
 
 let tableMeasureContext: CanvasRenderingContext2D | null | undefined;
 
+function normalizeTableContainerWidth(width: number) {
+  if (!Number.isFinite(width) || width <= 0) return 0;
+  // Column widths are whole pixels. Flooring a fractional content box keeps a
+  // fitted table inside its panel instead of creating a sub-pixel scrollbar.
+  return Math.floor(width);
+}
+
+function measureElementContentWidth(element: HTMLElement) {
+  const styles = window.getComputedStyle(element);
+  const horizontalBorder =
+    Number.parseFloat(styles.borderLeftWidth || "0") +
+    Number.parseFloat(styles.borderRightWidth || "0");
+  const horizontalPadding =
+    Number.parseFloat(styles.paddingLeft || "0") +
+    Number.parseFloat(styles.paddingRight || "0");
+  return calculateElementContentWidth(
+    element.getBoundingClientRect().width,
+    element.clientWidth,
+    horizontalBorder,
+    horizontalPadding
+  );
+}
+
+function calculateElementContentWidth(
+  borderBoxWidth: number,
+  clientWidth: number,
+  horizontalBorder = 0,
+  horizontalPadding = 0
+) {
+  const fractionalPaddingBoxWidth = Math.max(0, borderBoxWidth - horizontalBorder);
+  // clientWidth excludes a native vertical scrollbar, while the fractional
+  // padding box prevents sub-pixel overflow when no scrollbar is present.
+  return Math.max(0, Math.min(fractionalPaddingBoxWidth, clientWidth) - horizontalPadding);
+}
+
 function calculateBaseWidths<T extends Record<string, unknown>>(
   columns: TableColumn<T>[],
   autoWidths: Record<string, number>,
@@ -445,7 +486,7 @@ function distributeTableWidth<T extends Record<string, unknown>>(
     if (manualKeys.has(String(column.key))) return false;
     if (column.fillPriority === "normal") return true;
     if (isLongTextFillColumn(column)) return true;
-    return column.width === undefined;
+    return false;
   });
   if (!fillColumns.length) return baseWidths;
 
@@ -503,7 +544,7 @@ function shrinkTableWidthToContainer<T extends Record<string, unknown>>(
   const manualKeys = new Set(Object.keys(columnWidths));
   const candidates = columns
     .filter((column) => !manualKeys.has(String(column.key)))
-    .filter((column) => column.fillPriority === "last" || column.fillPriority === "normal" || isLongTextFillColumn(column) || column.width === undefined)
+    .filter((column) => column.fillPriority === "last" || column.fillPriority === "normal" || isLongTextFillColumn(column))
     .sort((left, right) => Number(isLongTextFillColumn(right)) - Number(isLongTextFillColumn(left)));
   const next = { ...widths };
   for (const column of candidates) {
@@ -524,7 +565,7 @@ function isLongTextFillColumn<T extends Record<string, unknown>>(column: TableCo
   if (column.fillPriority === "normal") return false;
   const key = String(column.key).toLowerCase();
   const label = column.label.toLowerCase();
-  return /error|message|issue|detail|description|query|json|payload|sql|text/u.test(`${key} ${label}`);
+  return /(?:^|[_\s-])(?:error|message|issue|detail|description|query|json|payload|sql|text)(?:$|[_\s-])/u.test(`${key} ${label}`);
 }
 
 function calculateAutoFitWidths<T extends Record<string, unknown>>(
@@ -539,15 +580,18 @@ function calculateAutoFitWidths<T extends Record<string, unknown>>(
 
   for (const column of autoColumns) {
     const key = String(column.key);
-    const headerWidth = measureTextWidth(context, column.label) + 38;
+    const headerWidth = measureTextWidth(context, column.label) + (column.sortable ? 38 : 26);
     if (isLongTextFillColumn(column)) {
       const preferredWidth = column.width ?? column.minWidth ?? headerWidth;
       result[key] = Math.max(column.minWidth ?? 96, Math.min(column.maxWidth ?? Number.POSITIVE_INFINITY, preferredWidth));
       continue;
     }
     const sampleWidths = rows.slice(0, 250).map((row) => {
-      const value = column.render ? renderedText(row, column) : display(row, key, timezoneName);
-      return measureTextWidth(context, value) + 26;
+      const measuredValues = column.measureValue?.(row, timezoneName);
+      const values = Array.isArray(measuredValues)
+        ? measuredValues
+        : [measuredValues ?? (column.render ? renderedText(row, column) : display(row, key, timezoneName))];
+      return Math.max(...values.map((value) => measureTextWidth(context, value || "-") + 26));
     });
     const measured = Math.ceil(Math.max(headerWidth, ...sampleWidths, column.minWidth ?? 0));
     result[key] = Math.max(column.minWidth ?? 48, Math.min(column.maxWidth ?? column.width ?? 180, measured));
@@ -560,7 +604,7 @@ function sortRows<T extends Record<string, unknown>>(rows: T[], columns: TableCo
   if (!sort) return rows;
   const column = columns.find((item) => (item.sortKey ?? String(item.key)) === sort.sortBy);
   if (!column) return rows;
-  const key = String(column.key);
+  const key = column.sortKey ?? String(column.key);
   const direction = sort.sortDir === "desc" ? -1 : 1;
   return [...rows].sort((left, right) => compareTableValues(tableSortValue(left, key), tableSortValue(right, key)) * direction);
 }
@@ -606,3 +650,11 @@ function renderedText<T extends Record<string, unknown>>(row: T, column: TableCo
   const key = String(column.key);
   return display(row, key);
 }
+
+export const monitoringTableTestUtils = {
+  calculateElementContentWidth,
+  calculateAutoFitWidths,
+  distributeTableWidth,
+  normalizeTableContainerWidth,
+  sortRows
+};

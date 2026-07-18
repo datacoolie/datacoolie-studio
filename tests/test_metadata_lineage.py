@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from datacoolie_studio.domains.lineage.service import build_lineage
+from datacoolie_studio.domains.analysis.models import InputEvidence
+from datacoolie_studio.domains.assets.reference_identity import build_reference_context_scope
 from datacoolie_studio.domains.metadata.normalizer import (
     enrich_metadata_documents_with_connections,
     normalize_metadata_document,
@@ -68,6 +70,124 @@ def test_lineage_stitches_same_path_across_different_connection_names():
     assert len(shared) == 1
     assert shared[0]["connection_names"] == ["reader", "writer"]
     assert shared[0]["metadata_source_ids"] == [1, 2]
+
+
+def test_lineage_stitches_same_api_endpoint_across_different_connection_names():
+    first = normalize_metadata_document(
+        1,
+        "first.json",
+        _api_metadata("api_to_a", "orders_api", "https://api.example.com/v1", "/orders", "orders_a"),
+    )
+    second = normalize_metadata_document(
+        2,
+        "second.json",
+        _api_metadata(
+            "api_to_b",
+            "orders_reader",
+            "https://api.example.com/v1/",
+            "https://api.example.com/v1/orders",
+            "orders_b",
+        ),
+    )
+
+    lineage = build_lineage({"_documents": [first, second], "errors": []}, environment_id=17)
+
+    api_assets = [node for node in lineage["assets"] if node["asset_type"] == "api"]
+    assert len(api_assets) == 1
+    assert api_assets[0]["connection_names"] == ["orders_api", "orders_reader"]
+    assert {item["kind"] for item in api_assets[0]["identifiers"]} == {"api_endpoint"}
+    assert api_assets[0]["identifiers"][0]["normalized_value"] == (
+        "https://api.example.com/v1|GET https://api.example.com/v1/orders"
+    )
+
+
+def test_lineage_distinguishes_api_endpoint_methods():
+    document = normalize_metadata_document(
+        1,
+        "api.json",
+        {
+            "connections": [{
+                "name": "orders_api",
+                "connection_type": "api",
+                "format": "api",
+                "configure": {"base_url": "https://api.example.com/v1"},
+            }, {
+                "name": "lake",
+                "connection_type": "file",
+                "format": "parquet",
+                "configure": {"base_path": "./data"},
+            }],
+            "dataflows": [
+                {
+                    "name": "get_orders",
+                    "source": {"connection_name": "orders_api", "table": "orders", "configure": {"endpoint": "/orders"}},
+                    "destination": {"connection_name": "lake", "table": "orders_get"},
+                },
+                {
+                    "name": "post_orders",
+                    "source": {
+                        "connection_name": "orders_api",
+                        "table": "orders",
+                        "configure": {"endpoint": "/orders", "method": "POST"},
+                    },
+                    "destination": {"connection_name": "lake", "table": "orders_post"},
+                },
+            ],
+        },
+    )
+
+    lineage = build_lineage({"_documents": [document], "errors": []}, environment_id=18)
+
+    values = sorted(
+        identifier["normalized_value"]
+        for node in lineage["assets"]
+        if node["asset_type"] == "api"
+        for identifier in node["identifiers"]
+        if identifier["kind"] == "api_endpoint"
+    )
+    assert values == [
+        "https://api.example.com/v1|GET https://api.example.com/v1/orders",
+        "https://api.example.com/v1|POST https://api.example.com/v1/orders",
+    ]
+
+
+def test_api_identity_ignores_auth_pagination_params_and_body():
+    first = normalize_metadata_document(
+        1,
+        "first.json",
+        _api_metadata(
+            "orders_open",
+            "orders_api",
+            "https://api.example.com/v1",
+            "/orders",
+            "orders_open",
+            connection_config={"auth_type": "bearer", "auth_token": "SECRET_TOKEN", "timeout": 3},
+            source_config={"pagination_type": "offset", "params": {"status": "open"}},
+        ),
+    )
+    second = normalize_metadata_document(
+        2,
+        "second.json",
+        _api_metadata(
+            "orders_closed",
+            "orders_reader",
+            "https://api.example.com/v1",
+            "/orders",
+            "orders_closed",
+            connection_config={"auth_type": "api_key", "api_key_value": "SECRET_KEY"},
+            source_config={"body": {"status": "closed"}, "watermark_to_param": "updated_before"},
+        ),
+    )
+
+    lineage = build_lineage({"_documents": [first, second], "errors": []}, environment_id=19)
+
+    api_assets = [node for node in lineage["assets"] if node["asset_type"] == "api"]
+    assert len(api_assets) == 1
+    identifier = api_assets[0]["identifiers"][0]
+    assert identifier["normalized_value"] == "https://api.example.com/v1|GET https://api.example.com/v1/orders"
+    serialized = json.dumps(identifier, sort_keys=True)
+    assert "SECRET" not in serialized
+    assert "status" not in serialized
 
 
 def test_lineage_resolves_connections_across_split_metadata_sources():
@@ -265,15 +385,23 @@ def test_sql_discovered_input_resolves_to_existing_metadata_asset():
     assert lineage["summary"]["dependencies"] == 1
     assert lineage["summary"]["resolved_dependencies"] == 1
     dependency = lineage["dependencies"][0]
-    assert dependency["resolution_status"] == "resolved"
+    assert dependency["resolution_status"] == "resolved_auto"
     assert dependency["observations"][0]["value"] == "raw.orders"
-    query_asset = next(asset for asset in lineage["assets"] if asset["kind"] == "sql_query")
+    query_asset = next(asset for asset in lineage["assets"] if asset["asset_type"] == "sql_query")
     raw_orders = next(
         asset for asset in lineage["assets"]
         if asset.get("schema_name") == "raw" and asset.get("table") == "orders"
     )
     query_flow = next(flow for flow in lineage["dataflows"] if flow["name"] == "query_orders")
-    assert dependency["source"] == {"entity_type": "asset", "id": raw_orders["id"]}
+    assert dependency["resolved_asset_id"] == raw_orders["id"]
+    occurrence = next(item for item in lineage["reference_occurrences"] if item["consumer_asset_id"] == query_asset["id"])
+    reference = next(item for item in lineage["references"] if item["id"] == occurrence["reference_id"])
+    assert occurrence["resolution_status"] == "resolved_auto"
+    assert reference["group_status"] == "resolved_single"
+    assert reference["resolved_asset_id"] == raw_orders["id"]
+    assert dependency["reference_id"] == reference["id"]
+    assert dependency["reference_occurrence_id"] == occurrence["id"]
+    assert dependency["consumer_asset_id"] == query_asset["id"]
     assert dependency["target_asset_id"] == query_asset["id"]
     assert query_flow["source_asset_id"] == query_asset["id"]
 
@@ -315,14 +443,14 @@ def test_query_asset_does_not_merge_with_same_table_endpoint():
         environment_id=11,
     )
 
-    query_asset = next(asset for asset in lineage["assets"] if asset["kind"] == "sql_query")
+    query_asset = next(asset for asset in lineage["assets"] if asset["asset_type"] == "sql_query")
     table_asset = next(
         asset for asset in lineage["assets"]
-        if asset["kind"] == "table" and asset.get("schema_name") == "raw" and asset.get("table") == "orders"
+        if asset["asset_type"] == "table" and asset.get("schema_name") == "raw" and asset.get("table") == "orders"
     )
     dependency = lineage["dependencies"][0]
     assert query_asset["id"] != table_asset["id"]
-    assert dependency["source"]["id"] == table_asset["id"]
+    assert dependency["resolved_asset_id"] == table_asset["id"]
     assert dependency["target_asset_id"] == query_asset["id"]
 
 
@@ -367,7 +495,7 @@ def test_sql_fan_in_is_dependencies_not_process_nodes():
 
     lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=6)
 
-    query_asset = next(asset for asset in lineage["assets"] if asset["kind"] == "sql_query")
+    query_asset = next(asset for asset in lineage["assets"] if asset["asset_type"] == "sql_query")
     build_mart = next(flow for flow in lineage["dataflows"] if flow["name"] == "build_mart")
     inputs = [
         dependency for dependency in lineage["dependencies"]
@@ -376,11 +504,11 @@ def test_sql_fan_in_is_dependencies_not_process_nodes():
 
     assert build_mart["source_asset_id"] == query_asset["id"]
     assert len(inputs) == 2
-    assert {dependency["source"]["entity_type"] for dependency in inputs} == {"asset"}
-    assert {dependency["resolution_status"] for dependency in inputs} == {"resolved"}
+    assert {dependency["resolution_status"] for dependency in inputs} == {"resolved_auto"}
+    assert all(dependency["resolved_asset_id"] for dependency in inputs)
 
 
-def test_sql_input_with_new_exact_identity_becomes_discovered_asset():
+def test_sql_input_with_new_exact_identity_remains_reference():
     document = normalize_metadata_document(
         1,
         "metadata.json",
@@ -413,12 +541,18 @@ def test_sql_input_with_new_exact_identity_becomes_discovered_asset():
     )
 
     dependency = lineage["dependencies"][0]
-    discovered = next(asset for asset in lineage["assets"] if asset["declaration_status"] == "discovered_only")
-    assert lineage["summary"]["discovered_only_assets"] == 1
-    assert lineage["summary"]["discovered_only_dependencies"] == 1
-    assert dependency["source"] == {"entity_type": "asset", "id": discovered["id"]}
-    assert discovered["schema_name"] == "external"
-    assert discovered["table"] == "orders"
+    occurrence = next(item for item in lineage["reference_occurrences"] if item["consumer_asset_id"] == dependency["target_asset_id"])
+    reference = next(item for item in lineage["references"] if item["id"] == occurrence["reference_id"])
+    assert lineage["summary"]["unresolved_dependencies"] == 1
+    assert dependency["reference_id"] == reference["id"]
+    assert dependency["resolved_asset_id"] is None
+    assert reference["group_status"] == "unresolved"
+    assert reference["resolved_asset_id"] is None
+    assert all(asset["id"] != reference["id"] for asset in lineage["assets"])
+    assert all(
+        not (asset.get("schema_name") == "external" and asset.get("table") == "orders")
+        for asset in lineage["assets"]
+    )
 
 
 def test_ambiguous_sql_input_remains_reference_outside_asset_registry():
@@ -459,12 +593,222 @@ def test_ambiguous_sql_input_remains_reference_outside_asset_registry():
     )
 
     reference = lineage["references"][0]
-    dependency = next(item for item in lineage["dependencies"] if item["source"]["entity_type"] == "reference")
+    dependency = lineage["dependencies"][0]
     assert lineage["summary"]["ambiguous_dependencies"] == 1
-    assert reference["resolution_status"] == "ambiguous"
+    assert reference["group_status"] == "ambiguous"
     assert len(reference["candidate_asset_ids"]) >= 2
-    assert dependency["source"]["id"] == reference["id"]
+    assert dependency["reference_id"] == reference["id"]
+    assert dependency["resolved_asset_id"] is None
     assert all(asset["id"] != reference["id"] for asset in lineage["assets"])
+
+
+def test_partial_schema_table_reference_resolves_only_when_unique():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        _schema_table_suffix_metadata(include_second_lakehouse=False),
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=20)
+
+    customer = next(
+        asset for asset in lineage["assets"]
+        if asset.get("database") == "lh1" and asset.get("schema_name") == "silver" and asset.get("table") == "customer"
+    )
+    dependency = lineage["dependencies"][0]
+    reference = lineage["references"][0]
+    occurrence = lineage["reference_occurrences"][0]
+    assert occurrence["raw_value"] == "silver.customer"
+    assert reference["group_status"] == "resolved_single"
+    assert dependency["resolved_asset_id"] == customer["id"]
+
+
+def test_same_reference_value_across_connections_has_one_canonical_reference_and_scoped_occurrences():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        {
+            "connections": [
+                {"name": "lh1", "connection_type": "lakehouse", "format": "delta", "configure": {"connection_instance": "catalog:main:lh1"}},
+                {"name": "lh2", "connection_type": "lakehouse", "format": "delta", "configure": {"connection_instance": "catalog:main:lh2"}},
+            ],
+            "dataflows": [
+                {
+                    "name": "query_lh1_customer",
+                    "source": {"connection_name": "lh1", "query": "SELECT * FROM silver.customer"},
+                    "destination": {"connection_name": "lh1", "schema_name": "gold", "table": "customer_lh1"},
+                },
+                {
+                    "name": "query_lh2_customer",
+                    "source": {"connection_name": "lh2", "query": "SELECT * FROM silver.customer"},
+                    "destination": {"connection_name": "lh2", "schema_name": "gold", "table": "customer_lh2"},
+                },
+            ],
+        },
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=23)
+
+    assert len(lineage["references"]) == 1
+    assert lineage["references"][0]["normalized_value"] == "silver.customer"
+    assert {item["context_scope"] for item in lineage["reference_occurrences"]} == {
+        "catalog:main:lh1",
+        "catalog:main:lh2",
+    }
+    assert {item["context_scope_source"] for item in lineage["reference_occurrences"]} == {"metadata_context"}
+
+
+def test_reference_context_scope_is_detected_for_paths_and_api_urls():
+    path_scope = build_reference_context_scope(
+        InputEvidence(kind="path", value="abfss://lake/container/data/customer", provenance="sql"),
+        {},
+    )
+    api_scope = build_reference_context_scope(
+        InputEvidence(kind="api", value="GET https://api.example.com/v1/customer", provenance="python"),
+        {},
+    )
+
+    assert (path_scope.value, path_scope.source) == ("abfss://lake", "detected")
+    assert (api_scope.value, api_scope.source) == ("https://api.example.com", "detected")
+
+
+def test_schema_table_reference_resolves_to_path_backed_table_asset():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        _path_backed_schema_table_metadata(),
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=22)
+
+    table_asset = next(
+        asset for asset in lineage["assets"]
+        if asset.get("schema_name") == "silver" and asset.get("table") == "saleslt_salesorderheader"
+    )
+    identifier_kinds = {identifier["kind"] for identifier in table_asset["identifiers"]}
+    dependency = lineage["dependencies"][0]
+    reference = lineage["references"][0]
+    occurrence = lineage["reference_occurrences"][0]
+
+    assert table_asset["entity_type"] == "asset"
+    assert table_asset["asset_type"] == "path"
+    assert {"physical_path", "logical_table"}.issubset(identifier_kinds)
+    assert occurrence["raw_value"] == "silver.saleslt_salesorderheader"
+    assert reference["entity_type"] == "reference"
+    assert reference["group_status"] == "resolved_single"
+    assert dependency["resolution_method"] == "unique_table_suffix"
+    assert dependency["resolved_asset_id"] == table_asset["id"]
+
+
+def test_partial_schema_table_reference_uses_connection_when_multiple_assets_match():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        _schema_table_suffix_metadata(include_second_lakehouse=True),
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=21)
+
+    dependency = lineage["dependencies"][0]
+    reference = lineage["references"][0]
+    occurrence = lineage["reference_occurrences"][0]
+    assert occurrence["raw_value"] == "silver.customer"
+    expected = next(asset for asset in lineage["assets"] if asset.get("database") == "lh1" and asset.get("schema_name") == "silver")
+    assert reference["group_status"] == "resolved_single"
+    assert dependency["resolved_asset_id"] == expected["id"]
+    assert dependency["resolution_method"] == "connection_table_suffix"
+
+
+def test_project_mapping_can_replace_successful_automatic_resolution():
+    document = normalize_metadata_document(1, "metadata.json", _schema_table_suffix_metadata(include_second_lakehouse=True))
+
+    lineage = build_lineage(
+        {"_documents": [document], "dataflows": document["dataflows"], "errors": []},
+        environment_id=21,
+        reference_mappings=[{
+            "id": 303,
+            "reference_type": "table_reference",
+            "reference_normalized_value": "silver.customer",
+            "target_identifier_kind": "logical_table",
+            "target_normalized_value": "catalog:main:lh2|main.lh2.silver.customer",
+        }],
+    )
+
+    expected = next(asset for asset in lineage["assets"] if asset.get("database") == "lh2" and asset.get("schema_name") == "silver")
+    dependency = next(item for item in lineage["dependencies"] if item["reference_id"])
+    assert dependency["resolution_status"] == "resolved_manual"
+    assert dependency["resolved_asset_id"] == expected["id"]
+    observation = next(item for item in lineage["references"][0]["observations"] if item.get("mapping_id") == 303)
+    assert observation["automatic_suggestion"]["method"] == "connection_table_suffix"
+
+
+def test_manual_reference_mapping_resolves_ambiguous_reference():
+    document = normalize_metadata_document(1, "metadata.json", _ambiguous_orders_metadata())
+
+    lineage = build_lineage(
+        {"_documents": [document], "dataflows": document["dataflows"], "errors": []},
+        environment_id=9,
+        reference_mappings=[{
+            "id": 101,
+            "reference_type": "table_reference",
+            "reference_normalized_value": "orders",
+            "target_identifier_kind": "logical_table",
+            "target_normalized_value": "catalog:main:warehouse|main.warehouse.sales.orders",
+            "note": "manual map to sales orders",
+        }],
+    )
+
+    query_asset = next(asset for asset in lineage["assets"] if asset["asset_type"] == "sql_query")
+    sales_orders = next(
+        asset for asset in lineage["assets"]
+        if asset.get("schema_name") == "sales" and asset.get("table") == "orders"
+    )
+    dependency = next(item for item in lineage["dependencies"] if item["target_asset_id"] == query_asset["id"])
+
+    assert dependency["resolution_status"] == "resolved_manual"
+    assert dependency["resolution_method"] == "manual_mapping"
+    assert dependency["reference_id"] is not None
+    assert dependency["resolved_asset_id"] == sales_orders["id"]
+    assert dependency["consumer_asset_id"] == query_asset["id"]
+    assert lineage["summary"]["resolved_manual_dependencies"] == 1
+    assert lineage["summary"]["ambiguous_dependencies"] == 0
+    assert len(lineage["references"]) == 1
+    reference = lineage["references"][0]
+    occurrence = lineage["reference_occurrences"][0]
+    assert reference["group_status"] == "resolved_single"
+    assert occurrence["resolution_status"] == "resolved_manual"
+    assert occurrence["target_asset_id"] == query_asset["id"]
+    assert occurrence["consumer_asset_id"] == query_asset["id"]
+    assert reference["resolved_asset_id"] == sales_orders["id"]
+    assert sales_orders["id"] in reference["candidate_asset_ids"]
+
+
+def test_manual_reference_mapping_target_missing_keeps_reference():
+    document = normalize_metadata_document(1, "metadata.json", _ambiguous_orders_metadata())
+
+    lineage = build_lineage(
+        {"_documents": [document], "dataflows": document["dataflows"], "errors": []},
+        environment_id=9,
+        reference_mappings=[{
+            "id": 202,
+            "reference_type": "table_reference",
+            "reference_normalized_value": "orders",
+            "target_identifier_kind": "logical_table",
+            "target_normalized_value": "catalog:main:warehouse|main.warehouse.curated.orders_missing",
+            "note": "missing in this env",
+        }],
+    )
+
+    reference = lineage["references"][0]
+    dependency = lineage["dependencies"][0]
+
+    assert reference["group_status"] == "mapping_target_missing"
+    assert dependency["resolution_status"] == "mapping_target_missing"
+    assert dependency["resolution_method"] == "manual_mapping_target_missing"
+    assert dependency["reference_id"] == reference["id"]
+    assert dependency["resolved_asset_id"] is None
+    assert any(obs.get("mapping_status") == "target_missing" for obs in reference["observations"])
+    assert lineage["summary"]["mapping_target_missing_dependencies"] == 1
 
 
 def test_duplicate_dataflow_id_with_different_endpoints_is_diagnostic():
@@ -584,6 +928,40 @@ def _metadata_with_connection(name: str, connection_name: str, base_path: str, s
     }
 
 
+def _api_metadata(
+    name: str,
+    connection_name: str,
+    base_url: str,
+    endpoint: str,
+    destination_table: str,
+    *,
+    connection_config: dict | None = None,
+    source_config: dict | None = None,
+) -> dict:
+    return {
+        "connections": [{
+            "name": connection_name,
+            "connection_type": "api",
+            "format": "api",
+            "configure": {"base_url": base_url, **(connection_config or {})},
+        }, {
+            "name": "lake",
+            "connection_type": "file",
+            "format": "parquet",
+            "configure": {"base_path": "./data"},
+        }],
+        "dataflows": [{
+            "name": name,
+            "source": {
+                "connection_name": connection_name,
+                "table": "orders",
+                "configure": {"endpoint": endpoint, **(source_config or {})},
+            },
+            "destination": {"connection_name": "lake", "table": destination_table},
+        }],
+    }
+
+
 def _catalog_metadata(name: str, catalog: str, base_path: str, table: str) -> dict:
     return {
         "connections": [{
@@ -599,4 +977,93 @@ def _catalog_metadata(name: str, catalog: str, base_path: str, table: str) -> di
             "source": {"connection_name": catalog, "table": f"{catalog}_{table}_input"},
             "destination": {"connection_name": catalog, "table": table},
         }],
+    }
+
+
+def _ambiguous_orders_metadata() -> dict:
+    return {
+        "connections": [{
+            "name": "lake",
+            "connection_type": "lakehouse",
+            "format": "delta",
+            "catalog": "main",
+            "database": "warehouse",
+        }],
+        "dataflows": [
+            {
+                "name": "seed_sales",
+                "source": {"connection_name": "lake", "schema_name": "raw", "table": "seed"},
+                "destination": {"connection_name": "lake", "schema_name": "sales", "table": "orders"},
+            },
+            {
+                "name": "seed_archive",
+                "source": {"connection_name": "lake", "schema_name": "raw", "table": "seed"},
+                "destination": {"connection_name": "lake", "schema_name": "archive", "table": "orders"},
+            },
+            {
+                "name": "query_orders",
+                "source": {"connection_name": "lake", "query": "SELECT * FROM orders"},
+                "destination": {"connection_name": "lake", "schema_name": "curated", "table": "orders"},
+            },
+        ],
+    }
+
+
+def _schema_table_suffix_metadata(*, include_second_lakehouse: bool) -> dict:
+    connections = [{
+        "name": "lh1",
+        "connection_type": "lakehouse",
+        "format": "delta",
+        "catalog": "main",
+        "database": "lh1",
+    }]
+    if include_second_lakehouse:
+        connections.append({
+            "name": "lh2",
+            "connection_type": "lakehouse",
+            "format": "delta",
+            "catalog": "main",
+            "database": "lh2",
+        })
+    dataflows = [
+        {
+            "name": "seed_lh1_customer",
+            "source": {"connection_name": "lh1", "schema_name": "raw", "table": "seed"},
+            "destination": {"connection_name": "lh1", "schema_name": "silver", "table": "customer"},
+        },
+        {
+            "name": "query_customer",
+            "source": {"connection_name": "lh1", "query": "SELECT * FROM silver.customer"},
+            "destination": {"connection_name": "lh1", "schema_name": "gold", "table": "customer"},
+        },
+    ]
+    if include_second_lakehouse:
+        dataflows.insert(1, {
+            "name": "seed_lh2_customer",
+            "source": {"connection_name": "lh2", "schema_name": "raw", "table": "seed"},
+            "destination": {"connection_name": "lh2", "schema_name": "silver", "table": "customer"},
+        })
+    return {"connections": connections, "dataflows": dataflows}
+
+
+def _path_backed_schema_table_metadata() -> dict:
+    return {
+        "connections": [{
+            "name": "fabric_lakehouse",
+            "connection_type": "lakehouse",
+            "format": "delta",
+            "configure": {"base_path": "Tables"},
+        }],
+        "dataflows": [
+            {
+                "name": "seed_salesorderheader",
+                "source": {"connection_name": "fabric_lakehouse", "schema_name": "bronze", "table": "saleslt_salesorderheader"},
+                "destination": {"connection_name": "fabric_lakehouse", "schema_name": "silver", "table": "saleslt_salesorderheader"},
+            },
+            {
+                "name": "query_salesorderheader",
+                "source": {"connection_name": "fabric_lakehouse", "query": "SELECT * FROM silver.saleslt_salesorderheader"},
+                "destination": {"connection_name": "fabric_lakehouse", "schema_name": "gold", "table": "fact_sales"},
+            },
+        ],
     }

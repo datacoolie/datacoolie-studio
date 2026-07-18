@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -49,6 +49,10 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    reference_mappings: Mapped[list[ProjectReferenceMapping]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
 
 
 class Environment(Base):
@@ -65,6 +69,24 @@ class Environment(Base):
         back_populates="environment",
         cascade="all, delete-orphan",
     )
+
+
+class ProjectReferenceMapping(Base):
+    __tablename__ = "project_reference_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    reference_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    reference_normalized_value: Mapped[str] = mapped_column(Text, nullable=False)
+    reference_signature_json: Mapped[str] = mapped_column(Text, nullable=False)
+    target_identifier_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_normalized_value: Mapped[str] = mapped_column(Text, nullable=False)
+    target_display_value: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="reference_mappings")
 
 
 class EnvironmentSource(Base):
@@ -113,15 +135,35 @@ class CodeArtifactSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class LineageSnapshot(Base):
-    __tablename__ = "lineage_snapshots"
+class EnvironmentReadModelCacheEntry(Base):
+    """One current, source-versioned derived read model per Environment key."""
+
+    __tablename__ = "environment_read_model_cache_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "model_key",
+            "parameters_fingerprint",
+            name="uq_environment_read_model_current",
+        ),
+        Index(
+            "ix_environment_read_model_lookup",
+            "environment_id",
+            "model_key",
+            "parameters_fingerprint",
+            "input_fingerprint",
+            "producer_version",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    model_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    parameters_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    graph_json: Mapped[str] = mapped_column(Text, nullable=False)
-    analyzer_version: Mapped[str] = mapped_column(String(50), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    producer_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class SourceRevision(Base):

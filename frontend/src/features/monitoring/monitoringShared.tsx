@@ -30,6 +30,7 @@ const REPORT_CHART_TIGHT_GRID_BOTTOM = 2;
 const REPORT_CHART_X_ZOOM_GRID_BOTTOM = 30;
 const RUN_TABLE_PAGE_SIZES = [50, 100, 200] as const;
 type HealthIntent = "neutral" | "bad" | "good" | "warning";
+export type HealthCardAccent = HealthIntent | "source" | "transform" | "destination" | "storage" | "overhead" | "intent";
 type PhaseKey = typeof PHASE_KEYS[number];
 type FailurePhaseKey = typeof FAILURE_PHASES[number];
 
@@ -39,6 +40,7 @@ function HealthStripCard({
   detail,
   title,
   intent = "neutral",
+  accent = "neutral",
   className = ""
 }: {
   label: string;
@@ -46,10 +48,11 @@ function HealthStripCard({
   detail?: ReactNode;
   title?: string;
   intent?: "neutral" | "bad" | "good" | "warning";
+  accent?: HealthCardAccent;
   className?: string;
 }) {
   return (
-    <div className={`overview-health-card health-card-${intent}${className ? ` ${className}` : ""}`} title={title}>
+    <div className={`overview-health-card health-card-${intent} ${healthCardAccentClass(accent, intent)}${className ? ` ${className}` : ""}`} title={title}>
       <span>{label}</span>
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
@@ -85,7 +88,7 @@ function DetailMetric({
 }: {
   label: string;
   value: ReactNode;
-  tone?: "neutral" | "good" | "warning" | "bad" | "blue" | "purple" | "amber";
+  tone?: "neutral" | "good" | "warning" | "bad" | "blue" | "purple" | "amber" | "read" | "written";
   labelFirst?: boolean;
 }) {
   return (
@@ -149,16 +152,16 @@ function failureCategoriesRuleTooltip() {
 function attentionQueueRuleTooltip() {
   return [
     "Value source:",
-    "- Signals are generated from current-filter metrics: failures, maintenance, freshness, reconciliation, performance, and log coverage.",
+    "- Signals roll up actionable current-filter health evidence from Jobs, Dataflows, Failures, Performance, Maintenance, Freshness, and Diagnostics.",
     "Display condition:",
     "- Recent failed jobs/dataflows: last 3d => bad, else last 7d => warning.",
     "- Repeated failure: top failing dataflow has >= 3 failed runs.",
     "- No log evidence: warning when no monitoring logs are found in current filters.",
     "- Stale logs: warning when latest log age > 7 days.",
-    "- Slowest stage: info only when stage p95 duration >= 60s.",
-    "- Failed maintenance (7d/14d), skipped maintenance (7d), stale targets, unchanged watermarks, and reconciliation mismatch trigger warning/bad by their counts.",
-    "- Severity follows the matched rule and is deterministic.",
-    "- Queue shows up to 8 signals in rule evaluation order."
+    "- Performance pressure uses the same P95/P50 thresholds as Performance; optimization candidates and a slow stage can also produce signals.",
+    "- Maintenance coverage/lag, freshness, runtime context, active runs, linkage, cache, and reconciliation evidence reuse their page metrics.",
+    "- High volume alone is not treated as an issue without anomaly evidence.",
+    "- Queue is deduplicated, then ranked by severity and impact; it shows up to 8 signals."
   ].join("\n");
 }
 
@@ -423,11 +426,13 @@ function operationHealthDivider() {
 function RuntimePhaseContribution({
   rows,
   labelKey = "operation_type",
-  emptyText = "No phase duration signals in current filters."
+  emptyText = "No phase duration signals in current filters.",
+  showLegend = true
 }: {
   rows: Array<Record<string, string | number>>;
   labelKey?: string;
   emptyText?: string;
+  showLegend?: boolean;
 }) {
   const [tooltip, setTooltip] = useState<{
     row: Record<string, string | number>;
@@ -446,12 +451,8 @@ function RuntimePhaseContribution({
   const totalRow = runtimePhaseTotalRow(visible, labelKey);
   const displayRows = totalRow ? [totalRow, ...visible] : visible;
   return (
-    <div className="runtime-phase-contribution">
-      <div className="runtime-phase-legend" aria-label="Phase legend">
-        {PHASE_KEYS.map((phase) => (
-          <span key={phase} className={`phase-chip phase-chip-${phase}`}>{phaseLabel(phase)}</span>
-        ))}
-      </div>
+    <div className={`runtime-phase-contribution${showLegend ? "" : " runtime-phase-contribution-with-header-legend"}`}>
+      {showLegend ? <RuntimePhaseLegend /> : null}
       <div className="runtime-phase-rows" style={{ gridTemplateRows: `repeat(${displayRows.length}, minmax(30px, 1fr))` }}>
         {displayRows.map((row) => {
           const totalDuration = num(row, "total_duration_seconds");
@@ -495,7 +496,7 @@ function RuntimePhaseContribution({
                         className={`runtime-phase-segment phase-${phase}`}
                         style={{ flexBasis: `${width}%` }}
                       >
-                        {percent >= 15 ? formatPercent(percent) : null}
+                        {percent >= 15 ? formatPhasePercent(percent) : null}
                       </span>
                     );
                   })}
@@ -506,6 +507,21 @@ function RuntimePhaseContribution({
         })}
       </div>
       {tooltip ? <RuntimePhaseMatrixTooltip row={tooltip.row} labelKey={labelKey} style={tooltip.style} /> : null}
+    </div>
+  );
+}
+
+export function healthCardAccentClass(accent: HealthCardAccent, intent: HealthIntent) {
+  const resolved = accent === "intent" ? intent : accent;
+  return `health-card-accent-${resolved}`;
+}
+
+function RuntimePhaseLegend() {
+  return (
+    <div className="runtime-phase-legend" aria-label="Phase legend">
+      {PHASE_KEYS.map((phase) => (
+        <span key={phase} className={`phase-chip phase-chip-${phase}`}>{phaseLabel(phase)}</span>
+      ))}
     </div>
   );
 }
@@ -553,7 +569,7 @@ function RuntimePhaseMatrixTooltip({
           {phaseRows.map((item) => (
             <tr key={item.phase}>
               <td><span className={`phase-dot phase-${item.phase}`} />{item.label}</td>
-              <td>{formatPercent(item.percent)}</td>
+              <td>{formatPhasePercent(item.percent)}</td>
               <td>{formatSeconds(item.duration)}</td>
               <td>{item.avg > 0 ? formatSeconds(item.avg) : "-"}</td>
               <td>{item.p95 > 0 ? formatSeconds(item.p95) : "-"}</td>
@@ -650,7 +666,8 @@ function workloadVolumeTrendOption(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
-  reportEffectiveGrain?: string
+  reportEffectiveGrain?: string,
+  showLegend = true
 ) {
   const mergedByDate = mergeVolumeTrendRows(rowsByDate, bytesByDate);
   const effectiveGrain = String(mergedByDate.find((row) => row.grain)?.grain ?? reportEffectiveGrain ?? filters.grain ?? "day");
@@ -675,20 +692,23 @@ function workloadVolumeTrendOption(
           row.grain ? `Grain: ${row.grain}` : "",
           timezoneName ? `Timezone: ${timezoneName}` : "",
           `Rows read: ${formatNumber(row.rows_read)}`,
-          `Rows output: ${formatNumber(row.rows_output)}`,
-          `Estimated output rows: ${formatNumber(row.rows_output_estimated)}`,
+          `Estimated rows written: ${formatNumber(row.est_rows_written)}`,
+          `Observed lakehouse rows written: ${formatNumber(row.rows_written)}`,
           `Lakehouse bytes added: ${formatBytes(num(row, "bytes_added"))}`,
           `Lakehouse bytes removed: ${formatBytes(num(row, "bytes_removed"))}`
         ].filter(Boolean).join("<br/>");
       }
     },
-    legend: {
-      top: 0,
-      left: "center",
-      itemWidth: 9,
-      itemHeight: 9,
-      textStyle: { fontSize: 10 }
-    },
+    legend: showLegend
+      ? {
+          top: 0,
+          left: "center",
+          itemWidth: 9,
+          itemHeight: 9,
+          textStyle: { fontSize: 10 }
+        }
+      : { show: false },
+    grid: reportChartGrid({ left: 46, right: 52, top: showLegend ? 22 : 5, bottom: 5, containLabel: false }),
     xAxis: {
       type: "category",
       data: visible.map((row) => row.bucket || row.date),
@@ -715,14 +735,14 @@ function workloadVolumeTrendOption(
       {
         name: "Rows read",
         type: "bar",
-        itemStyle: { color: reportChartPalette.blue, borderRadius: [3, 3, 0, 0] },
+        itemStyle: { color: reportChartPalette.read, borderRadius: [3, 3, 0, 0] },
         data: visible.map((row) => row.rows_read)
       },
       {
-        name: "Rows output",
+        name: "Est rows written",
         type: "bar",
-        itemStyle: { color: reportChartPalette.pending, borderRadius: [3, 3, 0, 0] },
-        data: visible.map((row) => row.rows_output)
+        itemStyle: { color: reportChartPalette.written, borderRadius: [3, 3, 0, 0] },
+        data: visible.map((row) => row.est_rows_written)
       },
       {
         name: "Lakehouse bytes added",
@@ -846,6 +866,7 @@ function statusTrendOption(
       itemHeight: 9,
       textStyle: { fontSize: 10 }
     },
+    grid: reportChartGrid({ left: 36, right: 40, top: 22, bottom: 5, containLabel: false }),
     xAxis: {
       type: "category",
       data: visible.map((row) => rowLabel(row)),
@@ -1216,7 +1237,8 @@ function minimumClientTrendGrainForSpan(spanSeconds: number) {
 
 export const monitoringTrendBucketTestUtils = {
   resolveTrendBucketKeys,
-  fillMissingFailureTrendDates
+  fillMissingFailureTrendDates,
+  workloadVolumeTrendOption
 };
 
 function dateKeyToUtcDate(dateKey: string) {
@@ -1706,6 +1728,10 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100) / 100}%`;
 }
 
+function formatPhasePercent(value: number) {
+  return `${Math.round(value * 10) / 10}%`;
+}
+
 function formatRelativeTime(value: string) {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return value;
@@ -1736,7 +1762,7 @@ function formatSecondsSingleDecimal(value: number) {
 function successRateIntent(successRate: number, failureRate: number, executableRuns: number): HealthIntent {
   if (!Number.isFinite(executableRuns) || executableRuns <= 0) return "neutral";
   if (failureRate >= 5 || successRate < 95) return "bad";
-  if (failureRate > 0 || successRate < 99) return "warning";
+  if (failureRate >= 1 || successRate < 99) return "warning";
   return "good";
 }
 
@@ -2036,7 +2062,7 @@ function jobWorkloadEfficiencyOption(
       itemHeight: 8,
       textStyle: { fontSize: 10, color: reportChartPalette.muted }
     },
-    grid: reportChartGrid({ left: 8, right: 8, top: operationTypes.length > 1 ? 22 : 4 }),
+    grid: reportChartGrid({ left: 8, right: 8, top: operationTypes.length > 1 ? 22 : 4, bottom: 0 }),
     xAxis: {
       type: "value",
       name: "dataflow runs",
@@ -2109,7 +2135,11 @@ function childFanoutDistributionOption(rows: Array<Record<string, string | numbe
       }
     },
     legend: { show: false },
-    grid: reportXAxisZoomGrid(Boolean(zoomConfig), { left: 8, right: 8, top: 4 }),
+    grid: {
+      ...reportXAxisZoomGrid(Boolean(zoomConfig), { left: 8, right: 8, top: 16 }),
+      bottom: zoomConfig ? REPORT_CHART_X_ZOOM_GRID_BOTTOM : 0,
+      containLabel: false
+    },
     xAxis: {
       type: "category",
       name: "total dataflows bins",
@@ -2804,13 +2834,17 @@ function dataflowNameStatusHealthOption(rows: Array<Record<string, string | numb
 }
 
 function DataflowEndpointHealthPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
-  const visible = rows.filter((row) => num(row, "runs") > 0).slice(0, 10);
+  const visible = rows.filter((row) => num(row, "runs") > 0);
   if (!visible.length) return <div className="table-empty">No endpoint health signals in current filters.</div>;
   return (
     <div className="dataflow-signal-list dataflow-endpoint-route-list">
       {visible.map((row, index) => {
         const failed = num(row, "failed");
+        const succeeded = num(row, "succeeded");
         const successRate = num(row, "success_rate");
+        const executableRuns = succeeded + failed;
+        const failureRate = executableRuns > 0 ? (failed / executableRuns) * 100 : 0;
+        const healthIntent = successRateIntent(successRate, failureRate, executableRuns);
         const rowsRead = num(row, "rows_read");
         const rowsWritten = num(row, "rows_written");
         const p95 = num(row, "p95_duration_seconds");
@@ -2843,12 +2877,15 @@ function DataflowEndpointHealthPanel({ rows }: { rows: Array<Record<string, stri
               </div>
             </div>
             <div className="dataflow-route-health">
-              <strong className={failed ? "status-bad" : successRate >= 95 ? "status-good" : ""}>{formatPercent(successRate)}</strong>
-              <small>{formatNumber(num(row, "runs"))} runs{failed ? ` · ${formatNumber(failed)} failed` : ""}</small>
+              <strong className={`status-${healthIntent}`}>{formatPercent(successRate)}</strong>
+              <small>
+                <span>{formatNumber(num(row, "runs"))} runs</span>
+                {failed ? <><span aria-hidden="true"> · </span><span className="dataflow-route-failures">{formatNumber(failed)} failed</span></> : null}
+              </small>
             </div>
             <div className="dataflow-route-volume">
               <strong>{formatNumber(rowsRead)} / {formatNumber(rowsWritten)}</strong>
-              <small>P95 {formatSeconds(p95)}</small>
+              <small className="dataflow-route-duration">P95 {formatSeconds(p95)}</small>
             </div>
           </div>
         );
@@ -2940,11 +2977,13 @@ function DataflowWatermarkSignalPanel({ rows }: { rows: Array<Record<string, str
 function FailureQueueTable({
   rows,
   maxRows,
+  offset = 0,
   onInspect,
   timezoneName
 }: {
   rows: Array<Record<string, string | number | null>>;
   maxRows: number;
+  offset?: number;
   onInspect?: (row: Record<string, unknown>) => void;
   timezoneName?: string | null;
 }) {
@@ -2952,16 +2991,17 @@ function FailureQueueTable({
     <DataTable<Record<string, string | number | null>>
       rows={rows}
       columns={[
-        { key: "failure_time", label: "Time", sortable: true, width: 178, render: (row) => <TableDateTimeValue value={row.failure_time} timezoneName={timezoneName} /> },
+        { key: "failure_time", label: "Time", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.failure_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.failure_time, activeTimezone, "-") },
         { key: "dataflow_name", label: "Dataflow", sortable: true, width: 178, render: (row) => <FailureDataflowNameCell row={row} /> },
-        { key: "failure_phase", label: "Phase", sortable: true, width: 96, render: (row) => <FailurePhaseBadge value={row.failure_phase} /> },
-        { key: "failure_category", label: "Category", sortable: true, width: 124, render: (row) => <CompactValue value={row.failure_category} /> },
+        { key: "failure_phase", label: "Phase", sortable: true, autoFit: true, maxWidth: 112, render: (row) => <FailurePhaseBadge value={row.failure_phase} />, measureValue: (row) => humanize(String(row.failure_phase || "unknown")) },
+        { key: "failure_category", label: "Category", sortable: true, autoFit: true, maxWidth: 180, render: (row) => <CompactValue value={row.failure_category} />, measureValue: (row) => String(row.failure_category || "unknown") },
         { key: "failure_message", label: "Message", sortable: true, width: 300, render: (row) => <IssuePreview row={{ error_preview: row.failure_message }} /> }
       ]}
       maxRows={maxRows}
+      offset={offset}
       onRowClick={onInspect}
       timezoneName={timezoneName}
-      className="monitoring-failure-table"
+      className="monitoring-failure-table monitoring-table-one-line"
     />
   );
 }
@@ -2979,17 +3019,17 @@ function RepeatedFailureTable({
     <DataTable<Record<string, string | number | null>>
       rows={rows}
       columns={[
-        { key: "failure_category", label: "Category", sortable: true, width: 124 },
-        { key: "failure_phase", label: "Phase", sortable: true, width: 96, render: (row) => <FailurePhaseBadge value={row.failure_phase} /> },
+        { key: "failure_category", label: "Category", sortable: true, autoFit: true, maxWidth: 180, measureValue: (row) => String(row.failure_category || "unknown") },
+        { key: "failure_phase", label: "Phase", sortable: true, autoFit: true, maxWidth: 112, render: (row) => <FailurePhaseBadge value={row.failure_phase} />, measureValue: (row) => humanize(String(row.failure_phase || "unknown")) },
         { key: "latest_error", label: "Error", sortable: true, minWidth: 240, fillPriority: "last", render: (row) => <IssuePreview row={{ error_preview: row.latest_error }} /> },
         { key: "failed_runs", label: "Runs", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
         { key: "affected_jobs", label: "Jobs", sortable: true, autoFit: true, minWidth: 50, maxWidth: 66 },
         { key: "affected_dataflows", label: "Flows", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
-        { key: "latest_time", label: "Latest", sortable: true, width: 178, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} /> }
+        { key: "latest_time", label: "Latest", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_time, activeTimezone, "-") }
       ]}
       maxRows={maxRows}
       timezoneName={timezoneName}
-      className="monitoring-failure-table"
+      className="monitoring-failure-table monitoring-table-one-line"
     />
   );
 }
@@ -3007,14 +3047,14 @@ function EndpointImpactTable({
     <DataTable<Record<string, string | number | null>>
       rows={rows}
       columns={[
-        { key: "source_name", label: "Route", sortable: true, minWidth: 210, render: (row) => <FailureRouteCell row={row} /> },
+        { key: "source_name", label: "Route", sortable: true, minWidth: 210, fillPriority: "last", render: (row) => <FailureRouteCell row={row} /> },
         { key: "failed_runs", label: "Runs", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
         { key: "affected_jobs", label: "Jobs", sortable: true, autoFit: true, minWidth: 50, maxWidth: 66 },
-        { key: "latest_time", label: "Latest", sortable: true, width: 178, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} /> }
+        { key: "latest_time", label: "Latest", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_time, activeTimezone, "-") }
       ]}
       maxRows={maxRows}
       timezoneName={timezoneName}
-      className="monitoring-failure-table"
+      className="monitoring-failure-table monitoring-table-one-line"
     />
   );
 }
@@ -3071,61 +3111,34 @@ const FAILURE_PHASE_LABELS: Record<FailurePhaseKey, string> = {
   unknown: "Unknown"
 };
 
+const monitoringPhaseColors = {
+  source: "#2563eb",
+  transform: "#7c3aed",
+  destination: "#16805c",
+  overhead: "#64748b",
+  unknown: "#b45309"
+} as const;
+
 const FAILURE_PHASE_COLORS: Record<FailurePhaseKey, string> = {
-  source: "#2f6f8f",
-  transform: "#8a6a3f",
-  destination: "#6a5aa8",
-  overhead: reportChartPalette.amber,
-  unknown: reportChartPalette.unknown
+  ...monitoringPhaseColors
 };
 
 function failureHorizontalBarOption(
   rows: Array<Record<string, string | number>>,
   labelKey: string,
   valueKey: string,
-  seriesName: string
+  _seriesName: string
 ) {
   const visibleRows = rows.filter((row) => num(row, valueKey) > 0);
   const zoomConfig = horizontalBarDataZoom(visibleRows.length);
   const barSizing = horizontalBarSeriesSizing(visibleRows.length);
-  if (hasFailurePhaseValues(visibleRows)) {
-    return failurePhaseHorizontalBarOption(visibleRows, labelKey, valueKey, seriesName, zoomConfig, barSizing);
-  }
-  return baseChartOption({
-    tooltip: {
-      trigger: "item",
-      triggerOn: "mousemove",
-      appendToBody: true,
-      axisPointer: { type: "none" },
-      extraCssText: "max-width: 260px; white-space: normal;",
-      formatter: (params: any) => {
-        const row = visibleRows[Number(params?.dataIndex ?? 0)] ?? {};
-        return [`<strong>${String(row[labelKey] ?? "unknown")}</strong>`, `Failures: ${formatNumber(num(row, valueKey))}`].join("<br/>");
-      }
-    },
-    grid: fixedHorizontalBarGrid(96, Boolean(zoomConfig), { right: zoomConfig ? 14 : 8, top: 4 }),
-    xAxis: { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-    yAxis: fixedHorizontalCategoryAxis(visibleRows.map((row) => String(row[labelKey] ?? "unknown")), 96),
-    dataZoom: zoomConfig,
-    series: [{
-      name: seriesName,
-      type: "bar",
-      ...barSizing,
-      itemStyle: { color: reportChartPalette.failed, borderRadius: 2 },
-      data: visibleRows.map((row) => num(row, valueKey))
-    }]
-  });
-}
-
-function hasFailurePhaseValues(rows: Array<Record<string, string | number>>) {
-  return rows.some((row) => FAILURE_PHASES.some((phase) => num(row, phase) > 0));
+  return failurePhaseHorizontalBarOption(visibleRows, labelKey, valueKey, zoomConfig, barSizing);
 }
 
 function failurePhaseHorizontalBarOption(
   visibleRows: Array<Record<string, string | number>>,
   labelKey: string,
   valueKey: string,
-  seriesName: string,
   zoomConfig: ReturnType<typeof horizontalBarDataZoom>,
   barSizing: ReturnType<typeof horizontalBarSeriesSizing>
 ) {
@@ -3139,10 +3152,10 @@ function failurePhaseHorizontalBarOption(
       formatter: (params: any) => {
         const row = visibleRows[Number(params?.dataIndex ?? 0)] ?? {};
         const phase = failurePhaseFromSeriesName(String(params?.seriesName ?? ""));
-        const phaseValue = phase ? num(row, phase) : Number(params?.value ?? 0);
+        const phaseValue = phase ? failurePhaseCount(row, phase, valueKey) : Number(params?.value ?? 0);
         return [
           `<strong>${String(row[labelKey] ?? "unknown")}</strong>`,
-          `${params?.marker ?? ""}${phase ? FAILURE_PHASE_LABELS[phase] : seriesName}: ${formatNumber(phaseValue)}`,
+          `${params?.marker ?? ""}${phase ? FAILURE_PHASE_LABELS[phase] : "Failures"}: ${formatNumber(phaseValue)}`,
           `Total failures: ${formatNumber(num(row, valueKey))}`
         ].join("<br/>");
       }
@@ -3164,9 +3177,17 @@ function failurePhaseHorizontalBarOption(
       stack: "failures",
       ...barSizing,
       itemStyle: { color: FAILURE_PHASE_COLORS[phase], borderRadius: phase === "unknown" ? [0, 2, 2, 0] : 0 },
-      data: visibleRows.map((row) => num(row, phase))
+      data: visibleRows.map((row) => failurePhaseCount(row, phase, valueKey))
     }))
   });
+}
+
+function failurePhaseCount(row: Record<string, string | number>, phase: FailurePhaseKey, totalKey: string) {
+  if (phase !== "unknown") return num(row, phase);
+  const explicitUnknown = num(row, "unknown");
+  if (explicitUnknown > 0) return explicitUnknown;
+  const attributed = num(row, "source") + num(row, "transform") + num(row, "destination") + num(row, "overhead");
+  return Math.max(0, num(row, totalKey) - attributed);
 }
 
 function failurePhaseFromSeriesName(seriesName: string): FailurePhaseKey | undefined {
@@ -3181,6 +3202,8 @@ function failureTrendOption(
   reportEffectiveGrain?: string
 ) {
   const visible = fillMissingFailureTrendDates(rows, filters, dateRange, timezoneName, reportEffectiveGrain);
+  const dataflowColor = "#c24141";
+  const jobColor = "#7c3aed";
   return baseChartOption({
     tooltip: {
       trigger: "axis",
@@ -3198,7 +3221,7 @@ function failureTrendOption(
         ].filter(Boolean).join("<br/>");
       }
     },
-    grid: reportChartGrid({ left: 8, right: 8, top: 12 }),
+    grid: reportChartGrid({ left: 42, right: 42, top: 22, bottom: 5, containLabel: false }),
     xAxis: {
       type: "category",
       data: visible.map((row) => String(row.date ?? row.bucket ?? "unknown")),
@@ -3229,8 +3252,8 @@ function failureTrendOption(
         smooth: true,
         showSymbol: false,
         symbolSize: 5,
-        lineStyle: { color: reportChartPalette.failed, width: 2 },
-        itemStyle: { color: reportChartPalette.failed },
+        lineStyle: { color: dataflowColor, width: 2 },
+        itemStyle: { color: dataflowColor },
         areaStyle: { color: "rgba(194, 65, 65, 0.08)" },
         yAxisIndex: 0,
         data: visible.map((row) => num(row, "failed_dataflows") || num(row, "failed"))
@@ -3241,8 +3264,8 @@ function failureTrendOption(
         smooth: true,
         showSymbol: false,
         symbolSize: 5,
-        lineStyle: { color: "#8a5a44", width: 2 },
-        itemStyle: { color: "#8a5a44" },
+        lineStyle: { color: jobColor, width: 2 },
+        itemStyle: { color: jobColor },
         yAxisIndex: 1,
         data: visible.map((row) => num(row, "failed_jobs"))
       }
@@ -3297,7 +3320,7 @@ function failureCategoryPhaseMatrixOption(rows: Array<Record<string, string | nu
         const phase = failurePhaseFromSeriesName(String(params?.seriesName ?? "")) ?? "unknown";
         const lines = [
           `<strong>${String(row.category ?? "unknown")}</strong>`,
-          `${params?.marker ?? ""}${FAILURE_PHASE_LABELS[phase]}: ${formatNumber(num(row, phase))}`,
+          `${params?.marker ?? ""}${FAILURE_PHASE_LABELS[phase]}: ${formatNumber(failurePhaseCount(row, phase, "total"))}`,
           `Total failures: ${formatNumber(num(row, "total"))}`
         ];
         return lines.join("<br/>");
@@ -3320,7 +3343,7 @@ function failureCategoryPhaseMatrixOption(rows: Array<Record<string, string | nu
       stack: "failures",
       ...barSizing,
       itemStyle: { color: FAILURE_PHASE_COLORS[phase], borderRadius: phase === "unknown" ? [0, 2, 2, 0] : 0 },
-      data: visibleRows.map((row) => num(row, phase))
+      data: visibleRows.map((row) => failurePhaseCount(row, phase, "total"))
     }))
   });
 }
@@ -3343,18 +3366,18 @@ function JobRunsTable({
       rows={rows}
       columns={[
         { key: "job_id", label: "Job", sortable: true, width: 132, className: "job-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
-        { key: "job_config", label: "Config", width: 92, className: "job-run-col-config", render: (row) => <JobConfigCell row={row} /> },
-        { key: "runtime_context", label: "Runtime", width: 140, className: "job-run-col-runtime", render: (row) => <RuntimeContextCell row={row} /> },
-        { key: "stages", label: "Stages", sortable: true, autoFit: true, minWidth: 74, maxWidth: 88, className: "job-run-col-stages", render: (row) => <JobListValue value={row.stages} multiline /> },
-        { key: "operation_types", label: "Operation", sortable: true, autoFit: true, minWidth: 86, maxWidth: 120, className: "job-run-col-operation", render: (row) => <JobListValue value={row.operation_types} /> },
-        { key: "start_time", label: "Start", sortable: true, width: 178, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} /> },
-        { key: "end_time", label: "End", sortable: true, width: 178, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} /> },
-        { key: "duration_seconds", label: "Duration", sortable: true, width: 82, className: "job-run-col-duration", render: (row) => formatSeconds(num(row, "duration_seconds")) },
-        { key: "status", label: "Status", sortable: true, width: 98, className: "job-run-col-status", render: (row) => <StatusCell row={row} /> },
-        { key: "child_dataflow_count", label: "Child flows", width: 118, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} /> },
-        { key: "volume", label: "Volume", width: 116, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} /> },
-        { key: "reconciliation_status", label: "Reconcile", width: 94, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={row.reconciliation_status} /> },
-        { key: "error_preview", label: "Issue", minWidth: 80, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
+        { key: "job_config", label: "Config", autoFit: true, minWidth: 72, maxWidth: 128, className: "job-run-col-config", render: (row) => <JobConfigCell row={row} />, measureValue: (row) => jobConfigLines(row) },
+        { key: "runtime_context", label: "Runtime", autoFit: true, minWidth: 72, maxWidth: 170, className: "job-run-col-runtime", render: (row) => <RuntimeContextCell row={row} />, measureValue: (row) => runtimeContextLines(row) },
+        { key: "stages", label: "Stages", sortable: true, autoFit: true, minWidth: 110, maxWidth: 160, fillPriority: "last", className: "job-run-col-stages", render: (row) => <JobListValue value={row.stages} multiline />, measureValue: (row) => parseListValue(row.stages).join(", ") || "-" },
+        { key: "operation_types", label: "Operation", sortable: true, autoFit: true, minWidth: 86, maxWidth: 160, className: "job-run-col-operation", render: (row) => <JobListValue value={row.operation_types} />, measureValue: (row) => parseListValue(row.operation_types).join(", ") || "-" },
+        { key: "start_time", label: "Start", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.start_time, activeTimezone, "-") },
+        { key: "end_time", label: "End", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.end_time, activeTimezone, "-") },
+        { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 96, className: "job-run-col-duration", render: (row) => formatSeconds(num(row, "duration_seconds")), measureValue: (row) => formatSeconds(num(row, "duration_seconds")) },
+        { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 88, maxWidth: 112, className: "job-run-col-status", render: (row) => <StatusCell row={row} />, measureValue: (row) => String(row.status || "unknown") },
+        { key: "child_dataflow_count", label: "Child flows", autoFit: true, minWidth: 92, maxWidth: 132, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} />, measureValue: (row) => childFlowSummaryLines(row) },
+        { key: "volume", label: "Volume", autoFit: true, minWidth: 96, maxWidth: 142, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} />, measureValue: (row) => jobVolumeLines(row) },
+        { key: "reconciliation_status", label: "Reconcile", autoFit: true, minWidth: 94, maxWidth: 128, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={row.reconciliation_status} />, measureValue: (row) => humanize(String(row.reconciliation_status || "not_available")) },
+        { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
       ]}
       maxRows={rows.length}
       sort={sort}
@@ -3484,7 +3507,7 @@ function DataflowPhaseCell({ row }: { row: MonitoringRecord }) {
     { phase: "overhead", value: overhead }
   ]);
   const pctByPhase = Object.fromEntries(segments.map((segment) => [segment.phase, segment.percent])) as Partial<Record<PhaseKey, number>>;
-  const contributionPct = (phase: PhaseKey) => formatPercent(pctByPhase[phase] ?? 0);
+  const contributionPct = (phase: PhaseKey) => formatPhasePercent(pctByPhase[phase] ?? 0);
   const bottleneck = phaseBottleneck(row, source, transform, destination, overhead);
   const title = [
     `Phase reason: ${bottleneck.label}`,
@@ -3611,13 +3634,8 @@ function monitoringTimezone(report: MonitoringReport) {
 }
 
 function JobConfigCell({ row }: { row: JobRecord }) {
-  const mainParts = [
-    isMeaningfulConfigValue(row.max_workers) ? `w ${formatConfigValue(row.max_workers, "max_workers")}` : "",
-    isMeaningfulConfigValue(row.retry_count) ? `r ${formatConfigValue(row.retry_count, "retry_count")}` : ""
-  ].filter(Boolean);
-  const stopValue = isMeaningfulConfigValue(row.stop_on_error) ? `stop ${formatConfigValue(row.stop_on_error, "stop_on_error")}` : "-";
-  const mainLabel = mainParts.length ? mainParts.join(" · ") : "-";
-  const title = `${mainParts.length ? mainParts.map((part) => part.replace(/^w /u, "Workers: ").replace(/^r /u, "Retry: ")).join(" · ") : "Workers / Retry: -"}\nStop on error: ${isMeaningfulConfigValue(row.stop_on_error) ? formatConfigValue(row.stop_on_error, "stop_on_error") : "-"}`;
+  const [mainLabel, stopValue] = jobConfigLines(row);
+  const title = `${mainLabel === "-" ? "Workers / Retry: -" : mainLabel.replace(/^w /u, "Workers: ").replace(/ · r /u, " · Retry: ")}\nStop on error: ${stopValue === "-" ? "-" : stopValue.replace(/^stop /u, "")}`;
   return (
     <span className="monitor-stack-cell" title={title}>
       <strong>{mainLabel}</strong>
@@ -3626,11 +3644,19 @@ function JobConfigCell({ row }: { row: JobRecord }) {
   );
 }
 
+function jobConfigLines(row: JobRecord) {
+  const mainParts = [
+    isMeaningfulConfigValue(row.max_workers) ? `w ${formatConfigValue(row.max_workers, "max_workers")}` : "",
+    isMeaningfulConfigValue(row.retry_count) ? `r ${formatConfigValue(row.retry_count, "retry_count")}` : ""
+  ].filter(Boolean);
+  const stopValue = isMeaningfulConfigValue(row.stop_on_error) ? `stop ${formatConfigValue(row.stop_on_error, "stop_on_error")}` : "-";
+  const mainLabel = mainParts.length ? mainParts.join(" · ") : "-";
+  return [mainLabel, stopValue];
+}
+
 function RuntimeContextCell({ row }: { row: JobRecord }) {
-  const engine = shortRuntimeName(row.engine_name, "engine");
-  const platform = shortRuntimeName(row.platform_name, "platform");
-  const provider = String(row.metadata_provider_name || "unknown");
-  const mainLabel = `${platform} · ${engine}`;
+  const [mainLabel, provider] = runtimeContextLines(row);
+  const [platform, engine] = mainLabel.split(" · ");
   const title = `Platform: ${platform} · Engine: ${engine}\nProvider: ${provider}`;
   return (
     <span className="monitor-stack-cell" title={title}>
@@ -3638,6 +3664,14 @@ function RuntimeContextCell({ row }: { row: JobRecord }) {
       <small>{provider}</small>
     </span>
   );
+}
+
+function runtimeContextLines(row: JobRecord) {
+  const engine = shortRuntimeName(row.engine_name, "engine");
+  const platform = shortRuntimeName(row.platform_name, "platform");
+  const provider = String(row.metadata_provider_name || "unknown");
+  const mainLabel = `${platform} · ${engine}`;
+  return [mainLabel, provider];
 }
 
 function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
@@ -3653,13 +3687,9 @@ function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
 }
 
 function JobVolumeCell({ row }: { row: JobRecord }) {
-  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
-  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
+  const [mainLabel, netBytesLabel] = jobVolumeLines(row);
   const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
   const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  const netBytes = bytesAdded - bytesRemoved;
-  const mainLabel = `${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`;
-  const netBytesLabel = formatBytes(netBytes);
   return (
     <span
       className="monitor-stack-cell"
@@ -3669,6 +3699,17 @@ function JobVolumeCell({ row }: { row: JobRecord }) {
       <small>{netBytesLabel}</small>
     </span>
   );
+}
+
+function jobVolumeLines(row: JobRecord) {
+  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
+  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
+  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
+  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
+  const netBytes = bytesAdded - bytesRemoved;
+  const mainLabel = `${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`;
+  const netBytesLabel = formatBytes(netBytes);
+  return [mainLabel, netBytesLabel];
 }
 
 function EndpointCell({ row, direction }: { row: MonitoringRecord; direction: "source" | "destination" }) {
@@ -3744,16 +3785,14 @@ function pathBasename(value: string | null) {
 }
 
 function ChildFlowSummary({ row }: { row: JobRecord }) {
-  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
+  const [mainLabel] = childFlowSummaryLines(row);
   const succeeded = num(row, "child_succeeded_count");
   const failed = num(row, "child_failed_count");
   const skipped = num(row, "child_skipped_count");
-  const mainLabel = formatNumber(total);
-  const statusLabel = `${formatNumber(succeeded)} / ${formatNumber(failed)} / ${formatNumber(skipped)}`;
   return (
     <span
       className="monitor-stack-cell monitor-child-summary"
-      title={`Total child flows: ${mainLabel}\nSucceeded: ${formatNumber(succeeded)} / Failed: ${formatNumber(failed)} / Skipped: ${formatNumber(skipped)}`}
+      title={`Total child flows: ${mainLabel}\nSucceeded: ${succeeded} / Failed: ${failed} / Skipped: ${skipped}`}
     >
       <strong>{mainLabel}</strong>
       <small>
@@ -3765,6 +3804,16 @@ function ChildFlowSummary({ row }: { row: JobRecord }) {
       </small>
     </span>
   );
+}
+
+function childFlowSummaryLines(row: JobRecord) {
+  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
+  const succeeded = num(row, "child_succeeded_count");
+  const failed = num(row, "child_failed_count");
+  const skipped = num(row, "child_skipped_count");
+  const mainLabel = formatNumber(total);
+  const statusLabel = `${formatNumber(succeeded)} / ${formatNumber(failed)} / ${formatNumber(skipped)}`;
+  return [mainLabel, statusLabel];
 }
 
 function ReconciliationBadge({ value }: { value: unknown }) {
@@ -3912,6 +3961,7 @@ export {
   ReportChart,
   baseChartOption,
   reportChartPalette,
+  monitoringPhaseColors,
   formatTimestampForDisplay,
   // Constants
   OVERVIEW_STATUSES,
@@ -3945,6 +3995,7 @@ export {
   operationHealthGroupLabel,
   operationHealthDivider,
   RuntimePhaseContribution,
+  RuntimePhaseLegend,
   RuntimePhaseMatrixTooltip,
   runtimePhaseTotalRow,
   phaseRowLabel,
@@ -4007,6 +4058,7 @@ export {
   formatCompact,
   formatBytesShort,
   formatPercent,
+  formatPhasePercent,
   formatRelativeTime,
   shortIdentifier,
   formatSecondsSingleDecimal,

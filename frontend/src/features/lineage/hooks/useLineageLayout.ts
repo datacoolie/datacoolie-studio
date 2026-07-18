@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { layoutLineage } from "../layout/elkLayout";
 import type { LineageFlow } from "../model/types";
 
@@ -7,19 +7,20 @@ export function useLineageLayout(flow: LineageFlow, layoutKey: string) {
     key: string;
     positions: Map<string, { x: number; y: number }>;
   } | null>(null);
+  const generation = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
+    const currentGeneration = ++generation.current;
     if (!flow.nodes.length) {
       setLayout({ key: layoutKey, positions: new Map() });
       return;
     }
-    void layoutLineage(flow.nodes, flow.edges, layoutKey).then((positions) => {
-      if (!cancelled) setLayout({ key: layoutKey, positions });
-    });
-    return () => {
-      cancelled = true;
-    };
+    const timer = window.setTimeout(() => {
+      void layoutLineage(flow.nodes, flow.edges, layoutKey).then((positions) => {
+        if (generation.current === currentGeneration) setLayout({ key: layoutKey, positions });
+      });
+    }, 80);
+    return () => window.clearTimeout(timer);
   }, [layoutKey]);
 
   const ready = layout?.key === layoutKey;

@@ -1,6 +1,7 @@
 import { FileClock, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MetadataBackup, MetadataEditorDocument } from "../../shared/api/types";
+import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatCellValue } from "./metadataSheetOperations";
 import type { SheetKey } from "./metadataSheetTypes";
 
@@ -44,13 +45,7 @@ export function MetadataHistoryDrawer({
     void loadBackups();
   }, [currentDocument.source.source_id]);
 
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !actionBusy) onClose();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [actionBusy, onClose]);
+  useDrawerEscape(onClose, !actionBusy);
 
   async function loadBackups() {
     setLoading(true);

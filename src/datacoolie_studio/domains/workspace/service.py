@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,22 +16,33 @@ from datacoolie_studio.db.models import (
     EnvironmentSource,
     LogFileManifest,
     CodeArtifactSnapshot,
-    LineageSnapshot,
+    EnvironmentReadModelCacheEntry,
     MetadataBackup,
     MetadataEditorDraft,
     MetadataSaveEvent,
     MetadataSourceSnapshot,
     MetadataValidationResult,
+    ProjectReferenceMapping,
     Project,
     SourceRevision,
     SyncJob,
 )
+from datacoolie_studio.domains.assets.reference_mappings import normalize_target_identifier
+from datacoolie_studio.domains.assets.reference_identity import normalize_reference_signature
+from datacoolie_studio.domains.code_artifacts.service import ensure_code_artifact_snapshot
+from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
+from datacoolie_studio.domains.metadata.reader import MetadataReadError
+from datacoolie_studio.domains.metadata.service import ensure_metadata_snapshot
+from datacoolie_studio.domains.read_models.cache import invalidate_project_read_models
+from datacoolie_studio.domains.read_models.keys import ASSETS_CATALOG, LINEAGE_GRAPH, OVERVIEW
 from datacoolie_studio.domains.sources.discovery import (
     DiscoveredSource,
     discover_datacoolie_project_sources,
     discover_metadata_sources,
 )
+from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import normalized_source_uri
+from datacoolie_studio.domains.sync import service as sync
 
 METADATA_SOURCE_DELETE_DEPENDENCIES = [
     ("draft", "saved draft", MetadataEditorDraft, "warning"),
@@ -46,6 +58,120 @@ METADATA_SOURCE_DELETE_DEPENDENCIES = [
 
 def list_projects(session: Session) -> list[Project]:
     return list(session.scalars(select(Project).order_by(Project.name)))
+
+
+def list_project_reference_mappings(session: Session, project_id: int) -> list[dict]:
+    _require_project(session, project_id)
+    statement = (
+        select(ProjectReferenceMapping)
+        .where(ProjectReferenceMapping.project_id == project_id)
+        .order_by(ProjectReferenceMapping.updated_at.desc(), ProjectReferenceMapping.id.desc())
+    )
+    return [_project_reference_mapping_to_dict(item) for item in session.scalars(statement)]
+
+
+def create_project_reference_mapping(
+    session: Session,
+    project_id: int,
+    *,
+    reference_type: str,
+    reference_value: str,
+    target_identifier_kind: str,
+    target_value: str,
+    target_display_value: str | None = None,
+    note: str | None = None,
+) -> dict:
+    _require_project(session, project_id)
+    signature = normalize_reference_signature(
+        reference_type=reference_type,
+        value=reference_value,
+    )
+    target_kind, target_normalized_value = normalize_target_identifier(target_identifier_kind, target_value)
+    duplicate = session.scalars(
+        select(ProjectReferenceMapping).where(
+            ProjectReferenceMapping.project_id == project_id,
+            ProjectReferenceMapping.reference_type == signature.reference_type,
+            ProjectReferenceMapping.reference_normalized_value == signature.normalized_value,
+        )
+    ).first()
+    if duplicate is not None:
+        raise ValueError("Mapping already exists for this reference signature")
+    mapping = ProjectReferenceMapping(
+        project_id=project_id,
+        reference_type=signature.reference_type,
+        reference_normalized_value=signature.normalized_value,
+        reference_signature_json=signature.to_json(),
+        target_identifier_kind=target_kind,
+        target_normalized_value=target_normalized_value,
+        target_display_value=(target_display_value or target_value).strip(),
+        note=((str(note).strip() or None) if note is not None else None),
+    )
+    session.add(mapping)
+    invalidate_project_read_models(session, project_id, model_keys={ASSETS_CATALOG, OVERVIEW, LINEAGE_GRAPH})
+    session.commit()
+    session.refresh(mapping)
+    return _project_reference_mapping_to_dict(mapping)
+
+
+def update_project_reference_mapping(
+    session: Session,
+    project_id: int,
+    mapping_id: int,
+    payload: dict[str, Any],
+) -> dict | None:
+    _require_project(session, project_id)
+    mapping = session.get(ProjectReferenceMapping, mapping_id)
+    if mapping is None or mapping.project_id != project_id:
+        return None
+
+    reference_type = payload.get("reference_type", mapping.reference_type)
+    reference_value = payload.get("reference_value", mapping.reference_normalized_value)
+    signature = normalize_reference_signature(
+        reference_type=str(reference_type),
+        value=str(reference_value),
+    )
+
+    target_kind_value = payload.get("target_identifier_kind", mapping.target_identifier_kind)
+    target_value = payload.get("target_value", mapping.target_normalized_value)
+    target_kind, target_normalized_value = normalize_target_identifier(str(target_kind_value), str(target_value))
+
+    target_display_value = payload.get("target_display_value", mapping.target_display_value)
+    normalized_target_display_value = (target_display_value or str(target_value)).strip()
+    note = payload.get("note", mapping.note)
+    normalized_note = ((str(note).strip() or None) if note is not None else None)
+    duplicate = session.scalars(
+        select(ProjectReferenceMapping).where(
+            ProjectReferenceMapping.project_id == project_id,
+            ProjectReferenceMapping.reference_type == signature.reference_type,
+            ProjectReferenceMapping.reference_normalized_value == signature.normalized_value,
+            ProjectReferenceMapping.id != mapping.id,
+        )
+    ).first()
+    if duplicate is not None:
+        raise ValueError("Mapping already exists for this reference signature")
+
+    mapping.reference_type = signature.reference_type
+    mapping.reference_normalized_value = signature.normalized_value
+    mapping.reference_signature_json = signature.to_json()
+    mapping.target_identifier_kind = target_kind
+    mapping.target_normalized_value = target_normalized_value
+    mapping.target_display_value = normalized_target_display_value
+    mapping.note = normalized_note
+    invalidate_project_read_models(session, project_id, model_keys={ASSETS_CATALOG, OVERVIEW, LINEAGE_GRAPH})
+    session.commit()
+    session.refresh(mapping)
+    return _project_reference_mapping_to_dict(mapping)
+
+
+def delete_project_reference_mapping(session: Session, project_id: int, mapping_id: int) -> bool:
+    _require_project(session, project_id)
+    mapping = session.get(ProjectReferenceMapping, mapping_id)
+    if mapping is None or mapping.project_id != project_id:
+        return False
+    invalidate_project_read_models(session, project_id, model_keys={ASSETS_CATALOG, OVERVIEW, LINEAGE_GRAPH})
+    session.delete(mapping)
+    session.commit()
+    return True
 
 
 def list_project_summaries(session: Session) -> list[dict]:
@@ -101,6 +227,31 @@ def list_project_summaries(session: Session) -> list[dict]:
             }
         )
     return summaries
+
+
+def _project_reference_mapping_to_dict(mapping: ProjectReferenceMapping) -> dict[str, Any]:
+    signature = normalize_reference_signature(
+        reference_type=mapping.reference_type,
+        value=mapping.reference_normalized_value,
+    ).to_dict()
+    return {
+        "id": mapping.id,
+        "project_id": mapping.project_id,
+        "reference_type": signature["reference_type"],
+        "reference_normalized_value": mapping.reference_normalized_value,
+        "reference_signature": signature,
+        "target_identifier_kind": mapping.target_identifier_kind,
+        "target_normalized_value": mapping.target_normalized_value,
+        "target_display_value": mapping.target_display_value,
+        "note": mapping.note,
+        "created_at": mapping.created_at,
+        "updated_at": mapping.updated_at,
+    }
+
+
+def _require_project(session: Session, project_id: int) -> None:
+    if session.get(Project, project_id) is None:
+        raise LookupError("Project not found")
 
 
 def create_project(session: Session, name: str, description: str | None = None) -> Project:
@@ -187,8 +338,11 @@ def add_metadata_source(
         source_config_json=json.dumps(source_config or {}, sort_keys=True),
     )
     session.add(source)
+    invalidate_environment_derived_caches(session, environment_id, structural=True)
     session.commit()
     session.refresh(source)
+    if source.enabled:
+        _initialize_discovered_sources(session, [source])
     return source
 
 
@@ -208,6 +362,7 @@ def import_metadata_sources(
         code_artifacts=[],
         errors=discovery.errors,
         enabled=enabled,
+        materialize_created_sources=True,
     )
 
 
@@ -240,6 +395,7 @@ def import_datacoolie_project_sources(
         code_artifacts=discovery.code_artifacts,
         errors=discovery.errors,
         enabled=enabled,
+        materialize_created_sources=True,
     )
 
 
@@ -268,8 +424,11 @@ def add_code_artifact(
         source_config_json=json.dumps(source_config or {}, sort_keys=True),
     )
     session.add(artifact)
+    invalidate_environment_derived_caches(session, environment_id, structural=True)
     session.commit()
     session.refresh(artifact)
+    if artifact.enabled:
+        _initialize_discovered_sources(session, [artifact])
     return artifact
 
 
@@ -281,8 +440,10 @@ def _import_discovered_sources(
     code_artifacts: list[DiscoveredSource],
     errors: list[dict],
     enabled: bool,
+    materialize_created_sources: bool = False,
 ) -> dict:
     created: list[dict] = []
+    created_sources: list[EnvironmentSource] = []
     existing: list[dict] = []
 
     for discovered in [*metadata_sources, *code_artifacts]:
@@ -291,19 +452,78 @@ def _import_discovered_sources(
             existing.append(_source_import_item(current, discovered, "existing"))
             continue
         current = _add_discovered_source(session, environment_id, discovered, enabled)
+        created_sources.append(current)
         created.append(_source_import_item(current, discovered, "created"))
+
+    initialization = _initialize_discovered_sources(session, created_sources) if materialize_created_sources else {
+        "auto_validated": 0,
+        "auto_synced": 0,
+        "auto_sync_errors": [],
+    }
+    all_errors = [*errors, *initialization["auto_sync_errors"]]
 
     return {
         "created": created,
         "existing": existing,
-        "errors": errors,
+        "errors": all_errors,
         "summary": {
             "created": len(created),
             "existing": len(existing),
-            "errors": len(errors),
+            "errors": len(all_errors),
             "metadata_sources": sum(1 for item in [*created, *existing] if item["source_kind"] == "metadata"),
             "code_artifacts": sum(1 for item in [*created, *existing] if item["source_kind"] == "code"),
+            "auto_validated": initialization["auto_validated"],
+            "auto_synced": initialization["auto_synced"],
         },
+    }
+
+
+def _initialize_discovered_sources(session: Session, sources: list[EnvironmentSource]) -> dict[str, Any]:
+    """Materialize only new Metadata/Code configurations discovered by a project scan."""
+    auto_validated = 0
+    auto_synced = 0
+    errors: list[dict[str, Any]] = []
+    for source in sources:
+        if not source.enabled:
+            continue
+        try:
+            with sync.source_refresh_guard(source.id) as acquired:
+                if not acquired:
+                    errors.append(_source_initialization_error(source, "Source refresh is already running"))
+                    continue
+                if source.source_kind == "metadata":
+                    ensure_metadata_snapshot(session, source)
+                elif source.source_kind == "code":
+                    ensure_code_artifact_snapshot(session, source)
+                else:
+                    continue
+            status = sync.source_sync_status(session, source)
+            if source.read_checked_at is not None:
+                auto_validated += 1
+            if status["status"] == "ok":
+                auto_synced += 1
+            else:
+                errors.append(_source_initialization_error(source, status.get("message") or "Initial sync failed"))
+        except MetadataReadError as exc:
+            if source.read_checked_at is not None:
+                auto_validated += 1
+            errors.append(_source_initialization_error(source, str(exc)))
+        except Exception as exc:
+            session.rollback()
+            errors.append(_source_initialization_error(source, str(exc)))
+    return {
+        "auto_validated": auto_validated,
+        "auto_synced": auto_synced,
+        "auto_sync_errors": errors,
+    }
+
+
+def _source_initialization_error(source: EnvironmentSource, message: str) -> dict[str, Any]:
+    return {
+        "source_id": source.id,
+        "source_kind": source.source_kind,
+        "uri": source.uri,
+        "message": message,
     }
 
 
@@ -359,107 +579,153 @@ def _source_import_item(source: EnvironmentSource, discovered: DiscoveredSource,
     }
 
 
+def environment_source_by_id(
+    session: Session,
+    environment_id: int,
+    source_id: int,
+    source_kind: str,
+) -> EnvironmentSource | None:
+    """Return a source only when it belongs to the requested Environment.
+
+    Route handlers use this lookup before any source-detail operation.  A
+    missing, wrong-kind, or cross-Environment source deliberately has the
+    same result so callers cannot enumerate resources outside their scope.
+    """
+    return session.scalar(
+        select(EnvironmentSource).where(
+            EnvironmentSource.id == source_id,
+            EnvironmentSource.environment_id == environment_id,
+            EnvironmentSource.source_kind == source_kind,
+        )
+    )
+
+
 def update_code_artifact(
     session: Session,
+    environment_id: int,
     source_id: int,
     *,
     uri: str | None = None,
     label: str | None = None,
     enabled: bool | None = None,
     source_config: dict | None = None,
-    sync_schedule_enabled: bool | None = None,
-    sync_interval_minutes: int | None = None,
 ) -> EnvironmentSource | None:
-    source = session.get(EnvironmentSource, source_id)
-    if source is None or source.source_kind != "code":
+    source = environment_source_by_id(session, environment_id, source_id, "code")
+    if source is None:
         return None
-    changed = False
+    structural_changed = False
     if uri is not None:
         normalized_uri = uri.strip()
         if normalized_uri != source.uri:
             source.uri = normalized_uri
-            changed = True
+            structural_changed = True
     if source_config is not None:
         config_json = json.dumps(source_config, sort_keys=True)
         if config_json != (source.source_config_json or "{}"):
             source.source_config_json = config_json
-            changed = True
-    if changed:
+            structural_changed = True
+    if structural_changed:
         _clear_source_read_check(source)
         _delete_source_sync_records(session, source)
         for row in _source_rows(session, CodeArtifactSnapshot, source.id):
             session.delete(row)
-        _delete_environment_lineage_snapshots(session, source.environment_id)
     if label is not None:
         source.label = label
     if enabled is not None:
+        structural_changed = structural_changed or source.enabled != enabled
         source.enabled = enabled
-    _update_schedule(source, sync_schedule_enabled, sync_interval_minutes)
+    if structural_changed:
+        invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.commit()
     session.refresh(source)
     return source
 
 
-def delete_code_artifact(session: Session, source_id: int) -> bool:
-    source = session.get(EnvironmentSource, source_id)
-    if source is None or source.source_kind != "code":
+def delete_code_artifact(session: Session, environment_id: int, source_id: int) -> bool:
+    source = environment_source_by_id(session, environment_id, source_id, "code")
+    if source is None:
         return False
     _delete_source_sync_records(session, source)
     for row in _source_rows(session, CodeArtifactSnapshot, source.id):
         session.delete(row)
-    _delete_environment_lineage_snapshots(session, source.environment_id)
+    invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.delete(source)
     session.commit()
     return True
 
 
+def code_artifact_delete_impact(session: Session, environment_id: int, source_id: int) -> dict | None:
+    source = environment_source_by_id(session, environment_id, source_id, "code")
+    if source is None:
+        return None
+    impact_specs = [
+        ("snapshot", "code snapshot", _count_source_rows(session, CodeArtifactSnapshot, source.id), "warning"),
+        ("lineage_cache", "lineage graph cache entry", _count_environment_read_models(session, source.environment_id, LINEAGE_GRAPH), "warning"),
+        ("source_revision", "source revision", _count_source_rows(session, SourceRevision, source.id), "info"),
+        ("sync_job", "sync history entry", _count_source_rows(session, SyncJob, source.id), "info"),
+    ]
+    impacts = [
+        {"kind": kind, "label": _pluralize(label, count), "count": count, "severity": severity}
+        for kind, label, count, severity in impact_specs
+        if count
+    ]
+    return {
+        "source_id": source.id,
+        "source_kind": source.source_kind,
+        "source_uri": source.uri,
+        "mode": "hard_delete",
+        "metadata_file_deleted": False,
+        "has_impact": bool(impacts),
+        "impacts": impacts,
+        "summary": _source_delete_impact_summary(impacts, "code artifact"),
+    }
+
+
 def update_metadata_source(
     session: Session,
+    environment_id: int,
     source_id: int,
     *,
     uri: str | None = None,
     label: str | None = None,
     enabled: bool | None = None,
-    sync_schedule_enabled: bool | None = None,
-    sync_interval_minutes: int | None = None,
 ) -> EnvironmentSource | None:
-    source = session.get(EnvironmentSource, source_id)
-    if source is not None and source.source_kind != "metadata":
-        return None
+    source = environment_source_by_id(session, environment_id, source_id, "metadata")
     if source is None:
         return None
+    structural_changed = False
     if uri is not None:
         normalized_uri = uri.strip()
         if normalized_uri != source.uri:
             _clear_source_read_check(source)
             _delete_source_sync_records(session, source)
             source.uri = normalized_uri
+            structural_changed = True
     if label is not None:
         source.label = label
     if enabled is not None:
+        structural_changed = structural_changed or source.enabled != enabled
         source.enabled = enabled
-    _update_schedule(source, sync_schedule_enabled, sync_interval_minutes)
+    if structural_changed:
+        invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.commit()
     session.refresh(source)
     return source
 
 
-def delete_metadata_source(session: Session, source_id: int) -> bool:
-    source = session.get(EnvironmentSource, source_id)
-    if source is not None and source.source_kind != "metadata":
-        return False
+def delete_metadata_source(session: Session, environment_id: int, source_id: int) -> bool:
+    source = environment_source_by_id(session, environment_id, source_id, "metadata")
     if source is None:
         return False
     _delete_metadata_source_dependencies(session, source)
+    invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.delete(source)
     session.commit()
     return True
 
 
-def metadata_source_delete_impact(session: Session, source_id: int) -> dict | None:
-    source = session.get(EnvironmentSource, source_id)
-    if source is not None and source.source_kind != "metadata":
-        return None
+def metadata_source_delete_impact(session: Session, environment_id: int, source_id: int) -> dict | None:
+    source = environment_source_by_id(session, environment_id, source_id, "metadata")
     if source is None:
         return None
 
@@ -514,16 +780,22 @@ def add_log_source(
         uri=uri.strip(),
         label=label,
         enabled=enabled,
+        sync_schedule_enabled=False,
+        sync_interval_minutes=1,
         source_config_json=json.dumps(source_config or {}, sort_keys=True),
     )
     session.add(path)
+    invalidate_environment_derived_caches(session, environment_id, structural=False)
     session.commit()
     session.refresh(path)
+    if path.enabled:
+        source_validation.validate_log_source(session, path)
     return path
 
 
 def update_log_source(
     session: Session,
+    environment_id: int,
     path_id: int,
     *,
     uri: str | None = None,
@@ -533,9 +805,7 @@ def update_log_source(
     sync_schedule_enabled: bool | None = None,
     sync_interval_minutes: int | None = None,
 ) -> EnvironmentSource | None:
-    path = session.get(EnvironmentSource, path_id)
-    if path is not None and path.source_kind != "logs":
-        return None
+    path = environment_source_by_id(session, environment_id, path_id, "logs")
     if path is None:
         return None
     changed = False
@@ -557,23 +827,54 @@ def update_log_source(
         path.label = label
     if enabled is not None:
         path.enabled = enabled
-    _update_schedule(path, sync_schedule_enabled, sync_interval_minutes)
+    _update_schedule(path, sync_schedule_enabled, sync_interval_minutes, default_interval_minutes=1)
+    invalidate_environment_derived_caches(session, path.environment_id, structural=False)
     session.commit()
     session.refresh(path)
     return path
 
 
-def delete_log_source(session: Session, path_id: int) -> bool:
-    path = session.get(EnvironmentSource, path_id)
-    if path is not None and path.source_kind != "logs":
-        return False
+def delete_log_source(session: Session, environment_id: int, path_id: int) -> bool:
+    path = environment_source_by_id(session, environment_id, path_id, "logs")
     if path is None:
         return False
     _delete_source_sync_records(session, path)
     _delete_source_log_cache(session, path)
+    invalidate_environment_derived_caches(session, path.environment_id, structural=False)
     session.delete(path)
     session.commit()
     return True
+
+
+def log_source_delete_impact(session: Session, environment_id: int, path_id: int) -> dict | None:
+    path = environment_source_by_id(session, environment_id, path_id, "logs")
+    if path is None:
+        return None
+    cache_stats = logs_cache.cached_source_stats(path.id)
+    impact_specs = [
+        ("manifest", "indexed log file", _count_source_rows(session, LogFileManifest, path.id), "warning"),
+        ("dataflow_cache", "cached dataflow run", cache_stats["dataflow_row_count"], "warning"),
+        ("job_cache", "cached job run", cache_stats["job_row_count"], "warning"),
+        ("filter_cache", "cached monitoring filter value", cache_stats["filter_value_count"], "info"),
+        ("source_revision", "source revision", _count_source_rows(session, SourceRevision, path.id), "info"),
+        ("sync_job", "refresh history entry", _count_source_rows(session, SyncJob, path.id), "info"),
+        ("schedule", "auto-refresh schedule", 1 if path.sync_schedule_enabled else 0, "info"),
+    ]
+    impacts = [
+        {"kind": kind, "label": _pluralize(label, count), "count": count, "severity": severity}
+        for kind, label, count, severity in impact_specs
+        if count
+    ]
+    return {
+        "source_id": path.id,
+        "source_kind": path.source_kind,
+        "source_uri": path.uri,
+        "mode": "hard_delete",
+        "metadata_file_deleted": False,
+        "has_impact": bool(impacts),
+        "impacts": impacts,
+        "summary": _log_delete_impact_summary(impacts),
+    }
 
 
 def _delete_metadata_source_dependencies(session: Session, source: EnvironmentSource) -> None:
@@ -602,11 +903,7 @@ def _delete_source_sync_records(session: Session, source: EnvironmentSource) -> 
 def _delete_source_log_cache(session: Session, source: EnvironmentSource) -> None:
     for row in _source_rows(session, LogFileManifest, source.id):
         session.delete(row)
-    try:
-        logs_cache.purge_cached_source_ids([source.id])
-    except Exception:
-        # Purging analytics cache is best-effort and should not block source updates/deletes.
-        pass
+    logs_cache.purge_cached_source_ids([source.id])
 
 
 def _etl_source_ids_for_environment(session: Session, environment_id: int) -> list[int]:
@@ -641,14 +938,6 @@ def _purge_analytics_cache_by_source_ids(source_ids: list[int]) -> None:
         pass
 
 
-def _delete_environment_lineage_snapshots(session: Session, environment_id: int) -> None:
-    rows = session.scalars(
-        select(LineageSnapshot).where(LineageSnapshot.environment_id == environment_id)
-    ).all()
-    for row in rows:
-        session.delete(row)
-
-
 def _clear_source_read_check(source: EnvironmentSource) -> None:
     source.read_check_status = None
     source.read_checked_at = None
@@ -680,6 +969,18 @@ def _count_environment_rows(session: Session, model, environment_id: int) -> int
     return int(
         session.scalar(
             select(func.count()).select_from(model).where(model.environment_id == environment_id)
+        )
+        or 0
+    )
+
+
+def _count_environment_read_models(session: Session, environment_id: int, model_key: str) -> int:
+    return int(
+        session.scalar(
+            select(func.count()).select_from(EnvironmentReadModelCacheEntry).where(
+                EnvironmentReadModelCacheEntry.environment_id == environment_id,
+                EnvironmentReadModelCacheEntry.model_key == model_key,
+            )
         )
         or 0
     )
@@ -720,7 +1021,13 @@ def source_to_dict(item: EnvironmentSource) -> dict:
     }
 
 
-def _update_schedule(source: EnvironmentSource, enabled: bool | None, interval_minutes: int | None) -> None:
+def _update_schedule(
+    source: EnvironmentSource,
+    enabled: bool | None,
+    interval_minutes: int | None,
+    *,
+    default_interval_minutes: int = 60,
+) -> None:
     if interval_minutes is not None and interval_minutes < 1:
         raise ValueError("Sync interval must be at least 1 minute")
     if enabled is not None:
@@ -728,7 +1035,23 @@ def _update_schedule(source: EnvironmentSource, enabled: bool | None, interval_m
     if interval_minutes is not None:
         source.sync_interval_minutes = interval_minutes
     if source.sync_schedule_enabled and not source.sync_interval_minutes:
-        source.sync_interval_minutes = 60
+        source.sync_interval_minutes = default_interval_minutes
+
+
+def _log_delete_impact_summary(impacts: list[dict]) -> str:
+    if not impacts:
+        return "No cached Studio data will be removed. Original log files will not be deleted."
+    parts = [f"{item['count']} {item['label']}" for item in impacts]
+    related = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])}, and {parts[-1]}"
+    return f"Deleting this log source will also remove {related}. Original log files will not be deleted."
+
+
+def _source_delete_impact_summary(impacts: list[dict], source_label: str) -> str:
+    if not impacts:
+        return f"No related Studio data will be removed. The original {source_label} will not be deleted."
+    parts = [f"{item['count']} {item['label']}" for item in impacts]
+    related = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])}, and {parts[-1]}"
+    return f"Deleting this source will also remove {related}. The original {source_label} will not be deleted."
 
 
 def _validation_from_source(source: EnvironmentSource) -> dict | None:

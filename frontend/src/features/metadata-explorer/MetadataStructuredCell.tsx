@@ -530,7 +530,7 @@ function highlightSql(value: string) {
   return nodes;
 }
 
-function formatPrettySql(value: string) {
+export function formatPrettySql(value: string) {
   const normalized = value
     .replace(/\s+/g, " ")
     .replace(/\s*,\s*/g, ", ")
@@ -552,7 +552,7 @@ function formatPrettySql(value: string) {
     .trim();
 }
 
-function highlightStructuredValue(value: string, kind: StructuredCellKind | null) {
+export function highlightStructuredValue(value: string, kind: StructuredCellKind | null) {
   return kind === "sql" ? highlightSql(value) : highlightJson(value);
 }
 

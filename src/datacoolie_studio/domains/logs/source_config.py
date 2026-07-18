@@ -18,10 +18,11 @@ class LogSourcePaths:
 
 
 def log_source_config(source: EnvironmentSource) -> dict[str, Any]:
-    if not source.source_config_json:
+    source_config_json = getattr(source, "source_config_json", None)
+    if not source_config_json:
         return {}
     try:
-        value = json.loads(source.source_config_json)
+        value = json.loads(source_config_json)
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
@@ -38,7 +39,7 @@ def resolve_log_source_paths(source: EnvironmentSource) -> LogSourcePaths:
         return LogSourcePaths(
             mode="separate_paths",
             base_log_uri=base_log_uri,
-            etl_logs_uri=etl_logs_uri or source.uri,
+            etl_logs_uri=_analyst_etl_uri(etl_logs_uri or source.uri),
             system_logs_uri=system_logs_uri,
         )
 
@@ -77,19 +78,19 @@ def _infer_from_uri(uri: str) -> dict[str, str | None]:
             base = uri.rstrip("/").rsplit("/", 1)[0]
             return {
                 "base_log_uri": base,
-                "etl_logs_uri": uri,
+                "etl_logs_uri": join_uri(uri, "analyst"),
                 "system_logs_uri": join_uri(base, "system_logs"),
             }
         if name == "system_logs":
             base = uri.rstrip("/").rsplit("/", 1)[0]
             return {
                 "base_log_uri": base,
-                "etl_logs_uri": join_uri(base, "etl_logs"),
+                "etl_logs_uri": join_uri(base, "etl_logs", "analyst"),
                 "system_logs_uri": uri,
             }
         return {
             "base_log_uri": uri,
-            "etl_logs_uri": join_uri(uri, "etl_logs"),
+            "etl_logs_uri": join_uri(uri, "etl_logs", "analyst"),
             "system_logs_uri": join_uri(uri, "system_logs"),
         }
 
@@ -98,18 +99,77 @@ def _infer_from_uri(uri: str) -> dict[str, str | None]:
         base = path.parent
         return {
             "base_log_uri": base.as_posix(),
-            "etl_logs_uri": path.as_posix(),
+            "etl_logs_uri": (path / "analyst").as_posix(),
             "system_logs_uri": (base / "system_logs").as_posix(),
         }
     if path.name == "system_logs":
         base = path.parent
         return {
             "base_log_uri": base.as_posix(),
-            "etl_logs_uri": (base / "etl_logs").as_posix(),
+            "etl_logs_uri": (base / "etl_logs" / "analyst").as_posix(),
+            "system_logs_uri": path.as_posix(),
+        }
+    if _looks_like_local_base_log_root(path):
+        return {
+            "base_log_uri": path.as_posix(),
+            "etl_logs_uri": (path / "etl_logs" / "analyst").as_posix(),
+            "system_logs_uri": (path / "system_logs").as_posix(),
+        }
+    if _looks_like_local_etl_log_root(path):
+        base, system = _local_base_and_system_for_etl(path)
+        return {
+            "base_log_uri": base.as_posix(),
+            "etl_logs_uri": path.as_posix(),
+            "system_logs_uri": system.as_posix(),
+        }
+    if _looks_like_local_system_log_root(path):
+        base, etl = _local_base_and_etl_for_system(path)
+        return {
+            "base_log_uri": base.as_posix(),
+            "etl_logs_uri": etl.as_posix(),
             "system_logs_uri": path.as_posix(),
         }
     return {
         "base_log_uri": path.as_posix(),
-        "etl_logs_uri": (path / "etl_logs").as_posix(),
+        "etl_logs_uri": (path / "etl_logs" / "analyst").as_posix(),
         "system_logs_uri": (path / "system_logs").as_posix(),
     }
+
+
+def _analyst_etl_uri(uri: str) -> str:
+    name = uri_basename(uri)
+    return join_uri(uri, "analyst") if name == "etl_logs" else uri
+
+
+def _looks_like_local_base_log_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return (path / "etl_logs").is_dir() or (path / "system_logs").is_dir()
+
+
+def _looks_like_local_etl_log_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return (path / "dataflow_run_log").exists() or (path / "job_run_log").exists()
+
+
+def _looks_like_local_system_log_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return any(path.glob("system_log_*.jsonl")) or (path / "system_logs").exists()
+
+
+def _local_base_and_system_for_etl(path: Path) -> tuple[Path, Path]:
+    if path.parent.name == "etl_logs":
+        base = path.parent.parent
+        return base, base / "system_logs" / path.name
+    base = path.parent
+    return base, base / "system_logs"
+
+
+def _local_base_and_etl_for_system(path: Path) -> tuple[Path, Path]:
+    if path.parent.name == "system_logs":
+        base = path.parent.parent
+        return base, base / "etl_logs" / path.name
+    base = path.parent
+    return base, base / "etl_logs" / "analyst"
