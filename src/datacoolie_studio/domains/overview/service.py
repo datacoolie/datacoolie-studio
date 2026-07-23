@@ -22,7 +22,7 @@ from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.metadata.service import load_environment_metadata
-from datacoolie_studio.domains.monitoring import service as monitoring
+import datacoolie_studio.domains.monitoring.query_service as monitoring_query_service
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace
 from datacoolie_studio.domains.read_models.cache import (
@@ -306,7 +306,7 @@ def _monitoring_summary(
     timezone_context: dict[str, Any],
 ) -> dict[str, Any]:
     timezone_info = timezone_context["timezone_info"]
-    return monitoring.cached_environment_overview_summary(
+    return monitoring_query_service.cached_environment_overview_summary(
         session,
         paths,
         timezone_info=timezone_info,

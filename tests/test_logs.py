@@ -22,38 +22,15 @@ from datacoolie_studio.domains.logs.reader import (
     read_job_logs,
     read_system_log_file,
 )
-from datacoolie_studio.domains.monitoring.service import (
-    _attention_queue,
-    _dataflow_operation_type,
-    _diagnostics_field_completeness,
-    _diagnostics_job_linkage_summary,
-    _diagnostics_page,
-    _destination_operation_type,
-    _enrich_dataflow_run_for_investigation,
-    _error_category,
-    _failures_page,
-    _filter_log_rows,
-    _freshness_page,
-    _health_page,
-    _is_lakehouse_destination,
-    _job_key,
-    _job_shape_label,
-    _job_runs_by_dataflow_operation_type,
-    _maintenance_upstream_dataflows,
-    _normalize_monitoring_filters_for_timezone,
-    _operation_windows,
-    _operations_page,
-    _performance_page,
-    _phase_duration,
-    _phase_duration_summary,
-    _status_by_date,
-    _time_value,
-    _trend_context,
-    _volume_page,
-    _watermark_classification,
-    dataflow_logs,
-    job_logs,
-)
+from datacoolie_studio.domains.monitoring.metrics.common_projections import _dataflow_operation_type, _destination_operation_type, _enrich_dataflow_run_for_investigation, _filter_log_rows, _is_lakehouse_destination, _job_key, _job_shape_label, _job_runs_by_dataflow_operation_type, _normalize_monitoring_filters_for_timezone, _phase_duration, _phase_duration_summary, _time_value, _trend_context, _watermark_classification
+from datacoolie_studio.domains.monitoring.metrics.diagnostics_projections import _diagnostics_field_completeness, _diagnostics_job_linkage_summary, _diagnostics_page
+from datacoolie_studio.domains.monitoring.metrics.failures_projections import _error_category, _failures_page
+from datacoolie_studio.domains.monitoring.metrics.freshness_projections import _freshness_page
+from datacoolie_studio.domains.monitoring.metrics.maintenance_projections import _maintenance_upstream_dataflows
+from datacoolie_studio.domains.monitoring.metrics.overview_projections import _attention_queue, _health_page, _operation_windows, _operations_page, _status_by_date
+from datacoolie_studio.domains.monitoring.metrics.performance_projections import _performance_page
+from datacoolie_studio.domains.monitoring.metrics.volume_projections import _volume_page
+from datacoolie_studio.domains.monitoring.query_service import dataflow_logs, job_logs
 from datacoolie_studio.domains.monitoring.page_service import monitoring_page, public_monitoring_page
 
 

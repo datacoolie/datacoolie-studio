@@ -6,9 +6,7 @@ from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics.connections import analytics_connections
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
-from datacoolie_studio.domains.monitoring import page_service
-from datacoolie_studio.domains.monitoring import service as monitoring_service
-
+from datacoolie_studio.domains.monitoring import page_service, query_service
 
 def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
@@ -29,7 +27,7 @@ def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatc
         for source_id in (7, 8)
     ]
 
-    assert not hasattr(monitoring_service, "_monitoring_rows")
+    assert not hasattr(query_service, "_monitoring_rows")
     original_connect = analytics_connections.connect
     connection_calls = 0
 

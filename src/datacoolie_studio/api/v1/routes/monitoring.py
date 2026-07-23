@@ -7,13 +7,7 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.api.v1.contracts.monitoring import MonitoringPageResponse
 from datacoolie_studio.db.session import get_session
-from datacoolie_studio.domains.monitoring.service import (
-    dataflow_logs,
-    job_logs,
-    latest_status,
-    latest_status_etag,
-    monitoring_filter_options,
-)
+from datacoolie_studio.domains.monitoring.query_service import dataflow_logs, job_logs, latest_status, latest_status_etag, monitoring_filter_options
 from datacoolie_studio.domains.monitoring.page_service import (
     monitoring_page,
     monitoring_page_cache_key,

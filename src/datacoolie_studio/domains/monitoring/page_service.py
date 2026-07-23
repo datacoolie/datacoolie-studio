@@ -7,7 +7,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.monitoring import service as metrics
+import datacoolie_studio.domains.monitoring.metrics.common_projections as metrics_common
+import datacoolie_studio.domains.monitoring.metrics.diagnostics_projections as metrics_diagnostics
+import datacoolie_studio.domains.monitoring.metrics.overview_projections as metrics_overview
+import datacoolie_studio.domains.monitoring.query_service as metrics_query_service
 from datacoolie_studio.domains.monitoring.diagnostics_repository import diagnostics_read_model
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
 from datacoolie_studio.domains.monitoring.read_models.failures import failures_read_model
@@ -135,7 +138,7 @@ def monitoring_page_cache_key(
         environment_id=environment_id,
         namespace=monitoring_page_key(page),
         parameters_fingerprint=fingerprint(parameters),
-        input_fingerprint=input_fingerprint or metrics.monitoring_input_fingerprint(session, paths),
+        input_fingerprint=input_fingerprint or metrics_query_service.monitoring_input_fingerprint(session, paths),
         producer_version=_PRODUCER_VERSION,
     )
 
@@ -186,7 +189,7 @@ def monitoring_page_evidence(
     sort_dir: str,
 ) -> dict[str, Any]:
     safe_sort_dir = sort_dir if sort_dir in {"asc", "desc"} else "desc"
-    normalized_filters = metrics._normalize_monitoring_filters_for_timezone(
+    normalized_filters = metrics_common._normalize_monitoring_filters_for_timezone(
         filters, timezone_info=timezone_info,
     )
     readers = {
@@ -276,7 +279,7 @@ def _build_monitoring_page(
         raise ValueError(f"Unknown Monitoring page: {page}")
     active_timezone = timezone_info or timezone.utc
     active_timezone_label = timezone_label or "UTC"
-    normalized_filters = metrics._normalize_monitoring_filters_for_timezone(
+    normalized_filters = metrics_common._normalize_monitoring_filters_for_timezone(
         filters or {}, timezone_info=active_timezone,
     )
     if page == "environment-overview":
@@ -380,7 +383,7 @@ def _build_environment_overview_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = environment_overview_read_model(
         paths,
         filters,
@@ -388,18 +391,18 @@ def _build_environment_overview_page(
         timezone_name=str(getattr(timezone_info, "key", "UTC")),
         analytics_context=analytics_context,
     )
-    operations = metrics._empty_operations_page()
+    operations = metrics_common._empty_operations_page()
     executable_dataflows = int(aggregate["dataflow_succeeded"] or 0) + int(
         aggregate["dataflow_failed"] or 0
     )
     operations["kpis"] = {"total_failures": int(aggregate["job_failed"] or 0)}
     operations["dataflow_kpis"] = {
-        "success_rate": metrics._rate(
+        "success_rate": metrics_common._rate(
             int(aggregate["dataflow_succeeded"] or 0),
             executable_dataflows,
         )
     }
-    operations["jobs_by_date_status"] = metrics._status_by_date_counts(
+    operations["jobs_by_date_status"] = metrics_overview._status_by_date_counts(
         list(aggregate["jobs_by_date_status"]),
         trend_context,
     )
@@ -422,18 +425,18 @@ def _build_environment_overview_page(
             "active_metadata_providers": int(aggregate["active_metadata_providers"] or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(),
+        "health": metrics_common._empty_health_page(),
         "attention": [],
         "coverage": {},
         "reconciliation": {},
-        "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
+        "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
         "operations": operations,
-        "failures": metrics._empty_failures_page(),
-        "performance": metrics._empty_performance_page(),
-        "volume": metrics._empty_volume_page(),
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "failures": metrics_common._empty_failures_page(),
+        "performance": metrics_common._empty_performance_page(),
+        "volume": metrics_common._empty_volume_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 
@@ -446,7 +449,7 @@ def _build_overview_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = overview_read_model(
         paths,
         filters,
@@ -466,12 +469,12 @@ def _build_overview_page(
     dataflow_succeeded = int(values.get("dataflow_succeeded") or 0)
     dataflow_failed = int(values.get("dataflow_failed") or 0)
 
-    operations = metrics._empty_operations_page()
+    operations = metrics_common._empty_operations_page()
     operations["windows"] = aggregate["windows"]
-    operations["jobs_by_date_status"] = metrics._status_by_date_counts(
+    operations["jobs_by_date_status"] = metrics_overview._status_by_date_counts(
         list(aggregate["job_status_trend"]), trend_context,
     )
-    operations["dataflows_by_date_status"] = metrics._status_by_date_counts(
+    operations["dataflows_by_date_status"] = metrics_overview._status_by_date_counts(
         list(aggregate["dataflow_status_trend"]), trend_context,
     )
     operations["jobs_by_engine_provider"] = aggregate["runtime_contexts"]
@@ -484,9 +487,9 @@ def _build_overview_page(
     operations["kpis"] = {
         "total_jobs": job_records,
         "total_succeeded": job_succeeded,
-        "job_success_rate": metrics._rate(job_succeeded, job_succeeded + job_failed),
-        "job_failure_rate": metrics._rate(job_failed, job_succeeded + job_failed),
-        "job_skip_rate": metrics._rate(int(values.get("job_skipped") or 0), job_records),
+        "job_success_rate": metrics_common._rate(job_succeeded, job_succeeded + job_failed),
+        "job_failure_rate": metrics_common._rate(job_failed, job_succeeded + job_failed),
+        "job_skip_rate": metrics_common._rate(int(values.get("job_skipped") or 0), job_records),
         "total_rows_processed": float(values.get("total_rows_processed") or 0),
         "total_failures": job_failed,
         "total_skipped": int(values.get("job_child_skipped") or 0),
@@ -502,15 +505,15 @@ def _build_overview_page(
         "skipped": int(values.get("dataflow_skipped") or 0),
         "pending": int(values.get("dataflow_pending") or 0),
         "running": int(values.get("dataflow_running") or 0),
-        "success_rate": metrics._rate(
+        "success_rate": metrics_common._rate(
             dataflow_succeeded, dataflow_succeeded + dataflow_failed,
         ),
-        "failure_rate": metrics._rate(
+        "failure_rate": metrics_common._rate(
             dataflow_failed, dataflow_succeeded + dataflow_failed,
         ),
-        "skip_rate": metrics._rate(int(values.get("dataflow_skipped") or 0), dataflow_records),
-        "pending_rate": metrics._rate(int(values.get("dataflow_pending") or 0), dataflow_records),
-        "running_rate": metrics._rate(int(values.get("dataflow_running") or 0), dataflow_records),
+        "skip_rate": metrics_common._rate(int(values.get("dataflow_skipped") or 0), dataflow_records),
+        "pending_rate": metrics_common._rate(int(values.get("dataflow_pending") or 0), dataflow_records),
+        "running_rate": metrics_common._rate(int(values.get("dataflow_running") or 0), dataflow_records),
         "total_bytes_written": float(values.get("total_bytes_written") or 0),
         "avg_duration_seconds": float(values.get("dataflow_avg_duration_seconds") or 0),
         "p95_duration_seconds": float(values.get("dataflow_p95_duration_seconds") or 0),
@@ -553,38 +556,38 @@ def _build_overview_page(
         has_jobs=job_records > 0,
     )
     failures = {
-        **metrics._empty_failures_page(),
+        **metrics_common._empty_failures_page(),
         "error_categories": aggregate["error_categories"],
         "top_failing_dataflows": aggregate["top_failing_dataflows"],
     }
     dataflow_duration = operations["dataflow_duration_stats"]
     p50 = float(dataflow_duration.get("p50_duration_seconds") or 0)
     p95 = float(dataflow_duration.get("p95_duration_seconds") or 0)
-    performance = metrics._empty_performance_page()
+    performance = metrics_common._empty_performance_page()
     performance["kpis"] = {
         "p50_duration_seconds": p50,
         "p95_duration_seconds": p95,
         "duration_pressure_ratio": p95 / p50 if p50 else 0,
         "optimization_candidate_count": int(performance_attention.get("optimization_candidate_count") or 0),
     }
-    maintenance = metrics._empty_maintenance_page()
+    maintenance = metrics_common._empty_maintenance_page()
     maintenance["kpis"] = {
         "coverage_missing_tables": int(maintenance_attention.get("coverage_missing_tables") or 0),
         "lagged_tables": int(maintenance_attention.get("lagged_tables") or 0),
         "latest_active_tables": int(maintenance_attention.get("latest_active_tables") or 0),
     }
-    freshness = metrics._empty_freshness_page()
+    freshness = metrics_common._empty_freshness_page()
     freshness["kpis"] = {
         "stale_candidates": int(freshness_attention.get("stale_candidates") or 0),
         "watermark_unchanged_runs": int(freshness_attention.get("watermark_unchanged_runs") or 0),
     }
-    diagnostics = metrics._empty_diagnostics_page()
+    diagnostics = metrics_common._empty_diagnostics_page()
     diagnostics["kpis"] = {
         "orphan_dataflow_job_ids": int(health_values.get("orphan_dataflow_job_ids") or 0),
         "jobs_without_dataflow_records": int(health_values.get("jobs_without_dataflow_records") or 0),
         "cache_warning_count": 0,
     }
-    attention = metrics._attention_queue(
+    attention = metrics_overview._attention_queue(
         [], [], failures, performance, maintenance, coverage, reconciliation,
         freshness, health, operations=operations, diagnostics=diagnostics,
     )
@@ -608,18 +611,18 @@ def _build_overview_page(
         "attention": attention,
         "coverage": {},
         "reconciliation": {},
-        "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
+        "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
         "operations": operations,
-        "failures": {**metrics._empty_failures_page(), "error_categories": aggregate["error_categories"]},
-        "performance": metrics._empty_performance_page(),
+        "failures": {**metrics_common._empty_failures_page(), "error_categories": aggregate["error_categories"]},
+        "performance": metrics_common._empty_performance_page(),
         "volume": {
-            **metrics._empty_volume_page(),
+            **metrics_common._empty_volume_page(),
             "rows_by_date": aggregate["rows_by_date"],
             "bytes_by_date": aggregate["bytes_by_date"],
         },
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 
@@ -646,7 +649,7 @@ def _build_volume_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = volume_read_model(
         paths, filters,
         grain=str(trend_context["effective_grain"]),
@@ -696,7 +699,7 @@ def _build_freshness_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = freshness_read_model(
         paths, filters,
         grain=str(trend_context["effective_grain"]),
@@ -744,7 +747,7 @@ def _build_performance_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = performance_read_model(
         paths, filters,
         grain=str(trend_context["effective_grain"]),
@@ -800,7 +803,7 @@ def _build_maintenance_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = maintenance_read_model(
         paths, filters,
         grain=str(trend_context["effective_grain"]),
@@ -834,7 +837,7 @@ def _build_maintenance_page(
         "health_status": health_status,
         "bytes_reclaimed_per_second": round(reclaimed / duration, 3) if duration else 0,
         "avg_bytes_per_file_removed": round(reclaimed / files_removed, 3) if files_removed else 0,
-        "no_op_runtime_share": metrics._rate(
+        "no_op_runtime_share": metrics_common._rate(
             float(values.get("no_op_duration_seconds") or 0),
             float(values.get("succeeded_duration_seconds") or 0),
         ),
@@ -877,15 +880,15 @@ def _empty_internal_page(
             "active_metadata_providers": int(values.get("active_metadata_providers") or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(), "attention": [], "coverage": {},
-        "reconciliation": {}, "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
-        "operations": metrics._empty_operations_page(),
-        "failures": metrics._empty_failures_page(),
-        "performance": metrics._empty_performance_page(),
-        "volume": metrics._empty_volume_page(),
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "health": metrics_common._empty_health_page(), "attention": [], "coverage": {},
+        "reconciliation": {}, "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
+        "operations": metrics_common._empty_operations_page(),
+        "failures": metrics_common._empty_failures_page(),
+        "performance": metrics_common._empty_performance_page(),
+        "volume": metrics_common._empty_volume_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
     result.update(sections)
@@ -900,7 +903,7 @@ def _build_dataflows_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = dataflows_read_model(
         paths,
         filters,
@@ -909,9 +912,9 @@ def _build_dataflows_page(
         analytics_context=analytics_context,
     )
     summary_values = aggregate.get("summary") or {}
-    operations = metrics._empty_operations_page()
+    operations = metrics_common._empty_operations_page()
     operations["windows"] = aggregate["windows"]
-    operations["dataflows_by_date_status"] = metrics._status_by_date_counts(
+    operations["dataflows_by_date_status"] = metrics_overview._status_by_date_counts(
         list(aggregate["status_trend"]),
         trend_context,
     )
@@ -947,7 +950,7 @@ def _build_dataflows_page(
         "p95_duration_seconds": duration_stats["p95_duration_seconds"],
         "active_engines": int(summary_values.get("dataflow_active_engines") or 0),
     }
-    volume = metrics._empty_volume_page()
+    volume = metrics_common._empty_volume_page()
     volume["kpis"] = {
         "total_rows_read": float(summary_values.get("total_rows_read") or 0),
         "total_rows_written": float(summary_values.get("total_rows_written") or 0),
@@ -972,18 +975,18 @@ def _build_dataflows_page(
             "active_metadata_providers": int(summary_values.get("active_metadata_providers") or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(),
+        "health": metrics_common._empty_health_page(),
         "attention": [],
         "coverage": {},
         "reconciliation": {},
-        "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
+        "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
         "operations": operations,
-        "failures": metrics._empty_failures_page(),
-        "performance": metrics._empty_performance_page(),
+        "failures": metrics_common._empty_failures_page(),
+        "performance": metrics_common._empty_performance_page(),
         "volume": volume,
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 def _build_jobs_page(
@@ -994,7 +997,7 @@ def _build_jobs_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = jobs_read_model(
         paths,
         filters,
@@ -1014,7 +1017,7 @@ def _build_jobs_page(
         "p99_duration_seconds": float(values.get("p99_duration_seconds") or 0),
         "max_duration_seconds": float(values.get("max_duration_seconds") or 0),
     }
-    operations = metrics._empty_operations_page()
+    operations = metrics_common._empty_operations_page()
     operations["kpis"] = {
         "total_jobs": int(values.get("total_jobs") or 0),
         "total_succeeded": int(values.get("total_succeeded") or 0),
@@ -1041,12 +1044,12 @@ def _build_jobs_page(
         "skipped": int(values.get("skipped_dataflows") or 0),
         "running": int(values.get("running_dataflows") or 0),
         "pending": int(values.get("pending_dataflows") or 0),
-        "success_rate": metrics._rate(succeeded_dataflows, succeeded_dataflows + failed_dataflows),
-        "failure_rate": metrics._rate(failed_dataflows, succeeded_dataflows + failed_dataflows),
+        "success_rate": metrics_common._rate(succeeded_dataflows, succeeded_dataflows + failed_dataflows),
+        "failure_rate": metrics_common._rate(failed_dataflows, succeeded_dataflows + failed_dataflows),
     }
     operations["windows"] = aggregate["windows"]
     operations["job_duration_stats"] = duration_stats
-    operations["jobs_by_date_status"] = metrics._status_by_date_counts(
+    operations["jobs_by_date_status"] = metrics_overview._status_by_date_counts(
         list(aggregate["status_trend"]),
         trend_context,
     )
@@ -1077,18 +1080,18 @@ def _build_jobs_page(
             "active_metadata_providers": int(values.get("active_metadata_providers") or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(),
+        "health": metrics_common._empty_health_page(),
         "attention": [],
         "coverage": {},
         "reconciliation": reconciliation,
-        "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
+        "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
         "operations": operations,
-        "failures": metrics._empty_failures_page(),
-        "performance": metrics._empty_performance_page(),
-        "volume": metrics._empty_volume_page(),
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "failures": metrics_common._empty_failures_page(),
+        "performance": metrics_common._empty_performance_page(),
+        "volume": metrics_common._empty_volume_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 
@@ -1101,7 +1104,7 @@ def _build_failures_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = failures_read_model(
         paths,
         filters,
@@ -1113,29 +1116,29 @@ def _build_failures_page(
     failed_jobs = int(values.get("failed_job_runs") or 0)
     succeeded_dataflows = int(values.get("succeeded_dataflows") or 0)
     failed_dataflows = int(values.get("failed_dataflows") or 0)
-    operations = metrics._empty_operations_page()
+    operations = metrics_common._empty_operations_page()
     operations["windows"] = aggregate["windows"]
     operations["kpis"] = {
         "total_jobs": int(values.get("job_records") or 0),
         "total_succeeded": succeeded_jobs,
         "total_failures": failed_jobs,
-        "job_success_rate": metrics._rate(succeeded_jobs, succeeded_jobs + failed_jobs),
-        "job_failure_rate": metrics._rate(failed_jobs, succeeded_jobs + failed_jobs),
+        "job_success_rate": metrics_common._rate(succeeded_jobs, succeeded_jobs + failed_jobs),
+        "job_failure_rate": metrics_common._rate(failed_jobs, succeeded_jobs + failed_jobs),
     }
     operations["dataflow_kpis"] = {
         "total_dataflows": int(values.get("dataflow_records") or 0),
         "succeeded": succeeded_dataflows,
         "failed": failed_dataflows,
-        "success_rate": metrics._rate(
+        "success_rate": metrics_common._rate(
             succeeded_dataflows,
             succeeded_dataflows + failed_dataflows,
         ),
-        "failure_rate": metrics._rate(
+        "failure_rate": metrics_common._rate(
             failed_dataflows,
             succeeded_dataflows + failed_dataflows,
         ),
     }
-    failures = metrics._empty_failures_page()
+    failures = metrics_common._empty_failures_page()
     failures.update({
         "kpis": {
             key: value
@@ -1175,18 +1178,18 @@ def _build_failures_page(
             "active_metadata_providers": int(values.get("active_metadata_providers") or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(),
+        "health": metrics_common._empty_health_page(),
         "attention": [],
         "coverage": {},
         "reconciliation": {},
-        "diagnostics": metrics._empty_diagnostics_page(),
-        "metric_definitions": metrics._metric_definitions(),
+        "diagnostics": metrics_common._empty_diagnostics_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
         "operations": operations,
         "failures": failures,
-        "performance": metrics._empty_performance_page(),
-        "volume": metrics._empty_volume_page(),
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "performance": metrics_common._empty_performance_page(),
+        "volume": metrics_common._empty_volume_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 
@@ -1199,7 +1202,7 @@ def _build_diagnostics_page(
     timezone_source: str,
     analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> dict[str, Any]:
-    trend_context = metrics._trend_context(filters, [], timezone_info)
+    trend_context = metrics_common._trend_context(filters, [], timezone_info)
     aggregate = diagnostics_read_model(
         paths,
         filters,
@@ -1213,7 +1216,7 @@ def _build_diagnostics_page(
         for value in (summary.get("earliest_log_at"), summary.get("latest_log_at"))
         if value
     ]
-    trend_context = metrics._trend_context(filters, trend_rows, timezone_info)
+    trend_context = metrics_common._trend_context(filters, trend_rows, timezone_info)
     trend_context["effective_grain"] = aggregate.get("effective_grain") or trend_context["effective_grain"]
     diagnostics = dict(aggregate["diagnostics"])
     diagnostics["record_evidence_by_date"] = _fill_diagnostics_trend_buckets(
@@ -1238,18 +1241,18 @@ def _build_diagnostics_page(
             "active_metadata_providers": int(summary.get("active_metadata_providers") or 0),
             "log_paths": len([path for path in paths if path.enabled]),
         },
-        "health": metrics._empty_health_page(),
+        "health": metrics_common._empty_health_page(),
         "attention": [],
         "coverage": coverage,
         "reconciliation": aggregate["reconciliation"],
         "diagnostics": diagnostics,
-        "metric_definitions": metrics._metric_definitions(),
-        "operations": metrics._empty_operations_page(),
-        "failures": metrics._empty_failures_page(),
-        "performance": metrics._empty_performance_page(),
-        "volume": metrics._empty_volume_page(),
-        "maintenance": metrics._empty_maintenance_page(),
-        "freshness": metrics._empty_freshness_page(),
+        "metric_definitions": metrics_overview._metric_definitions(),
+        "operations": metrics_common._empty_operations_page(),
+        "failures": metrics_common._empty_failures_page(),
+        "performance": metrics_common._empty_performance_page(),
+        "volume": metrics_common._empty_volume_page(),
+        "maintenance": metrics_common._empty_maintenance_page(),
+        "freshness": metrics_common._empty_freshness_page(),
         "errors": [],
     }
 
@@ -1259,7 +1262,7 @@ def _fill_diagnostics_trend_buckets(
     trend_context: dict[str, Any],
 ) -> list[dict[str, Any]]:
     buckets = {str(row.get("bucket") or "unknown"): row for row in rows}
-    for bucket in metrics._diagnostics_expected_trend_buckets(trend_context):
+    for bucket in metrics_diagnostics._diagnostics_expected_trend_buckets(trend_context):
         buckets.setdefault(bucket, {
             "bucket": bucket,
             "date": bucket,

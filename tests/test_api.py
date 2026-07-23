@@ -1919,9 +1919,9 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             next_ids = {row["dataflow_run_id"] for row in next_child_page["records"]}
             assert first_ids.isdisjoint(next_ids)
 
-        from datacoolie_studio.domains.monitoring import service as monitoring_service
+        from datacoolie_studio.domains.monitoring import query_service
 
-        assert not hasattr(monitoring_service, "_monitoring_rows")
+        assert not hasattr(query_service, "_monitoring_rows")
         environment_overview = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/environment-overview"
         ).json()

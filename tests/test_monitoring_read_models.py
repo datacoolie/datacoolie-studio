@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
-from datacoolie_studio.domains.monitoring import page_service, service as monitoring_service
+from datacoolie_studio.domains.monitoring import page_service, query_service
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
 from datacoolie_studio.domains.monitoring.read_models.jobs import jobs_read_model
 from datacoolie_studio.domains.monitoring.read_models.failures import failures_read_model
@@ -689,7 +689,7 @@ def test_all_monitoring_pages_bypass_legacy_fact_materialization() -> None:
         id=1, environment_id=1, source_kind="logs", uri="test://monitoring/1", enabled=True,
     )]
 
-    assert not hasattr(monitoring_service, "_monitoring_rows")
+    assert not hasattr(query_service, "_monitoring_rows")
     for page in page_service.MONITORING_PAGES:
         result = page_service._build_monitoring_page(
             paths,
