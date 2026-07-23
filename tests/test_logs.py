@@ -2079,7 +2079,10 @@ def test_duckdb_expected_column_order_keeps_source_columns_before_studio_columns
         "operation_types": "VARCHAR",
     }
 
-    ordered = logs_cache._expected_column_order(actual_columns, source_column_types)
+    ordered = analytics_schema.expected_column_order(
+        actual_columns,
+        source_column_types,
+    )
 
     assert ordered == [
         "job_id",

@@ -16,12 +16,10 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.core.config import analytics_database_path
 from datacoolie_studio.core.time import parse_utc_datetime, utc_datetime_sort_key
 from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
+from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.analytics.connections import analytics_connections
-from datacoolie_studio.domains.analytics.serving_facts import (
-    monitoring_serving_schema_is_ready,
-)
 from datacoolie_studio.domains.logs.discovery import (
     DiscoveredLogFile,
     LogStreamCheckpoint,
@@ -160,7 +158,7 @@ def analytics_cache_stats() -> dict[str, Any]:
     if not exists:
         return stats
     _ensure_duckdb_cache_ready(path)
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         meta = analytics_store.analytics_meta(conn)
         if meta is not None:
@@ -188,7 +186,7 @@ def analytics_materialization_token(paths: list[EnvironmentSource]) -> str:
     if not path.exists():
         return _unavailable_analytics_token(source_ids, "missing_database")
     try:
-        conn = _connect_analytics(path, read_only=True)
+        conn = analytics_access.connect(path, read_only=True)
     except duckdb.Error:
         return _unavailable_analytics_token(source_ids, "database_unavailable")
     try:
@@ -214,7 +212,7 @@ def analytics_reader(
         yield None, [], _unavailable_analytics_token(source_ids, "missing_database")
         return
     try:
-        conn = _connect_analytics(path, read_only=True)
+        conn = analytics_access.connect(path, read_only=True)
     except duckdb.Error:
         yield None, [], _unavailable_analytics_token(source_ids, "database_unavailable")
         return
@@ -232,7 +230,7 @@ def analytics_reader(
 def clear_analytics_cache() -> dict[str, int]:
     """Delete only the rebuildable DuckDB analytics cache files."""
     path = analytics_database_path()
-    candidate_path = _analytics_candidate_path(path)
+    candidate_path = analytics_access.candidate_path(path)
     if not path.exists() and not candidate_path.exists():
         return {
             "deleted_files": 0,
@@ -306,7 +304,7 @@ def cached_source_stats(source_id: int) -> dict[str, int]:
     if not path.exists():
         return stats
     _ensure_duckdb_cache_ready(path)
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         stats["dataflow_row_count"] = _table_source_row_count(conn, analytics_schema.DATAFLOW_TABLE, source_id)
         stats["job_row_count"] = _table_source_row_count(conn, analytics_schema.JOB_TABLE, source_id)
@@ -326,7 +324,7 @@ def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     if not path.exists():
         return {"dataflow_rows_deleted": 0, "job_rows_deleted": 0, "filter_values_deleted": 0}
     _ensure_duckdb_cache_ready(path)
-    conn = _connect_analytics(path)
+    conn = analytics_access.connect(path)
     try:
         dataflow_rows = _delete_rows_by_source_ids(conn, analytics_schema.DATAFLOW_TABLE, unique_ids)
         job_rows = _delete_rows_by_source_ids(conn, analytics_schema.JOB_TABLE, unique_ids)
@@ -1362,11 +1360,11 @@ def _upsert_duckdb_rows(
     checkpoints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     path = analytics_database_path()
-    if _analytics_schema_rebuild_required(path):
+    if analytics_access.schema_rebuild_required(path):
         with _analytics_schema_rebuild_lock:
-            if _analytics_schema_rebuild_required(path):
-                candidate_path = _analytics_candidate_path(path)
-                _discard_analytics_candidate(candidate_path)
+            if analytics_access.schema_rebuild_required(path):
+                candidate_path = analytics_access.candidate_path(path)
+                analytics_access.discard_candidate(candidate_path)
                 result = _write_duckdb_rows(
                     candidate_path,
                     source_id,
@@ -1380,7 +1378,7 @@ def _upsert_duckdb_rows(
                 if result["published"]:
                     try:
                         _validate_analytics_candidate(candidate_path, source_id)
-                        _swap_analytics_candidate(candidate_path, path)
+                        analytics_access.swap_candidate(candidate_path, path)
                     except Exception as exc:
                         result["errors"].append(
                             {
@@ -1418,7 +1416,7 @@ def _write_duckdb_rows(
     parsed_dataflow_records = 0
     file_row_counts: dict[str, int] = {}
     errors: list[dict[str, str]] = []
-    conn = _connect_analytics(path)
+    conn = analytics_access.connect(path)
     try:
         _ensure_duckdb_tables(conn)
         conn.execute("BEGIN TRANSACTION")
@@ -1485,7 +1483,7 @@ def _read_duckdb_rows(
     if not path.exists():
         return [], []
     _ensure_duckdb_cache_ready(path)
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         placeholders = ", ".join("?" for _ in source_ids)
         dataflows = _select_typed_rows(
@@ -2006,50 +2004,18 @@ def _ensure_duckdb_cache_ready(path: Path) -> None:
     del path
 
 
-def _analytics_schema_rebuild_required(path: Path) -> bool:
-    return path.exists() and not _typed_cache_is_ready(path)
-
-
-def _analytics_candidate_path(path: Path) -> Path:
-    return path.with_name(f"{path.stem}.candidate{path.suffix}")
-
-
-def _discard_analytics_candidate(candidate_path: Path) -> None:
-    for candidate in (candidate_path, Path(f"{candidate_path}.wal")):
-        if candidate.exists():
-            candidate.unlink()
-
-
 def _validate_analytics_candidate(candidate_path: Path, source_id: int) -> None:
-    if not _typed_cache_is_ready(candidate_path):
+    if not analytics_access.cache_is_ready(candidate_path):
         raise RuntimeError("Analytics rebuild candidate did not create the current typed schema")
-    conn = _connect_analytics(candidate_path, read_only=True)
+    conn = analytics_access.connect(candidate_path, read_only=True)
     try:
         _analytics_materialization_token_from_connection(conn, [source_id])
     finally:
         conn.close()
 
 
-def _swap_analytics_candidate(candidate_path: Path, live_path: Path) -> None:
-    """Replace an incompatible analytics DB only after candidate validation and reader drain."""
-    if not candidate_path.exists():
-        raise RuntimeError("Analytics rebuild candidate is missing")
-    with analytics_connections.exclusive_maintenance():
-        candidate_path.replace(live_path)
-        live_wal = Path(f"{live_path}.wal")
-        candidate_wal = Path(f"{candidate_path}.wal")
-        if candidate_wal.exists():
-            candidate_wal.replace(live_wal)
-        elif live_wal.exists():
-            live_wal.unlink()
-
-
-def _connect_analytics(path: Path, *, read_only: bool = False):
-    return analytics_connections.connect(path, read_only=read_only)
-
-
 def _analytics_materialization_token_from_connection(conn, enabled_source_ids: list[int]) -> str:
-    if not _typed_cache_schema_is_ready(conn):
+    if not analytics_schema.typed_cache_schema_is_ready(conn):
         raise AnalyticsRebuildRequired(
             "Monitoring analytics use an incompatible schema; rebuild the Log sources",
             source_ids=enabled_source_ids,
@@ -2081,34 +2047,6 @@ def _analytics_materialization_token_from_connection(conn, enabled_source_ids: l
     )
 
 
-def _typed_cache_schema_is_ready(conn) -> bool:
-    return (
-        analytics_schema.table_exists(conn, analytics_schema.DATAFLOW_TABLE)
-        and analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE)
-        and analytics_schema.table_exists(conn, analytics_schema.FILTER_VALUES_TABLE)
-        and analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE)
-        and analytics_schema.table_exists(conn, analytics_schema.ANALYTICS_META_TABLE)
-        and "generation" in analytics_schema.table_columns(conn, analytics_schema.CACHE_SOURCES_TABLE)
-        and _typed_table_schema_is_current(conn, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
-        and _typed_table_schema_is_current(conn, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
-        and monitoring_serving_schema_is_ready(conn)
-        and not _has_empty_generated_job_columns(conn)
-        and not analytics_schema.table_exists(conn, analytics_schema.LEGACY_DATAFLOW_TABLE)
-        and not analytics_schema.table_exists(conn, analytics_schema.LEGACY_JOB_TABLE)
-    )
-
-
-def _typed_cache_is_ready(path: Path) -> bool:
-    try:
-        conn = _connect_analytics(path, read_only=True)
-    except duckdb.Error:
-        return False
-    try:
-        return _typed_cache_schema_is_ready(conn)
-    finally:
-        conn.close()
-
-
 def _rebuild_required(paths: list[EnvironmentSource], *, reason: str) -> AnalyticsRebuildRequired:
     source_ids = _analytics_source_ids(paths)
     return AnalyticsRebuildRequired(
@@ -2136,9 +2074,9 @@ def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
     if not source_ids:
         return set()
     path = analytics_database_path()
-    if not path.exists() or not _typed_cache_is_ready(path):
+    if not path.exists() or not analytics_access.cache_is_ready(path):
         return set()
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         placeholders = ", ".join("?" for _ in source_ids)
         return {
@@ -2154,9 +2092,9 @@ def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
 
 def _analytics_cache_has_source(source_id: int) -> bool:
     path = analytics_database_path()
-    if not path.exists() or not _typed_cache_is_ready(path):
+    if not path.exists() or not analytics_access.cache_is_ready(path):
         return False
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         meta = analytics_store.analytics_meta(conn)
         return bool(
@@ -2171,9 +2109,9 @@ def _analytics_cache_has_source(source_id: int) -> bool:
 
 def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     path = analytics_database_path()
-    if not path.exists() or not _typed_cache_is_ready(path):
+    if not path.exists() or not analytics_access.cache_is_ready(path):
         return {}, {}
-    conn = _connect_analytics(path, read_only=True)
+    conn = analytics_access.connect(path, read_only=True)
     try:
         if not analytics_schema.table_exists(conn, analytics_schema.INGEST_CHECKPOINT_TABLE) or not analytics_schema.table_exists(conn, analytics_schema.INGEST_MANIFEST_TABLE):
             return {}, {}
@@ -2437,7 +2375,7 @@ def _select_typed_rows(
 
 def _ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> bool:
     columns = analytics_schema.table_columns(conn, table_name)
-    if columns and ("_source_id" not in columns or _has_legacy_raw_json_column(columns) or _has_incompatible_column_types(conn, table_name, column_types)):
+    if columns and ("_source_id" not in columns or analytics_schema.has_legacy_raw_json_column(columns) or analytics_schema.has_incompatible_column_types(conn, table_name, column_types)):
         conn.execute(f"DROP TABLE {table_name}")
         columns = []
     if not columns:
@@ -2454,14 +2392,14 @@ def _ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> 
 
 def _ensure_dataflow_cache_table(conn) -> bool:
     columns = analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE)
-    if columns and ("_source_id" not in columns or _has_legacy_raw_json_column(columns)):
+    if columns and ("_source_id" not in columns or analytics_schema.has_legacy_raw_json_column(columns)):
         conn.execute(f"DROP TABLE {analytics_schema.DATAFLOW_TABLE}")
         columns = []
     if not columns:
         return _ensure_typed_table(conn, analytics_schema.DATAFLOW_TABLE, {})
     existing = set(columns)
     _ensure_columns(conn, analytics_schema.DATAFLOW_TABLE, analytics_schema.STUDIO_CACHE_COLUMNS, existing)
-    _ensure_column_order(conn, analytics_schema.DATAFLOW_TABLE, _actual_source_column_types(conn, analytics_schema.DATAFLOW_TABLE))
+    _ensure_column_order(conn, analytics_schema.DATAFLOW_TABLE, analytics_schema.actual_source_column_types(conn, analytics_schema.DATAFLOW_TABLE))
     return False
 
 
@@ -2596,7 +2534,7 @@ def _ensure_column_order(conn, table_name: str, source_column_types: dict[str, s
     actual_columns = analytics_schema.table_columns(conn, table_name)
     if not actual_columns:
         return
-    expected_columns = _expected_column_order(actual_columns, source_column_types)
+    expected_columns = analytics_schema.expected_column_order(actual_columns, source_column_types)
     if actual_columns == expected_columns:
         return
     actual_types = analytics_schema.table_column_types(conn, table_name)
@@ -2616,27 +2554,6 @@ def _ensure_column_order(conn, table_name: str, source_column_types: dict[str, s
     conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table_name}")
 
 
-def _expected_column_order(actual_columns: list[str], source_column_types: dict[str, str]) -> list[str]:
-    actual = set(actual_columns)
-    source_columns = [column for column in source_column_types if column in actual]
-    extra_source_columns = [
-        column
-        for column in actual_columns
-        if column not in source_column_types and column not in analytics_schema.STUDIO_CACHE_COLUMNS
-    ]
-    studio_columns = [column for column in analytics_schema.STUDIO_CACHE_COLUMNS if column in actual]
-    return [*source_columns, *extra_source_columns, *studio_columns]
-
-
-def _actual_source_column_types(conn, table_name: str) -> dict[str, str]:
-    actual_types = analytics_schema.table_column_types(conn, table_name)
-    return {
-        column: actual_types[column]
-        for column in analytics_schema.table_columns(conn, table_name)
-        if column not in analytics_schema.STUDIO_CACHE_COLUMNS and column in actual_types
-    }
-
-
 def _drop_empty_generated_job_columns(conn) -> None:
     """Remove columns that older studio cache versions generated for jobs."""
     if not analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE):
@@ -2654,64 +2571,6 @@ def _drop_empty_generated_job_columns(conn) -> None:
                 conn.execute(f"ALTER TABLE {analytics_schema.JOB_TABLE} DROP COLUMN {quoted_column}")
         except duckdb.Error:
             continue
-
-
-def _has_empty_generated_job_columns(conn) -> bool:
-    if not analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE):
-        return False
-    columns = set(analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
-    for column in ("operation_type",):
-        if column not in columns:
-            continue
-        quoted_column = _quote_identifier(column)
-        try:
-            non_null_count = conn.execute(
-                f"SELECT count(*) FROM {analytics_schema.JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
-            ).fetchone()[0]
-        except duckdb.Error:
-            return False
-        if int(non_null_count or 0) == 0:
-            return True
-    return False
-
-
-def _typed_table_schema_is_current(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = analytics_schema.table_columns(conn, table_name)
-    if table_name == analytics_schema.DATAFLOW_TABLE:
-        return (
-            bool(columns)
-            and "_source_id" in columns
-            and not _has_legacy_raw_json_column(columns)
-            and not _has_incompatible_column_types(conn, table_name, {})
-            and not _has_column_order_mismatch(conn, table_name, _actual_source_column_types(conn, table_name))
-        )
-    return (
-        bool(columns)
-        and "_source_id" in columns
-        and set(column_types).issubset(columns)
-        and not _has_legacy_raw_json_column(columns)
-        and not _has_incompatible_column_types(conn, table_name, column_types)
-        and not _has_column_order_mismatch(conn, table_name, column_types)
-    )
-
-
-def _has_legacy_raw_json_column(columns: list[str]) -> bool:
-    return "_raw_json" in columns
-
-
-def _has_column_order_mismatch(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = analytics_schema.table_columns(conn, table_name)
-    return bool(columns) and columns != _expected_column_order(columns, column_types)
-
-
-def _has_incompatible_column_types(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    actual_types = analytics_schema.table_column_types(conn, table_name)
-    expected_types = {**analytics_schema.STUDIO_CACHE_COLUMNS, **column_types}
-    for column, expected_type in expected_types.items():
-        actual_type = actual_types.get(column)
-        if actual_type and not analytics_schema.duckdb_type_matches(actual_type, expected_type):
-            return True
-    return False
 
 
 def _table_row_count(conn, table_name: str) -> int:

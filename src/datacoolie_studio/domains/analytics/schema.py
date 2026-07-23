@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import duckdb
 
+from datacoolie_studio.domains.analytics.serving_facts import (
+    monitoring_serving_schema_is_ready,
+)
+
 
 STUDIO_CACHE_COLUMNS = {
     "_source_id": "BIGINT",
@@ -283,3 +287,129 @@ def ensure_analytics_meta_table(conn) -> None:
             """,
             [ANALYTICS_SCHEMA_VERSION],
         )
+
+
+def expected_column_order(
+    actual_columns: list[str],
+    source_column_types: dict[str, str],
+) -> list[str]:
+    actual = set(actual_columns)
+    source_columns = [column for column in source_column_types if column in actual]
+    extra_source_columns = [
+        column
+        for column in actual_columns
+        if column not in source_column_types and column not in STUDIO_CACHE_COLUMNS
+    ]
+    studio_columns = [column for column in STUDIO_CACHE_COLUMNS if column in actual]
+    return [*source_columns, *extra_source_columns, *studio_columns]
+
+
+def actual_source_column_types(conn, table_name: str) -> dict[str, str]:
+    actual_types = table_column_types(conn, table_name)
+    return {
+        column: actual_types[column]
+        for column in table_columns(conn, table_name)
+        if column not in STUDIO_CACHE_COLUMNS and column in actual_types
+    }
+
+
+def has_legacy_raw_json_column(columns: list[str]) -> bool:
+    return "_raw_json" in columns
+
+
+def has_column_order_mismatch(
+    conn,
+    table_name: str,
+    column_types: dict[str, str],
+) -> bool:
+    columns = table_columns(conn, table_name)
+    return bool(columns) and columns != expected_column_order(columns, column_types)
+
+
+def has_incompatible_column_types(
+    conn,
+    table_name: str,
+    column_types: dict[str, str],
+) -> bool:
+    actual_types = table_column_types(conn, table_name)
+    expected_types = {**STUDIO_CACHE_COLUMNS, **column_types}
+    return any(
+        actual_type
+        and not duckdb_type_matches(actual_type, expected_type)
+        for column, expected_type in expected_types.items()
+        if (actual_type := actual_types.get(column))
+    )
+
+
+def typed_table_schema_is_current(
+    conn,
+    table_name: str,
+    column_types: dict[str, str],
+) -> bool:
+    columns = table_columns(conn, table_name)
+    if table_name == DATAFLOW_TABLE:
+        actual_source_types = actual_source_column_types(conn, table_name)
+        return (
+            bool(columns)
+            and "_source_id" in columns
+            and not has_legacy_raw_json_column(columns)
+            and not has_incompatible_column_types(conn, table_name, {})
+            and not has_column_order_mismatch(
+                conn,
+                table_name,
+                actual_source_types,
+            )
+        )
+    return (
+        bool(columns)
+        and "_source_id" in columns
+        and set(column_types).issubset(columns)
+        and not has_legacy_raw_json_column(columns)
+        and not has_incompatible_column_types(conn, table_name, column_types)
+        and not has_column_order_mismatch(conn, table_name, column_types)
+    )
+
+
+def has_empty_generated_job_columns(conn) -> bool:
+    if not table_exists(conn, JOB_TABLE):
+        return False
+    columns = set(table_columns(conn, JOB_TABLE))
+    for column in ("operation_type",):
+        if column not in columns:
+            continue
+        quoted_column = quote_identifier(column)
+        try:
+            non_null_count = conn.execute(
+                f"SELECT count(*) FROM {JOB_TABLE} "
+                f"WHERE {quoted_column} IS NOT NULL"
+            ).fetchone()[0]
+        except duckdb.Error:
+            return False
+        if int(non_null_count or 0) == 0:
+            return True
+    return False
+
+
+def typed_cache_schema_is_ready(conn) -> bool:
+    return (
+        table_exists(conn, DATAFLOW_TABLE)
+        and table_exists(conn, JOB_TABLE)
+        and table_exists(conn, FILTER_VALUES_TABLE)
+        and table_exists(conn, CACHE_SOURCES_TABLE)
+        and table_exists(conn, ANALYTICS_META_TABLE)
+        and "generation" in table_columns(conn, CACHE_SOURCES_TABLE)
+        and typed_table_schema_is_current(
+            conn,
+            DATAFLOW_TABLE,
+            DATAFLOW_COLUMN_TYPES,
+        )
+        and typed_table_schema_is_current(conn, JOB_TABLE, JOB_COLUMN_TYPES)
+        and monitoring_serving_schema_is_ready(conn)
+        and not has_empty_generated_job_columns(conn)
+        and not table_exists(conn, LEGACY_DATAFLOW_TABLE)
+        and not table_exists(conn, LEGACY_JOB_TABLE)
+    )
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
