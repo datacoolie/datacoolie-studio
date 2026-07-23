@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { failureDiagnosticTags, formatRuntimeTimestampForDisplay, phaseRuntimeStatusClass } from "./MonitoringDetailDrawer";
+import { describe, expect, it } from "vitest";import { failureDiagnosticTags } from "./details/FailureDetails";
+import { formatRuntimeTimestampForDisplay, phaseRuntimeStatusClass } from "./details/detailPrimitives";
 
 describe("dataflow run drawer runtime status", () => {
   it.each([

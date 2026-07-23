@@ -1,10 +1,5 @@
-import { describe, expect, it } from "vitest";
-import {
-  freshnessDrawerHealth,
-  freshnessEndpointLabel,
-  freshnessRunTimeLines,
-  isFreshnessWatermarkConfigured,
-} from "./MonitoringDetailDrawer";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPrimitives";
+import { describe, expect, it } from "vitest";import { freshnessDrawerHealth, freshnessRunTimeLines } from "./details/detailPrimitives";
+import { freshnessEndpointLabel, isFreshnessWatermarkConfigured } from "./details/FreshnessDetails";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPrimitives";
 
 describe("Freshness registry drawer semantics", () => {
   it("formats runtime phase contribution with one decimal place", () => {

@@ -2965,10 +2965,6 @@ body,
 /* 8. Monitoring surface colors → CSS token variables.
       Replaces hardcoded #dde3eb / #ffffff / #f8fafc with token refs
       so the monitoring section tracks any future theme change automatically. */
-.monitoring-health-card {
-  border-color: var(--color-border);
-  background: var(--color-surface);
-}
 
 .overview-health-strip > div {
   border-color: var(--color-border);
@@ -4144,7 +4140,6 @@ pre,
 .lineage-identity,
 .dataflow-run-id,
 .asset-identity,
-.monitoring-mono,
 .table-cell-mono {
   font-family: var(--font-mono);
 }
@@ -4276,10 +4271,6 @@ pre,
 .overview-status-header,
 .overview-report-panel,
 .metadata-kpi-tile,
-.monitoring-health-card,
-.monitoring-diagnostics-impact-card,
-.monitoring-freshness-watermark-card,
-.monitoring-job-group-card,
 .project-detail-header-panel {
   border-color: var(--color-border);
   border-radius: var(--radius-md);
@@ -4297,8 +4288,7 @@ pre,
 .project-detail-header,
 .project-local-tabs,
 .metadata-tabs,
-.report-filter-frame,
-.monitoring-filter-shell {
+.report-filter-frame {
   border-color: var(--color-border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(247, 249, 252, 0.96)),
@@ -4317,8 +4307,6 @@ pre,
 .metric-card span,
 .mini-metric span,
 .metadata-kpi-label,
-.monitoring-health-card span,
-.monitoring-health-card small,
 .project-detail-metric em {
   color: var(--color-text-subtle);
   font-size: var(--font-size-2xs);
@@ -4330,7 +4318,6 @@ pre,
 .metric-card strong,
 .mini-metric strong,
 .metadata-kpi-value,
-.monitoring-health-card strong,
 .project-detail-metric strong {
   color: var(--color-text);
   font-weight: var(--font-weight-semibold);
@@ -4342,8 +4329,7 @@ pre,
 input,
 select,
 textarea,
-.metadata-search-input,
-.monitoring-search-input {
+.metadata-search-input {
   border-color: var(--color-border-strong);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
@@ -4358,8 +4344,7 @@ textarea::placeholder {
 input:focus,
 select:focus,
 textarea:focus,
-.metadata-search-input:focus,
-.monitoring-search-input:focus {
+.metadata-search-input:focus {
   border-color: var(--color-accent);
   box-shadow: var(--ring-accent-soft);
 }
@@ -4426,7 +4411,6 @@ label {
 
 /* Data tables and report tables */
 table,
-.monitoring-table,
 .metadata-sheet,
 .rdg,
 .dsg-container {
@@ -4434,7 +4418,6 @@ table,
 }
 
 th,
-.monitoring-table th,
 .rdg-header-row,
 .dsg-header-row,
 .data-grid-header {
@@ -4446,7 +4429,6 @@ th,
 }
 
 td,
-.monitoring-table td,
 .rdg-cell,
 .dsg-cell {
   color: var(--color-text);

@@ -1,4 +1,4 @@
-import type { MonitoringDetailKind } from "./MonitoringDetailDrawer";
+import { MonitoringDetailKind } from "./MonitoringDetailDrawer";
 import type { TableSort } from "./MonitoringCharts";
 
 export interface MonitoringDetailTarget {

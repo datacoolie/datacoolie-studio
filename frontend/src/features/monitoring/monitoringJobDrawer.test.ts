@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lifecycleStatusPresentations } from "../../shared/statusPresentation";
-import { semanticNumber } from "./MonitoringDetailDrawer";
+import { lifecycleStatusPresentations } from "../../shared/statusPresentation";import { semanticNumber } from "./details/detailPrimitives";
 
 describe("Job drawer semantic status colors", () => {
   it.each([

@@ -1,5 +1,6 @@
 import { Activity, AlertTriangle, BarChart3, Boxes, Clock3, FileWarning, Gauge, HardDrive, RefreshCw, Table2, Workflow } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import "./monitoring.css";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   JobRecord,
@@ -8,8 +9,7 @@ import type {
   MonitoringReport
 } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
-import type { TableSort } from "./MonitoringCharts";
-import type { MonitoringDetailKind } from "./MonitoringDetailDrawer";
+import type { TableSort } from "./MonitoringCharts";import { MonitoringDetailKind } from "./MonitoringDetailDrawer";
 import { mergeDataflowRunDetail, monitoringDetailEvidenceRequest } from "./monitoringDetailEvidence";
 import { MonitoringFilterBar, type MonitoringSearchOption } from "./MonitoringFilterBar";
 import { IntentPrefetchController } from "./intentPrefetch";
