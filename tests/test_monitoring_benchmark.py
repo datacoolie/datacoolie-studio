@@ -5,12 +5,13 @@ import duckdb
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from benchmarks.monitoring_performance import _nearest_rank, _summarize, benchmark_call
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_DATAFLOW_FACTS_TABLE,
     MONITORING_JOB_FACTS_TABLE,
     monitoring_serving_schema_is_ready,
 )
+from datacoolie_studio.domains.logs import cache as logs_cache
 
 
 def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monkeypatch):
@@ -44,7 +45,7 @@ def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monke
             f"SELECT COUNT(*) FROM {MONITORING_JOB_FACTS_TABLE}"
         ).fetchone()[0] == 50
         assert connection.execute(
-            f"SELECT COUNT(*) FROM {logs_cache.FILTER_VALUES_TABLE}"
+            f"SELECT COUNT(*) FROM {analytics_schema.FILTER_VALUES_TABLE}"
         ).fetchone()[0] > 0
 
 

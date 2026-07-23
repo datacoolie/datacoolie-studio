@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.logs import cache as logs_cache
 from datacoolie_studio.domains.logs.reader import (
     discover_dataflow_parquet_files,
@@ -1840,17 +1841,17 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
         logs_cache._ensure_duckdb_tables(connection)
         logs_cache._ensure_typed_table(
             connection,
-            logs_cache.DATAFLOW_TABLE,
+            analytics_schema.DATAFLOW_TABLE,
             logs_cache.DATAFLOW_COLUMN_TYPES,
         )
         logs_cache._ensure_typed_table(
             connection,
-            logs_cache.JOB_TABLE,
+            analytics_schema.JOB_TABLE,
             logs_cache.JOB_COLUMN_TYPES,
         )
         logs_cache._insert_typed_rows(
             connection,
-            logs_cache.DATAFLOW_TABLE,
+            analytics_schema.DATAFLOW_TABLE,
             7,
             [
                 ("outside.parquet", "dataflow_parquet", "{}", {"status": "failed", "end_time": "2026-06-10T02:59:59Z"}),
@@ -1861,7 +1862,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
         )
         logs_cache._insert_typed_rows(
             connection,
-            logs_cache.JOB_TABLE,
+            analytics_schema.JOB_TABLE,
             7,
             [
                 ("last7.jsonl", "job_jsonl", "{}", {"status": "failed", "engine_name": "polars", "end_time": "2026-07-02T20:00:00Z"}),
@@ -1931,12 +1932,12 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
         logs_cache._ensure_duckdb_tables(connection)
         logs_cache._ensure_typed_table(
             connection,
-            logs_cache.DATAFLOW_TABLE,
+            analytics_schema.DATAFLOW_TABLE,
             logs_cache.DATAFLOW_COLUMN_TYPES,
         )
         logs_cache._insert_typed_rows(
             connection,
-            logs_cache.DATAFLOW_TABLE,
+            analytics_schema.DATAFLOW_TABLE,
             7,
             [
                 *recent_rows,
@@ -1976,10 +1977,10 @@ def test_legacy_dataflow_cache_table_is_recreated_in_one_schema_pass(tmp_path: P
     analytics_path = tmp_path / "analytics.duckdb"
     with duckdb.connect(str(analytics_path)) as connection:
         connection.execute(
-            f"CREATE TABLE {logs_cache.DATAFLOW_TABLE} (_raw_json VARCHAR)"
+            f"CREATE TABLE {analytics_schema.DATAFLOW_TABLE} (_raw_json VARCHAR)"
         )
         logs_cache._ensure_duckdb_tables(connection)
-        columns = logs_cache._table_columns(connection, logs_cache.DATAFLOW_TABLE)
+        columns = analytics_schema.table_columns(connection, analytics_schema.DATAFLOW_TABLE)
 
     assert "_raw_json" not in columns
     assert "_source_id" in columns
@@ -2004,7 +2005,7 @@ def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path
         logs_cache._ensure_duckdb_tables(connection)
         logs_cache._insert_typed_rows(
             connection,
-            logs_cache.JOB_TABLE,
+            analytics_schema.JOB_TABLE,
             1,
             [("job.jsonl", "job_jsonl", "{}", job_row)],
             logs_cache.JOB_COLUMN_TYPES,

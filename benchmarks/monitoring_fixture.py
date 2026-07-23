@@ -4,6 +4,7 @@ from pathlib import Path
 
 import duckdb
 
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.logs import cache
 
 
@@ -25,14 +26,14 @@ def build_analytics_fixture(
     source_values = ", ".join(f"({int(source_id)})" for source_id in source_ids)
     connection = duckdb.connect(str(path))
     try:
-        cache._ensure_typed_table(connection, cache.DATAFLOW_TABLE, cache.DATAFLOW_COLUMN_TYPES)
-        cache._ensure_typed_table(connection, cache.JOB_TABLE, cache.JOB_COLUMN_TYPES)
+        cache._ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, cache.DATAFLOW_COLUMN_TYPES)
+        cache._ensure_typed_table(connection, analytics_schema.JOB_TABLE, cache.JOB_COLUMN_TYPES)
         cache._ensure_filter_values_table(connection)
         cache._ensure_cache_sources_table(connection)
         cache._ensure_analytics_meta_table(connection)
         connection.execute(
             f"""
-            INSERT INTO {cache.JOB_TABLE} (
+            INSERT INTO {analytics_schema.JOB_TABLE} (
               _source_id, _file_uri, _file_kind, _file_date, _source_size,
               _source_mtime_ns, _ingested_at, _type, job_id, platform_name,
               engine_name, metadata_provider_name, start_time, end_time,
@@ -66,7 +67,7 @@ def build_analytics_fixture(
         )
         connection.execute(
             f"""
-            INSERT INTO {cache.DATAFLOW_TABLE} (
+            INSERT INTO {analytics_schema.DATAFLOW_TABLE} (
               _source_id, _file_uri, _file_kind, _file_date, _source_size,
               _source_mtime_ns, _ingested_at, _type, job_id, dataflow_id,
               dataflow_run_id, dataflow_name, stage, operation_type, status,
@@ -118,7 +119,7 @@ def build_analytics_fixture(
         )
         now = "2026-07-21T00:00:00+00:00"
         connection.execute(
-            f"INSERT INTO {cache.CACHE_SOURCES_TABLE} "
+            f"INSERT INTO {analytics_schema.CACHE_SOURCES_TABLE} "
             f"SELECT source_id, ?::TIMESTAMPTZ, 1 FROM (VALUES {source_values}) sources(source_id)",
             [now],
         )

@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.logs.cache import (
+from datacoolie_studio.domains.analytics.schema import (
     DATAFLOW_TABLE,
     FILTER_VALUES_TABLE,
     JOB_TABLE,

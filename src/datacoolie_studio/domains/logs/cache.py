@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.core.config import analytics_database_path
 from datacoolie_studio.core.time import parse_utc_datetime, utc_datetime_sort_key
 from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics.connections import analytics_connections
 from datacoolie_studio.domains.analytics.serving_facts import (
     monitoring_serving_schema_is_ready,
@@ -47,29 +48,6 @@ from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, req
 from datacoolie_studio.domains.storage.adapters import FileRevision, LocalStorageAdapter
 from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
-
-
-STUDIO_CACHE_COLUMNS = {
-    "_source_id": "BIGINT",
-    "_file_uri": "VARCHAR",
-    "_file_kind": "VARCHAR",
-    "_file_date": "DATE",
-    "_source_size": "BIGINT",
-    "_source_mtime_ns": "BIGINT",
-    "_ingested_at": "TIMESTAMPTZ",
-}
-GENERATED_CACHE_COLUMNS = {"__event_time", "__run_date"}
-
-DATAFLOW_TABLE = "etl_dataflow_runs"
-JOB_TABLE = "etl_job_runs"
-FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
-CACHE_SOURCES_TABLE = "etl_cache_sources"
-ANALYTICS_META_TABLE = "etl_analytics_meta"
-INGEST_CHECKPOINT_TABLE = "log_ingest_checkpoint"
-INGEST_MANIFEST_TABLE = "log_ingest_file_manifest"
-ANALYTICS_SCHEMA_VERSION = 5
-LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
-LEGACY_JOB_TABLE = "etl_job_run_cache"
 
 
 _analytics_schema_rebuild_lock = Lock()
@@ -147,20 +125,20 @@ JOB_SORT_COLUMNS = {
 }
 
 FILTER_VALUE_SOURCES = {
-    "operation_type": (DATAFLOW_TABLE, "operation_type"),
-    "status": (DATAFLOW_TABLE, "status"),
-    "stage": (DATAFLOW_TABLE, "stage"),
-    "engine_name": (JOB_TABLE, "engine_name"),
-    "metadata_provider_name": (JOB_TABLE, "metadata_provider_name"),
-    "platform_name": (JOB_TABLE, "platform_name"),
-    "source_connection_type": (DATAFLOW_TABLE, "source_connection_type"),
-    "source_format": (DATAFLOW_TABLE, "source_format"),
-    "source_table": (DATAFLOW_TABLE, "source_table"),
-    "destination_connection_type": (DATAFLOW_TABLE, "destination_connection_type"),
-    "destination_format": (DATAFLOW_TABLE, "destination_format"),
-    "destination_table": (DATAFLOW_TABLE, "destination_table"),
-    "destination_load_type": (DATAFLOW_TABLE, "destination_load_type"),
-    "destination_operation_type": (DATAFLOW_TABLE, "destination_operation_type"),
+    "operation_type": (analytics_schema.DATAFLOW_TABLE, "operation_type"),
+    "status": (analytics_schema.DATAFLOW_TABLE, "status"),
+    "stage": (analytics_schema.DATAFLOW_TABLE, "stage"),
+    "engine_name": (analytics_schema.JOB_TABLE, "engine_name"),
+    "metadata_provider_name": (analytics_schema.JOB_TABLE, "metadata_provider_name"),
+    "platform_name": (analytics_schema.JOB_TABLE, "platform_name"),
+    "source_connection_type": (analytics_schema.DATAFLOW_TABLE, "source_connection_type"),
+    "source_format": (analytics_schema.DATAFLOW_TABLE, "source_format"),
+    "source_table": (analytics_schema.DATAFLOW_TABLE, "source_table"),
+    "destination_connection_type": (analytics_schema.DATAFLOW_TABLE, "destination_connection_type"),
+    "destination_format": (analytics_schema.DATAFLOW_TABLE, "destination_format"),
+    "destination_table": (analytics_schema.DATAFLOW_TABLE, "destination_table"),
+    "destination_load_type": (analytics_schema.DATAFLOW_TABLE, "destination_load_type"),
+    "destination_operation_type": (analytics_schema.DATAFLOW_TABLE, "destination_operation_type"),
 }
 
 DATAFLOW_COLUMN_TYPES = {
@@ -323,9 +301,9 @@ def analytics_cache_stats() -> dict[str, Any]:
         meta = _analytics_meta(conn)
         if meta is not None:
             stats.update(meta)
-        stats["dataflow_row_count"] = _table_row_count(conn, DATAFLOW_TABLE)
-        stats["job_row_count"] = _table_row_count(conn, JOB_TABLE)
-        stats["filter_value_count"] = _table_row_count(conn, FILTER_VALUES_TABLE)
+        stats["dataflow_row_count"] = _table_row_count(conn, analytics_schema.DATAFLOW_TABLE)
+        stats["job_row_count"] = _table_row_count(conn, analytics_schema.JOB_TABLE)
+        stats["filter_value_count"] = _table_row_count(conn, analytics_schema.FILTER_VALUES_TABLE)
         stats["cached_source_ids"] = sorted(_cache_source_ids(conn))
     finally:
         conn.close()
@@ -340,7 +318,7 @@ def analytics_materialization_token(paths: list[EnvironmentSource]) -> str:
     """
     source_ids = _analytics_source_ids(paths)
     if not source_ids:
-        return f"analytics-v{ANALYTICS_SCHEMA_VERSION}:empty"
+        return f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:empty"
 
     path = analytics_database_path()
     if not path.exists():
@@ -365,7 +343,7 @@ def analytics_reader(
     """Open one validated, progress-silent reader for a Monitoring request."""
     source_ids = _analytics_source_ids(paths)
     if not source_ids:
-        yield None, [], f"analytics-v{ANALYTICS_SCHEMA_VERSION}:empty"
+        yield None, [], f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:empty"
         return
     path = analytics_database_path()
     if not path.exists():
@@ -466,9 +444,9 @@ def cached_source_stats(source_id: int) -> dict[str, int]:
     _ensure_duckdb_cache_ready(path)
     conn = _connect_analytics(path, read_only=True)
     try:
-        stats["dataflow_row_count"] = _table_source_row_count(conn, DATAFLOW_TABLE, source_id)
-        stats["job_row_count"] = _table_source_row_count(conn, JOB_TABLE, source_id)
-        stats["filter_value_count"] = _table_source_row_count(conn, FILTER_VALUES_TABLE, source_id)
+        stats["dataflow_row_count"] = _table_source_row_count(conn, analytics_schema.DATAFLOW_TABLE, source_id)
+        stats["job_row_count"] = _table_source_row_count(conn, analytics_schema.JOB_TABLE, source_id)
+        stats["filter_value_count"] = _table_source_row_count(conn, analytics_schema.FILTER_VALUES_TABLE, source_id)
     finally:
         conn.close()
     return stats
@@ -486,12 +464,12 @@ def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     _ensure_duckdb_cache_ready(path)
     conn = _connect_analytics(path)
     try:
-        dataflow_rows = _delete_rows_by_source_ids(conn, DATAFLOW_TABLE, unique_ids)
-        job_rows = _delete_rows_by_source_ids(conn, JOB_TABLE, unique_ids)
-        filter_rows = _delete_rows_by_source_ids(conn, FILTER_VALUES_TABLE, unique_ids)
-        _delete_rows_by_source_ids(conn, CACHE_SOURCES_TABLE, unique_ids, source_column="source_id")
-        _delete_rows_by_source_ids(conn, INGEST_MANIFEST_TABLE, unique_ids, source_column="source_id")
-        _delete_rows_by_source_ids(conn, INGEST_CHECKPOINT_TABLE, unique_ids, source_column="source_id")
+        dataflow_rows = _delete_rows_by_source_ids(conn, analytics_schema.DATAFLOW_TABLE, unique_ids)
+        job_rows = _delete_rows_by_source_ids(conn, analytics_schema.JOB_TABLE, unique_ids)
+        filter_rows = _delete_rows_by_source_ids(conn, analytics_schema.FILTER_VALUES_TABLE, unique_ids)
+        _delete_rows_by_source_ids(conn, analytics_schema.CACHE_SOURCES_TABLE, unique_ids, source_column="source_id")
+        _delete_rows_by_source_ids(conn, analytics_schema.INGEST_MANIFEST_TABLE, unique_ids, source_column="source_id")
+        _delete_rows_by_source_ids(conn, analytics_schema.INGEST_CHECKPOINT_TABLE, unique_ids, source_column="source_id")
     finally:
         conn.close()
     return {
@@ -1073,7 +1051,7 @@ def cached_monitoring_summary(
                 status,
                 COALESCE(end_time, start_time) AS event_time,
                 COALESCE(__run_date, CAST(timezone('UTC', COALESCE(end_time, start_time)) AS DATE)) AS run_date
-              FROM {DATAFLOW_TABLE}
+              FROM {analytics_schema.DATAFLOW_TABLE}
               WHERE _source_id IN ({placeholders})
                 AND COALESCE(end_time, start_time) >= ?
             ),
@@ -1082,7 +1060,7 @@ def cached_monitoring_summary(
                 status,
                 engine_name,
                 __event_time AS event_time
-              FROM {JOB_TABLE}
+              FROM {analytics_schema.JOB_TABLE}
               WHERE _source_id IN ({placeholders})
                 AND __event_time >= ?
             ),
@@ -1175,7 +1153,7 @@ def query_cached_latest_dataflow_runs(
                   TRY_CAST(start_time AS TIMESTAMPTZ),
                   TIMESTAMPTZ '1970-01-01 00:00:00+00'
                 ) AS event_time
-              FROM {DATAFLOW_TABLE}
+              FROM {analytics_schema.DATAFLOW_TABLE}
               WHERE _source_id IN ({placeholders})
                 AND (NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
                   OR NULLIF(CAST(dataflow_name AS VARCHAR), '') IS NOT NULL)
@@ -1198,7 +1176,7 @@ def query_cached_latest_dataflow_runs(
         ambiguous_rows = conn.execute(
             f"""
             SELECT CAST(dataflow_name AS VARCHAR)
-            FROM {DATAFLOW_TABLE}
+            FROM {analytics_schema.DATAFLOW_TABLE}
             WHERE _source_id IN ({placeholders})
               AND NULLIF(CAST(dataflow_name AS VARCHAR), '') IS NOT NULL
               AND NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
@@ -1313,14 +1291,14 @@ def query_cached_dataflow_logs(
               ANY_VALUE(platform_name) AS platform_name,
               ANY_VALUE(status) AS status,
               ANY_VALUE(duration_seconds) AS duration_seconds
-            FROM {JOB_TABLE}
+            FROM {analytics_schema.JOB_TABLE}
             WHERE _source_id IN ({source_placeholders})
               AND job_id IS NOT NULL
             GROUP BY _source_id, job_id
             """
         )
         from_sql = (
-            f"FROM {DATAFLOW_TABLE} d "
+            f"FROM {analytics_schema.DATAFLOW_TABLE} d "
             f"LEFT JOIN ({job_lookup_sql}) j ON j._source_id = d._source_id AND j.job_id = d.job_id "
             f"WHERE d._source_id IN ({source_placeholders}){where_sql}"
         )
@@ -1362,7 +1340,7 @@ def query_cached_job_logs(
     with analytics_reader(paths) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], 0, []
-        job_select_sql = _select_alias_columns("j", _table_columns(conn, JOB_TABLE))
+        job_select_sql = _select_alias_columns("j", analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
         source_placeholders = ", ".join("?" for _ in source_ids)
         where_sql, params = _monitoring_filter_sql(filters, "j", "j", include_dataflow_filters=False)
         child_summary_sql = (
@@ -1381,14 +1359,14 @@ def query_cached_job_logs(
               SUM(destination_rows_written) AS child_total_rows_written,
               SUM(destination_bytes_added) AS child_total_bytes_added,
               SUM(destination_bytes_removed) AS child_total_bytes_removed
-            FROM {DATAFLOW_TABLE}
+            FROM {analytics_schema.DATAFLOW_TABLE}
             WHERE _source_id IN ({source_placeholders})
               AND job_id IS NOT NULL
             GROUP BY _source_id, job_id
             """
         )
         from_sql = (
-            f"FROM {JOB_TABLE} j "
+            f"FROM {analytics_schema.JOB_TABLE} j "
             f"LEFT JOIN ({child_summary_sql}) c ON c._source_id = j._source_id AND c.job_id = j.job_id "
             f"WHERE j._source_id IN ({source_placeholders}){where_sql}"
         )
@@ -1457,14 +1435,14 @@ def query_cached_monitoring_rows(
               ANY_VALUE(engine_name) AS engine_name,
               ANY_VALUE(metadata_provider_name) AS metadata_provider_name,
               ANY_VALUE(platform_name) AS platform_name
-            FROM {JOB_TABLE}
+            FROM {analytics_schema.JOB_TABLE}
             WHERE _source_id IN ({source_placeholders})
               AND job_id IS NOT NULL
             GROUP BY _source_id, job_id
             """
         )
 
-        dataflow_available = set(_table_columns(conn, DATAFLOW_TABLE))
+        dataflow_available = set(analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE))
         requested_dataflow_columns = list(dataflow_columns or tuple(DATAFLOW_COLUMN_TYPES))
         selected_dataflow_columns = [column for column in requested_dataflow_columns if column in dataflow_available]
         dataflow_select_sql = _select_alias_columns("d", selected_dataflow_columns)
@@ -1476,7 +1454,7 @@ def query_cached_monitoring_rows(
               COALESCE(j.engine_name, 'unknown') AS engine_name,
               COALESCE(j.metadata_provider_name, 'unknown') AS metadata_provider_name,
               COALESCE(j.platform_name, 'unknown') AS platform_name
-            FROM {DATAFLOW_TABLE} d
+            FROM {analytics_schema.DATAFLOW_TABLE} d
             LEFT JOIN ({job_lookup_sql}) j
               ON j._source_id = d._source_id AND j.job_id = d.job_id
             WHERE d._source_id IN ({source_placeholders}){dataflow_where_sql}
@@ -1486,7 +1464,7 @@ def query_cached_monitoring_rows(
         )
         dataflows = _result_rows(dataflow_result)
 
-        job_available = set(_table_columns(conn, JOB_TABLE))
+        job_available = set(analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
         requested_job_columns = list(job_columns or tuple(JOB_COLUMN_TYPES))
         selected_job_columns = [column for column in requested_job_columns if column in job_available]
         job_select_sql = _select_alias_columns("j", selected_job_columns)
@@ -1499,7 +1477,7 @@ def query_cached_monitoring_rows(
         job_result = conn.execute(
             f"""
             SELECT {job_select_sql}
-            FROM {JOB_TABLE} j
+            FROM {analytics_schema.JOB_TABLE} j
             WHERE j._source_id IN ({source_placeholders}){job_where_sql}
             ORDER BY j.__event_time DESC NULLS LAST
             """,
@@ -1584,16 +1562,16 @@ def _write_duckdb_rows(
             _preflight_dataflow_schemas(conn, [file_uri for file_uri, _, _ in dataflow_files])
             stale_files = [*removed_files, *changed_files]
             for file_uri in stale_files:
-                if _table_exists(conn, DATAFLOW_TABLE):
-                    conn.execute(f"DELETE FROM {DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
-                if _table_exists(conn, JOB_TABLE):
-                    conn.execute(f"DELETE FROM {JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
+                if analytics_schema.table_exists(conn, analytics_schema.DATAFLOW_TABLE):
+                    conn.execute(f"DELETE FROM {analytics_schema.DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
+                if analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE):
+                    conn.execute(f"DELETE FROM {analytics_schema.JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
             for file_uri, file_kind, revision_json in dataflow_files:
                 row_count = _insert_dataflow_file(conn, source_id, file_uri, file_kind, revision_json)
                 parsed_dataflow_records += row_count
                 file_row_counts[file_uri] = row_count
             if job_rows:
-                _insert_typed_rows(conn, JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
+                _insert_typed_rows(conn, analytics_schema.JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
             _assert_ingest_files_stable(ingest_files or [])
             _upsert_ingest_control_rows(
                 conn,
@@ -1640,12 +1618,12 @@ def _upsert_ingest_control_rows(
         file_uri = str(item["file_uri"])
         file_kind = str(item["file_kind"])
         conn.execute(
-            f"DELETE FROM {INGEST_MANIFEST_TABLE} WHERE source_id = ? AND log_kind = ? AND file_uri = ?",
+            f"DELETE FROM {analytics_schema.INGEST_MANIFEST_TABLE} WHERE source_id = ? AND log_kind = ? AND file_uri = ?",
             [source_id, file_kind, file_uri],
         )
         conn.execute(
             f"""
-            INSERT INTO {INGEST_MANIFEST_TABLE} (
+            INSERT INTO {analytics_schema.INGEST_MANIFEST_TABLE} (
               source_id, log_kind, file_uri, partition_value, partition_format,
               revision_json, row_count, ingested_at
             ) VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?::TIMESTAMPTZ)
@@ -1664,12 +1642,12 @@ def _upsert_ingest_control_rows(
     for checkpoint in checkpoints:
         file_kind = str(checkpoint["file_kind"])
         conn.execute(
-            f"DELETE FROM {INGEST_CHECKPOINT_TABLE} WHERE source_id = ? AND log_kind = ?",
+            f"DELETE FROM {analytics_schema.INGEST_CHECKPOINT_TABLE} WHERE source_id = ? AND log_kind = ?",
             [source_id, file_kind],
         )
         conn.execute(
             f"""
-            INSERT INTO {INGEST_CHECKPOINT_TABLE} (
+            INSERT INTO {analytics_schema.INGEST_CHECKPOINT_TABLE} (
               source_id, log_kind, partition_format, partition_value,
               boundary_last_modified, updated_at
             ) VALUES (?, ?, ?, ?::DATE, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ)
@@ -1700,14 +1678,14 @@ def _read_duckdb_rows(
         placeholders = ", ".join("?" for _ in source_ids)
         dataflows = _select_typed_rows(
             conn,
-            DATAFLOW_TABLE,
+            analytics_schema.DATAFLOW_TABLE,
             placeholders,
             source_ids,
             columns=dataflow_columns,
         )
         jobs = _select_typed_rows(
             conn,
-            JOB_TABLE,
+            analytics_schema.JOB_TABLE,
             placeholders,
             source_ids,
             columns=job_columns,
@@ -1735,7 +1713,7 @@ def monitoring_filter_sql(
     job_alias: str,
     *,
     include_dataflow_filters: bool = True,
-    dataflow_table: str = DATAFLOW_TABLE,
+    dataflow_table: str = analytics_schema.DATAFLOW_TABLE,
     dataflow_event_time_column: str | None = None,
 ) -> tuple[str, list[Any]]:
     return _monitoring_filter_sql(
@@ -1753,7 +1731,7 @@ def _monitoring_filter_sql(
     row_alias: str,
     job_alias: str,
     include_dataflow_filters: bool = True,
-    dataflow_table: str = DATAFLOW_TABLE,
+    dataflow_table: str = analytics_schema.DATAFLOW_TABLE,
     dataflow_event_time_column: str | None = None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
@@ -1935,7 +1913,7 @@ def _monitoring_connection_sql(
     filters: dict[str, str],
     row_alias: str,
     include_dataflow_filters: bool,
-    dataflow_table: str = DATAFLOW_TABLE,
+    dataflow_table: str = analytics_schema.DATAFLOW_TABLE,
 ) -> tuple[str, list[Any]]:
     values = _split_filter_values(filters.get("connection"))
     if not values:
@@ -2199,11 +2177,11 @@ def _json_ready(row: dict[str, Any]) -> dict[str, Any]:
 def _ensure_duckdb_tables(conn) -> None:
     recreated = [
         _ensure_dataflow_cache_table(conn),
-        _ensure_typed_table(conn, JOB_TABLE, JOB_COLUMN_TYPES),
+        _ensure_typed_table(conn, analytics_schema.JOB_TABLE, JOB_COLUMN_TYPES),
     ]
     _drop_empty_generated_job_columns(conn)
-    if any(recreated) and _table_exists(conn, FILTER_VALUES_TABLE):
-        conn.execute(f"DROP TABLE {FILTER_VALUES_TABLE}")
+    if any(recreated) and analytics_schema.table_exists(conn, analytics_schema.FILTER_VALUES_TABLE):
+        conn.execute(f"DROP TABLE {analytics_schema.FILTER_VALUES_TABLE}")
     _ensure_filter_values_table(conn)
     _ensure_cache_sources_table(conn)
     _ensure_ingest_control_tables(conn)
@@ -2272,7 +2250,7 @@ def _analytics_materialization_token_from_connection(conn, enabled_source_ids: l
     missing_source_ids = sorted(set(enabled_source_ids) - cached_source_ids)
     if (
         meta is None
-        or meta["schema_version"] != ANALYTICS_SCHEMA_VERSION
+        or meta["schema_version"] != analytics_schema.ANALYTICS_SCHEMA_VERSION
         or meta["build_state"] != "ready"
         or missing_source_ids
     ):
@@ -2283,7 +2261,7 @@ def _analytics_materialization_token_from_connection(conn, enabled_source_ids: l
             reason="incomplete_sources" if missing_source_ids else "not_ready",
         )
     return (
-        f"analytics-v{ANALYTICS_SCHEMA_VERSION}:"
+        f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:"
         + ",".join(
             f"{source_id}:{int(source_generations.get(source_id, 0))}"
             for source_id in enabled_source_ids
@@ -2293,18 +2271,18 @@ def _analytics_materialization_token_from_connection(conn, enabled_source_ids: l
 
 def _typed_cache_schema_is_ready(conn) -> bool:
     return (
-        _table_exists(conn, DATAFLOW_TABLE)
-        and _table_exists(conn, JOB_TABLE)
-        and _table_exists(conn, FILTER_VALUES_TABLE)
-        and _table_exists(conn, CACHE_SOURCES_TABLE)
-        and _table_exists(conn, ANALYTICS_META_TABLE)
-        and "generation" in _table_columns(conn, CACHE_SOURCES_TABLE)
-        and _typed_table_schema_is_current(conn, DATAFLOW_TABLE, DATAFLOW_COLUMN_TYPES)
-        and _typed_table_schema_is_current(conn, JOB_TABLE, JOB_COLUMN_TYPES)
+        analytics_schema.table_exists(conn, analytics_schema.DATAFLOW_TABLE)
+        and analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE)
+        and analytics_schema.table_exists(conn, analytics_schema.FILTER_VALUES_TABLE)
+        and analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE)
+        and analytics_schema.table_exists(conn, analytics_schema.ANALYTICS_META_TABLE)
+        and "generation" in analytics_schema.table_columns(conn, analytics_schema.CACHE_SOURCES_TABLE)
+        and _typed_table_schema_is_current(conn, analytics_schema.DATAFLOW_TABLE, DATAFLOW_COLUMN_TYPES)
+        and _typed_table_schema_is_current(conn, analytics_schema.JOB_TABLE, JOB_COLUMN_TYPES)
         and monitoring_serving_schema_is_ready(conn)
         and not _has_empty_generated_job_columns(conn)
-        and not _table_exists(conn, LEGACY_DATAFLOW_TABLE)
-        and not _table_exists(conn, LEGACY_JOB_TABLE)
+        and not analytics_schema.table_exists(conn, analytics_schema.LEGACY_DATAFLOW_TABLE)
+        and not analytics_schema.table_exists(conn, analytics_schema.LEGACY_JOB_TABLE)
     )
 
 
@@ -2322,7 +2300,7 @@ def _typed_cache_is_ready(path: Path) -> bool:
 def _ensure_filter_values_table(conn) -> None:
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {FILTER_VALUES_TABLE} (
+        CREATE TABLE IF NOT EXISTS {analytics_schema.FILTER_VALUES_TABLE} (
           _source_id BIGINT,
           field VARCHAR,
           value VARCHAR,
@@ -2336,23 +2314,23 @@ def _ensure_filter_values_table(conn) -> None:
 def _ensure_cache_sources_table(conn) -> None:
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {CACHE_SOURCES_TABLE} (
+        CREATE TABLE IF NOT EXISTS {analytics_schema.CACHE_SOURCES_TABLE} (
           source_id BIGINT PRIMARY KEY,
           refreshed_at TIMESTAMPTZ,
           generation BIGINT NOT NULL DEFAULT 0
         )
         """
     )
-    if "generation" not in _table_columns(conn, CACHE_SOURCES_TABLE):
+    if "generation" not in analytics_schema.table_columns(conn, analytics_schema.CACHE_SOURCES_TABLE):
         conn.execute(
-            f"ALTER TABLE {CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
+            f"ALTER TABLE {analytics_schema.CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
         )
 
 
 def _ensure_ingest_control_tables(conn) -> None:
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {INGEST_CHECKPOINT_TABLE} (
+        CREATE TABLE IF NOT EXISTS {analytics_schema.INGEST_CHECKPOINT_TABLE} (
           source_id BIGINT NOT NULL,
           log_kind VARCHAR NOT NULL,
           partition_format VARCHAR NOT NULL,
@@ -2365,7 +2343,7 @@ def _ensure_ingest_control_tables(conn) -> None:
     )
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {INGEST_MANIFEST_TABLE} (
+        CREATE TABLE IF NOT EXISTS {analytics_schema.INGEST_MANIFEST_TABLE} (
           source_id BIGINT NOT NULL,
           log_kind VARCHAR NOT NULL,
           file_uri VARCHAR NOT NULL,
@@ -2383,7 +2361,7 @@ def _ensure_ingest_control_tables(conn) -> None:
 def _ensure_analytics_meta_table(conn) -> None:
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {ANALYTICS_META_TABLE} (
+        CREATE TABLE IF NOT EXISTS {analytics_schema.ANALYTICS_META_TABLE} (
           singleton_id INTEGER PRIMARY KEY,
           schema_version INTEGER NOT NULL,
           generation BIGINT NOT NULL,
@@ -2392,51 +2370,51 @@ def _ensure_analytics_meta_table(conn) -> None:
         )
         """
     )
-    if conn.execute(f"SELECT COUNT(*) FROM {ANALYTICS_META_TABLE}").fetchone()[0] == 0:
+    if conn.execute(f"SELECT COUNT(*) FROM {analytics_schema.ANALYTICS_META_TABLE}").fetchone()[0] == 0:
         conn.execute(
             f"""
-            INSERT INTO {ANALYTICS_META_TABLE}
+            INSERT INTO {analytics_schema.ANALYTICS_META_TABLE}
               (singleton_id, schema_version, generation, build_state, published_at)
             VALUES (1, ?, 0, 'rebuild_required', NULL)
             """,
-            [ANALYTICS_SCHEMA_VERSION],
+            [analytics_schema.ANALYTICS_SCHEMA_VERSION],
         )
 
 
 def _publish_analytics_generation(conn) -> None:
     rebuild_monitoring_serving_facts(
         conn,
-        dataflow_table=DATAFLOW_TABLE,
-        job_table=JOB_TABLE,
-        dataflow_column_types=_cache_table_column_types(DATAFLOW_COLUMN_TYPES),
-        job_column_types=_cache_table_column_types(JOB_COLUMN_TYPES),
+        dataflow_table=analytics_schema.DATAFLOW_TABLE,
+        job_table=analytics_schema.JOB_TABLE,
+        dataflow_column_types=analytics_schema.cache_table_column_types(DATAFLOW_COLUMN_TYPES),
+        job_column_types=analytics_schema.cache_table_column_types(JOB_COLUMN_TYPES),
     )
     validate_monitoring_serving_facts(
         conn,
-        dataflow_table=DATAFLOW_TABLE,
-        job_table=JOB_TABLE,
+        dataflow_table=analytics_schema.DATAFLOW_TABLE,
+        job_table=analytics_schema.JOB_TABLE,
     )
     _ensure_analytics_meta_table(conn)
     conn.execute(
         f"""
-        UPDATE {ANALYTICS_META_TABLE}
+        UPDATE {analytics_schema.ANALYTICS_META_TABLE}
         SET schema_version = ?,
             generation = generation + 1,
             build_state = 'ready',
             published_at = ?::TIMESTAMPTZ
         WHERE singleton_id = 1
         """,
-        [ANALYTICS_SCHEMA_VERSION, utc_now().isoformat()],
+        [analytics_schema.ANALYTICS_SCHEMA_VERSION, utc_now().isoformat()],
     )
 
 
 def _analytics_meta(conn) -> dict[str, Any] | None:
-    if not _table_exists(conn, ANALYTICS_META_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.ANALYTICS_META_TABLE):
         return None
     row = conn.execute(
         f"""
         SELECT schema_version, generation, build_state, published_at
-        FROM {ANALYTICS_META_TABLE}
+        FROM {analytics_schema.ANALYTICS_META_TABLE}
         WHERE singleton_id = 1
         """
     ).fetchone()
@@ -2470,36 +2448,36 @@ def _analytics_source_ids(paths: list[EnvironmentSource]) -> list[int]:
 
 def _unavailable_analytics_token(source_ids: list[int], reason: str) -> str:
     source_key = ",".join(str(source_id) for source_id in source_ids)
-    return f"analytics-v{ANALYTICS_SCHEMA_VERSION}:unavailable:{reason}:{source_key}"
+    return f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:unavailable:{reason}:{source_key}"
 
 
 def _mark_cache_source(conn, source_id: int) -> None:
     _ensure_cache_sources_table(conn)
     current = conn.execute(
-        f"SELECT generation FROM {CACHE_SOURCES_TABLE} WHERE source_id = ?",
+        f"SELECT generation FROM {analytics_schema.CACHE_SOURCES_TABLE} WHERE source_id = ?",
         [source_id],
     ).fetchone()
     generation = int(current[0] or 0) + 1 if current is not None else 1
-    conn.execute(f"DELETE FROM {CACHE_SOURCES_TABLE} WHERE source_id = ?", [source_id])
+    conn.execute(f"DELETE FROM {analytics_schema.CACHE_SOURCES_TABLE} WHERE source_id = ?", [source_id])
     conn.execute(
-        f"INSERT INTO {CACHE_SOURCES_TABLE} (source_id, refreshed_at, generation) VALUES (?, ?::TIMESTAMPTZ, ?)",
+        f"INSERT INTO {analytics_schema.CACHE_SOURCES_TABLE} (source_id, refreshed_at, generation) VALUES (?, ?::TIMESTAMPTZ, ?)",
         [source_id, utc_now().isoformat(), generation],
     )
 
 
 def _cache_source_ids(conn) -> set[int]:
-    if not _table_exists(conn, CACHE_SOURCES_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE):
         return set()
-    return {int(row[0]) for row in conn.execute(f"SELECT source_id FROM {CACHE_SOURCES_TABLE}").fetchall()}
+    return {int(row[0]) for row in conn.execute(f"SELECT source_id FROM {analytics_schema.CACHE_SOURCES_TABLE}").fetchall()}
 
 
 def _cache_source_generations(conn) -> dict[int, int]:
-    if not _table_exists(conn, CACHE_SOURCES_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE):
         return {}
     return {
         int(source_id): int(generation or 0)
         for source_id, generation in conn.execute(
-            f"SELECT source_id, generation FROM {CACHE_SOURCES_TABLE}"
+            f"SELECT source_id, generation FROM {analytics_schema.CACHE_SOURCES_TABLE}"
         ).fetchall()
     }
 
@@ -2516,7 +2494,7 @@ def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
         return {
             int(row[0])
             for row in conn.execute(
-                f"SELECT source_id FROM {CACHE_SOURCES_TABLE} WHERE source_id IN ({placeholders})",
+                f"SELECT source_id FROM {analytics_schema.CACHE_SOURCES_TABLE} WHERE source_id IN ({placeholders})",
                 source_ids,
             ).fetchall()
         }
@@ -2533,7 +2511,7 @@ def _analytics_cache_has_source(source_id: int) -> bool:
         meta = _analytics_meta(conn)
         return bool(
             meta
-            and meta["schema_version"] == ANALYTICS_SCHEMA_VERSION
+            and meta["schema_version"] == analytics_schema.ANALYTICS_SCHEMA_VERSION
             and meta["build_state"] == "ready"
             and source_id in _cache_source_ids(conn)
         )
@@ -2547,7 +2525,7 @@ def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[
         return {}, {}
     conn = _connect_analytics(path, read_only=True)
     try:
-        if not _table_exists(conn, INGEST_CHECKPOINT_TABLE) or not _table_exists(conn, INGEST_MANIFEST_TABLE):
+        if not analytics_schema.table_exists(conn, analytics_schema.INGEST_CHECKPOINT_TABLE) or not analytics_schema.table_exists(conn, analytics_schema.INGEST_MANIFEST_TABLE):
             return {}, {}
         checkpoints = {
             str(file_kind): {
@@ -2559,7 +2537,7 @@ def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[
             for file_kind, partition_format, partition_value, boundary_last_modified in conn.execute(
                 f"""
                 SELECT log_kind, partition_format, partition_value, boundary_last_modified
-                FROM {INGEST_CHECKPOINT_TABLE}
+                FROM {analytics_schema.INGEST_CHECKPOINT_TABLE}
                 WHERE source_id = ?
                 """,
                 [source_id],
@@ -2568,7 +2546,7 @@ def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[
         manifests = {
             str(file_uri): str(revision_json)
             for file_uri, revision_json in conn.execute(
-                f"SELECT file_uri, revision_json FROM {INGEST_MANIFEST_TABLE} WHERE source_id = ?",
+                f"SELECT file_uri, revision_json FROM {analytics_schema.INGEST_MANIFEST_TABLE} WHERE source_id = ?",
                 [source_id],
             ).fetchall()
         }
@@ -2579,16 +2557,16 @@ def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[
 
 def _refresh_filter_values(conn, source_id: int) -> None:
     _ensure_filter_values_table(conn)
-    conn.execute(f"DELETE FROM {FILTER_VALUES_TABLE} WHERE _source_id = ?", [source_id])
+    conn.execute(f"DELETE FROM {analytics_schema.FILTER_VALUES_TABLE} WHERE _source_id = ?", [source_id])
     updated_at = utc_now().isoformat()
     for field, (table_name, column_name) in FILTER_VALUE_SOURCES.items():
-        if not _table_exists(conn, table_name):
+        if not analytics_schema.table_exists(conn, table_name):
             continue
-        if column_name not in _table_columns(conn, table_name):
+        if column_name not in analytics_schema.table_columns(conn, table_name):
             continue
         conn.execute(
             f"""
-            INSERT INTO {FILTER_VALUES_TABLE}
+            INSERT INTO {analytics_schema.FILTER_VALUES_TABLE}
             SELECT
               ?::BIGINT AS _source_id,
               ?::VARCHAR AS field,
@@ -2603,8 +2581,8 @@ def _refresh_filter_values(conn, source_id: int) -> None:
             """,
             [source_id, field, updated_at, source_id],
         )
-    if _table_exists(conn, DATAFLOW_TABLE):
-        dataflow_columns = set(_table_columns(conn, DATAFLOW_TABLE))
+    if analytics_schema.table_exists(conn, analytics_schema.DATAFLOW_TABLE):
+        dataflow_columns = set(analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE))
         connection_selects = []
         identity_sql = ", ".join(
             [
@@ -2621,7 +2599,7 @@ def _refresh_filter_values(conn, source_id: int) -> None:
             connection_selects.append(
                 f"""
                 SELECT {identity_sql}, TRIM(CAST({quoted_column} AS VARCHAR)) AS connection_name
-                FROM {DATAFLOW_TABLE}
+                FROM {analytics_schema.DATAFLOW_TABLE}
                 WHERE _source_id = ?
                   AND {quoted_column} IS NOT NULL
                   AND TRIM(CAST({quoted_column} AS VARCHAR)) <> ''
@@ -2632,7 +2610,7 @@ def _refresh_filter_values(conn, source_id: int) -> None:
         union_sql = "\nUNION ALL\n".join(connection_selects)
         conn.execute(
             f"""
-            INSERT INTO {FILTER_VALUES_TABLE}
+            INSERT INTO {analytics_schema.FILTER_VALUES_TABLE}
             SELECT
               ?::BIGINT AS _source_id,
               'connection'::VARCHAR AS field,
@@ -2656,8 +2634,8 @@ def _migrate_legacy_cache(conn) -> None:
     migrated_source_ids.update(
         _migrate_legacy_table(
             conn,
-            legacy_table=LEGACY_DATAFLOW_TABLE,
-            target_table=DATAFLOW_TABLE,
+            legacy_table=analytics_schema.LEGACY_DATAFLOW_TABLE,
+            target_table=analytics_schema.DATAFLOW_TABLE,
             column_types=DATAFLOW_COLUMN_TYPES,
             file_kind="legacy_dataflow_json",
         )
@@ -2665,8 +2643,8 @@ def _migrate_legacy_cache(conn) -> None:
     migrated_source_ids.update(
         _migrate_legacy_table(
             conn,
-            legacy_table=LEGACY_JOB_TABLE,
-            target_table=JOB_TABLE,
+            legacy_table=analytics_schema.LEGACY_JOB_TABLE,
+            target_table=analytics_schema.JOB_TABLE,
             column_types=JOB_COLUMN_TYPES,
             file_kind="legacy_job_json",
         )
@@ -2682,13 +2660,13 @@ def _migrate_legacy_table(
     column_types: dict[str, str],
     file_kind: str,
 ) -> set[int]:
-    if not _table_exists(conn, legacy_table):
+    if not analytics_schema.table_exists(conn, legacy_table):
         return set()
-    legacy_columns = set(_table_columns(conn, legacy_table))
+    legacy_columns = set(analytics_schema.table_columns(conn, legacy_table))
     if not {"source_id", "file_uri", "row_json"} <= legacy_columns:
         return set()
 
-    if not _table_exists(conn, target_table):
+    if not analytics_schema.table_exists(conn, target_table):
         _ensure_typed_table(conn, target_table, column_types)
 
     migrated_source_ids = set()
@@ -2722,7 +2700,7 @@ def _migrate_legacy_table(
                 continue
             typed_rows.append((str(file_uri or ""), file_kind, "{}", row))
         if typed_rows:
-            if not _table_exists(conn, target_table):
+            if not analytics_schema.table_exists(conn, target_table):
                 _ensure_typed_table(conn, target_table, column_types)
             _insert_typed_rows(conn, target_table, source_id, typed_rows, column_types)
             migrated_source_ids.add(source_id)
@@ -2738,13 +2716,13 @@ def _insert_typed_rows(
     column_types: dict[str, str],
 ) -> None:
     _ensure_source_columns(conn, table_name, rows, column_types)
-    columns = _table_columns(conn, table_name)
+    columns = analytics_schema.table_columns(conn, table_name)
     insert_columns = [
         column
         for column in columns
         if (
-            column in STUDIO_CACHE_COLUMNS
-            or column in GENERATED_CACHE_COLUMNS
+            column in analytics_schema.STUDIO_CACHE_COLUMNS
+            or column in analytics_schema.GENERATED_CACHE_COLUMNS
             or any(column in row for _, _, _, row in rows)
         )
     ]
@@ -2766,7 +2744,7 @@ def _insert_dataflow_file(conn, source_id: int, file_uri: str, file_kind: str, r
     row_count = conn.execute(f"SELECT count(*) FROM read_parquet('{escaped}', union_by_name=true)").fetchone()[0]
     conn.execute(
         f"""
-        INSERT INTO {DATAFLOW_TABLE} BY NAME
+        INSERT INTO {analytics_schema.DATAFLOW_TABLE} BY NAME
         SELECT
           {int(source_id)}::BIGINT AS _source_id,
           {_sql_string(file_uri)} AS _file_uri,
@@ -2790,9 +2768,9 @@ def _select_typed_rows(
     *,
     columns: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
-    if not _table_exists(conn, table_name):
+    if not analytics_schema.table_exists(conn, table_name):
         return []
-    available = set(_table_columns(conn, table_name))
+    available = set(analytics_schema.table_columns(conn, table_name))
     selected = [column for column in (columns or ()) if column in available]
     column_sql = ", ".join(_quote_identifier(column) for column in selected) if selected else "*"
     result = conn.execute(
@@ -2808,37 +2786,33 @@ def _select_typed_rows(
 
 
 def _ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = _table_columns(conn, table_name)
+    columns = analytics_schema.table_columns(conn, table_name)
     if columns and ("_source_id" not in columns or _has_legacy_raw_json_column(columns) or _has_incompatible_column_types(conn, table_name, column_types)):
         conn.execute(f"DROP TABLE {table_name}")
         columns = []
     if not columns:
         definitions = [
             f"{_quote_identifier(column)} {data_type}"
-            for column, data_type in _cache_table_column_types(column_types).items()
+            for column, data_type in analytics_schema.cache_table_column_types(column_types).items()
         ]
         conn.execute(f"CREATE TABLE {table_name} ({', '.join(definitions)})")
         return True
-    _ensure_columns(conn, table_name, _cache_table_column_types(column_types), set(columns))
+    _ensure_columns(conn, table_name, analytics_schema.cache_table_column_types(column_types), set(columns))
     _ensure_column_order(conn, table_name, column_types)
     return False
 
 
 def _ensure_dataflow_cache_table(conn) -> bool:
-    columns = _table_columns(conn, DATAFLOW_TABLE)
+    columns = analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE)
     if columns and ("_source_id" not in columns or _has_legacy_raw_json_column(columns)):
-        conn.execute(f"DROP TABLE {DATAFLOW_TABLE}")
+        conn.execute(f"DROP TABLE {analytics_schema.DATAFLOW_TABLE}")
         columns = []
     if not columns:
-        return _ensure_typed_table(conn, DATAFLOW_TABLE, {})
+        return _ensure_typed_table(conn, analytics_schema.DATAFLOW_TABLE, {})
     existing = set(columns)
-    _ensure_columns(conn, DATAFLOW_TABLE, STUDIO_CACHE_COLUMNS, existing)
-    _ensure_column_order(conn, DATAFLOW_TABLE, _actual_source_column_types(conn, DATAFLOW_TABLE))
+    _ensure_columns(conn, analytics_schema.DATAFLOW_TABLE, analytics_schema.STUDIO_CACHE_COLUMNS, existing)
+    _ensure_column_order(conn, analytics_schema.DATAFLOW_TABLE, _actual_source_column_types(conn, analytics_schema.DATAFLOW_TABLE))
     return False
-
-
-def _cache_table_column_types(column_types: dict[str, str]) -> dict[str, str]:
-    return {**column_types, **STUDIO_CACHE_COLUMNS}
 
 
 def _ensure_source_columns(
@@ -2847,17 +2821,17 @@ def _ensure_source_columns(
     rows: list[tuple[str, str, str, dict[str, Any]]],
     column_types: dict[str, str],
 ) -> None:
-    existing = set(_table_columns(conn, table_name))
-    actual_types = _table_column_types(conn, table_name)
+    existing = set(analytics_schema.table_columns(conn, table_name))
+    actual_types = analytics_schema.table_column_types(conn, table_name)
     inferred: dict[str, set[str]] = {}
     for _, _, _, row in rows:
         for column, value in row.items():
-            if value is None or column in STUDIO_CACHE_COLUMNS:
+            if value is None or column in analytics_schema.STUDIO_CACHE_COLUMNS:
                 continue
             expected = column_types.get(column) or _infer_duckdb_type(value)
             if column in existing:
                 actual = actual_types.get(column)
-                if actual and not _duckdb_type_matches(actual, expected):
+                if actual and not analytics_schema.duckdb_type_matches(actual, expected):
                     raise LogSchemaIncompatibleError(
                         f"Column {column!r} changed datatype from {actual} to {expected}"
                     )
@@ -2880,17 +2854,17 @@ def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
     parquet_column_types = {
         name: data_type
         for name, data_type in described
-        if name not in STUDIO_CACHE_COLUMNS
+        if name not in analytics_schema.STUDIO_CACHE_COLUMNS
     }
-    if not _table_exists(conn, DATAFLOW_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.DATAFLOW_TABLE):
         definitions = [
             f"{_quote_identifier(column)} {data_type}"
-            for column, data_type in _cache_table_column_types(parquet_column_types).items()
+            for column, data_type in analytics_schema.cache_table_column_types(parquet_column_types).items()
         ]
-        conn.execute(f"CREATE TABLE {DATAFLOW_TABLE} ({', '.join(definitions)})")
+        conn.execute(f"CREATE TABLE {analytics_schema.DATAFLOW_TABLE} ({', '.join(definitions)})")
         return
-    existing = set(_table_columns(conn, DATAFLOW_TABLE))
-    actual_types = _table_column_types(conn, DATAFLOW_TABLE)
+    existing = set(analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE))
+    actual_types = analytics_schema.table_column_types(conn, analytics_schema.DATAFLOW_TABLE)
     for column, source_type in parquet_column_types.items():
         actual_type = actual_types.get(column)
         if actual_type and not _source_type_fits_target(actual_type, source_type):
@@ -2903,8 +2877,8 @@ def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
         if column not in existing
     }
     if discovered:
-        _ensure_columns(conn, DATAFLOW_TABLE, discovered, existing)
-        _ensure_column_order(conn, DATAFLOW_TABLE, parquet_column_types)
+        _ensure_columns(conn, analytics_schema.DATAFLOW_TABLE, discovered, existing)
+        _ensure_column_order(conn, analytics_schema.DATAFLOW_TABLE, parquet_column_types)
 
 
 def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
@@ -2913,12 +2887,12 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
     candidate_types: dict[str, str] = {}
     for file_uri in file_uris:
         for column, source_type in _describe_parquet_columns(conn, file_uri):
-            if column in STUDIO_CACHE_COLUMNS:
+            if column in analytics_schema.STUDIO_CACHE_COLUMNS:
                 continue
             previous = candidate_types.get(column)
             candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
-    existing = set(_table_columns(conn, DATAFLOW_TABLE))
-    actual_types = _table_column_types(conn, DATAFLOW_TABLE)
+    existing = set(analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE))
+    actual_types = analytics_schema.table_column_types(conn, analytics_schema.DATAFLOW_TABLE)
     for column, source_type in candidate_types.items():
         actual_type = actual_types.get(column)
         if actual_type and not _source_type_fits_target(actual_type, source_type):
@@ -2927,8 +2901,8 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
             )
     discovered = {column: data_type for column, data_type in candidate_types.items() if column not in existing}
     if discovered:
-        _ensure_columns(conn, DATAFLOW_TABLE, discovered, existing)
-    _ensure_column_order(conn, DATAFLOW_TABLE, candidate_types)
+        _ensure_columns(conn, analytics_schema.DATAFLOW_TABLE, discovered, existing)
+    _ensure_column_order(conn, analytics_schema.DATAFLOW_TABLE, candidate_types)
 
 
 def _common_source_type(column: str, left: str, right: str) -> str:
@@ -2948,7 +2922,7 @@ def _common_source_type(column: str, left: str, right: str) -> str:
 def _source_type_fits_target(target_type: str, source_type: str) -> bool:
     target = target_type.upper()
     source = source_type.upper()
-    if _duckdb_type_matches(target, source):
+    if analytics_schema.duckdb_type_matches(target, source):
         return True
     if target == "DOUBLE" and source in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT"}:
         return True
@@ -2969,14 +2943,14 @@ def _ensure_columns(conn, table_name: str, column_types: dict[str, str], existin
 
 
 def _ensure_column_order(conn, table_name: str, source_column_types: dict[str, str]) -> None:
-    actual_columns = _table_columns(conn, table_name)
+    actual_columns = analytics_schema.table_columns(conn, table_name)
     if not actual_columns:
         return
     expected_columns = _expected_column_order(actual_columns, source_column_types)
     if actual_columns == expected_columns:
         return
-    actual_types = _table_column_types(conn, table_name)
-    expected_types = _cache_table_column_types(source_column_types)
+    actual_types = analytics_schema.table_column_types(conn, table_name)
+    expected_types = analytics_schema.cache_table_column_types(source_column_types)
     temp_table = f"{table_name}__column_order"
     conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
     definitions = [
@@ -2998,73 +2972,51 @@ def _expected_column_order(actual_columns: list[str], source_column_types: dict[
     extra_source_columns = [
         column
         for column in actual_columns
-        if column not in source_column_types and column not in STUDIO_CACHE_COLUMNS
+        if column not in source_column_types and column not in analytics_schema.STUDIO_CACHE_COLUMNS
     ]
-    studio_columns = [column for column in STUDIO_CACHE_COLUMNS if column in actual]
+    studio_columns = [column for column in analytics_schema.STUDIO_CACHE_COLUMNS if column in actual]
     return [*source_columns, *extra_source_columns, *studio_columns]
 
 
 def _actual_source_column_types(conn, table_name: str) -> dict[str, str]:
-    actual_types = _table_column_types(conn, table_name)
+    actual_types = analytics_schema.table_column_types(conn, table_name)
     return {
         column: actual_types[column]
-        for column in _table_columns(conn, table_name)
-        if column not in STUDIO_CACHE_COLUMNS and column in actual_types
+        for column in analytics_schema.table_columns(conn, table_name)
+        if column not in analytics_schema.STUDIO_CACHE_COLUMNS and column in actual_types
     }
-
-
-def _table_exists(conn, table_name: str) -> bool:
-    try:
-        conn.execute(f"SELECT 1 FROM {table_name} LIMIT 0")
-        return True
-    except duckdb.CatalogException:
-        return False
-
-
-def _table_columns(conn, table_name: str) -> list[str]:
-    try:
-        return [row[1] for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()]
-    except duckdb.CatalogException:
-        return []
-
-
-def _table_column_types(conn, table_name: str) -> dict[str, str]:
-    try:
-        return {str(row[1]): str(row[2]) for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()}
-    except duckdb.CatalogException:
-        return {}
 
 
 def _drop_empty_generated_job_columns(conn) -> None:
     """Remove columns that older studio cache versions generated for jobs."""
-    if not _table_exists(conn, JOB_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE):
         return
-    columns = set(_table_columns(conn, JOB_TABLE))
+    columns = set(analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
     for column in ("operation_type",):
         if column not in columns:
             continue
         quoted_column = _quote_identifier(column)
         try:
             non_null_count = conn.execute(
-                f"SELECT count(*) FROM {JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
+                f"SELECT count(*) FROM {analytics_schema.JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
             ).fetchone()[0]
             if int(non_null_count or 0) == 0:
-                conn.execute(f"ALTER TABLE {JOB_TABLE} DROP COLUMN {quoted_column}")
+                conn.execute(f"ALTER TABLE {analytics_schema.JOB_TABLE} DROP COLUMN {quoted_column}")
         except duckdb.Error:
             continue
 
 
 def _has_empty_generated_job_columns(conn) -> bool:
-    if not _table_exists(conn, JOB_TABLE):
+    if not analytics_schema.table_exists(conn, analytics_schema.JOB_TABLE):
         return False
-    columns = set(_table_columns(conn, JOB_TABLE))
+    columns = set(analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
     for column in ("operation_type",):
         if column not in columns:
             continue
         quoted_column = _quote_identifier(column)
         try:
             non_null_count = conn.execute(
-                f"SELECT count(*) FROM {JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
+                f"SELECT count(*) FROM {analytics_schema.JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
             ).fetchone()[0]
         except duckdb.Error:
             return False
@@ -3074,8 +3026,8 @@ def _has_empty_generated_job_columns(conn) -> bool:
 
 
 def _typed_table_schema_is_current(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = _table_columns(conn, table_name)
-    if table_name == DATAFLOW_TABLE:
+    columns = analytics_schema.table_columns(conn, table_name)
+    if table_name == analytics_schema.DATAFLOW_TABLE:
         return (
             bool(columns)
             and "_source_id" in columns
@@ -3098,36 +3050,28 @@ def _has_legacy_raw_json_column(columns: list[str]) -> bool:
 
 
 def _has_column_order_mismatch(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = _table_columns(conn, table_name)
+    columns = analytics_schema.table_columns(conn, table_name)
     return bool(columns) and columns != _expected_column_order(columns, column_types)
 
 
 def _has_incompatible_column_types(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    actual_types = _table_column_types(conn, table_name)
-    expected_types = {**STUDIO_CACHE_COLUMNS, **column_types}
+    actual_types = analytics_schema.table_column_types(conn, table_name)
+    expected_types = {**analytics_schema.STUDIO_CACHE_COLUMNS, **column_types}
     for column, expected_type in expected_types.items():
         actual_type = actual_types.get(column)
-        if actual_type and not _duckdb_type_matches(actual_type, expected_type):
+        if actual_type and not analytics_schema.duckdb_type_matches(actual_type, expected_type):
             return True
     return False
 
 
-def _duckdb_type_matches(actual_type: str, expected_type: str) -> bool:
-    actual = actual_type.upper()
-    expected = expected_type.upper()
-    if expected == "TIMESTAMPTZ":
-        return actual in {"TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"}
-    return actual == expected or actual.startswith(f"{expected}(")
-
-
 def _table_row_count(conn, table_name: str) -> int:
-    if not _table_exists(conn, table_name):
+    if not analytics_schema.table_exists(conn, table_name):
         return 0
     return int(conn.execute(f"SELECT count(*) FROM {table_name}").fetchone()[0])
 
 
 def _table_source_row_count(conn, table_name: str, source_id: int) -> int:
-    if not _table_exists(conn, table_name) or "_source_id" not in _table_columns(conn, table_name):
+    if not analytics_schema.table_exists(conn, table_name) or "_source_id" not in analytics_schema.table_columns(conn, table_name):
         return 0
     return int(
         conn.execute(
@@ -3139,9 +3083,9 @@ def _table_source_row_count(conn, table_name: str, source_id: int) -> int:
 
 
 def _table_source_ids(conn, table_name: str) -> list[int]:
-    if not _table_exists(conn, table_name):
+    if not analytics_schema.table_exists(conn, table_name):
         return []
-    if "_source_id" not in _table_columns(conn, table_name):
+    if "_source_id" not in analytics_schema.table_columns(conn, table_name):
         return []
     rows = conn.execute(
         f"SELECT DISTINCT _source_id FROM {table_name} WHERE _source_id IS NOT NULL ORDER BY _source_id"
@@ -3150,9 +3094,9 @@ def _table_source_ids(conn, table_name: str) -> list[int]:
 
 
 def _table_has_source_rows(conn, table_name: str, source_ids: list[int]) -> bool:
-    if not source_ids or not _table_exists(conn, table_name):
+    if not source_ids or not analytics_schema.table_exists(conn, table_name):
         return False
-    if "_source_id" not in _table_columns(conn, table_name):
+    if "_source_id" not in analytics_schema.table_columns(conn, table_name):
         return False
     placeholders = ", ".join("?" for _ in source_ids)
     count = conn.execute(
@@ -3169,9 +3113,9 @@ def _delete_rows_by_source_ids(
     *,
     source_column: str = "_source_id",
 ) -> int:
-    if not source_ids or not _table_exists(conn, table_name):
+    if not source_ids or not analytics_schema.table_exists(conn, table_name):
         return 0
-    if source_column not in _table_columns(conn, table_name):
+    if source_column not in analytics_schema.table_columns(conn, table_name):
         return 0
     quoted_source_column = _quote_identifier(source_column)
     placeholders = ", ".join("?" for _ in source_ids)

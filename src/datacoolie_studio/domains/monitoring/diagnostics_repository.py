@@ -5,9 +5,8 @@ from datetime import date, datetime
 from typing import Any
 
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics.schema import DATAFLOW_TABLE, JOB_TABLE
 from datacoolie_studio.domains.logs.cache import (
-    DATAFLOW_TABLE,
-    JOB_TABLE,
     analytics_reader,
     monitoring_filter_sql,
 )

@@ -5,6 +5,7 @@ import pytest
 from datetime import datetime, timezone
 
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.logs import cache as logs_cache
 from datacoolie_studio.domains.monitoring import page_service, service as monitoring_service
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
@@ -546,7 +547,7 @@ def test_freshness_read_model_tracks_the_actual_consecutive_skipped_streak() -> 
         ))
     logs_cache._insert_typed_rows(
         connection,
-        logs_cache.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_TABLE,
         1,
         skipped_rows,
         logs_cache.DATAFLOW_COLUMN_TYPES,
@@ -616,7 +617,7 @@ def test_maintenance_read_model_returns_wide_trends_and_registry_drawer_evidence
     connection = _dataflow_metric_connection(include_asset_metadata=True)
     logs_cache._insert_typed_rows(
         connection,
-        logs_cache.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_TABLE,
         1,
         [(
             "maintenance.parquet",
@@ -708,17 +709,17 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
     logs_cache._ensure_duckdb_tables(connection)
     logs_cache._ensure_typed_table(
         connection,
-        logs_cache.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_TABLE,
         logs_cache.DATAFLOW_COLUMN_TYPES,
     )
     logs_cache._ensure_typed_table(
         connection,
-        logs_cache.JOB_TABLE,
+        analytics_schema.JOB_TABLE,
         logs_cache.JOB_COLUMN_TYPES,
     )
     logs_cache._insert_typed_rows(
         connection,
-        logs_cache.JOB_TABLE,
+        analytics_schema.JOB_TABLE,
         1,
         [
             (
@@ -764,7 +765,7 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
         })
     logs_cache._insert_typed_rows(
         connection,
-        logs_cache.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_TABLE,
         1,
         [
             (
@@ -820,8 +821,8 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
 def _rebuild_serving_facts(connection) -> None:
     rebuild_monitoring_serving_facts(
         connection,
-        dataflow_table=logs_cache.DATAFLOW_TABLE,
-        job_table=logs_cache.JOB_TABLE,
-        dataflow_column_types=logs_cache._cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
-        job_column_types=logs_cache._cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
+        dataflow_table=analytics_schema.DATAFLOW_TABLE,
+        job_table=analytics_schema.JOB_TABLE,
+        dataflow_column_types=analytics_schema.cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
+        job_column_types=analytics_schema.cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
     )

@@ -3,13 +3,14 @@ from pathlib import Path
 import duckdb
 
 from benchmarks.monitoring_fixture import build_analytics_fixture
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_DATAFLOW_FACTS_TABLE,
     MONITORING_JOB_FACTS_TABLE,
     rebuild_monitoring_serving_facts,
     validate_monitoring_serving_facts,
 )
+from datacoolie_studio.domains.logs import cache as logs_cache
 
 
 def test_serving_facts_reconcile_context_and_derived_columns(tmp_path: Path):
@@ -33,8 +34,8 @@ def test_serving_facts_reconcile_context_and_derived_columns(tmp_path: Path):
         assert dataflow[4] == "FileProvider"
         validate_monitoring_serving_facts(
             connection,
-            dataflow_table=logs_cache.DATAFLOW_TABLE,
-            job_table=logs_cache.JOB_TABLE,
+            dataflow_table=analytics_schema.DATAFLOW_TABLE,
+            job_table=analytics_schema.JOB_TABLE,
         )
 
 
@@ -46,15 +47,15 @@ def test_serving_fact_rebuild_is_idempotent(tmp_path: Path):
         before = _serving_digest(connection)
         rebuild_monitoring_serving_facts(
             connection,
-            dataflow_table=logs_cache.DATAFLOW_TABLE,
-            job_table=logs_cache.JOB_TABLE,
-            dataflow_column_types=logs_cache._cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
-            job_column_types=logs_cache._cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
+            dataflow_table=analytics_schema.DATAFLOW_TABLE,
+            job_table=analytics_schema.JOB_TABLE,
+            dataflow_column_types=analytics_schema.cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
+            job_column_types=analytics_schema.cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
         )
         validate_monitoring_serving_facts(
             connection,
-            dataflow_table=logs_cache.DATAFLOW_TABLE,
-            job_table=logs_cache.JOB_TABLE,
+            dataflow_table=analytics_schema.DATAFLOW_TABLE,
+            job_table=analytics_schema.JOB_TABLE,
         )
         assert _serving_digest(connection) == before
 
@@ -68,8 +69,8 @@ def test_serving_validation_rejects_row_count_drift(tmp_path: Path):
         try:
             validate_monitoring_serving_facts(
                 connection,
-                dataflow_table=logs_cache.DATAFLOW_TABLE,
-                job_table=logs_cache.JOB_TABLE,
+                dataflow_table=analytics_schema.DATAFLOW_TABLE,
+                job_table=analytics_schema.JOB_TABLE,
             )
         except RuntimeError as exc:
             assert "row counts" in str(exc)
@@ -92,8 +93,8 @@ def test_failed_serving_validation_rolls_back_generation(tmp_path: Path, monkeyp
         before = connection.execute(
             f"""
             SELECT
-              (SELECT generation FROM {logs_cache.ANALYTICS_META_TABLE} WHERE singleton_id = 1),
-              (SELECT COUNT(*) FROM {logs_cache.JOB_TABLE}),
+              (SELECT generation FROM {analytics_schema.ANALYTICS_META_TABLE} WHERE singleton_id = 1),
+              (SELECT COUNT(*) FROM {analytics_schema.JOB_TABLE}),
               (SELECT COUNT(*) FROM {MONITORING_JOB_FACTS_TABLE})
             """
         ).fetchone()
@@ -115,8 +116,8 @@ def test_failed_serving_validation_rolls_back_generation(tmp_path: Path, monkeyp
         after = connection.execute(
             f"""
             SELECT
-              (SELECT generation FROM {logs_cache.ANALYTICS_META_TABLE} WHERE singleton_id = 1),
-              (SELECT COUNT(*) FROM {logs_cache.JOB_TABLE}),
+              (SELECT generation FROM {analytics_schema.ANALYTICS_META_TABLE} WHERE singleton_id = 1),
+              (SELECT COUNT(*) FROM {analytics_schema.JOB_TABLE}),
               (SELECT COUNT(*) FROM {MONITORING_JOB_FACTS_TABLE})
             """
         ).fetchone()
