@@ -16,7 +16,12 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.core.config import analytics_database_path
 from datacoolie_studio.core.time import parse_utc_datetime, utc_datetime_sort_key
 from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
-from datacoolie_studio.domains.logs.connections import analytics_connections
+from datacoolie_studio.domains.analytics.connections import analytics_connections
+from datacoolie_studio.domains.analytics.serving_facts import (
+    monitoring_serving_schema_is_ready,
+    rebuild_monitoring_serving_facts,
+    validate_monitoring_serving_facts,
+)
 from datacoolie_studio.domains.logs.discovery import (
     DiscoveredLogFile,
     LogStreamCheckpoint,
@@ -37,11 +42,6 @@ from datacoolie_studio.domains.logs.reader import (
     read_system_log_file,
 )
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
-from datacoolie_studio.domains.monitoring.serving_facts import (
-    monitoring_serving_schema_is_ready,
-    rebuild_monitoring_serving_facts,
-    validate_monitoring_serving_facts,
-)
 from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, require_local_path
 from datacoolie_studio.domains.storage.adapters import FileRevision, LocalStorageAdapter

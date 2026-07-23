@@ -34,7 +34,7 @@ class ManagedDuckDBConnection:
 
 
 class AnalyticsConnectionManager:
-    """Coordinate in-process DuckDB connections with exclusive cache maintenance."""
+    """Coordinate in-process DuckDB connections with exclusive analytics maintenance."""
 
     def __init__(self) -> None:
         self._condition = Condition()

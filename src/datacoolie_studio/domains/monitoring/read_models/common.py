@@ -9,7 +9,7 @@ from datacoolie_studio.domains.logs.cache import (
     analytics_reader,
     monitoring_filter_sql,
 )
-from datacoolie_studio.domains.monitoring.serving_facts import (
+from datacoolie_studio.domains.analytics.serving_facts import (
     DATAFLOW_FACT_COLUMNS,
     JOB_FACT_COLUMNS,
     MONITORING_DATAFLOW_FACTS_TABLE,

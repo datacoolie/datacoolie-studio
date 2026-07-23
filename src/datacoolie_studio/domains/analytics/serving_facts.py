@@ -1,3 +1,5 @@
+"""Persisted projections consumed by Monitoring read models."""
+
 from __future__ import annotations
 
 from typing import Any

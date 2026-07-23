@@ -40,7 +40,7 @@ from datacoolie_studio.domains.monitoring.metrics.failure import (
     failure_tags_sql,
 )
 from datacoolie_studio.domains.monitoring.read_models.common import filtered_ctes
-from datacoolie_studio.domains.monitoring.serving_facts import rebuild_monitoring_serving_facts
+from datacoolie_studio.domains.analytics.serving_facts import rebuild_monitoring_serving_facts
 
 
 def test_filtered_ctes_apply_dataflow_scope_to_jobs() -> None:
