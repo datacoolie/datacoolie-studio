@@ -9,9 +9,11 @@ from zoneinfo import ZoneInfo
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.monitoring import log_repository
 from datacoolie_studio.domains.logs.reader import (
     discover_dataflow_parquet_files,
     discover_job_jsonl_files,
@@ -229,6 +231,7 @@ def test_public_monitoring_pages_project_only_consumed_sections(tmp_path: Path, 
 def _published_monitoring_paths(tmp_path: Path, monkeypatch) -> list[EnvironmentSource]:
     analytics_path = tmp_path / "monitoring.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     build_analytics_fixture(analytics_path, source_ids=[1], dataflow_rows=50)
     return [EnvironmentSource(
         id=1,
@@ -462,9 +465,13 @@ def test_performance_page_uses_executable_runs_and_operation_specific_workload_r
     assert {row["operation_type"] for row in page["workload_efficiency_points"]} == {"etl", "maintenance"}
 
 
-def test_monitoring_job_and_dataflow_logs_include_investigation_fields():
-    jobs = job_logs([PathRecord(str(SAMPLE_LOGS))], limit=5)
-    dataflows = dataflow_logs([PathRecord(str(SAMPLE_LOGS))], limit=5)
+def test_monitoring_job_and_dataflow_logs_include_investigation_fields(
+    tmp_path: Path,
+    monkeypatch,
+):
+    paths = _published_monitoring_paths(tmp_path, monkeypatch)
+    jobs = job_logs(paths, limit=5, session=object())
+    dataflows = dataflow_logs(paths, limit=5, session=object())
 
     assert jobs["records"]
     assert dataflows["records"]
@@ -1734,15 +1741,14 @@ def test_legacy_duckdb_cache_is_replaced_by_typed_candidate_after_reader_drain(t
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     with duckdb.connect(str(analytics_path)) as connection:
         connection.execute("CREATE TABLE etl_dataflow_run_cache (source_id INTEGER, file_uri VARCHAR, row_json VARCHAR)")
         connection.execute("CREATE TABLE etl_job_run_cache (source_id INTEGER, file_uri VARCHAR, row_json VARCHAR)")
 
-    dataflows, jobs = logs_cache._read_duckdb_rows([1])
-    assert dataflows == []
-    assert jobs == []
+    assert analytics_access.cache_is_ready(analytics_path) is False
 
-    reader = logs_cache.analytics_connections.connect(analytics_path, read_only=True)
+    reader = analytics_access.connect(analytics_path, read_only=True)
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
@@ -1786,6 +1792,7 @@ def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, 
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     first = logs_cache._upsert_duckdb_rows(
         7,
         [],
@@ -1837,6 +1844,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
 
     with duckdb.connect(str(analytics_path)) as connection:
         logs_cache._ensure_duckdb_tables(connection)
@@ -1886,13 +1894,9 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
             published_at=datetime.now(timezone.utc),
         )
 
-    def reject_row_materialization(*_args, **_kwargs):
-        raise AssertionError("Overview aggregate must not materialize cached Monitoring rows")
-
-    monkeypatch.setattr(logs_cache, "_read_duckdb_rows", reject_row_materialization)
     source = PathRecord(str(tmp_path))
     source.id = 7
-    cached = logs_cache.cached_monitoring_summary(
+    cached = log_repository.cached_monitoring_summary(
         object(),
         [source],
         cutoff=datetime(2026, 6, 10, 3, 0, tzinfo=timezone.utc),
@@ -1923,6 +1927,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     recent_rows = [
         (
             f"recent-{index}.parquet",
@@ -1980,7 +1985,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
 
     source = PathRecord(str(tmp_path))
     source.id = 7
-    result = logs_cache.query_cached_latest_dataflow_runs(object(), [source])
+    result = log_repository.query_cached_latest_dataflow_runs(object(), [source])
 
     assert result is not None
     rows, ambiguous_names, errors = result
@@ -2010,6 +2015,7 @@ def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     raw_start = "2026-06-18T15:23:08.534826+07:00"
     job_row = {
         "job_id": "job-1",
@@ -2044,6 +2050,7 @@ def test_duckdb_cache_uses_parquet_schema_for_dataflow_timestamps(tmp_path: Path
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     file_uri = discover_dataflow_parquet_files(str(SAMPLE_LOGS))[0]
 
     with duckdb.connect(str(analytics_path)) as connection:

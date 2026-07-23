@@ -20,6 +20,12 @@ def test_logs_does_not_import_monitoring() -> None:
     assert ("logs", "monitoring") not in edges
 
 
+def test_monitoring_does_not_import_logs() -> None:
+    edges = _domain_import_edges("monitoring")
+
+    assert ("monitoring", "logs") not in edges
+
+
 def _domain_import_edges(source_domain: str) -> set[tuple[str, str]]:
     edges: set[tuple[str, str]] = set()
     for source_file in (DOMAINS_ROOT / source_domain).rglob("*.py"):

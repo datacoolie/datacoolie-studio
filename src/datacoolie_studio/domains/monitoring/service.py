@@ -14,14 +14,12 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
-from datacoolie_studio.domains.logs.cache import (
+from datacoolie_studio.domains.monitoring.log_repository import (
     cached_monitoring_summary,
     query_cached_dataflow_logs,
     query_cached_job_logs,
     query_cached_latest_dataflow_runs,
 )
-from datacoolie_studio.domains.logs.reader import read_dataflow_logs, read_job_logs
-from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
 from datacoolie_studio.domains.monitoring.repository import monitoring_filter_options_read_model
 from datacoolie_studio.domains.monitoring.context import (
     materialization_token as analytics_materialization_token,
@@ -346,36 +344,37 @@ def dataflow_logs(
     session: Session | None = None,
     timezone_info: tzinfo | None = None,
 ) -> dict[str, Any]:
-    filters = _normalize_monitoring_filters_for_timezone(filters or {}, timezone_info=timezone_info)
-    if session is not None:
-        cached = query_cached_dataflow_logs(
-            session,
-            paths,
-            filters=filters,
-            limit=limit,
-            offset=offset,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
-        )
-        if cached is not None:
-            rows, total, errors = cached
-            rows = [_enrich_dataflow_run_for_investigation(row) for row in rows]
-            return {
-                "records": rows,
-                "errors": errors,
-                "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
-            }
+    if session is None:
+        raise ValueError("Monitoring dataflow queries require a database session")
+    normalized_filters = _normalize_monitoring_filters_for_timezone(
+        filters or {},
+        timezone_info=timezone_info,
+    )
+    cached = query_cached_dataflow_logs(
+        session,
+        paths,
+        filters=normalized_filters,
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    if cached is None:
         raise _analytics_unavailable(paths)
-    enabled_paths = _enabled_etl_paths(paths)
-    rows, errors = read_dataflow_logs(enabled_paths)
-    jobs, job_errors = read_job_logs(enabled_paths)
-    job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
-    rows = [_enrich_dataflow(row, job_by_id.get(row.get("job_id"))) for row in rows]
-    rows = _filter_log_rows(rows, filters, include_dataflow_filters=True)
-    rows = _sort_log_rows(rows, sort_by, sort_dir)
-    total = len(rows)
-    page = [_enrich_dataflow_run_for_investigation(row) for row in rows[offset:offset + limit]]
-    return {"records": page, "errors": [*errors, *job_errors], "summary": {"records": len(page), "total_records": total, "limit": limit, "offset": offset}}
+    rows, total, errors = cached
+    rows = [_enrich_dataflow_run_for_investigation(row) for row in rows]
+    return {
+        "records": rows,
+        "errors": errors,
+        "summary": {
+            "records": len(rows),
+            "total_records": total,
+            "limit": limit,
+            "offset": offset,
+            "cache": "duckdb",
+        },
+    }
+
 
 
 def job_logs(
@@ -388,42 +387,42 @@ def job_logs(
     session: Session | None = None,
     timezone_info: tzinfo | None = None,
 ) -> dict[str, Any]:
-    filters = _normalize_monitoring_filters_for_timezone(filters or {}, timezone_info=timezone_info)
-    if session is not None:
-        cached = query_cached_job_logs(
-            session,
-            paths,
-            filters=filters,
-            limit=limit,
-            offset=offset,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
-        )
-        if cached is not None:
-            rows, total, errors = cached
-            rows = [_enrich_job_run_for_investigation(row) for row in rows]
-            return {
-                "records": rows,
-                "errors": errors,
-                "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
-            }
+    if session is None:
+        raise ValueError("Monitoring job queries require a database session")
+    normalized_filters = _normalize_monitoring_filters_for_timezone(
+        filters or {},
+        timezone_info=timezone_info,
+    )
+    cached = query_cached_job_logs(
+        session,
+        paths,
+        filters=normalized_filters,
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    if cached is None:
         raise _analytics_unavailable(paths)
-    enabled_paths = _enabled_etl_paths(paths)
-    rows, errors = read_job_logs(enabled_paths)
-    all_dataflow_rows, dataflow_errors = read_dataflow_logs(enabled_paths)
-    dataflow_rows: list[dict[str, Any]] = []
-    if _has_dataflow_scoped_filter(filters):
-        dataflow_rows = _filter_log_rows(all_dataflow_rows, filters, include_dataflow_filters=True)
-    rows = _filter_log_rows(rows, filters, include_dataflow_filters=False)
-    rows = _filter_jobs_for_dataflow_scope(rows, dataflow_rows, filters)
-    rows = _enrich_job_runs_for_investigation(rows, all_dataflow_rows)
-    rows = _sort_log_rows(rows, sort_by, sort_dir)
-    total = len(rows)
-    page = rows[offset:offset + limit]
-    return {"records": page, "errors": [*errors, *dataflow_errors], "summary": {"records": len(page), "total_records": total, "limit": limit, "offset": offset}}
+    rows, total, errors = cached
+    rows = [_enrich_job_run_for_investigation(row) for row in rows]
+    return {
+        "records": rows,
+        "errors": errors,
+        "summary": {
+            "records": len(rows),
+            "total_records": total,
+            "limit": limit,
+            "offset": offset,
+            "cache": "duckdb",
+        },
+    }
+
 
 
 def latest_status(paths: list[EnvironmentSource], session: Session | None = None) -> dict[str, Any]:
+    if session is None:
+        raise ValueError("Latest Monitoring status requires a database session")
     environment_id = paths[0].environment_id if paths else None
     parameters_fingerprint = empty_parameters_fingerprint()
     input_fingerprint = _latest_runs_input_fingerprint(session, paths) if session is not None else ""
@@ -468,8 +467,7 @@ def latest_status(paths: list[EnvironmentSource], session: Session | None = None
         if focused is not None:
             rows, ambiguous_names, errors = focused
         else:
-            rows, errors = read_dataflow_logs(_enabled_etl_paths(paths))
-            ambiguous_names = None
+            raise _analytics_unavailable(paths)
         response = _latest_runs_response(rows, errors, ambiguous_names)
         if session is not None and environment_id is not None:
             replace_read_model(
@@ -1055,15 +1053,6 @@ def _is_later(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
     candidate_time = candidate.get("end_time") or candidate.get("start_time")
     current_time = current.get("end_time") or current.get("start_time")
     return _time_value(candidate_time) > _time_value(current_time)
-
-
-def _enabled_etl_paths(paths: list[EnvironmentSource]) -> list[str]:
-    return [
-        resolved.etl_logs_uri or path.uri
-        for path in paths
-        if path.enabled
-        for resolved in [resolve_log_source_paths(path)]
-    ]
 
 
 def _analytics_unavailable(paths: list[EnvironmentSource]) -> AnalyticsRebuildRequired:

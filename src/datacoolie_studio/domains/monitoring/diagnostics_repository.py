@@ -6,8 +6,8 @@ from typing import Any
 
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics.schema import DATAFLOW_TABLE, JOB_TABLE
-from datacoolie_studio.domains.logs.cache import monitoring_filter_sql
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
+from datacoolie_studio.domains.monitoring.log_repository import monitoring_filter_sql
 
 
 _FIELD_GROUPS = (
