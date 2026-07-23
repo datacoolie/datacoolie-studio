@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from datacoolie_studio.api.v1 import api_router
 from datacoolie_studio.db.session import init_db
-from datacoolie_studio.domains.logs.cache import AnalyticsRebuildRequired
+from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.sync.scheduler import scheduler_loop
 
 

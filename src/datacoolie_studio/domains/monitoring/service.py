@@ -13,9 +13,8 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.logs.cache import (
-    AnalyticsRebuildRequired,
-    analytics_materialization_token,
     cached_monitoring_summary,
     query_cached_dataflow_logs,
     query_cached_job_logs,
@@ -24,6 +23,9 @@ from datacoolie_studio.domains.logs.cache import (
 from datacoolie_studio.domains.logs.reader import read_dataflow_logs, read_job_logs
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
 from datacoolie_studio.domains.monitoring.repository import monitoring_filter_options_read_model
+from datacoolie_studio.domains.monitoring.context import (
+    materialization_token as analytics_materialization_token,
+)
 from datacoolie_studio.domains.monitoring.metrics.failure import (
     categorize_failure,
     classify_failure,

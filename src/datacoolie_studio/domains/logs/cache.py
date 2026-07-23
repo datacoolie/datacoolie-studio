@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import re
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterator
+from typing import Any
 
 import duckdb
 from sqlalchemy import delete, select
@@ -20,6 +20,7 @@ from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.analytics.connections import analytics_connections
+from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.logs.discovery import (
     DiscoveredLogFile,
     LogStreamCheckpoint,
@@ -52,23 +53,6 @@ from datacoolie_studio.domains.environment_caches import invalidate_environment_
 # every freshness/context read. Invalidated on sync and cache purge.
 _pending_changes_lock = Lock()
 _pending_changes_cache: dict[int, tuple[float, bool]] = {}
-
-
-class AnalyticsRebuildRequired(RuntimeError):
-    code = "analytics_rebuild_required"
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        source_ids: list[int] | None = None,
-        missing_source_ids: list[int] | None = None,
-        reason: str = "not_ready",
-    ) -> None:
-        super().__init__(message)
-        self.source_ids = source_ids or []
-        self.missing_source_ids = missing_source_ids or []
-        self.reason = reason
 
 
 class LogSchemaIncompatibleError(RuntimeError):
@@ -135,61 +119,6 @@ FILTER_VALUE_SOURCES = {
     "destination_load_type": (analytics_schema.DATAFLOW_TABLE, "destination_load_type"),
     "destination_operation_type": (analytics_schema.DATAFLOW_TABLE, "destination_operation_type"),
 }
-
-def analytics_materialization_token(paths: list[EnvironmentSource]) -> str:
-    """Return the O(1) published token used by Monitoring result-cache keys.
-
-    Source manifests remain the sync change-detection authority. Request paths
-    use this published token and never scan every manifest row.
-    """
-    source_ids = _analytics_source_ids(paths)
-    if not source_ids:
-        return f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:empty"
-
-    path = analytics_database_path()
-    if not path.exists():
-        return _unavailable_analytics_token(source_ids, "missing_database")
-    try:
-        conn = analytics_access.connect(path, read_only=True)
-    except duckdb.Error:
-        return _unavailable_analytics_token(source_ids, "database_unavailable")
-    try:
-        try:
-            return _analytics_materialization_token_from_connection(conn, source_ids)
-        except AnalyticsRebuildRequired as exc:
-            return _unavailable_analytics_token(source_ids, exc.reason)
-    finally:
-        conn.close()
-
-
-@contextmanager
-def analytics_reader(
-    paths: list[EnvironmentSource],
-) -> Iterator[tuple[Any, list[int], str]]:
-    """Open one validated, progress-silent reader for a Monitoring request."""
-    source_ids = _analytics_source_ids(paths)
-    if not source_ids:
-        yield None, [], f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:empty"
-        return
-    path = analytics_database_path()
-    if not path.exists():
-        yield None, [], _unavailable_analytics_token(source_ids, "missing_database")
-        return
-    try:
-        conn = analytics_access.connect(path, read_only=True)
-    except duckdb.Error:
-        yield None, [], _unavailable_analytics_token(source_ids, "database_unavailable")
-        return
-    try:
-        try:
-            token = _analytics_materialization_token_from_connection(conn, source_ids)
-        except AnalyticsRebuildRequired as exc:
-            yield None, [], _unavailable_analytics_token(source_ids, exc.reason)
-        else:
-            yield conn, source_ids, token
-    finally:
-        conn.close()
-
 
 def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
     """Return a shallow source revision without walking the log tree."""
@@ -807,7 +736,7 @@ def cached_monitoring_summary(
     requirement. Request paths never fall back to parsing raw log files.
     """
     del session
-    with analytics_reader(paths) as (conn, source_ids, _generation):
+    with analytics_access.reader(_analytics_source_ids(paths)) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return {
                 "dataflow_records": 0,
@@ -916,7 +845,7 @@ def query_cached_latest_dataflow_runs(
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]] | None:
     """Return one narrow latest row per stable Dataflow identity from DuckDB."""
     del session
-    with analytics_reader(paths) as (conn, source_ids, _generation):
+    with analytics_access.reader(_analytics_source_ids(paths)) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], [], []
         placeholders = ", ".join("?" for _ in source_ids)
@@ -1064,7 +993,7 @@ def query_cached_dataflow_logs(
     sort_dir: str = "desc",
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, str]]] | None:
     del session
-    with analytics_reader(paths) as (conn, source_ids, _generation):
+    with analytics_access.reader(_analytics_source_ids(paths)) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], 0, []
         source_placeholders = ", ".join("?" for _ in source_ids)
@@ -1125,7 +1054,7 @@ def query_cached_job_logs(
     sort_dir: str = "desc",
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, str]]] | None:
     del session
-    with analytics_reader(paths) as (conn, source_ids, _generation):
+    with analytics_access.reader(_analytics_source_ids(paths)) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], 0, []
         job_select_sql = _select_alias_columns("j", analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
@@ -1210,7 +1139,7 @@ def query_cached_monitoring_rows(
     the active report scope.
     """
     del session
-    reader_context = nullcontext(analytics_context) if analytics_context is not None else analytics_reader(paths)
+    reader_context = nullcontext(analytics_context) if analytics_context is not None else analytics_access.reader(_analytics_source_ids(paths))
     with reader_context as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], [], []
@@ -1437,7 +1366,7 @@ def _cached_source_context(
     session: Session,
     paths: list[EnvironmentSource],
 ) -> tuple[list[int], list[dict[str, str]]] | None:
-    token = analytics_materialization_token(paths)
+    token = analytics_access.materialization_token(_analytics_source_ids(paths))
     if ":unavailable:" in token:
         return [], []
     return _analytics_source_ids(paths), []
@@ -1935,42 +1864,9 @@ def _validate_analytics_candidate(candidate_path: Path, source_id: int) -> None:
         raise RuntimeError("Analytics rebuild candidate did not create the current typed schema")
     conn = analytics_access.connect(candidate_path, read_only=True)
     try:
-        _analytics_materialization_token_from_connection(conn, [source_id])
+        analytics_access.materialization_token_from_connection(conn, [source_id])
     finally:
         conn.close()
-
-
-def _analytics_materialization_token_from_connection(conn, enabled_source_ids: list[int]) -> str:
-    if not analytics_schema.typed_cache_schema_is_ready(conn):
-        raise AnalyticsRebuildRequired(
-            "Monitoring analytics use an incompatible schema; rebuild the Log sources",
-            source_ids=enabled_source_ids,
-            missing_source_ids=enabled_source_ids,
-            reason="schema_mismatch",
-        )
-    meta = analytics_store.analytics_meta(conn)
-    cached_source_ids = analytics_store.cache_source_ids(conn)
-    source_generations = analytics_store.cache_source_generations(conn)
-    missing_source_ids = sorted(set(enabled_source_ids) - cached_source_ids)
-    if (
-        meta is None
-        or meta["schema_version"] != analytics_schema.ANALYTICS_SCHEMA_VERSION
-        or meta["build_state"] != "ready"
-        or missing_source_ids
-    ):
-        raise AnalyticsRebuildRequired(
-            "Monitoring analytics are incomplete; sync the Log sources to rebuild them",
-            source_ids=enabled_source_ids,
-            missing_source_ids=missing_source_ids or enabled_source_ids,
-            reason="incomplete_sources" if missing_source_ids else "not_ready",
-        )
-    return (
-        f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:"
-        + ",".join(
-            f"{source_id}:{int(source_generations.get(source_id, 0))}"
-            for source_id in enabled_source_ids
-        )
-    )
 
 
 def _rebuild_required(paths: list[EnvironmentSource], *, reason: str) -> AnalyticsRebuildRequired:
@@ -1989,11 +1885,6 @@ def _analytics_source_ids(paths: list[EnvironmentSource]) -> list[int]:
         for path in paths
         if path.enabled and not source_validation.is_validated_empty_log_source(path)
     )
-
-
-def _unavailable_analytics_token(source_ids: list[int], reason: str) -> str:
-    source_key = ",".join(str(source_id) for source_id in source_ids)
-    return f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:unavailable:{reason}:{source_key}"
 
 
 def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:

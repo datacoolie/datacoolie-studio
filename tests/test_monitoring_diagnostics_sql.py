@@ -3,14 +3,20 @@ from pathlib import Path
 
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import access as analytics_access
+from datacoolie_studio.domains.analytics.connections import analytics_connections
+from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
 from datacoolie_studio.domains.monitoring import page_service
 from datacoolie_studio.domains.monitoring import service as monitoring_service
 
 
 def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_access,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
     build_analytics_fixture(analytics_path, source_ids=[7, 8], dataflow_rows=250)
     paths = [
         EnvironmentSource(
@@ -24,7 +30,7 @@ def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatc
     ]
 
     assert not hasattr(monitoring_service, "_monitoring_rows")
-    original_connect = logs_cache.analytics_connections.connect
+    original_connect = analytics_connections.connect
     connection_calls = 0
 
     def counted_connect(*args, **kwargs):
@@ -32,8 +38,8 @@ def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatc
         connection_calls += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(logs_cache.analytics_connections, "connect", counted_connect)
-    with logs_cache.analytics_reader(paths) as analytics_context:
+    monkeypatch.setattr(analytics_connections, "connect", counted_connect)
+    with analytics_reader(paths) as analytics_context:
         payload = page_service._build_monitoring_page(
             paths,
             page="diagnostics",

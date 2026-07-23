@@ -5,16 +5,14 @@ from datetime import date, datetime, timezone
 from typing import Any, ContextManager, Iterable, TypeAlias
 
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.logs.cache import (
-    analytics_reader,
-    monitoring_filter_sql,
-)
+from datacoolie_studio.domains.logs.cache import monitoring_filter_sql
 from datacoolie_studio.domains.analytics.serving_facts import (
     DATAFLOW_FACT_COLUMNS,
     JOB_FACT_COLUMNS,
     MONITORING_DATAFLOW_FACTS_TABLE,
     MONITORING_JOB_FACTS_TABLE,
 )
+from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
 
 
 AnalyticsContext: TypeAlias = tuple[Any, list[int], str]

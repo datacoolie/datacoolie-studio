@@ -5,6 +5,7 @@ import duckdb
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from benchmarks.monitoring_performance import _nearest_rank, _summarize, benchmark_call
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_DATAFLOW_FACTS_TABLE,
@@ -12,11 +13,17 @@ from datacoolie_studio.domains.analytics.serving_facts import (
     monitoring_serving_schema_is_ready,
 )
 from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.monitoring.context import materialization_token
 
 
 def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_access,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
 
     counts = build_analytics_fixture(analytics_path, source_ids=[7, 8], dataflow_rows=250)
 
@@ -31,7 +38,7 @@ def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monke
         )
         for source_id in (7, 8)
     ]
-    assert logs_cache.analytics_materialization_token(sources).startswith("analytics-v")
+    assert materialization_token(sources).startswith("analytics-v")
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         assert connection.execute("SELECT COUNT(*) FROM etl_dataflow_runs").fetchone()[0] == 250
         assert connection.execute("SELECT COUNT(*) FROM etl_job_runs").fetchone()[0] == 50

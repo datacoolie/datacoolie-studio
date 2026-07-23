@@ -20,7 +20,7 @@ from datacoolie_studio.db.models import (
 )
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
-from datacoolie_studio.domains.logs.cache import AnalyticsRebuildRequired
+from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.metadata.service import load_environment_metadata
 from datacoolie_studio.domains.monitoring import service as monitoring
 from datacoolie_studio.domains.studio_settings import service as studio_settings

@@ -118,11 +118,17 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
 
     from fastapi.testclient import TestClient
 
+    from datacoolie_studio.domains.analytics import access as analytics_access
     from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
     from datacoolie_studio.domains.logs import cache as logs_cache
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_access,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
     monkeypatch.setattr(
         analytics_maintenance,
         "analytics_database_path",
@@ -284,10 +290,17 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
 
     from datacoolie_studio.db.models import EnvironmentSource
+    from datacoolie_studio.domains.analytics import access as analytics_access
     from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
     from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
 
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_access,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
     monkeypatch.setattr(
         analytics_maintenance,
         "analytics_database_path",
@@ -307,7 +320,7 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
     clear_started = Event()
 
     def hold_reader() -> None:
-        with logs_cache.analytics_reader([source]):
+        with analytics_reader([source]):
             reader_started.set()
             assert reader_release.wait(timeout=2)
 
