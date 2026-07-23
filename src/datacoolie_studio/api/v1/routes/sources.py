@@ -17,7 +17,7 @@ from datacoolie_studio.api.v1.schemas import (
 )
 from datacoolie_studio.domains.code_artifacts.service import refresh_code_artifact, validate_code_artifact
 from datacoolie_studio.db.session import get_session
-from datacoolie_studio.domains.logs.cache import refresh_log_source_cache
+from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
 from datacoolie_studio.domains.logs.discovery import LogSyncMode, LogSyncSpec, LookbackRange
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.service import ensure_metadata_materialization

@@ -16,3 +16,11 @@ class AnalyticsRebuildRequired(RuntimeError):
         self.source_ids = source_ids or []
         self.missing_source_ids = missing_source_ids or []
         self.reason = reason
+
+
+class AnalyticsSchemaIncompatibleError(RuntimeError):
+    code = "schema_incompatible"
+
+
+class AnalyticsFileChangedDuringPublishError(RuntimeError):
+    code = "file_changed_during_sync"

@@ -164,6 +164,24 @@ ANALYTICS_SCHEMA_VERSION = 5
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 
+FILTER_VALUE_SOURCES = {
+    "operation_type": (DATAFLOW_TABLE, "operation_type"),
+    "status": (DATAFLOW_TABLE, "status"),
+    "stage": (DATAFLOW_TABLE, "stage"),
+    "engine_name": (JOB_TABLE, "engine_name"),
+    "metadata_provider_name": (JOB_TABLE, "metadata_provider_name"),
+    "platform_name": (JOB_TABLE, "platform_name"),
+    "source_connection_type": (DATAFLOW_TABLE, "source_connection_type"),
+    "source_format": (DATAFLOW_TABLE, "source_format"),
+    "source_table": (DATAFLOW_TABLE, "source_table"),
+    "destination_connection_type": (DATAFLOW_TABLE, "destination_connection_type"),
+    "destination_format": (DATAFLOW_TABLE, "destination_format"),
+    "destination_table": (DATAFLOW_TABLE, "destination_table"),
+    "destination_load_type": (DATAFLOW_TABLE, "destination_load_type"),
+    "destination_operation_type": (DATAFLOW_TABLE, "destination_operation_type"),
+}
+
+
 
 def cache_table_column_types(column_types: dict[str, str]) -> dict[str, str]:
     return {**column_types, **STUDIO_CACHE_COLUMNS}

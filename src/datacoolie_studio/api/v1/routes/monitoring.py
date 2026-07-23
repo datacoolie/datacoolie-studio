@@ -21,7 +21,7 @@ from datacoolie_studio.domains.monitoring.page_service import (
     monitoring_page_etag,
     public_monitoring_page,
 )
-from datacoolie_studio.domains.logs.cache import system_log_records
+from datacoolie_studio.domains.logs.system_logs import system_log_records
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace

@@ -12,13 +12,13 @@ from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_JOB_FACTS_TABLE,
     monitoring_serving_schema_is_ready,
 )
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.monitoring.context import materialization_token
 
 
 def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(
         analytics_access,
         "analytics_database_path",

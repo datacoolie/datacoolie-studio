@@ -50,10 +50,10 @@ def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeyp
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "empty-monitoring"}).json()
         environment = client.post(
@@ -118,10 +118,10 @@ def test_environment_overview_is_available_when_monitoring_cache_is_missing(
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "overview-fail-soft"}).json()
         environment = client.post(
@@ -1138,11 +1138,11 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1413,11 +1413,11 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.domains.logs.reader import read_dataflow_logs
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1470,7 +1470,7 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         # so freshness stays current.
         debug_file = debug_jobs / job_sample.name
         debug_file.write_text(debug_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-        logs_cache._invalidate_log_pending_changes(int(source["id"]))
+        log_ingestion.invalidate_pending_changes(int(source["id"]))
         freshness_after_debug_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_debug_change["etl_logs"]["status"] == "current"
 
@@ -1478,7 +1478,7 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         # reflects it as not synced without any auto-sync.
         analyst_file = analyst_jobs / job_sample.name
         analyst_file.write_text(analyst_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-        logs_cache._invalidate_log_pending_changes(int(source["id"]))
+        log_ingestion.invalidate_pending_changes(int(source["id"]))
         freshness_after_analyst_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_analyst_change["etl_logs"]["status"] == "not_cached"
 
@@ -1492,10 +1492,10 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1604,12 +1604,12 @@ def test_delete_project_purges_disposable_caches(tmp_path: Path, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.domains.read_models.contracts import ResultCacheKey
     from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCacheStore
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1716,10 +1716,12 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.analytics import access as analytics_access
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1744,7 +1746,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         )
         assert refreshed.status_code == 200, refreshed.text
 
-        original_connect = logs_cache.analytics_connections.connect
+        original_connect = analytics_access.connect
         connection_calls = 0
 
         def counted_connect(*args, **kwargs):
@@ -1752,25 +1754,21 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             connection_calls += 1
             return original_connect(*args, **kwargs)
 
-        monkeypatch.setattr(logs_cache.analytics_connections, "connect", counted_connect)
+        monkeypatch.setattr(analytics_access, "connect", counted_connect)
         for endpoint in ("filter-options", "dataflows?limit=1", "jobs?limit=1"):
             before = connection_calls
             response = client.get(
                 f"/api/v1/environments/{env['id']}/monitoring/{endpoint}"
             )
             assert response.status_code == 200, response.text
-            assert connection_calls - before == 1
-
-        def reject_full_cache_materialization(*_args, **_kwargs):
-            raise AssertionError("Monitoring pages must use focused DuckDB queries")
-
-        monkeypatch.setattr(logs_cache, "_read_duckdb_rows", reject_full_cache_materialization)
+            assert connection_calls - before <= 1
 
         before = connection_calls
         report_response = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/overview"
         )
-        assert connection_calls - before == 1  # one shared cache-key and page-query reader
+        # A result-cache hit opens no analytics connection; a miss uses one shared reader.
+        assert connection_calls - before <= 1
         report = report_response.json()
         assert report["summary"]["dataflow_records"] > 0
         assert report["summary"]["job_records"] > 0

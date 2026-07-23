@@ -11,7 +11,7 @@ from datacoolie_studio.domains.analytics.serving_facts import (
     rebuild_monitoring_serving_facts,
     validate_monitoring_serving_facts,
 )
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.logs import ingestion as log_ingestion
 
 
 def test_serving_facts_reconcile_context_and_derived_columns(tmp_path: Path):
@@ -81,13 +81,14 @@ def test_serving_validation_rejects_row_count_drift(tmp_path: Path):
 
 def test_failed_serving_validation_rolls_back_generation(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
-    first = logs_cache._upsert_duckdb_rows(
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    first = analytics_store.publish_rows(
         7,
         [],
         [("job-1.jsonl", "job_jsonl", "{}", {"job_id": "job-1", "status": "succeeded"})],
         [],
         ["job-1.jsonl"],
+        database_path=analytics_path,
     )
     assert first["published"] is True
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
@@ -108,12 +109,13 @@ def test_failed_serving_validation_rolls_back_generation(tmp_path: Path, monkeyp
         "validate_monitoring_serving_facts",
         reject_serving_facts,
     )
-    failed = logs_cache._upsert_duckdb_rows(
+    failed = analytics_store.publish_rows(
         7,
         [],
         [("job-2.jsonl", "job_jsonl", "{}", {"job_id": "job-2", "status": "failed"})],
         [],
         ["job-2.jsonl"],
+        database_path=analytics_path,
     )
     assert failed["published"] is False
     assert "serving validation failed" in failed["errors"][0]["message"]

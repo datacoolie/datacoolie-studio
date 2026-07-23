@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import schema as analytics_schema
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.monitoring import page_service, service as monitoring_service
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
 from datacoolie_studio.domains.monitoring.read_models.jobs import jobs_read_model
@@ -545,7 +545,7 @@ def test_freshness_read_model_tracks_the_actual_consecutive_skipped_streak() -> 
                 "end_time": f"2026-07-21T0{index}:01:00Z",
             },
         ))
-    logs_cache._insert_typed_rows(
+    analytics_store.insert_typed_rows(
         connection,
         analytics_schema.DATAFLOW_TABLE,
         1,
@@ -615,7 +615,7 @@ def test_maintenance_read_model_returns_empty_evidence_without_maintenance_runs(
 
 def test_maintenance_read_model_returns_wide_trends_and_registry_drawer_evidence() -> None:
     connection = _dataflow_metric_connection(include_asset_metadata=True)
-    logs_cache._insert_typed_rows(
+    analytics_store.insert_typed_rows(
         connection,
         analytics_schema.DATAFLOW_TABLE,
         1,
@@ -706,18 +706,18 @@ def test_all_monitoring_pages_bypass_legacy_fact_materialization() -> None:
 
 def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
     connection = duckdb.connect(":memory:")
-    logs_cache._ensure_duckdb_tables(connection)
-    logs_cache._ensure_typed_table(
+    analytics_store.ensure_tables(connection)
+    analytics_store.ensure_typed_table(
         connection,
         analytics_schema.DATAFLOW_TABLE,
         analytics_schema.DATAFLOW_COLUMN_TYPES,
     )
-    logs_cache._ensure_typed_table(
+    analytics_store.ensure_typed_table(
         connection,
         analytics_schema.JOB_TABLE,
         analytics_schema.JOB_COLUMN_TYPES,
     )
-    logs_cache._insert_typed_rows(
+    analytics_store.insert_typed_rows(
         connection,
         analytics_schema.JOB_TABLE,
         1,
@@ -763,7 +763,7 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
             "destination_table": "curated.orders",
             "destination_path": "/lakehouse/curated/orders",
         })
-    logs_cache._insert_typed_rows(
+    analytics_store.insert_typed_rows(
         connection,
         analytics_schema.DATAFLOW_TABLE,
         1,

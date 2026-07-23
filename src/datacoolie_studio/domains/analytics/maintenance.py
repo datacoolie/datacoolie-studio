@@ -86,3 +86,86 @@ def table_row_count(conn, table_name: str) -> int:
     if not schema.table_exists(conn, table_name):
         return 0
     return int(conn.execute(f"SELECT count(*) FROM {table_name}").fetchone()[0])
+
+
+def source_stats(source_id: int) -> dict[str, int]:
+    stats = {
+        "dataflow_row_count": 0,
+        "job_row_count": 0,
+        "filter_value_count": 0,
+    }
+    path = analytics_database_path()
+    if not path.exists():
+        return stats
+    conn = access.connect(path, read_only=True)
+    try:
+        stats["dataflow_row_count"] = store.table_source_row_count(
+            conn,
+            schema.DATAFLOW_TABLE,
+            source_id,
+        )
+        stats["job_row_count"] = store.table_source_row_count(
+            conn,
+            schema.JOB_TABLE,
+            source_id,
+        )
+        stats["filter_value_count"] = store.table_source_row_count(
+            conn,
+            schema.FILTER_VALUES_TABLE,
+            source_id,
+        )
+    finally:
+        conn.close()
+    return stats
+
+
+def purge_source_ids(source_ids: list[int]) -> dict[str, int]:
+    unique_ids = sorted({int(source_id) for source_id in source_ids if int(source_id) > 0})
+    if not unique_ids:
+        return {
+            "dataflow_rows_deleted": 0,
+            "job_rows_deleted": 0,
+            "filter_values_deleted": 0,
+        }
+    path = analytics_database_path()
+    if not path.exists():
+        return {
+            "dataflow_rows_deleted": 0,
+            "job_rows_deleted": 0,
+            "filter_values_deleted": 0,
+        }
+    conn = access.connect(path)
+    try:
+        dataflow_rows = store.delete_rows_by_source_ids(
+            conn,
+            schema.DATAFLOW_TABLE,
+            unique_ids,
+        )
+        job_rows = store.delete_rows_by_source_ids(
+            conn,
+            schema.JOB_TABLE,
+            unique_ids,
+        )
+        filter_rows = store.delete_rows_by_source_ids(
+            conn,
+            schema.FILTER_VALUES_TABLE,
+            unique_ids,
+        )
+        for table_name in (
+            schema.CACHE_SOURCES_TABLE,
+            schema.INGEST_MANIFEST_TABLE,
+            schema.INGEST_CHECKPOINT_TABLE,
+        ):
+            store.delete_rows_by_source_ids(
+                conn,
+                table_name,
+                unique_ids,
+                source_column="source_id",
+            )
+    finally:
+        conn.close()
+    return {
+        "dataflow_rows_deleted": dataflow_rows,
+        "job_rows_deleted": job_rows,
+        "filter_values_deleted": filter_rows,
+    }

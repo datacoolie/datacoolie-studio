@@ -121,10 +121,10 @@ def _test_client(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(database_path))
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     return TestClient(app), analytics_path
 
 
@@ -259,13 +259,13 @@ def test_incremental_refresh_does_not_use_legacy_recursive_source_scans(
     with client:
         environment_id, source_id = _create_workspace(client, log_root)
 
-        from datacoolie_studio.domains.logs import cache as logs_cache
+        from datacoolie_studio.domains.logs import ingestion as log_ingestion
 
         def fail_legacy_scan(*_args, **_kwargs):
             raise AssertionError("incremental refresh must not invoke a legacy recursive source scan")
 
-        monkeypatch.setattr(logs_cache.sync, "stat_source", fail_legacy_scan)
-        monkeypatch.setattr(logs_cache.source_validation, "validate_log_source", fail_legacy_scan)
+        monkeypatch.setattr(log_ingestion.sync, "stat_source", fail_legacy_scan)
+        monkeypatch.setattr(log_ingestion.source_validation, "validate_log_source", fail_legacy_scan)
         _refresh(client, environment_id, source_id)
 
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import Environment, EnvironmentSource
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.read_models.keys import (
     ASSETS_CATALOG,
     LINEAGE_GRAPH,
@@ -99,7 +99,10 @@ def _clear_analytics(session: Session, environment_id: int | None) -> dict[str, 
             )
         )
     )
-    deleted = logs_cache.purge_cached_source_ids([int(source_id) for source_id in source_ids])
+    normalized_source_ids = [int(source_id) for source_id in source_ids]
+    for source_id in normalized_source_ids:
+        log_ingestion.invalidate_pending_changes(source_id)
+    deleted = analytics_maintenance.purge_source_ids(normalized_source_ids)
     return {
         "deleted_files": 0,
         "deleted_file_bytes": 0,

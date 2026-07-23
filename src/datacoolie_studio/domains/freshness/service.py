@@ -140,7 +140,7 @@ def _load_environment_context_state(session: Session, environment_id: int) -> En
     # for a cached Log source with new/changed files, on the same read that
     # reports Metadata and Code freshness. The scan result is cached for the
     # source-check interval (TTL) so it is not repeated on every read.
-    from datacoolie_studio.domains.logs.cache import log_source_has_pending_changes
+    from datacoolie_studio.domains.logs.ingestion import log_source_has_pending_changes
     from datacoolie_studio.domains.studio_settings.service import source_check_interval_seconds
 
     pending_ttl = source_check_interval_seconds(session)

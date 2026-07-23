@@ -9,7 +9,8 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
+from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.db.models import (
     Environment,
     EnvironmentMetadataEditorDraft,
@@ -873,7 +874,8 @@ def update_log_source(
         _delete_source_log_cache(session, path)
     elif enabled_changed:
         _clear_source_read_check(path)
-        logs_cache.purge_cached_source_ids([path.id])
+        log_ingestion.invalidate_pending_changes(path.id)
+        analytics_maintenance.purge_source_ids([path.id])
     if label is not None:
         path.label = label
     if enabled is not None:
@@ -901,7 +903,7 @@ def log_source_delete_impact(session: Session, environment_id: int, path_id: int
     path = environment_source_by_id(session, environment_id, path_id, "logs")
     if path is None:
         return None
-    cache_stats = logs_cache.cached_source_stats(path.id)
+    cache_stats = analytics_maintenance.source_stats(path.id)
     impact_specs = [
         ("manifest", "indexed log file", _count_source_rows(session, LogFileManifest, path.id), "warning"),
         ("dataflow_cache", "cached dataflow run", cache_stats["dataflow_row_count"], "warning"),
@@ -954,7 +956,8 @@ def _delete_source_sync_records(session: Session, source: EnvironmentSource) -> 
 def _delete_source_log_cache(session: Session, source: EnvironmentSource) -> None:
     for row in _source_rows(session, LogFileManifest, source.id):
         session.delete(row)
-    logs_cache.purge_cached_source_ids([source.id])
+    log_ingestion.invalidate_pending_changes(source.id)
+    analytics_maintenance.purge_source_ids([source.id])
 
 
 def _etl_source_ids_for_environment(session: Session, environment_id: int) -> list[int]:
@@ -983,7 +986,9 @@ def _purge_analytics_cache_by_source_ids(source_ids: list[int]) -> None:
     if not source_ids:
         return
     try:
-        logs_cache.purge_cached_source_ids(source_ids)
+        for source_id in source_ids:
+            log_ingestion.invalidate_pending_changes(source_id)
+        analytics_maintenance.purge_source_ids(source_ids)
     except Exception:
         # Purging analytics cache is best-effort and should not block project/environment deletes.
         pass

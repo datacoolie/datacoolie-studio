@@ -7,7 +7,6 @@ import duckdb
 
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
-from datacoolie_studio.domains.logs import cache
 
 
 def build_analytics_fixture(
@@ -28,8 +27,8 @@ def build_analytics_fixture(
     source_values = ", ".join(f"({int(source_id)})" for source_id in source_ids)
     connection = duckdb.connect(str(path))
     try:
-        cache._ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
-        cache._ensure_typed_table(connection, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
+        analytics_store.ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
+        analytics_store.ensure_typed_table(connection, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
         analytics_schema.ensure_filter_values_table(connection)
         analytics_schema.ensure_cache_sources_table(connection)
         analytics_schema.ensure_analytics_meta_table(connection)
@@ -126,7 +125,7 @@ def build_analytics_fixture(
             [now],
         )
         for source_id in source_ids:
-            cache._refresh_filter_values(connection, source_id)
+            analytics_store.refresh_filter_values(connection, source_id)
         analytics_store.publish_generation(
             connection,
             dataflow_column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,

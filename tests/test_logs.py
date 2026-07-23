@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 import json
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.monitoring import log_repository
 from datacoolie_studio.domains.logs.reader import (
     discover_dataflow_parquet_files,
@@ -230,7 +231,7 @@ def test_public_monitoring_pages_project_only_consumed_sections(tmp_path: Path, 
 
 def _published_monitoring_paths(tmp_path: Path, monkeypatch) -> list[EnvironmentSource]:
     analytics_path = tmp_path / "monitoring.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     build_analytics_fixture(analytics_path, source_ids=[1], dataflow_rows=50)
     return [EnvironmentSource(
@@ -1740,7 +1741,7 @@ def test_legacy_duckdb_cache_is_replaced_by_typed_candidate_after_reader_drain(t
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     with duckdb.connect(str(analytics_path)) as connection:
         connection.execute("CREATE TABLE etl_dataflow_run_cache (source_id INTEGER, file_uri VARCHAR, row_json VARCHAR)")
@@ -1752,7 +1753,10 @@ def test_legacy_duckdb_cache_is_replaced_by_typed_candidate_after_reader_drain(t
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                logs_cache._upsert_duckdb_rows,
+                partial(
+                    analytics_store.publish_rows,
+                    database_path=analytics_path,
+                ),
                 1,
                 [],
                 [
@@ -1791,9 +1795,9 @@ def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, 
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
-    first = logs_cache._upsert_duckdb_rows(
+    first = analytics_store.publish_rows(
         7,
         [],
         [
@@ -1806,6 +1810,7 @@ def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, 
         ],
         [],
         ["job.jsonl"],
+        database_path=analytics_path,
     )
     assert first["published"] is True
 
@@ -1819,13 +1824,14 @@ def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, 
     def fail_insert(*_args, **_kwargs):
         raise RuntimeError("invalid parquet")
 
-    monkeypatch.setattr(logs_cache, "_insert_dataflow_file", fail_insert)
-    failed = logs_cache._upsert_duckdb_rows(
+    monkeypatch.setattr(analytics_store, "insert_dataflow_file", fail_insert)
+    failed = analytics_store.publish_rows(
         7,
         [("bad.parquet", "dataflow_parquet", "{}")],
         [],
         [],
         ["bad.parquet"],
+        database_path=analytics_path,
     )
     assert failed["published"] is False
     assert failed["errors"]
@@ -1843,22 +1849,22 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
 
     with duckdb.connect(str(analytics_path)) as connection:
-        logs_cache._ensure_duckdb_tables(connection)
-        logs_cache._ensure_typed_table(
+        analytics_store.ensure_tables(connection)
+        analytics_store.ensure_typed_table(
             connection,
             analytics_schema.DATAFLOW_TABLE,
             analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
-        logs_cache._ensure_typed_table(
+        analytics_store.ensure_typed_table(
             connection,
             analytics_schema.JOB_TABLE,
             analytics_schema.JOB_COLUMN_TYPES,
         )
-        logs_cache._insert_typed_rows(
+        analytics_store.insert_typed_rows(
             connection,
             analytics_schema.DATAFLOW_TABLE,
             7,
@@ -1869,7 +1875,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
             ],
             analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
-        logs_cache._insert_typed_rows(
+        analytics_store.insert_typed_rows(
             connection,
             analytics_schema.JOB_TABLE,
             7,
@@ -1926,7 +1932,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     recent_rows = [
         (
@@ -1944,13 +1950,13 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
         for index in range(1001)
     ]
     with duckdb.connect(str(analytics_path)) as connection:
-        logs_cache._ensure_duckdb_tables(connection)
-        logs_cache._ensure_typed_table(
+        analytics_store.ensure_tables(connection)
+        analytics_store.ensure_typed_table(
             connection,
             analytics_schema.DATAFLOW_TABLE,
             analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
-        logs_cache._insert_typed_rows(
+        analytics_store.insert_typed_rows(
             connection,
             analytics_schema.DATAFLOW_TABLE,
             7,
@@ -2003,7 +2009,7 @@ def test_legacy_dataflow_cache_table_is_recreated_in_one_schema_pass(tmp_path: P
         connection.execute(
             f"CREATE TABLE {analytics_schema.DATAFLOW_TABLE} (_raw_json VARCHAR)"
         )
-        logs_cache._ensure_duckdb_tables(connection)
+        analytics_store.ensure_tables(connection)
         columns = analytics_schema.table_columns(connection, analytics_schema.DATAFLOW_TABLE)
 
     assert "_raw_json" not in columns
@@ -2014,7 +2020,7 @@ def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     raw_start = "2026-06-18T15:23:08.534826+07:00"
     job_row = {
@@ -2027,8 +2033,8 @@ def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path
     }
 
     with duckdb.connect(str(analytics_path)) as connection:
-        logs_cache._ensure_duckdb_tables(connection)
-        logs_cache._insert_typed_rows(
+        analytics_store.ensure_tables(connection)
+        analytics_store.insert_typed_rows(
             connection,
             analytics_schema.JOB_TABLE,
             1,
@@ -2049,13 +2055,13 @@ def test_duckdb_cache_uses_parquet_schema_for_dataflow_timestamps(tmp_path: Path
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
     file_uri = discover_dataflow_parquet_files(str(SAMPLE_LOGS))[0]
 
     with duckdb.connect(str(analytics_path)) as connection:
-        logs_cache._ensure_duckdb_tables(connection)
-        logs_cache._insert_dataflow_file(connection, 1, file_uri, "dataflow_parquet", "{}")
+        analytics_store.ensure_tables(connection)
+        analytics_store.insert_dataflow_file(connection, 1, file_uri, "dataflow_parquet", "{}")
 
         escaped = file_uri.replace("'", "''")
         source_types = {

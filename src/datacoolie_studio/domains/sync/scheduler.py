@@ -13,7 +13,7 @@ from datacoolie_studio.domains.code_artifacts.service import (
     code_artifact_materialization,
     ensure_code_artifact_materialization,
 )
-from datacoolie_studio.domains.logs.cache import refresh_log_source_cache
+from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.service import (
     ensure_metadata_materialization,

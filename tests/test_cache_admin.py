@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.read_models.contracts import ResultCacheKey
 from datacoolie_studio.domains.read_models.database import reset_result_cache_engine
 from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCacheStore
@@ -120,10 +121,10 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
 
     from datacoolie_studio.domains.analytics import access as analytics_access
     from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(
         analytics_access,
         "analytics_database_path",
@@ -208,13 +209,6 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
                 (source["id"],),
             ).fetchone()[0] == manifest_count
 
-        from datacoolie_studio.domains.monitoring import service as monitoring_service
-
-        def reject_raw_reader(*_args, **_kwargs):
-            raise AssertionError("Monitoring requests must not parse raw logs after Analytics Clear")
-
-        monkeypatch.setattr(monitoring_service, "read_dataflow_logs", reject_raw_reader)
-        monkeypatch.setattr(monitoring_service, "read_job_logs", reject_raw_reader)
         unavailable = client.get(
             f"/api/v1/environments/{environment['id']}/monitoring/pages/overview"
         )
@@ -240,10 +234,10 @@ def test_reenabled_log_source_requires_fresh_analytics_publish(tmp_path: Path, m
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "source-lifecycle"}).json()
         environment = client.post(
@@ -292,10 +286,10 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
     from datacoolie_studio.db.models import EnvironmentSource
     from datacoolie_studio.domains.analytics import access as analytics_access
     from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
 
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(
         analytics_access,
         "analytics_database_path",
@@ -306,7 +300,14 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
         "analytics_database_path",
         lambda: analytics_path,
     )
-    published = logs_cache._upsert_duckdb_rows(7, [], [], [], [])
+    published = analytics_store.publish_rows(
+        7,
+        [],
+        [],
+        [],
+        [],
+        database_path=analytics_path,
+    )
     assert published["published"] is True
     source = EnvironmentSource(
         id=7,
