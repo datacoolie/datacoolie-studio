@@ -8,7 +8,7 @@ function reference(overrides: Partial<AssetReferenceGroupItem> = {}) {
     reference_type: "table_reference",
     normalized_value: "silver.customer",
     display_name: "silver.customer",
-    group_status: "unresolved",
+    resolution: { state: "unresolved", reason: "no_match" },
     resolved_asset_id: null,
     resolved_asset_ids: [],
     candidate_asset_ids: [],
@@ -37,7 +37,7 @@ function occurrence(id: string, consumerAssetId: string, line: number): AssetRef
     display_name: "silver.customer",
     provenance: "python",
     consumer_asset_id: consumerAssetId,
-    resolution_status: "unresolved",
+    resolution: { state: "unresolved", reason: "no_match" },
     resolution_method: "no_declared_asset_match",
     candidate_asset_ids: [],
     candidate_assets: [],
@@ -61,7 +61,7 @@ describe("reference drawer model", () => {
 
   it("describes a unique resolved target and manual mapping scope", () => {
     const story = referenceResolutionStory(reference({
-      group_status: "resolved_single",
+      resolution: { state: "manual" },
       resolved_asset_id: "asset:customer",
       resolved_asset: { id: "asset:customer", display_name: "customer", friendly_name: "customer", asset_type: "table", attention_count: 0 },
       manual_mapping: { mapping_id: 7 },
@@ -71,22 +71,22 @@ describe("reference drawer model", () => {
   });
 
   it.each([
-    ["ambiguous", "2 canonical candidates match this reference."],
-    ["mapping_target_missing", "The mapped target is missing from this environment."],
-    ["partially_resolved", "1 of 2 occurrences resolve successfully."],
-    ["resolved_mixed", "Occurrences resolve to 2 different assets."],
-  ] as const)("builds the %s resolution narrative", (groupStatus, expectedTitle) => {
-    const occurrences = groupStatus === "partially_resolved"
+    ["multiple_matches", "2 canonical candidates match this reference."],
+    ["target_missing", "The mapped target is missing from this environment."],
+    ["incomplete", "1 of 2 occurrences resolve successfully."],
+    ["conflicting_targets", "Occurrences resolve to 2 different assets."],
+  ] as const)("builds the %s resolution narrative", (reason, expectedTitle) => {
+    const occurrences = reason === "incomplete"
       ? [
-        { ...occurrence("occurrence:1", "asset:a", 8), resolution_status: "resolved_auto" as const },
+        { ...occurrence("occurrence:1", "asset:a", 8), resolution: { state: "automatic" as const } },
         occurrence("occurrence:2", "asset:b", 11),
       ]
       : [];
     const story = referenceResolutionStory(reference({
-      group_status: groupStatus,
-      candidate_asset_ids: groupStatus === "ambiguous" ? ["asset:a", "asset:b"] : [],
-      resolved_asset_ids: groupStatus === "resolved_mixed" ? ["asset:a", "asset:b"] : [],
-      manual_mapping: groupStatus === "mapping_target_missing"
+      resolution: { state: "unresolved", reason },
+      candidate_asset_ids: reason === "multiple_matches" ? ["asset:a", "asset:b"] : [],
+      resolved_asset_ids: reason === "conflicting_targets" ? ["asset:a", "asset:b"] : [],
+      manual_mapping: reason === "target_missing"
         ? { mapping_id: 9, target_normalized_value: "catalog.database.silver.customer" }
         : null,
     }), occurrences);

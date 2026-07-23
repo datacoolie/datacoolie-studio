@@ -11,6 +11,23 @@ from datacoolie_studio.domains.logs.source_config import resolve_log_source_path
 from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, require_local_path
 
 
+EMPTY_LOG_SOURCE_MESSAGE = "No ETL or system log files found"
+
+
+def is_validated_empty_log_source(source: EnvironmentSource) -> bool:
+    """Whether a completed validation established that a source has no log files."""
+    if (
+        getattr(source, "source_kind", "logs") != "logs"
+        or getattr(source, "read_check_status", None) != "error"
+    ):
+        return False
+    try:
+        result = json.loads(getattr(source, "read_check_result_json", None) or "{}")
+    except json.JSONDecodeError:
+        return False
+    return result.get("message") == EMPTY_LOG_SOURCE_MESSAGE
+
+
 def validate_metadata_source(session: Session, source: EnvironmentSource) -> dict:
     try:
         path = require_local_path(source.uri)
@@ -56,7 +73,7 @@ def validate_log_source(session: Session, source: EnvironmentSource) -> dict:
         return record_source_validation(
             session,
             source,
-            source_validation_error(source, "No ETL or system log files found"),
+            source_validation_error(source, EMPTY_LOG_SOURCE_MESSAGE),
         )
 
     counts = {

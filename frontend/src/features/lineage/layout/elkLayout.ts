@@ -8,6 +8,10 @@ const ASSET_NODE_HEIGHT = 62;
 const positionCache = new Map<string, Map<string, { x: number; y: number }>>();
 let elk: InstanceType<typeof ELK> | null = null;
 
+export function cachedLineageLayout(cacheKey: string) {
+  return positionCache.get(cacheKey) ?? null;
+}
+
 function elkClient() {
   elk ??= new ELK({ workerFactory: () => new ElkWorker() });
   return elk;

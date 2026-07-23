@@ -81,9 +81,9 @@ describe("lineage reference nodes", () => {
       entities: [],
       dataflows: [dataflow("flow-source-target", "source", "target")],
       dependencies: [
-        dependency("unresolved", "source"),
-        dependency("ambiguous", "source"),
-        dependency("mapping_target_missing", "source"),
+        dependency("no_match", "source"),
+        dependency("multiple_matches", "source"),
+        dependency("target_missing", "source"),
       ],
       focusNodeIds: new Set(),
       focusEdgeIds: new Set(),
@@ -189,29 +189,27 @@ function reference(id: string, provenances: LineageReference["provenances"] = ["
     reference_type: "table_reference",
     display_name: "unknown.orders",
     normalized_value: "unknown.orders",
-    group_status: "unresolved",
+    resolution: { state: "unresolved", reason: "no_match" },
     resolved_asset_ids: [],
     candidate_asset_ids: [],
-    occurrence_ids: [],
+    occurrence_count: 0,
     consumer_asset_ids: [],
     provenances,
     dependency_count: 1,
-    observations: [],
   };
 }
 
-function dependency(resolutionStatus: LineageDependency["resolution_status"], resolvedAssetId?: string): LineageDependency {
+function dependency(reason: "no_match" | "multiple_matches" | "target_missing", resolvedAssetId?: string): LineageDependency {
   return {
-    id: `dependency-${resolutionStatus}`,
+    id: `dependency-${reason}`,
     target_asset_id: "target",
     consumer_asset_id: "target",
     kind: "reads",
     provenance: "sql",
-    resolution_status: resolutionStatus,
+    resolution: { state: "unresolved", reason },
     resolution_method: "test",
     reference_id: "reference-orders",
     reference_occurrence_id: "occurrence-orders",
     resolved_asset_id: resolvedAssetId,
-    observations: [],
   };
 }

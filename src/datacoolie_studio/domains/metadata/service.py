@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.db.models import EnvironmentSource, MetadataSourceSnapshot, utc_now
-from datacoolie_studio.domains.metadata.editor import _metadata_source_name, load_editor_document_from_raw, validate_editor_document
+from datacoolie_studio.db.models import EnvironmentSource, MetadataMaterialization, utc_now
+from datacoolie_studio.domains.freshness.service import metadata_catalog_version
+from datacoolie_studio.domains.metadata.editor import (
+    _metadata_source_name,
+    load_editor_document_from_raw,
+    load_environment_editor_draft,
+    validate_editor_document,
+)
 from datacoolie_studio.domains.metadata.normalizer import (
     METADATA_NORMALIZER_VERSION,
     enrich_metadata_documents_with_connections,
@@ -18,6 +25,9 @@ from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.sync import service as sync
 
 
+METADATA_MATERIALIZATION_SCHEMA_VERSION = "metadata-materialization.v1"
+
+
 def load_environment_metadata(session: Session, sources: list[EnvironmentSource]) -> dict:
     documents = []
     errors = []
@@ -25,8 +35,8 @@ def load_environment_metadata(session: Session, sources: list[EnvironmentSource]
         if not source.enabled:
             continue
         try:
-            snapshot, warning = _ensure_metadata_snapshot_result(session, source)
-            normalized = json.loads(snapshot.normalized_metadata_json or "{}")
+            materialization, warning = _ensure_metadata_materialization_result(session, source)
+            normalized = json.loads(materialization.normalized_metadata_json or "{}")
             if normalized:
                 documents.append(normalized)
             if warning:
@@ -62,8 +72,8 @@ def load_environment_metadata(session: Session, sources: list[EnvironmentSource]
 
 
 def load_cached_editor_document(session: Session, source: EnvironmentSource) -> dict:
-    snapshot = ensure_metadata_snapshot(session, source)
-    return _refresh_editor_document_routing(source, json.loads(snapshot.editor_document_json))
+    materialization = ensure_metadata_materialization(session, source)
+    return _refresh_editor_document_routing(source, json.loads(materialization.editor_document_json))
 
 
 def load_environment_editor_document(session: Session, sources: list[EnvironmentSource]) -> dict:
@@ -106,6 +116,29 @@ def load_environment_editor_document(session: Session, sources: list[Environment
     return document
 
 
+def load_environment_editor_workspace(
+    session: Session,
+    environment_id: int,
+    sources: list[EnvironmentSource],
+    *,
+    document: dict | None = None,
+    draft: dict | None = None,
+) -> dict:
+    resolved_document = document or load_environment_editor_document(session, sources)
+    resolved_draft = (
+        load_environment_editor_draft(session, environment_id)
+        if draft is None
+        else draft
+    )
+    return {
+        "schema_version": "metadata-editor-workspace.v1",
+        "environment_id": environment_id,
+        "metadata_catalog_version": metadata_catalog_version(session, sources),
+        "document": resolved_document,
+        "draft": resolved_draft,
+    }
+
+
 def _refresh_editor_document_routing(source: EnvironmentSource, document: dict) -> dict:
     source_name = _metadata_source_name(source)
     source_info = document.setdefault("source", {})
@@ -139,30 +172,35 @@ def _editor_sheet_counts(document: dict) -> dict[str, int]:
     return result
 
 
-def ensure_metadata_snapshot(session: Session, source: EnvironmentSource, *, force: bool = False) -> MetadataSourceSnapshot:
-    snapshot, _ = _ensure_metadata_snapshot_result(session, source, force=force)
-    return snapshot
-
-
-def _ensure_metadata_snapshot_result(
+def ensure_metadata_materialization(
     session: Session,
     source: EnvironmentSource,
     *,
     force: bool = False,
-) -> tuple[MetadataSourceSnapshot, dict | None]:
+) -> MetadataMaterialization:
+    materialization, _ = _ensure_metadata_materialization_result(session, source, force=force)
+    return materialization
+
+
+def _ensure_metadata_materialization_result(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    force: bool = False,
+) -> tuple[MetadataMaterialization, dict | None]:
     if source.source_kind != "metadata":
         raise MetadataReadError("Source is not a metadata source")
 
     current = sync.stat_source(source, include_content_hash=False)
-    latest = latest_metadata_snapshot(session, source.id)
+    current_materialization = metadata_materialization(session, source.id)
     if (
         not force
-        and latest is not None
-        and _same_revision_json(current, latest.source_revision_json)
-        and _snapshot_uses_current_normalizer(latest)
-        and _snapshot_has_editor_routing(latest)
+        and current_materialization is not None
+        and _same_revision_json(current, current_materialization.source_revision_json)
+        and _materialization_uses_current_normalizer(current_materialization)
+        and _materialization_has_editor_routing(current_materialization)
     ):
-        return latest, None
+        return current_materialization, None
 
     job = sync.begin_sync_job(session, source, "force_refresh" if force else "auto_refresh")
     error = _revision_error(source, current)
@@ -176,8 +214,8 @@ def _ensure_metadata_snapshot_result(
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
         )
         source_validation.validate_metadata_source(session, source)
-        if latest is not None:
-            return latest, error
+        if current_materialization is not None:
+            return current_materialization, error
         raise MetadataReadError(error["message"])
 
     try:
@@ -200,37 +238,57 @@ def _ensure_metadata_snapshot_result(
             source,
             source_validation.source_validation_error(source, str(exc)),
         )
-        if latest is not None:
-            return latest, error
+        if current_materialization is not None:
+            return current_materialization, error
         raise
 
-    snapshot = MetadataSourceSnapshot(
-        source_id=source.id,
-        source_revision_json=json.dumps(current, sort_keys=True),
-        editor_document_json=json.dumps(editor_document, ensure_ascii=False),
-        normalized_metadata_json=json.dumps(normalized, ensure_ascii=False),
+    revision_json = json.dumps(current, sort_keys=True)
+    fingerprint = _materialization_fingerprint(current)
+    previous_fingerprint = (
+        current_materialization.materialization_fingerprint
+        if current_materialization is not None
+        else None
     )
-    session.add(snapshot)
-    if latest is None or not _same_revision_json(current, latest.source_revision_json):
+    if current_materialization is None:
+        current_materialization = MetadataMaterialization(
+            source_id=source.id,
+            source_revision_json=revision_json,
+            normalizer_version=METADATA_NORMALIZER_VERSION,
+            materialization_fingerprint=fingerprint,
+            editor_document_json=json.dumps(editor_document, ensure_ascii=False),
+            normalized_metadata_json=json.dumps(normalized, ensure_ascii=False),
+        )
+        session.add(current_materialization)
+    else:
+        current_materialization.source_revision_json = revision_json
+        current_materialization.normalizer_version = METADATA_NORMALIZER_VERSION
+        current_materialization.materialization_fingerprint = fingerprint
+        current_materialization.editor_document_json = json.dumps(editor_document, ensure_ascii=False)
+        current_materialization.normalized_metadata_json = json.dumps(normalized, ensure_ascii=False)
+        current_materialization.materialized_at = utc_now()
+    if previous_fingerprint != fingerprint:
         invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     sync.record_source_revision(session, source=source, status="ok", revision=current, error=None, checked_at=utc_now())
     sync.finish_sync_job(
         session,
         job,
         status="succeeded",
-        message="Metadata source cache refreshed",
-        result={"status": "ok", "message": "Metadata source cache refreshed", "revision": current, "error": None},
+        message="Metadata source materialization refreshed",
+        result={
+            "status": "ok",
+            "message": "Metadata source materialization refreshed",
+            "revision": current,
+            "error": None,
+        },
     )
     source_validation.validate_metadata_source(session, source)
-    return snapshot, None
+    return current_materialization, None
 
 
-def latest_metadata_snapshot(session: Session, source_id: int) -> MetadataSourceSnapshot | None:
-    return session.scalars(
-        select(MetadataSourceSnapshot)
-        .where(MetadataSourceSnapshot.source_id == source_id)
-        .order_by(MetadataSourceSnapshot.created_at.desc(), MetadataSourceSnapshot.id.desc())
-    ).first()
+def metadata_materialization(session: Session, source_id: int) -> MetadataMaterialization | None:
+    return session.scalar(
+        select(MetadataMaterialization).where(MetadataMaterialization.source_id == source_id)
+    )
 
 
 def _merge_editor_sheet_documents(documents: list[dict], sheet_name: str) -> dict:
@@ -268,17 +326,13 @@ def _same_revision_json(current: dict, stored_json: str | None) -> bool:
     )
 
 
-def _snapshot_uses_current_normalizer(snapshot: MetadataSourceSnapshot) -> bool:
-    try:
-        normalized = json.loads(snapshot.normalized_metadata_json or "{}")
-    except json.JSONDecodeError:
-        return False
-    return normalized.get("_normalizer_version") == METADATA_NORMALIZER_VERSION
+def _materialization_uses_current_normalizer(materialization: MetadataMaterialization) -> bool:
+    return materialization.normalizer_version == METADATA_NORMALIZER_VERSION
 
 
-def _snapshot_has_editor_routing(snapshot: MetadataSourceSnapshot) -> bool:
+def _materialization_has_editor_routing(materialization: MetadataMaterialization) -> bool:
     try:
-        editor = json.loads(snapshot.editor_document_json or "{}")
+        editor = json.loads(materialization.editor_document_json or "{}")
     except json.JSONDecodeError:
         return False
     sheets = editor.get("sheets") if isinstance(editor, dict) else {}
@@ -298,6 +352,19 @@ def _snapshot_has_editor_routing(snapshot: MetadataSourceSnapshot) -> bool:
         ):
             return False
     return True
+
+
+def _materialization_fingerprint(revision: dict) -> str:
+    canonical = json.dumps(
+        {
+            "revision": revision,
+            "normalizer_version": METADATA_NORMALIZER_VERSION,
+            "schema_version": METADATA_MATERIALIZATION_SCHEMA_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _revision_error(source: EnvironmentSource, revision: dict) -> dict | None:

@@ -5,15 +5,19 @@ import {
   DetailMetric,
   DurationHeadline,
   HealthStripCard,
+  LifecycleStatusValues,
   JobDurationByOperationBoxPlot,
   JobRunsTable,
   JobStageHealthPanel,
   JobWorkloadEfficiencyScatter,
   ReportChart,
   ReportPanel,
+  StatusHealthLegend,
+  StatusTrendLegend,
   type TableSort,
   TablePager,
   WindowPairDetail,
+  WorkloadEfficiencyLegend,
   durationIntent,
   durationPercentilesDetail,
   durationStatsTitle,
@@ -59,7 +63,7 @@ export function JobsPage({
   const jobDurationStats = (report.operations.job_duration_stats ?? {}) as Record<string, number>;
   const latestFailedJob = report.operations.latest_failed_job;
   const latestFailedTime = latestFailedJob ? String(latestFailedJob.end_time ?? latestFailedJob.start_time ?? "") : "";
-  const durationByOperationRows = report.operations.dataflow_duration_by_operation_type ?? [];
+  const durationByOperationRows = report.operations.job_duration_by_operation_types ?? [];
   const jobTrendRows = report.operations.jobs_by_date_status ?? [];
   const workloadEfficiencyRows = report.operations.job_workload_efficiency ?? [];
   const childFanoutRows = report.operations.job_child_fanout_distribution ?? [];
@@ -83,10 +87,10 @@ export function JobsPage({
             <WindowPairDetail
               firstLabel="24h"
               firstValue={formatNumber(last24Window.job_runs ?? 0)}
-              firstTone="neutral"
+              firstTone="headline"
               secondLabel="7d"
               secondValue={formatNumber(last7Window.job_runs ?? 0)}
-              secondTone="neutral"
+              secondTone="headline"
             />
           }
           title="Job runs in the rolling last 24 hours and last 7 * 24 hours. Executable jobs = succeeded + failed. Skipped jobs are not counted in execution rate."
@@ -127,15 +131,33 @@ export function JobsPage({
           title={latestFailedTime ? `Latest failed job time: ${formatTimestampForDisplay(latestFailedTime, timezoneName)}` : "No failed jobs in current filters."}
         />
         <HealthStripCard
-          label="Running / Pending / Skipped"
-          value={`${formatNumber(kpis.total_running ?? 0)} / ${formatNumber(kpis.total_pending ?? 0)} / ${formatNumber(kpis.total_skipped ?? 0)}`}
+          label="Skipped / Running / Pending"
+          value={
+            <LifecycleStatusValues
+              running={kpis.total_running ?? 0}
+              pending={kpis.total_pending ?? 0}
+              skipped={kpis.total_skipped ?? 0}
+            />
+          }
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={`${formatNumber(last24Window.job_running ?? 0)} / ${formatNumber(last24Window.job_pending ?? 0)} / ${formatNumber(last24Window.job_skipped ?? 0)}`}
+              firstValue={
+                <LifecycleStatusValues
+                  running={last24Window.job_running ?? 0}
+                  pending={last24Window.job_pending ?? 0}
+                  skipped={last24Window.job_skipped ?? 0}
+                />
+              }
               firstTone="neutral"
               secondLabel="7d"
-              secondValue={`${formatNumber(last7Window.job_running ?? 0)} / ${formatNumber(last7Window.job_pending ?? 0)} / ${formatNumber(last7Window.job_skipped ?? 0)}`}
+              secondValue={
+                <LifecycleStatusValues
+                  running={last7Window.job_running ?? 0}
+                  pending={last7Window.job_pending ?? 0}
+                  skipped={last7Window.job_skipped ?? 0}
+                />
+              }
               secondTone="neutral"
             />
           }
@@ -176,8 +198,8 @@ export function JobsPage({
         <section className="monitoring-job-primary-grid">
           <ReportPanel
             title="Job status trend by date"
-            subtitle="job runs by status and success rate"
             titleTooltip="Job run status over the selected time range. Success rate line uses succeeded / (succeeded + failed)."
+            headerAction={<StatusTrendLegend />}
           >
             <div className="monitoring-job-chart-fill">
               <ReportChart
@@ -187,9 +209,9 @@ export function JobsPage({
             </div>
           </ReportPanel>
           <ReportPanel
-            title="Dataflow operation duration"
-            subtitle="dataflow operation_type"
-            titleTooltip="Box plot by dataflow log operation_type. It shows min, Q1, median, Q3, and max duration for completed dataflow runs. Tooltip includes average, P95, count, and status mix."
+            title="Job operation duration"
+            subtitle="job operation_types"
+            titleTooltip="Box plot of job duration grouped by the exact operation_types bundle from each job log record. Array values stay together and display as value_1, value_2. It shows min, Q1, median, Q3, and max duration for completed job runs. Tooltip includes average, P95, count, and status mix."
           >
             <JobDurationByOperationBoxPlot rows={durationByOperationRows} />
           </ReportPanel>
@@ -197,15 +219,15 @@ export function JobsPage({
         <section className="monitoring-job-secondary-grid">
           <ReportPanel
             title="Job x stage health"
-            subtitle="distinct jobs touching each stage"
             titleTooltip="Counts distinct job_id values that touched each dataflow stage, then splits those jobs by job-log status. Skipped is not counted as failed."
+            headerAction={<StatusHealthLegend />}
           >
             <JobStageHealthPanel rows={jobStageRows} />
           </ReportPanel>
           <ReportPanel
             title="Workload efficiency"
-            subtitle="dataflow runs vs duration"
             titleTooltip="Each point is a job_id + dataflow operation_type group. X is total dataflow runs, Y is total dataflow duration, color is operation_type, and point size is rows read divided by duration."
+            headerAction={<WorkloadEfficiencyLegend rows={workloadEfficiencyRows} />}
           >
             <JobWorkloadEfficiencyScatter rows={workloadEfficiencyRows} onInspect={onInspect} />
           </ReportPanel>

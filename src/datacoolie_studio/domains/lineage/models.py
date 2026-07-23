@@ -3,19 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from datacoolie_studio.domains.assets.reference_resolution import ReferenceResolution
+
 
 AssetKind = Literal["table", "path", "sql_query", "python_function", "api", "unresolved"]
 DeclarationStatus = Literal["declared", "discovered_only"]
 ReferenceType = Literal["table_reference", "path_reference", "api_endpoint_reference", "unknown"]
-ReferenceGroupStatus = Literal[
-    "resolved_single",
-    "resolved_mixed",
-    "partially_resolved",
-    "ambiguous",
-    "unresolved",
-    "mapping_target_missing",
-]
-ResolutionStatus = Literal["resolved_auto", "resolved_manual", "ambiguous", "unresolved", "mapping_target_missing"]
 DependencyKind = Literal["reads", "uses"]
 Provenance = Literal["sql", "python", "python_sql"]
 
@@ -26,7 +19,7 @@ class LineageReference:
     reference_type: ReferenceType
     display_name: str
     normalized_value: str
-    group_status: ReferenceGroupStatus
+    resolution: ReferenceResolution
     entity_type: Literal["reference"] = field(default="reference", init=False)
     resolved_asset_id: str | None = None
     resolved_asset_ids: list[str] = field(default_factory=list)
@@ -47,7 +40,7 @@ class LineageReferenceOccurrence:
     reference_id: str
     reference_type: ReferenceType
     display_name: str
-    resolution_status: ResolutionStatus
+    resolution: ReferenceResolution
     raw_value: str
     normalized_value: str
     context_scope: str | None
@@ -88,7 +81,7 @@ class LineageDependency:
     consumer_asset_id: str
     kind: DependencyKind
     provenance: Provenance
-    resolution_status: ResolutionStatus
+    resolution: ReferenceResolution
     resolution_method: str
     reference_id: str
     reference_occurrence_id: str

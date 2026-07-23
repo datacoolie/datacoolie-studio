@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
+import type { TableSort } from "../MonitoringCharts";
 import {
   DataTable,
   DetailMetric,
@@ -23,42 +24,57 @@ import {
   formatSeconds,
   horizontalBarDataZoom,
   monitoringTimezone,
+  normalizeTrendBucketKey,
   num,
   reportChartPalette,
   reportChartGrid,
   resolveTrendBucketKeys
 } from "../monitoringShared";
 
-const MAINTENANCE_PAGE_SIZE = 100;
 const MAINTENANCE_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
 type EfficiencyScaleMode = "linear" | "log";
 
 export function MaintenancePage({
   report,
   filters,
+  rows,
+  totalRows,
+  loading,
+  sort,
+  onSort,
+  limit,
+  offset,
+  onPageChange,
+  onPageSizeChange,
   onInspect
 }: {
   report: MonitoringReport;
   filters: MonitoringFilters;
+  rows: MonitoringRecord[];
+  totalRows: number;
+  loading: boolean;
+  sort: TableSort;
+  onSort: (sort: TableSort) => void;
+  limit: number;
+  offset: number;
+  onPageChange: (offset: number) => void;
+  onPageSizeChange: (limit: number) => void;
   onInspect?: (row: MonitoringRecord) => void;
 }) {
   const kpis = report.maintenance.kpis ?? {};
   const timezoneName = monitoringTimezone(report);
-  const tableRows = ((report.maintenance.table_registry ?? report.maintenance.table_outcome ?? report.maintenance.per_table ?? []) as MonitoringRecord[]);
-  const efficiencyRows = (report.maintenance.table_efficiency_points ?? report.maintenance.efficiency_points ?? []) as Array<Record<string, unknown>>;
+  const tableRows = rows;
+  const outcomeRows = (report.maintenance.table_outcome ?? []) as MonitoringRecord[];
+  const efficiencyRows = useMemo(
+    () => (report.maintenance.table_efficiency_points ?? []) as Array<Record<string, unknown>>,
+    [report.maintenance.table_efficiency_points]
+  );
   const [efficiencyScale, setEfficiencyScale] = useState<EfficiencyScaleMode>(() => defaultMaintenanceEfficiencyScale(efficiencyRows));
-  const [offset, setOffset] = useState(0);
-  const [limit, setLimit] = useState(MAINTENANCE_PAGE_SIZE);
-
-  useEffect(() => {
-    setOffset(0);
-  }, [report]);
 
   useEffect(() => {
     setEfficiencyScale(defaultMaintenanceEfficiencyScale(efficiencyRows));
-  }, [report, efficiencyRows]);
+  }, [efficiencyRows]);
 
-  const visibleRows = tableRows.slice(offset, offset + limit);
   const health = String(kpis.health_status ?? "no_evidence");
   const bytesReclaimed = Number(kpis.bytes_reclaimed ?? 0);
   const durationSeconds = Number(kpis.duration_seconds ?? 0);
@@ -176,7 +192,7 @@ export function MaintenancePage({
             titleTooltip="One row per destination target, sorted by attention priority, reclaimed bytes, then latest evidence."
           >
             <ReportChart
-              option={maintenanceTableOutcomeOption(tableRows)}
+              option={maintenanceTableOutcomeOption(outcomeRows)}
               height="100%"
               wheelDataZoomStep={1}
             />
@@ -184,7 +200,6 @@ export function MaintenancePage({
           <ReportPanel
             title="Table efficiency map"
             className="monitoring-maintenance-efficiency-panel"
-            subtitle={efficiencyScale === "log" ? "bytes reclaimed vs duration · log scale" : "bytes reclaimed vs duration · linear scale"}
             titleTooltip="Each point is a destination table. X = bytes reclaimed, Y = total maintenance duration, size = maintenance run count, color = table health. Log scale keeps zero, small, and large reclaim values visible together; tooltips always show raw values."
             headerAction={
               <div className="monitoring-maintenance-efficiency-actions">
@@ -202,25 +217,22 @@ export function MaintenancePage({
 
         <ReportPanel
           title="Destination table maintenance registry"
-          subtitle={`${formatNumber(tableRows.length)} destinations · attention first`}
+          subtitle={`${formatNumber(totalRows)} destinations · attention first`}
           className="monitoring-maintenance-runs-panel"
           titleTooltip="One row per destination table or destination asset. Dataflow maintenance runs are evidence behind the table-level health."
           headerAction={
             <TablePager
               limit={limit}
               offset={offset}
-              loadedRows={visibleRows.length}
-              totalRows={tableRows.length}
-              loading={false}
-              onPageChange={setOffset}
-              onPageSizeChange={(nextLimit) => {
-                setLimit(nextLimit);
-                setOffset(0);
-              }}
+              loadedRows={tableRows.length}
+              totalRows={totalRows}
+              loading={loading}
+              onPageChange={onPageChange}
+              onPageSizeChange={onPageSizeChange}
             />
           }
         >
-          <MaintenanceRegistryTable rows={visibleRows} timezoneName={timezoneName} onInspect={onInspect} />
+          <MaintenanceRegistryTable rows={tableRows} sort={sort} onSort={onSort} timezoneName={timezoneName} onInspect={onInspect} />
         </ReportPanel>
       </div>
     </div>
@@ -293,10 +305,14 @@ function MaintenanceEfficiencyScaleToggle({
 
 function MaintenanceRegistryTable({
   rows,
+  sort,
+  onSort,
   timezoneName,
   onInspect
 }: {
   rows: MonitoringRecord[];
+  sort: TableSort;
+  onSort: (sort: TableSort) => void;
   timezoneName?: string | null;
   onInspect?: (row: MonitoringRecord) => void;
 }) {
@@ -316,6 +332,8 @@ function MaintenanceRegistryTable({
         { key: "attention_reason", label: "Attention", minWidth: 140, fillPriority: "last", render: (row) => <MaintenanceReasonCell row={row} /> }
       ]}
       maxRows={rows.length}
+      sort={sort}
+      onSort={onSort}
       onRowClick={onInspect}
       timezoneName={timezoneName}
       className="monitoring-maintenance-table"
@@ -415,7 +433,7 @@ function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
 function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
   const [runLabel] = maintenanceRunLines(row);
   return (
-    <span className="monitor-stack-cell" title={`Runs: ${formatNumber(num(row, "run_count"))}\nSucceeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}`}>
+    <span className="monitor-stack-cell" title={`Runs: ${formatNumber(num(row, "run_count"))}\nSucceeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}\nRunning / pending / unknown: ${formatNumber(num(row, "running"))} / ${formatNumber(num(row, "pending"))} / ${formatNumber(num(row, "unknown"))}`}>
       <strong>{runLabel}</strong>
       <small>
         <span style={{ color: reportChartPalette.success }}>{formatNumber(num(row, "succeeded"))}</span>
@@ -688,12 +706,16 @@ function maintenanceTrendRows(
   createEmpty: (bucket: string, grain: string) => Record<string, string | number | null>
 ): Array<Record<string, string | number | null>> {
   const effectiveGrain = String(rows.find((row) => row.grain)?.grain ?? report.summary.effective_grain ?? filters.grain ?? "day");
-  const knownDateKeys = rows.map((row) => String(row.bucket ?? row.date ?? "")).filter((date) => date && date !== "unknown");
+  const normalizedRows = rows.map((row) => {
+    const bucket = normalizeTrendBucketKey(row.bucket ?? row.date, effectiveGrain, timezoneName);
+    return { ...row, bucket, date: bucket };
+  });
+  const knownDateKeys = normalizedRows.map((row) => String(row.bucket ?? "")).filter((date) => date && date !== "unknown");
   const dateKeys = resolveTrendBucketKeys(filters, report.summary.date_range, timezoneName, knownDateKeys, effectiveGrain);
-  const byKey = new Map(rows.map((row) => [String(row.bucket ?? row.date), row]));
+  const byKey = new Map(normalizedRows.map((row) => [String(row.bucket), row]));
   const visible = dateKeys.length > 0
     ? dateKeys.map((dateKey) => ({ ...createEmpty(dateKey, effectiveGrain), ...(byKey.get(dateKey) ?? {}) }))
-    : rows;
+    : normalizedRows;
   return visible.map((row) => ({
     ...row,
     total: num(row, "total") || MAINTENANCE_STATUSES.reduce((sum, status) => sum + num(row, status), 0),
@@ -812,3 +834,8 @@ function emptyChartOption(message: string): EChartsOption {
     }
   });
 }
+
+export const maintenancePageTestUtils = {
+  maintenanceReclaimTrendOption,
+  maintenanceStatusTrendOption,
+};

@@ -80,7 +80,7 @@ def test_build_assets_inventory_covers_canonical_assets_references_provenance_an
 
     unresolved_reference = next(
         item for item in reference_rows
-        if item["group_status"] == "unresolved"
+        if item["resolution"] == {"state": "unresolved", "reason": "no_match"}
     )
     unresolved_occurrence = next(item for item in occurrence_rows if item["reference_id"] == unresolved_reference["id"])
     assert unresolved_reference["reference_type"] == "table_reference"
@@ -114,7 +114,7 @@ def test_build_assets_inventory_covers_canonical_assets_references_provenance_an
 
     ambiguous_reference = next(
         item for item in reference_rows
-        if item["group_status"] == "ambiguous"
+        if item["resolution"] == {"state": "unresolved", "reason": "multiple_matches"}
     )
     assert ambiguous_reference["attention_count"] == 1
     ambiguous_attention = ambiguous_reference["attention_items"][0]
@@ -127,7 +127,7 @@ def test_build_assets_inventory_covers_canonical_assets_references_provenance_an
     assert "lake · main.warehouse.archive.orders" in candidate_identities
     assert "lake · main.warehouse.sales.orders" in candidate_identities
 
-    assert "unresolved" in payload["filter_options"]["reference_groups"]["group_statuses"]
+    assert "unresolved" in payload["filter_options"]["reference_groups"]["resolution_states"]
     assert "table_reference" in payload["filter_options"]["reference_groups"]["reference_types"]
     assert "source" in payload["filter_options"]["assets"]["roles"]
     assert "destination" in payload["filter_options"]["assets"]["roles"]
@@ -214,7 +214,21 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         reference_rows = references.json()["items"]
         assert len(reference_rows) == payload["summary"]["references"]
         assert "pagination" not in references.json()
-        assert any(item["group_status"] == "unresolved" for item in reference_rows)
+        assert any(item["resolution"]["state"] == "unresolved" for item in reference_rows)
+        assert all(item["occurrence_count"] >= 1 for item in reference_rows)
+        assert all("occurrence_ids" not in item or item["occurrence_ids"] == [] for item in reference_rows)
+        method_row = next(item for item in reference_rows if item["resolution_methods"])
+        method_search = client.get(
+            f"/api/v1/environments/{environment['id']}/asset-references",
+            params={"q": method_row["resolution_methods"][0]},
+        ).json()["items"]
+        assert method_row["id"] in {item["id"] for item in method_search}
+        resolved_row = next(item for item in reference_rows if item.get("resolved_asset"))
+        resolved_search = client.get(
+            f"/api/v1/environments/{environment['id']}/asset-references",
+            params={"q": resolved_row["resolved_asset"]["display_name"]},
+        ).json()["items"]
+        assert resolved_row["id"] in {item["id"] for item in resolved_search}
         assert payload["summary"]["asset_attention"] >= 1
         assert asset_rows
 
@@ -263,7 +277,7 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         structural_before = client.get(
             f"/api/v1/environments/{environment['id']}/freshness"
         ).json()["structural_cache_version"]
-        unresolved = next(item for item in reference_rows if item["group_status"] == "unresolved")
+        unresolved = next(item for item in reference_rows if item["resolution"]["state"] == "unresolved")
         target = next(item["mapping_target"] for item in asset_rows if item.get("mapping_target"))
         mapping = client.post(
             f"/api/v1/projects/{project['id']}/reference-mappings",
@@ -282,9 +296,29 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         assert structural_after != structural_before
         assert client.get(f"/api/v1/environments/{environment['id']}/assets").json()["catalog_version"] != payload["catalog_version"]
 
-        with sqlite3.connect(tmp_path / "studio.db") as connection:
+        project_registry = client.get(f"/api/v1/projects/{project['id']}/reference-registry")
+        assert project_registry.status_code == 200
+        project_row = next(
+            item for item in project_registry.json()["rows"]
+            if item["normalized_value"] == unresolved["normalized_value"]
+        )
+        assert project_row["resolution"]["state"] == "manual"
+        assert project_row["mapping"]["id"] == mapping.json()["id"]
+
+        cleared = client.delete(
+            f"/api/v1/projects/{project['id']}/reference-mappings/{mapping.json()['id']}"
+        )
+        assert cleared.status_code == 204
+        cleared_row = next(
+            item for item in client.get(f"/api/v1/projects/{project['id']}/reference-registry").json()["rows"]
+            if item["normalized_value"] == unresolved["normalized_value"]
+        )
+        assert cleared_row["resolution"]["state"] == "unresolved"
+        assert cleared_row["mapping"] is None
+
+        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
             assert connection.execute(
-                "select count(*) from environment_read_model_cache_entries where model_key = 'assets.catalog'"
+                "select count(*) from result_cache_entries where namespace = 'assets.catalog'"
             ).fetchone()[0] == 1
 
         if detail_payload["upstream_assets"]:

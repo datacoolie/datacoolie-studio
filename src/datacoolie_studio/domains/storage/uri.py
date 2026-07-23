@@ -10,6 +10,8 @@ CLOUD_SCHEMES = {
     "abfss": "adls",
     "adl": "adls",
     "dbfs": "dbfs",
+    "gcs": "gcs",
+    "gs": "gcs",
     "s3": "s3",
     "s3a": "s3",
     "s3n": "s3",

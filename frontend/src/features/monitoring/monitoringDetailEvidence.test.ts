@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { monitoringDetailEvidenceRequest } from "./monitoringDetailEvidence";
+import { mergeDataflowRunDetail, monitoringDetailEvidenceRequest } from "./monitoringDetailEvidence";
 
 const page = {
   limit: 100,
@@ -46,5 +46,17 @@ describe("monitoring detail evidence request", () => {
   it("does not request evidence for non-paged drawers or missing identity", () => {
     expect(monitoringDetailEvidenceRequest({ kind: "diagnostics", row: {} }, {}, page)).toBeNull();
     expect(monitoringDetailEvidenceRequest({ kind: "freshness", row: {} }, {}, page)).toBeNull();
+  });
+
+  it("keeps failure annotations while canonical run fields fill the drawer", () => {
+    expect(mergeDataflowRunDetail(
+      { dataflow_run_id: "run-1", failure_tags: ["timeout"], source_table: null },
+      { dataflow_run_id: "run-1", source_table: "raw.orders", destination_table: "silver.orders" },
+    )).toEqual({
+      dataflow_run_id: "run-1",
+      failure_tags: ["timeout"],
+      source_table: "raw.orders",
+      destination_table: "silver.orders",
+    });
   });
 });

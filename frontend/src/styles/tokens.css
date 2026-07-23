@@ -60,6 +60,14 @@
   --color-info: #2563eb;
   --color-info-soft: #e6efff;
 
+  /* Reference resolution: automatic=success, manual=user override, unresolved=attention */
+  --resolution-automatic-color: var(--color-success);
+  --resolution-automatic-bg: var(--color-success-soft);
+  --resolution-manual-color: var(--color-info);
+  --resolution-manual-bg: var(--color-info-soft);
+  --resolution-unresolved-color: var(--color-warning);
+  --resolution-unresolved-bg: var(--color-warning-soft);
+
   /* Spacing scale (4px base) */
   --space-1: 4px;
   --space-2: 8px;

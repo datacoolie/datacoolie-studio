@@ -1,11 +1,12 @@
 import { Check, Copy, ListTree, Search, WrapText, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
-import { api } from "../../shared/api/client";
-import type { SystemLogResponse } from "../../shared/api/types";
 import { formatTimestampForDisplay, parseTimestamp } from "../../shared/time";
+import { monitoringSystemLogsOptions, SYSTEM_LOG_PAGE_SIZE } from "./monitoringQueries";
 
-const PAGE_SIZE = 500;
+export { systemLogScopeParams } from "./monitoringQueries";
+
 const LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
 
 interface SystemLogViewerProps {
@@ -30,18 +31,19 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
   const titleId = useId();
   const dialogRef = useRef<HTMLElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const requestVersion = useRef(0);
   const [searchValue, setSearchValue] = useState("");
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState("");
   const [includeDataflowLogs, setIncludeDataflowLogs] = useState(false);
-  const [response, setResponse] = useState<SystemLogResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [lastPageSize, setLastPageSize] = useState(0);
-  const [error, setError] = useState<string | null>(null);
   const [wrapped, setWrapped] = useState(true);
   const [copied, setCopied] = useState(false);
+  const logsQuery = useInfiniteQuery(monitoringSystemLogsOptions(environmentId, {
+    jobId,
+    dataflowId,
+    includeDataflowLogs,
+    level,
+    query,
+  }));
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(searchValue.trim()), 250);
@@ -87,64 +89,19 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
     };
   }, [onClose]);
 
-  useEffect(() => {
-    const version = ++requestVersion.current;
-    setLoading(true);
-    setError(null);
-    setResponse(null);
-    setLastPageSize(0);
-    void api.getMonitoringSystemLogs(environmentId, {
-      job_id: jobId,
-      ...systemLogScopeParams(dataflowId, includeDataflowLogs),
-      level: level || undefined,
-      q: query || undefined,
-      limit: PAGE_SIZE,
-      offset: 0,
-    }).then((next) => {
-      if (version !== requestVersion.current) return;
-      setResponse(next);
-      setLastPageSize(next.records.length);
-    }).catch((reason: unknown) => {
-      if (version !== requestVersion.current) return;
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }).finally(() => {
-      if (version === requestVersion.current) setLoading(false);
-    });
-  }, [dataflowId, environmentId, includeDataflowLogs, jobId, level, query]);
-
-  const records = useMemo(() => sortLogRecords(response?.records ?? []), [response?.records]);
-  const canLoadMore = !loading && !loadingMore && Boolean(response) && (
-    records.length < (response?.total ?? 0) || lastPageSize === PAGE_SIZE
-  );
+  const pages = logsQuery.data?.pages ?? [];
+  const records = useMemo(() => sortLogRecords(pages.flatMap((page) => page.records)), [pages]);
+  const total = pages.at(-1)?.total ?? 0;
+  const files = useMemo(() => Array.from(new Set(pages.flatMap((page) => page.files))), [pages]);
+  const readErrors = useMemo(() => pages.flatMap((page) => page.errors), [pages]);
+  const loading = logsQuery.isPending;
+  const loadingMore = logsQuery.isFetchingNextPage;
+  const error = logsQuery.error instanceof Error ? logsQuery.error.message : logsQuery.error ? String(logsQuery.error) : null;
+  const canLoadMore = Boolean(logsQuery.hasNextPage && !logsQuery.isFetchingNextPage);
   const scopeLabel = dataflowId ? `Dataflow ${dataflowId}` : includeDataflowLogs ? "Job + dataflows" : "Job only";
 
-  async function loadMore() {
-    if (!canLoadMore || !response) return;
-    const version = requestVersion.current;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const next = await api.getMonitoringSystemLogs(environmentId, {
-        job_id: jobId,
-        ...systemLogScopeParams(dataflowId, includeDataflowLogs),
-        level: level || undefined,
-        q: query || undefined,
-        limit: PAGE_SIZE,
-        offset: response.records.length,
-      });
-      if (version !== requestVersion.current) return;
-      setLastPageSize(next.records.length);
-      setResponse({
-        records: [...response.records, ...next.records],
-        total: Math.max(response.total, next.total),
-        files: next.files.length ? next.files : response.files,
-        errors: [...response.errors, ...next.errors],
-      });
-    } catch (reason) {
-      if (version === requestVersion.current) setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      if (version === requestVersion.current) setLoadingMore(false);
-    }
+  function loadMore() {
+    if (canLoadMore) void logsQuery.fetchNextPage();
   }
 
   async function copyVisibleLogs() {
@@ -178,8 +135,8 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
           </div>
           <div className="system-log-dialog-summary">
             <span>{scopeLabel}</span>
-            <span>{loading ? "Loading…" : `${response?.total ?? 0} records`}</span>
-            <span>{response?.files.length ?? 0} files</span>
+            <span>{loading ? "Loading…" : `${total} records`}</span>
+            <span>{files.length} files</span>
           </div>
           <button className="icon-action" type="button" aria-label="Close system logs" title="Close" onClick={onClose}>
             <X size={17} />
@@ -226,10 +183,10 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
         <div className={`system-log-viewer${wrapped ? " is-wrapped" : ""}`} aria-live="polite" aria-busy={loading}>
           {loading ? <SystemLogState title="Loading system logs…" detail="Reading the indexed log files for this job." /> : null}
           {!loading && error && !records.length ? <SystemLogState tone="error" title="Unable to read system logs" detail={error} /> : null}
-          {!loading && !error && response && !response.files.length ? (
+          {!loading && !error && logsQuery.data && !files.length ? (
             <SystemLogState title="No indexed system logs" detail="Sync the configured log source, then open this viewer again." />
           ) : null}
-          {!loading && response?.files.length && !records.length ? (
+          {!loading && files.length > 0 && !records.length ? (
             <SystemLogState
               title="No matching log records"
               detail={query || level
@@ -242,11 +199,11 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
           {records.length ? (
             <div className="system-log-lines" role="log" aria-label="System log records">
               {records.map((record, index) => <SystemLogLine key={logRecordKey(record, index)} record={record} timezoneName={timezoneName} />)}
-              {response?.errors.length ? <div className="system-log-read-warning">{response.errors.length} file read warnings occurred while loading these logs.</div> : null}
+              {readErrors.length ? <div className="system-log-read-warning">{readErrors.length} file read warnings occurred while loading these logs.</div> : null}
               {error ? <div className="system-log-read-warning is-error">Could not load more records: {error}</div> : null}
               {canLoadMore ? (
                 <button className="system-log-load-more" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
-                  {loadingMore ? "Loading…" : `Load ${PAGE_SIZE} more`}
+                  {loadingMore ? "Loading…" : `Load ${SYSTEM_LOG_PAGE_SIZE} more`}
                 </button>
               ) : null}
             </div>
@@ -258,15 +215,10 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
   );
 }
 
-export function systemLogScopeParams(dataflowId: string | undefined, includeDataflowLogs: boolean) {
-  if (dataflowId) return { dataflow_id: dataflowId };
-  return includeDataflowLogs ? { include_dataflow_logs: 1 } : {};
-}
-
 function SystemLogLine({ record, timezoneName }: { record: Record<string, unknown>; timezoneName?: string | null }) {
   const parts = systemLogParts(record, timezoneName);
   return (
-    <div className="system-log-line" title={JSON.stringify(record, null, 2)}>
+    <div className="system-log-line">
       <span className="system-log-time">{parts.time}</span>
       <LogSeparator />
       <span className={`system-log-level is-${logLevelTone(parts.level)}`}>[{parts.level}]</span>

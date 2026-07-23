@@ -5,22 +5,24 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import func, select
 
-from datacoolie_studio.db.models import Base, EnvironmentReadModelCacheEntry
 from datacoolie_studio.domains.read_models.contracts import (
     CachedResult,
     ResultCacheKey,
     get_or_compute,
 )
 from datacoolie_studio.domains.read_models.coordinator import InProcessResultBuildCoordinator
-from datacoolie_studio.domains.read_models.studio_db import (
-    StudioDbCachePolicy,
-    StudioDbResultCacheStore,
+from datacoolie_studio.domains.read_models.database import (
+    ResultCacheEntry,
+    create_result_cache_session,
+    reset_result_cache_engine,
+)
+from datacoolie_studio.domains.read_models.sqlite_store import (
+    ResultCachePolicy,
+    SqliteResultCacheStore,
     clear_memory_cache,
 )
 from datacoolie_studio.domains.monitoring.page_service import _canonical_parameters
@@ -35,7 +37,16 @@ class _MemoryStore:
         with self.lock:
             return self.values.get(key.identity)
 
-    def put(self, key: ResultCacheKey, payload: dict) -> CachedResult:
+    def generation(self, key: ResultCacheKey) -> str:
+        return "0:0:0"
+
+    def put(
+        self,
+        key: ResultCacheKey,
+        payload: dict,
+        *,
+        expected_generation: str | None = None,
+    ) -> CachedResult:
         result = CachedResult(payload=payload, computed_at=datetime.now(timezone.utc))
         with self.lock:
             self.values[key.identity] = result
@@ -82,32 +93,30 @@ def test_get_or_compute_coalesces_concurrent_misses():
     assert coordinator.active_keys() == 0
 
 
-def test_studio_db_store_coalesces_concurrent_request_sessions(tmp_path: Path):
+def test_sqlite_store_coalesces_concurrent_requests(tmp_path: Path, monkeypatch):
     clear_memory_cache()
-    engine = create_engine(
+    monkeypatch.setenv(
+        "DATACOOLIE_STUDIO_RESULT_CACHE_URL",
         f"sqlite:///{(tmp_path / 'cache.db').as_posix()}",
-        connect_args={"check_same_thread": False},
     )
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    reset_result_cache_engine()
     coordinator = InProcessResultBuildCoordinator()
     calls = 0
     calls_lock = Lock()
 
     def request() -> dict:
         nonlocal calls
-        with factory() as session:
-            store = StudioDbResultCacheStore(session)
+        store = SqliteResultCacheStore()
 
-            def producer() -> dict:
-                nonlocal calls
-                with calls_lock:
-                    calls += 1
-                time.sleep(0.03)
-                return {"value": 9}
+        def producer() -> dict:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.03)
+            return {"value": 9}
 
-            result, _ = get_or_compute(store, coordinator, _key(), producer)
-            return result.payload
+        result, _ = get_or_compute(store, coordinator, _key(), producer)
+        return result.payload
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(lambda _: request(), range(5)))
@@ -136,6 +145,32 @@ def test_get_or_compute_releases_failed_build_for_retry():
     assert coordinator.active_keys() == 0
 
 
+def test_clear_during_build_prevents_stale_repopulation(monkeypatch):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", "memory://")
+    reset_result_cache_engine()
+    clear_memory_cache()
+    store = SqliteResultCacheStore()
+    coordinator = InProcessResultBuildCoordinator()
+    started = Event()
+    release = Event()
+
+    def producer() -> dict:
+        started.set()
+        assert release.wait(timeout=2)
+        return {"value": "stale"}
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(get_or_compute, store, coordinator, _key(), producer)
+        assert started.wait(timeout=2)
+        store.clear(environment_id=1, namespaces={"monitoring.page.performance"})
+        release.set()
+        result, cache_hit = future.result(timeout=2)
+
+    assert cache_hit is False
+    assert result.stored is False
+    assert store.get(_key()) is None
+
+
 def test_relative_window_anchor_uses_studio_timezone():
     now = datetime(2026, 7, 18, 18, 0, tzinfo=timezone.utc)
 
@@ -146,43 +181,46 @@ def test_relative_window_anchor_uses_studio_timezone():
     assert saigon["window_anchor"] == "2026-07-19"
 
 
-def test_studio_db_store_reuses_versions_and_bounds_persisted_entries():
+def test_freshness_window_anchor_tracks_the_current_minute():
+    now = datetime(2026, 7, 18, 18, 23, 45, tzinfo=timezone.utc)
+
+    freshness = _canonical_parameters("freshness", {"range": "all"}, "Asia/Saigon", now=now)
+
+    assert freshness["window_anchor"] == "2026-07-19T01:23:00+07:00"
+
+
+def test_sqlite_store_reuses_versions_and_bounds_persisted_entries(monkeypatch):
     clear_memory_cache()
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-    policy = StudioDbCachePolicy(
+    monkeypatch.setenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", "memory://")
+    reset_result_cache_engine()
+    policy = ResultCachePolicy(
         max_memory_entries=2,
         max_memory_bytes=1_024,
-        max_persisted_entries_per_environment=2,
+        max_persisted_variants_per_environment=3,
         max_payload_bytes=256,
     )
-    with factory() as session:
-        store = StudioDbResultCacheStore(session, policy)
-        store.put(_key("one"), {"value": 1})
-        store.put(_key("two"), {"value": 2})
-        store.put(replace(_key("catalog"), namespace="assets.catalog"), {"value": "assets"})
-        store.put(_key("three"), {"value": 3})
-        assert session.scalar(select(func.count()).select_from(EnvironmentReadModelCacheEntry)) == 3
+    store = SqliteResultCacheStore(policy)
+    store.put(_key("one"), {"value": 1})
+    store.put(_key("two"), {"value": 2})
+    store.put(replace(_key("catalog"), namespace="assets.catalog"), {"value": "assets"})
+    store.put(_key("three"), {"value": 3})
+    with create_result_cache_session() as session:
+        assert session.scalar(select(func.count()).select_from(ResultCacheEntry)) == 3
 
-        clear_memory_cache()
-        assert store.get(_key("one")) is None
-        assert store.get(_key("two")) is not None
-        assert store.get(_key("three")) is not None
+    clear_memory_cache()
+    assert store.get(_key("one")) is None
+    assert store.get(_key("two")) is not None
+    assert store.get(_key("three")) is not None
 
-        replacement = store.put(_key("three", "source-v2"), {"value": 4})
-        assert replacement.stored is True
-        assert store.get(_key("three")) is None
-        assert store.get(_key("three", "source-v2")) is not None
+    replacement = store.put(_key("three", "source-v2"), {"value": 4})
+    assert replacement.stored is True
+    assert store.get(_key("three")) is None
+    assert store.get(_key("three", "source-v2")) is not None
 
-        oversized = store.put(_key("large"), {"value": "x" * 300})
-        assert oversized.stored is False
-        assert store.get(_key("large")) is None
+    oversized = store.put(_key("large"), {"value": "x" * 300})
+    assert oversized.stored is False
+    assert store.get(_key("large")) is None
 
-        store.invalidate(1, {"monitoring.page.performance"})
-        session.commit()
-        assert session.scalar(select(func.count()).select_from(EnvironmentReadModelCacheEntry)) == 1
+    store.invalidate(1, {"monitoring.page.performance"})
+    with create_result_cache_session() as session:
+        assert session.scalar(select(func.count()).select_from(ResultCacheEntry)) == 1

@@ -12,7 +12,6 @@ import {
 interface ProjectOverviewPageProps {
   project: ProjectSummary | null;
   busy: boolean;
-  mappingCount: number;
   onOpenEnvironment: (projectId: number, environmentId: number) => void;
   onOpenEnvironments: (projectId: number) => void;
   onConfigureSources: (projectId: number, environmentId: number) => void;
@@ -23,7 +22,6 @@ interface ProjectOverviewPageProps {
 export function ProjectOverviewPage({
   project,
   busy,
-  mappingCount,
   onOpenEnvironment,
   onOpenEnvironments,
   onConfigureSources,
@@ -40,8 +38,8 @@ export function ProjectOverviewPage({
   const environmentSummary = !readiness.total
     ? "No environments yet"
     : `${readiness.total} active · ${readiness.ready} ready`;
-  const mappingSummary = mappingCount
-    ? `${mappingCount} saved project ${mappingCount === 1 ? "mapping" : "mappings"} shared across environments`
+  const mappingSummary = project.reference_mapping_count
+    ? `${project.reference_mapping_count} saved project ${project.reference_mapping_count === 1 ? "mapping" : "mappings"} shared across environments`
     : "Add a project mapping when automatic resolution needs correction";
 
   return (

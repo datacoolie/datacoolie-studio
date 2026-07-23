@@ -111,59 +111,33 @@ class EnvironmentSource(Base):
     environment: Mapped[Environment] = relationship(back_populates="sources")
 
 
-class MetadataSourceSnapshot(Base):
-    __tablename__ = "metadata_source_snapshots"
+class MetadataMaterialization(Base):
+    __tablename__ = "metadata_materializations"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_metadata_materialization_source"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
     source_revision_json: Mapped[str] = mapped_column(Text, nullable=False)
+    normalizer_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    materialization_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     editor_document_json: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    materialized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class CodeArtifactSnapshot(Base):
-    __tablename__ = "code_artifact_snapshots"
+class CodeArtifactMaterialization(Base):
+    __tablename__ = "code_artifact_materializations"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_code_artifact_materialization_source"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
     source_revision_json: Mapped[str] = mapped_column(Text, nullable=False)
+    materialization_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     artifact_manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
     module_index_json: Mapped[str] = mapped_column(Text, nullable=False)
     diagnostics_json: Mapped[str] = mapped_column(Text, nullable=False)
     analyzer_version: Mapped[str] = mapped_column(String(50), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-
-
-class EnvironmentReadModelCacheEntry(Base):
-    """One current, source-versioned derived read model per Environment key."""
-
-    __tablename__ = "environment_read_model_cache_entries"
-    __table_args__ = (
-        UniqueConstraint(
-            "environment_id",
-            "model_key",
-            "parameters_fingerprint",
-            name="uq_environment_read_model_current",
-        ),
-        Index(
-            "ix_environment_read_model_lookup",
-            "environment_id",
-            "model_key",
-            "parameters_fingerprint",
-            "input_fingerprint",
-            "producer_version",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
-    model_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    parameters_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    producer_version: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    materialized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class SourceRevision(Base):
@@ -182,6 +156,9 @@ class SourceRevision(Base):
 
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
+    __table_args__ = (
+        Index("ix_sync_jobs_retention", "source_id", "status", "completed_at", "started_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)

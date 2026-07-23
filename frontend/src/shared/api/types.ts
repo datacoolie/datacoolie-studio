@@ -1,7 +1,12 @@
 export type TargetIdentifierKind = "logical_table" | "physical_path" | "api_endpoint";
-export type ResolutionStatus = "resolved_auto" | "resolved_manual" | "ambiguous" | "unresolved" | "mapping_target_missing";
 export type ReferenceType = "table_reference" | "path_reference" | "api_endpoint_reference" | "unknown";
-export type ReferenceGroupStatus = "resolved_single" | "resolved_mixed" | "partially_resolved" | "ambiguous" | "unresolved" | "mapping_target_missing";
+export type ResolutionState = "automatic" | "manual" | "unresolved";
+export type ResolutionReason = "no_match" | "multiple_matches" | "conflicting_targets" | "incomplete" | "target_missing";
+
+export interface ReferenceResolution {
+  state: ResolutionState;
+  reason?: ResolutionReason | null;
+}
 
 export interface Project {
   id: number;
@@ -25,6 +30,7 @@ export interface ProjectSummary extends Project {
   environment_count: number;
   metadata_source_count: number;
   etl_log_path_count: number;
+  reference_mapping_count: number;
   environments: ProjectEnvironmentSummary[];
 }
 
@@ -42,10 +48,83 @@ export interface ProjectReferenceMapping {
   updated_at: string;
 }
 
+export interface ProjectReferenceRegistryTarget {
+  id: string;
+  asset_id: string;
+  asset_ids: string[];
+  environment_ids: number[];
+  environment_names: string[];
+  asset_type: AssetInventoryItem["asset_type"];
+  format?: string | null;
+  connection_name: string;
+  display_name: string;
+  context?: string | null;
+  kind: TargetIdentifierKind;
+  value: string;
+  display: string;
+}
+
+export interface ProjectReferenceRegistryEnvironment {
+  environment_id: number;
+  environment_name: string;
+  resolution: ReferenceResolution;
+  resolved_asset_id?: string | null;
+  resolved_asset_ids: string[];
+  observed_target_ids: string[];
+  candidate_asset_ids: string[];
+  manual_mapping_id?: number | null;
+  manual_mapping_status?: string | null;
+  occurrence_count: number;
+  consumer_count: number;
+}
+
+export interface ProjectReferenceRegistryObservedTarget {
+  target: ProjectReferenceRegistryTarget;
+  environment_ids: number[];
+  environment_names: string[];
+}
+
+export interface ProjectReferenceRegistryTargetCoverage {
+  available_environment_names: string[];
+  missing_environment_names: string[];
+  available: number;
+  total: number;
+}
+
+export interface ProjectReferenceRegistryRow {
+  id: string;
+  reference_type: ReferenceType;
+  normalized_value: string;
+  mapping?: ProjectReferenceMapping | null;
+  resolution: ReferenceResolution;
+  environments: ProjectReferenceRegistryEnvironment[];
+  candidate_asset_ids: string[];
+  resolved_asset_ids: string[];
+  target?: ProjectReferenceRegistryTarget | null;
+  observed_targets: ProjectReferenceRegistryObservedTarget[];
+  target_coverage: ProjectReferenceRegistryTargetCoverage;
+}
+
+export interface ProjectReferenceRegistryFailure {
+  environment_id: number;
+  environment_name: string;
+  message: string;
+}
+
+export interface ProjectReferenceRegistryResponse {
+  project_id: number;
+  mappings: ProjectReferenceMapping[];
+  rows: ProjectReferenceRegistryRow[];
+  targets: ProjectReferenceRegistryTarget[];
+  failures: ProjectReferenceRegistryFailure[];
+}
+
 export interface StudioPathInfo {
+  backend: string;
   path: string;
   exists: boolean;
   size_bytes?: number | null;
+  maintenance_supported: boolean;
 }
 
 export interface StudioAnalyticsCacheInfo {
@@ -53,6 +132,10 @@ export interface StudioAnalyticsCacheInfo {
   path: string;
   exists: boolean;
   size_bytes?: number | null;
+  schema_version?: number | null;
+  generation?: number | null;
+  build_state: "ready" | "rebuild_required";
+  published_at?: string | null;
   dataflow_row_count: number;
   job_row_count: number;
   filter_value_count: number;
@@ -62,17 +145,57 @@ export interface StudioAnalyticsCacheInfo {
   orphan_source_ids: number[];
 }
 
-export interface StudioStorageInfo {
+export interface StudioDiagnostics {
   workspace_database: StudioPathInfo;
   analytics_cache: StudioAnalyticsCacheInfo;
+}
+
+export type StudioCacheScope = "read_models" | "analytics" | "all_disposable";
+export type StudioCacheFeature = "overview" | "assets" | "lineage" | "monitoring";
+
+export interface StudioResultCacheStatus {
+  backend: "sqlite";
+  path: string;
+  entries: number;
+  payload_bytes: number;
+  file_bytes: number;
+  limits: Record<string, number>;
+  memory: { entries: number; bytes: number };
+}
+
+export interface StudioCacheStatus {
+  result_cache: StudioResultCacheStatus;
+  analytics_cache: {
+    backend: "duckdb";
+    path: string;
+    exists: boolean;
+    file_bytes: number;
+    schema_version?: number | null;
+    generation?: number | null;
+    build_state: "ready" | "rebuild_required";
+    published_at?: string | null;
+    dataflow_rows: number;
+    job_rows: number;
+    filter_values: number;
+  };
+  sync_job_retention?: Record<string, unknown> | null;
+}
+
+export interface StudioCacheMutation {
+  scope: string;
+  environment_id?: number | null;
+  features: string[];
+  read_models?: Record<string, number> | null;
+  analytics?: Record<string, number> | null;
+  analytics_dependent_read_models?: Record<string, number> | null;
 }
 
 export interface StudioSettings {
   timezone: string;
   timezone_source: "configured" | "server_default";
+  timezone_offset_minutes: number;
   source_check_interval_seconds: number;
   updated_at?: string | null;
-  storage: StudioStorageInfo;
 }
 
 export type ModuleStatus = "available" | "coming_soon";
@@ -167,6 +290,16 @@ export interface SourceSyncStatus {
   latest_job?: SourceSyncJob | null;
 }
 
+export type LogSyncRequest =
+  | { mode: "incremental" }
+  | {
+      mode: "incremental_with_lookback";
+      lookback: {
+        from_partition: string;
+        to_partition: string;
+      };
+    };
+
 export interface SystemLogFile {
   source_id: number;
   file_uri: string;
@@ -182,20 +315,6 @@ export interface SystemLogResponse {
   errors: Array<Record<string, string>>;
 }
 
-export interface FreshnessSourceItem {
-  source_id: number;
-  source_kind: "metadata" | "logs" | string;
-  label?: string | null;
-  uri: string;
-  status: string;
-  source_modified_at?: string | null;
-  cache_synced_at?: string | null;
-  cache_source_modified_at?: string | null;
-  revision?: Record<string, unknown> | null;
-  cache_revision?: Record<string, unknown> | null;
-  message: string;
-}
-
 export interface FreshnessGroup {
   status: string;
   max_source_modified_at?: string | null;
@@ -203,18 +322,26 @@ export interface FreshnessGroup {
   count: number;
 }
 
-export interface EnvironmentFreshness {
-  environment_id: number;
-  status: string;
-  message: string;
-  max_source_modified_at?: string | null;
-  metadata_source_count: number;
-  etl_log_path_count: number;
-  source_cache_version: string;
-  structural_cache_version: string;
-  metadata: FreshnessGroup;
-  etl_logs: FreshnessGroup;
-  items: FreshnessSourceItem[];
+export interface EnvironmentContext {
+  schema_version: "environment-context.v1";
+  project: { id: number; name: string };
+  environment: { id: number; project_id: number; name: string };
+  source_counts: { metadata: number; logs: number; code: number };
+  freshness: {
+    status: string;
+    message: string;
+    max_source_modified_at?: string | null;
+    metadata: FreshnessGroup;
+    etl_logs: FreshnessGroup;
+  };
+  versions: {
+    source_registry: string;
+    metadata_catalog: string;
+    code_catalog: string;
+    operations: string;
+    reference_mappings: string;
+  };
+  checked_at: string;
 }
 
 export interface SourceDeleteImpactItem {
@@ -275,7 +402,7 @@ export interface MetadataResponse {
 }
 
 export interface EnvironmentOverview {
-  schema_version: "environment-overview.v1";
+  schema_version: "environment-overview.v2";
   sources: {
     metadata: { configured: number; enabled: number };
     logs: { configured: number; enabled: number };
@@ -340,6 +467,14 @@ export interface MetadataEditorDocument {
   issues: MetadataEditorIssue[];
 }
 
+export interface MetadataEditorWorkspace {
+  schema_version: "metadata-editor-workspace.v1";
+  environment_id: number;
+  metadata_catalog_version: string;
+  document: MetadataEditorDocument;
+  draft: MetadataEditorDocument | null;
+}
+
 export interface MetadataBackup {
   id: number;
   project_id: number;
@@ -375,6 +510,11 @@ export interface LineageAsset {
   python_function?: string | null;
   metadata_source_ids?: number[];
   roles?: string[];
+  mapping_target?: {
+    kind: TargetIdentifierKind | string;
+    value: string;
+    display: string;
+  } | null;
   observations?: Array<Record<string, unknown>>;
   identifiers?: Array<Record<string, unknown>>;
 }
@@ -385,15 +525,15 @@ export interface LineageReference {
   reference_type: ReferenceType;
   display_name: string;
   normalized_value: string;
-  group_status: ReferenceGroupStatus;
+  resolution: ReferenceResolution;
   resolved_asset_id?: string | null;
   resolved_asset_ids: string[];
   candidate_asset_ids: string[];
-  occurrence_ids: string[];
+  occurrence_count: number;
   consumer_asset_ids: string[];
   provenances: Array<"sql" | "python" | "python_sql">;
   dependency_count: number;
-  observations: Array<Record<string, unknown>>;
+  manual_mapping?: AssetManualMappingInfo | null;
 }
 
 export interface SourceLocation {
@@ -405,26 +545,6 @@ export interface SourceLocation {
   end_line?: number | null;
   end_column?: number | null;
   coordinate_space?: "query_source" | "function_source" | null;
-}
-
-export interface LineageReferenceOccurrence {
-  id: string;
-  reference_id: string;
-  reference_type: ReferenceType;
-  display_name: string;
-  resolution_status: ResolutionStatus;
-  raw_value: string;
-  normalized_value: string;
-  context_scope?: string | null;
-  context_scope_source?: "detected" | "metadata_context" | null;
-  source_location?: SourceLocation | null;
-  provenance: "sql" | "python" | "python_sql";
-  target_asset_id: string;
-  consumer_asset_id: string;
-  resolved_asset_id?: string | null;
-  candidate_asset_ids: string[];
-  resolution_method: string;
-  observations: Array<Record<string, unknown>>;
 }
 
 export interface LineageDataflow {
@@ -445,22 +565,11 @@ export interface LineageDependency {
   consumer_asset_id: string;
   kind: "reads" | "uses";
   provenance: "sql" | "python" | "python_sql";
-  resolution_status: ResolutionStatus;
+  resolution: ReferenceResolution;
   resolution_method: string;
   reference_id: string;
   reference_occurrence_id: string;
   resolved_asset_id?: string | null;
-  observations: Array<Record<string, unknown>>;
-}
-
-export interface LineageDiagnostic {
-  severity: "info" | "warning" | "error";
-  code: string;
-  message: string;
-  asset_id?: string;
-  dataflow_id?: string;
-  metadata_source_id?: number;
-  details?: Record<string, unknown>;
 }
 
 export interface LineageSummary {
@@ -470,24 +579,22 @@ export interface LineageSummary {
   dependencies: number;
   stitched_assets: number;
   declared_assets: number;
-  resolved_auto_dependencies: number;
-  resolved_dependencies: number;
-  resolved_manual_dependencies?: number;
-  ambiguous_dependencies: number;
+  automatic_references: number;
+  manual_references: number;
+  unresolved_references: number;
+  automatic_dependencies: number;
+  manual_dependencies: number;
   unresolved_dependencies: number;
-  mapping_target_missing_dependencies?: number;
   diagnostics: number;
 }
 
 export interface LineageResponse {
-  schema_version: "lineage.v2";
+  schema_version: "lineage.v4";
   summary: LineageSummary;
   assets: LineageAsset[];
   references: LineageReference[];
-  reference_occurrences: LineageReferenceOccurrence[];
   dataflows: LineageDataflow[];
   dependencies: LineageDependency[];
-  diagnostics: LineageDiagnostic[];
 }
 
 export interface AssetSummary {
@@ -497,10 +604,9 @@ export interface AssetSummary {
   visible: number;
   asset_attention: number;
   with_attention: number;
-  references_needing_mapping: number;
-  references_ambiguous: number;
-  references_unresolved: number;
-  references_mapping_target_missing: number;
+  automatic_references: number;
+  manual_references: number;
+  unresolved_references: number;
 }
 
 export interface AssetMetadataSource {
@@ -533,8 +639,7 @@ export interface AssetReferenceFilterOptions {
   connections?: string[];
   reference_types: Array<ReferenceType | string>;
   provenances: Array<"sql" | "python" | "python_sql" | string>;
-  group_statuses?: Array<ReferenceGroupStatus | string>;
-  resolution_statuses?: Array<ResolutionStatus | string>;
+  resolution_states?: Array<ResolutionState | string>;
   resolution_methods?: string[];
   attention_states: string[];
 }
@@ -591,7 +696,7 @@ export interface AssetReferenceGroupItem {
   reference_type: ReferenceType;
   normalized_value: string;
   display_name: string;
-  group_status: ReferenceGroupStatus;
+  resolution: ReferenceResolution;
   resolved_asset_id?: string | null;
   resolved_asset_ids: string[];
   resolved_asset?: AssetBrief | null;
@@ -601,6 +706,8 @@ export interface AssetReferenceGroupItem {
   consumer_asset_ids: string[];
   consumer_assets: AssetBrief[];
   provenances: Array<"sql" | "python" | "python_sql" | string>;
+  resolution_methods?: string[];
+  occurrence_count?: number;
   dependency_count: number;
   dataflow_ids: string[];
   attention_count: number;
@@ -623,7 +730,7 @@ export interface AssetReferenceOccurrenceItem {
   consumer_asset_id?: string | null;
   consumer_asset?: AssetBrief | null;
   connection_name?: string | null;
-  resolution_status: ResolutionStatus;
+  resolution: ReferenceResolution;
   resolution_method?: string | null;
   resolved_asset_id?: string | null;
   resolved_asset?: AssetBrief | null;
@@ -707,7 +814,7 @@ export interface AssetDependencyReference {
   id: string;
   display_name: string;
   reference_type: string;
-  resolution_status: string;
+  resolution: ReferenceResolution;
   raw_value?: string | null;
   provenance?: string | null;
 }
@@ -716,7 +823,7 @@ export interface AssetDependsOnItem {
   id: string;
   kind: string;
   provenance: string;
-  resolution_status: string;
+  resolution: ReferenceResolution;
   resolution_method: string;
   reference_id?: string | null;
   resolved_asset_id?: string | null;
@@ -728,7 +835,7 @@ export interface AssetUsedByItem {
   id: string;
   kind: string;
   provenance: string;
-  resolution_status: string;
+  resolution: ReferenceResolution;
   resolution_method: string;
   target_asset: AssetBrief;
   reference?: AssetDependencyReference | null;
@@ -816,6 +923,9 @@ export interface MonitoringRecord {
   duration_seconds?: number | null;
   started_at?: string | null;
   completed_at?: string | null;
+  failure_category?: string | null;
+  failure_tags?: string[];
+  failure_rule_id?: string | null;
   [key: string]: unknown;
 }
 
@@ -908,7 +1018,7 @@ export interface MonitoringReport {
     job_status_distribution: Array<{ status: string; count: number }>;
     job_runs_by_operation_type?: Array<Record<string, string | number>>;
     job_runs_by_dataflow_operation_type?: Array<Record<string, string | number>>;
-    dataflow_duration_by_operation_type?: Array<Record<string, unknown>>;
+    job_duration_by_operation_types?: Array<Record<string, unknown>>;
     dataflow_duration_by_stage?: Array<Record<string, unknown>>;
     job_workload_efficiency?: Array<Record<string, string | number | null>>;
     job_child_fanout_distribution?: Array<Record<string, string | number | null>>;
@@ -935,7 +1045,7 @@ export interface MonitoringReport {
   };
   failures: {
     kpis?: Record<string, string | number | null>;
-    latest_queue?: Array<Record<string, string | number | null>>;
+    latest_queue?: MonitoringRecord[];
     repeated_signatures?: Array<Record<string, string | number | null>>;
     failure_by_phase?: NamedCount[];
     failure_category_phase_matrix?: Array<Record<string, string | number>>;
@@ -951,18 +1061,10 @@ export interface MonitoringReport {
     kpis?: Record<string, string | number | null>;
     duration_distribution_by_stage?: Array<Record<string, unknown>>;
     phase_contribution_by_stage_operation?: Array<Record<string, string | number>>;
-    workload_efficiency_points?: Array<Record<string, string | number | null>>;
+    workload_efficiency_points?: Array<Record<string, string | number | null> | Array<string | number | null>>;
     slowest_dataflow_profiles?: Array<Record<string, string | number | null>>;
     runtime_context_profiles?: Array<Record<string, string | number | null>>;
     performance_trend?: Array<Record<string, string | number | null>>;
-    investigation_queue?: MonitoringRecord[];
-    duration_breakdown: Array<Record<string, string | number>>;
-    duration_vs_rows: Array<Record<string, string | number>>;
-    slowest_dataflows: MonitoringRecord[];
-    slowest_dataflows_by_p95?: Array<Record<string, string | number | null>>;
-    overview_p95_duration_seconds?: number;
-    duration_by_stage: Array<Record<string, string | number>>;
-    engine_stage_matrix: Array<Record<string, string | number>>;
   };
   volume: {
     kpis: Record<string, number>;
@@ -976,40 +1078,32 @@ export interface MonitoringReport {
     top_dataflows_by_rows_written: Array<Record<string, string | number>>;
     top_dataflows_by_bytes_added?: Array<Record<string, string | number>>;
     top_dataflows_by_net_bytes?: Array<Record<string, string | number | null>>;
-    dataflow_registry?: MonitoringRecord[];
-    investigation_queue?: MonitoringRecord[];
   };
   maintenance: {
     kpis: Record<string, string | number | null>;
     status_by_date?: Array<Record<string, string | number | null>>;
     reclaim_by_date?: Array<Record<string, string | number | null>>;
-    operation_health?: Array<Record<string, string | number | null>>;
-    table_registry?: Array<Record<string, string | number | boolean | null>>;
-    table_attention?: Array<Record<string, string | number | boolean | null>>;
     table_efficiency_points?: Array<Record<string, string | number | boolean | null>>;
     table_outcome?: Array<Record<string, string | number | null>>;
-    efficiency_points?: Array<Record<string, string | number | null>>;
-    investigation_queue?: MonitoringRecord[];
-    bytes_reclaimed_by_table: Array<Record<string, string | number>>;
     format_comparison: Array<Record<string, string | number>>;
-    per_table: Array<Record<string, string | number | null>>;
-    duration_vs_files_removed: Array<Record<string, string | number>>;
     bytes_reclaimed_by_date: Array<Record<string, string | number>>;
   };
   freshness: {
     kpis: Record<string, number>;
-    latest_freshness_by_dataflow: Array<Record<string, string | number | null>>;
-    watermark_movement: Array<Record<string, string | number | null>>;
+    age_by_dataflow?: Array<Record<string, string | number | null>>;
     watermark_movement_by_date?: Array<Record<string, string | number | null>>;
     age_distribution?: Array<Record<string, string | number | null>>;
     watermark_coverage_by_stage?: Array<Record<string, string | number | null>>;
     skipped_streak_distribution?: Array<Record<string, string | number | null>>;
-    dataflow_registry?: Array<Record<string, string | number | null>>;
-    stale_candidates: Array<Record<string, string | number | null>>;
-    skipped_patterns: Array<Record<string, string | number | null>>;
   };
   errors: Array<Record<string, unknown>>;
 }
+
+export type MonitoringPageResponse = {
+  schema_version: "monitoring-page.v9";
+  page: "environment-overview" | "overview" | "jobs" | "dataflows" | "failures" | "diagnostics" | "performance" | "volume" | "maintenance" | "freshness";
+  summary: MonitoringReport["summary"];
+} & Partial<Omit<MonitoringReport, "summary" | "metric_definitions">>;
 
 export interface MonitoringFilterOption {
   value: string;

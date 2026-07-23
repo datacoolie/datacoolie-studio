@@ -1,13 +1,13 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Icon } from "@iconify/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { api } from "../../shared/api/client";
-import type { AssetInventoryItem, AssetReferenceGroupItem, Environment, ProjectReferenceMapping } from "../../shared/api/types";
+import type { ProjectReferenceRegistryFailure, ProjectReferenceRegistryResponse } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
 import { buildReferenceMappingPayload, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import { ProjectReferenceMappingDrawer } from "./ProjectReferenceMappingDrawer";
 import { ProjectReferenceMappingTargetPicker } from "./ProjectReferenceMappingTargetPicker";
+import { ReferenceMappingClearAction } from "../reference-mappings/ReferenceMappingClearAction";
 import {
   buildProjectMappingRegistry,
   canCreateProjectMapping,
@@ -17,16 +17,18 @@ import {
   projectMappingStateLabel,
   projectMappingTargetBusinessKey,
   projectMappingTargetLabel,
-  type ProjectAssetsSnapshot,
   type ProjectReferenceRegistryRow,
   type ProjectMappingState,
 } from "./projectReferenceMappingRegistryModel";
+import "./project-reference-mappings.css";
 
-interface ProjectReferenceMappingsPageProps {
+export interface ProjectReferenceMappingsPageProps {
   projectId: number | null;
   projectName: string | null;
-  environments: Environment[];
-  mappings: ProjectReferenceMapping[];
+  registryResponse: ProjectReferenceRegistryResponse | null;
+  loadFailures: ProjectReferenceRegistryFailure[];
+  loading: boolean;
+  loadError: string | null;
   busy: boolean;
   routeSearch?: string;
   onReload: () => Promise<void>;
@@ -35,13 +37,7 @@ interface ProjectReferenceMappingsPageProps {
   onDelete: (mappingId: number) => Promise<unknown>;
 }
 
-type MappingFilter = "all" | "needs" | "manual" | "automatic" | "coverage" | "saved";
-
-interface EnvironmentLoadFailure {
-  environmentId: number;
-  environmentName: string;
-  message: string;
-}
+type MappingFilter = "all" | "unresolved" | "manual" | "automatic";
 
 interface ProjectMappingDraft {
   rowId: string;
@@ -57,8 +53,10 @@ interface MappingActionError {
 export function ProjectReferenceMappingsPage({
   projectId,
   projectName,
-  environments,
-  mappings,
+  registryResponse,
+  loadFailures,
+  loading,
+  loadError,
   busy,
   routeSearch,
   onReload,
@@ -68,95 +66,17 @@ export function ProjectReferenceMappingsPage({
 }: ProjectReferenceMappingsPageProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<MappingFilter>("all");
-  const [snapshots, setSnapshots] = useState<ProjectAssetsSnapshot[]>([]);
-  const [loadFailures, setLoadFailures] = useState<EnvironmentLoadFailure[]>([]);
-  const [loading, setLoading] = useState(false);
   const [detailsRowId, setDetailsRowId] = useState<string | null>(null);
   const [mappingDraft, setMappingDraft] = useState<ProjectMappingDraft | null>(null);
   const [openPickerRowId, setOpenPickerRowId] = useState<string | null>(null);
   const [clearRowId, setClearRowId] = useState<string | null>(null);
   const [savingRowId, setSavingRowId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<MappingActionError | null>(null);
-  const requestRef = useRef(0);
   const activeProjectIdRef = useRef<number | null>(projectId);
 
   // A mutation can finish after a route switch. Keep its follow-up refresh and
   // local UI state tied to the project visible in this render.
   activeProjectIdRef.current = projectId;
-
-  const projectEnvironments = useMemo(
-    () => projectId ? environments.filter((environment) => environment.project_id === projectId) : [],
-    [environments, projectId],
-  );
-  const projectEnvironmentIds = useMemo(
-    () => new Set(projectEnvironments.map((environment) => environment.id)),
-    [projectEnvironments],
-  );
-  const projectSnapshots = useMemo(
-    () => snapshots.filter((snapshot) => projectEnvironmentIds.has(snapshot.environment.id)),
-    [projectEnvironmentIds, snapshots],
-  );
-  const projectMappings = useMemo(
-    () => projectId ? mappings.filter((mapping) => mapping.project_id === projectId) : [],
-    [mappings, projectId],
-  );
-  const visibleLoadFailures = useMemo(
-    () => loadFailures.filter((failure) => projectEnvironmentIds.has(failure.environmentId)),
-    [loadFailures, projectEnvironmentIds],
-  );
-
-  const loadRegistryData = useCallback(async () => {
-    const requestedProjectId = projectId;
-    if (activeProjectIdRef.current !== requestedProjectId) return;
-    const requestId = ++requestRef.current;
-    setLoading(true);
-    const results = await Promise.allSettled(
-      projectEnvironments.map(async (environment) => ({
-        environment,
-        response: await loadEnvironmentAssetRegistry(environment.id),
-      })),
-    );
-    if (requestId !== requestRef.current || activeProjectIdRef.current !== requestedProjectId) return;
-
-    const nextSnapshots: ProjectAssetsSnapshot[] = [];
-    const nextFailures: EnvironmentLoadFailure[] = [];
-    results.forEach((result, index) => {
-      const environment = projectEnvironments[index];
-      if (!environment) return;
-      if (result.status === "fulfilled") {
-        nextSnapshots.push({
-          environment: result.value.environment,
-          assets: result.value.response.assets,
-          referenceGroups: result.value.response.referenceGroups,
-        });
-        return;
-      }
-      nextFailures.push({
-        environmentId: environment.id,
-        environmentName: environment.name,
-        message: toErrorMessage(result.reason),
-      });
-    });
-    setSnapshots((currentSnapshots) => {
-      const currentByEnvironment = new Map(currentSnapshots.map((snapshot) => [snapshot.environment.id, snapshot]));
-      const refreshedByEnvironment = new Map(nextSnapshots.map((snapshot) => [snapshot.environment.id, snapshot]));
-      return projectEnvironments.flatMap((environment) => {
-        const refreshed = refreshedByEnvironment.get(environment.id);
-        if (refreshed) return [refreshed];
-        const previous = currentByEnvironment.get(environment.id);
-        return previous ? [previous] : [];
-      });
-    });
-    setLoadFailures(nextFailures);
-    setLoading(false);
-  }, [projectEnvironments, projectId]);
-
-  useEffect(() => {
-    void loadRegistryData();
-    return () => {
-      requestRef.current += 1;
-    };
-  }, [loadRegistryData]);
 
   useEffect(() => {
     const params = new URLSearchParams(routeSearch ?? "");
@@ -175,12 +95,12 @@ export function ProjectReferenceMappingsPage({
 
   const refreshRegistry = useCallback(async () => {
     if (activeProjectIdRef.current !== projectId) return;
-    await Promise.all([onReload(), loadRegistryData()]);
-  }, [loadRegistryData, onReload, projectId]);
+    await onReload();
+  }, [onReload, projectId]);
 
   const registry = useMemo(
-    () => buildProjectMappingRegistry(projectSnapshots, projectMappings, projectId ?? undefined),
-    [projectId, projectMappings, projectSnapshots],
+    () => buildProjectMappingRegistry(registryResponse),
+    [registryResponse],
   );
   const rows = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -226,6 +146,7 @@ export function ProjectReferenceMappingsPage({
     }
     setSavingRowId(row.id);
     setActionError(null);
+    let saved = false;
     try {
       const payload = buildReferenceMappingPayload(
         { reference_type: row.referenceType, normalized_value: row.normalizedValue },
@@ -234,13 +155,19 @@ export function ProjectReferenceMappingsPage({
       );
       if (row.mapping) await onUpdate(row.mapping.id, payload);
       else await onCreate(payload);
+      saved = true;
       if (activeProjectIdRef.current !== mutationProjectId) return;
       await refreshRegistry();
       if (activeProjectIdRef.current !== mutationProjectId) return;
       setMappingDraft(null);
     } catch (cause) {
       if (activeProjectIdRef.current === mutationProjectId) {
-        setActionError({ rowId: row.id, message: toErrorMessage(cause, "Mapping could not be saved.") });
+        setActionError({
+          rowId: row.id,
+          message: saved
+            ? `Mapping was saved, but the registry could not be refreshed. ${toErrorMessage(cause)}`
+            : toErrorMessage(cause, "Mapping could not be saved."),
+        });
       }
     } finally {
       if (activeProjectIdRef.current === mutationProjectId) setSavingRowId(null);
@@ -258,8 +185,10 @@ export function ProjectReferenceMappingsPage({
     }
     setSavingRowId(row.id);
     setActionError(null);
+    let cleared = false;
     try {
       await onDelete(row.mapping.id);
+      cleared = true;
       if (activeProjectIdRef.current !== mutationProjectId) return;
       await refreshRegistry();
       if (activeProjectIdRef.current !== mutationProjectId) return;
@@ -267,7 +196,12 @@ export function ProjectReferenceMappingsPage({
       if (mappingDraft?.rowId === row.id) setMappingDraft(null);
     } catch (cause) {
       if (activeProjectIdRef.current === mutationProjectId) {
-        setActionError({ rowId: row.id, message: toErrorMessage(cause, "Mapping could not be cleared.") });
+        setActionError({
+          rowId: row.id,
+          message: cleared
+            ? `Mapping was cleared, but the registry could not be refreshed. ${toErrorMessage(cause)}`
+            : toErrorMessage(cause, "Mapping could not be cleared."),
+        });
       }
     } finally {
       if (activeProjectIdRef.current === mutationProjectId) setSavingRowId(null);
@@ -311,7 +245,7 @@ export function ProjectReferenceMappingsPage({
               placeholder="Filter reference, target, note, environment"
               aria-label="Filter reference mappings"
             />
-            <button className="text-action reference-mappings-icon-action" type="button" disabled={loading || busy} onClick={() => void refreshRegistry()} title="Reload mapping registry" aria-label="Reload mapping registry">
+            <button className="text-action reference-mappings-icon-action" type="button" disabled={loading || busy} onClick={() => void refreshRegistry().catch(() => undefined)} title="Reload mapping registry" aria-label="Reload mapping registry">
               <RefreshCw size={13} />
             </button>
           </div>
@@ -319,24 +253,30 @@ export function ProjectReferenceMappingsPage({
 
         <div className="reference-mappings-statusline">
           <span>Each row is one canonical reference. A saved project mapping overrides automatic resolution for every occurrence of that reference.</span>
-          <strong>{loading ? "Loading registry..." : `${counts.manual} manual active · ${counts.needs} need attention · ${counts.automatic} automatic`}</strong>
+          <strong>{loading ? "Loading registry..." : `${counts.manual} manual · ${counts.unresolved} unresolved · ${counts.automatic} automatic`}</strong>
         </div>
 
-        {visibleLoadFailures.length ? (
+        {loadError ? (
           <div className="reference-mappings-load-warning" role="alert">
             <AlertTriangle size={14} aria-hidden="true" />
-            <span>Could not load {visibleLoadFailures.map((failure) => failure.environmentName).join(", ")}. Successful or previously loaded environments remain visible.</span>
-            <button className="text-action" type="button" disabled={loading || busy} onClick={() => void loadRegistryData()}>Retry</button>
+            <span>{loadError}</span>
+            <button className="text-action" type="button" disabled={loading || busy} onClick={() => void refreshRegistry().catch(() => undefined)}>Retry</button>
+          </div>
+        ) : null}
+
+        {loadFailures.length ? (
+          <div className="reference-mappings-load-warning" role="alert">
+            <AlertTriangle size={14} aria-hidden="true" />
+            <span>Could not load {loadFailures.map((failure) => failure.environment_name).join(", ")}. Successful or previously loaded environments remain visible.</span>
+            <button className="text-action" type="button" disabled={loading || busy} onClick={() => void refreshRegistry().catch(() => undefined)}>Retry</button>
           </div>
         ) : null}
 
         <div className="reference-mappings-filter-row" aria-label="Reference mapping filters">
           <FilterChip label="All" value={counts.all} active={filter === "all"} onClick={() => setFilter("all")} />
-          <FilterChip label="Manual active" value={counts.manual} active={filter === "manual"} onClick={() => setFilter("manual")} />
-          <FilterChip label="Needs attention" value={counts.needs} active={filter === "needs"} onClick={() => setFilter("needs")} />
-          <FilterChip label="Automatic" value={counts.automatic} active={filter === "automatic"} onClick={() => setFilter("automatic")} />
-          <FilterChip label="Coverage risk" value={counts.coverage} active={filter === "coverage"} onClick={() => setFilter("coverage")} />
-          <FilterChip label="Saved only" value={counts.saved} active={filter === "saved"} onClick={() => setFilter("saved")} />
+          <FilterChip label="Manual" value={counts.manual} active={filter === "manual"} resolution="manual" onClick={() => setFilter("manual")} />
+          <FilterChip label="Unresolved" value={counts.unresolved} active={filter === "unresolved"} resolution="unresolved" onClick={() => setFilter("unresolved")} />
+          <FilterChip label="Automatic" value={counts.automatic} active={filter === "automatic"} resolution="automatic" onClick={() => setFilter("automatic")} />
         </div>
 
         <div className="table-scroll reference-mappings-table-wrap">
@@ -433,7 +373,7 @@ export function ProjectReferenceMappingsPage({
                         {canMutate ? (
                           <div className="project-mapping-table-actions">
                             <button
-                              className={row.mapping ? "text-action project-mapping-action-edit" : "text-action project-mapping-action-map"}
+                              className={row.mapping ? "text-action reference-mapping-action-edit" : "text-action reference-mapping-action-map"}
                               type="button"
                               disabled={busy || saving || (Boolean(draft) && !canCommit)}
                               onClick={() => void mapOrEdit(row)}
@@ -442,12 +382,12 @@ export function ProjectReferenceMappingsPage({
                                 ? "Saving..."
                                 : draft
                                   ? "Save"
-                                  : row.mapping || row.state === "automatic"
+                                  : row.mapping
                                     ? "Edit"
                                     : "Map"}
                             </button>
                             {canEdit ? (
-                              <ClearMappingAction
+                              <ReferenceMappingClearAction
                                 confirming={clearRowId === row.id}
                                 disabled={busy || saving}
                                 onClear={() => void clearMapping(row)}
@@ -488,54 +428,10 @@ export function ProjectReferenceMappingsPage({
   );
 }
 
-function ClearMappingAction({
-  confirming,
-  disabled,
-  onClear,
-  onDismiss,
-}: {
-  confirming: boolean;
-  disabled: boolean;
-  onClear: () => void;
-  onDismiss: () => void;
-}) {
-  const actionRef = useRef<HTMLSpanElement | null>(null);
-
-  useEffect(() => {
-    if (!confirming) return undefined;
-    function dismissOnOutsidePointer(event: PointerEvent) {
-      if (event.target instanceof Node && !actionRef.current?.contains(event.target)) onDismiss();
-    }
-    function dismissOnEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onDismiss();
-    }
-    document.addEventListener("pointerdown", dismissOnOutsidePointer, true);
-    document.addEventListener("keydown", dismissOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", dismissOnOutsidePointer, true);
-      document.removeEventListener("keydown", dismissOnEscape);
-    };
-  }, [confirming, onDismiss]);
-
+function FilterChip({ label, value, active, resolution, onClick }: { label: string; value: number; active: boolean; resolution?: ProjectMappingState; onClick: () => void }) {
+  const className = ["reference-mapping-filter-chip", active ? "active" : "", resolution ? `resolution-${resolution}` : ""].filter(Boolean).join(" ");
   return (
-    <span ref={actionRef}>
-      <button
-        className={confirming ? "text-action project-mapping-action-clear confirm" : "text-action project-mapping-action-clear"}
-        type="button"
-        disabled={disabled}
-        onClick={onClear}
-      >
-        {confirming ? "Confirm clear" : "Clear"}
-      </button>
-    </span>
-  );
-}
-
-function FilterChip({ label, value, active, onClick }: { label: string; value: number; active: boolean; onClick: () => void }) {
-  return (
-    <button type="button" aria-pressed={active} className={active ? "reference-mapping-filter-chip active" : "reference-mapping-filter-chip"} onClick={onClick}>
+    <button type="button" aria-pressed={active} className={className} onClick={onClick}>
       <span>{label}</span>
       <strong>{value.toLocaleString()}</strong>
     </button>
@@ -546,35 +442,21 @@ function matchesFilter(state: ProjectMappingState, filter: MappingFilter) {
   if (filter === "all") return true;
   if (filter === "manual") return state === "manual";
   if (filter === "automatic") return state === "automatic";
-  if (filter === "coverage") return state === "partial" || state === "missing_target";
-  if (filter === "saved") return state === "stored_only" || state === "inactive";
-  return ["needs_mapping", "partial", "missing_target", "inactive", "stored_only", "review"].includes(state);
+  return state === "unresolved";
 }
 
 function buildCounts(states: ProjectMappingState[]) {
   return {
     all: states.length,
-    needs: states.filter((state) => matchesFilter(state, "needs")).length,
+    unresolved: states.filter((state) => state === "unresolved").length,
     manual: states.filter((state) => state === "manual").length,
     automatic: states.filter((state) => state === "automatic").length,
-    coverage: states.filter((state) => state === "partial" || state === "missing_target").length,
-    saved: states.filter((state) => state === "stored_only" || state === "inactive").length,
   };
 }
 
 function formatTimestamp(value: string) {
   const timestamp = new Date(value);
   return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
-}
-
-async function loadEnvironmentAssetRegistry(environmentId: number) {
-  const [assetResponse, referenceResponse] = await Promise.all([
-    api.getAssets(environmentId),
-    api.getAssetReferences(environmentId),
-  ]);
-  const assets: AssetInventoryItem[] = assetResponse.items;
-  const referenceGroups: AssetReferenceGroupItem[] = referenceResponse.items;
-  return { assets, referenceGroups };
 }
 
 function toErrorMessage(reason: unknown, fallback = "The environment asset registry could not be loaded.") {

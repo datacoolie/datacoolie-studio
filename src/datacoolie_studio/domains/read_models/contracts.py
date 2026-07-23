@@ -48,7 +48,15 @@ class CachedResult:
 class ResultCacheStore(Protocol):
     def get(self, key: ResultCacheKey) -> CachedResult | None: ...
 
-    def put(self, key: ResultCacheKey, payload: Payload) -> CachedResult: ...
+    def generation(self, key: ResultCacheKey) -> str: ...
+
+    def put(
+        self,
+        key: ResultCacheKey,
+        payload: Payload,
+        *,
+        expected_generation: str | None = None,
+    ) -> CachedResult: ...
 
     def invalidate(self, environment_id: int, namespaces: set[str] | None = None) -> None: ...
 
@@ -71,5 +79,6 @@ def get_or_compute(
         cached = store.get(key)
         if cached is not None:
             return cached, True
+        generation = store.generation(key)
         payload = producer()
-        return store.put(key, payload), False
+        return store.put(key, payload, expected_generation=generation), False

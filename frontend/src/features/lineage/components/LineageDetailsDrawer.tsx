@@ -1,18 +1,17 @@
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Code2, Copy, LocateFixed, LogIn, LogOut, PencilLine, TriangleAlert, Workflow, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api } from "../../../shared/api/client";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type {
   AssetDefinitionResponse,
   AssetInventoryItem,
   AssetReferenceGroupItem,
+  AssetReferenceOccurrenceItem,
   LatestStatusResponse,
   LineageAsset,
   LineageDataflow,
   LineageDependency,
   LineageReference,
-  LineageReferenceOccurrence,
   MonitoringRecord,
-  ProjectReferenceMapping,
 } from "../../../shared/api/types";
 import { StatusPill } from "../../../shared/components/StatusPill";
 import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
@@ -24,8 +23,11 @@ import { highlightStructuredValue } from "../../metadata-explorer/MetadataStruct
 import { LineageFormatIcon } from "./LineageFormatIcon";
 import { LineageCodeDialog } from "./LineageCodeDialog";
 import { LineageEntityIcon } from "./LineageEntityIcon";
-import { ReferenceMappingEditor } from "../../reference-mappings/ReferenceMappingEditor";
-import type { ReferenceMappingPayload } from "../../reference-mappings/referenceMappingModel";
+import { ReferenceMappingDrawer } from "../../reference-mappings/ReferenceMappingDrawer";
+import { ReferenceMappingClearAction } from "../../reference-mappings/ReferenceMappingClearAction";
+import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../../reference-mappings/referenceMappingModel";
+import { assetDetailOptions, assetSourceOptions, referenceDetailOptions } from "../../assets/assetsQueries";
+import { lineageDataflowRunsOptions } from "../lineageQueries";
 
 type InspectorTone = "selected" | "input" | "output";
 type RelationshipTone = Exclude<InspectorTone, "selected">;
@@ -34,12 +36,22 @@ type OpenDataflowDetails = (dataflow: LineageDataflow) => void;
 type InspectorPage = LineageFocus & { view: "summary" | "full"; tone: InspectorTone };
 const LINEAGE_DRAWER_HISTORY_KEY = "datacoolieLineageDrawer";
 
-function lineageDrawerHistoryDepth(state: unknown) {
-  if (!state || typeof state !== "object") return 0;
+type LineageDrawerHistoryState =
+  | { kind: "details"; depth: number }
+  | { kind: "mapping"; depth: number; referenceId: string };
+
+function lineageDrawerHistoryFromState(state: unknown): LineageDrawerHistoryState | null {
+  if (!state || typeof state !== "object") return null;
   const value = (state as Record<string, unknown>)[LINEAGE_DRAWER_HISTORY_KEY];
-  if (!value || typeof value !== "object") return 0;
-  const depth = (value as Record<string, unknown>).depth;
-  return typeof depth === "number" && Number.isInteger(depth) && depth > 0 ? depth : 0;
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const depth = record.depth;
+  if (typeof depth !== "number" || !Number.isInteger(depth) || depth <= 0) return null;
+  if (record.kind === "details") return { kind: "details", depth };
+  if (record.kind === "mapping" && typeof record.referenceId === "string" && record.referenceId) {
+    return { kind: "mapping", depth, referenceId: record.referenceId };
+  }
+  return null;
 }
 
 export function LineageDetailsDrawer({
@@ -53,7 +65,6 @@ export function LineageDetailsDrawer({
   onFocusItem,
   onOpenDataflowDetails,
   mappingAssets,
-  mappings,
   mappingBusy = false,
   onCreateReferenceMapping,
   onUpdateReferenceMapping,
@@ -70,7 +81,6 @@ export function LineageDetailsDrawer({
   onFocusItem: (focus: LineageFocus) => void;
   onOpenDataflowDetails: OpenDataflowDetails;
   mappingAssets: AssetInventoryItem[];
-  mappings: ProjectReferenceMapping[];
   mappingBusy?: boolean;
   onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
   onUpdateReferenceMapping: (mappingId: number, payload: ReferenceMappingPayload) => Promise<unknown>;
@@ -83,10 +93,18 @@ export function LineageDetailsDrawer({
   const suppressNextPopRef = useRef(false);
   const selectionKeyRef = useRef<string | null>(null);
   const [mappingReferenceId, setMappingReferenceId] = useState<string | null>(null);
+  const mappingReferenceIdRef = useRef<string | null>(null);
+  const [clearReferenceId, setClearReferenceId] = useState<string | null>(null);
+  const [mappingActionError, setMappingActionError] = useState<{ referenceId: string; message: string } | null>(null);
 
   function updatePages(next: InspectorPage[]) {
     pagesRef.current = next;
     setPages(next);
+  }
+
+  function updateMappingReference(next: string | null) {
+    mappingReferenceIdRef.current = next;
+    setMappingReferenceId(next);
   }
 
   function unwindDrawerHistory() {
@@ -109,7 +127,9 @@ export function LineageDetailsDrawer({
     const selectionKey = selection ? `${selection.kind}:${selection.id}` : null;
     if (selectionKeyRef.current !== selectionKey && historyDepthRef.current > 0) unwindDrawerHistory();
     selectionKeyRef.current = selectionKey;
-    setMappingReferenceId(null);
+    updateMappingReference(null);
+    setClearReferenceId(null);
+    setMappingActionError(null);
     updatePages(selection ? [{ ...selection, view: "summary", tone: "selected" }] : []);
   }, [selection?.kind, selection?.id]);
 
@@ -119,10 +139,17 @@ export function LineageDetailsDrawer({
         suppressNextPopRef.current = false;
         return;
       }
-      const nextDepth = lineageDrawerHistoryDepth(event.state);
+      const nextHistory = lineageDrawerHistoryFromState(event.state);
+      const nextDepth = nextHistory?.depth ?? 0;
       const removedDepth = historyDepthRef.current - nextDepth;
-      if (removedDepth <= 0 || pagesRef.current.length <= 1) return;
+      const currentMappingReferenceId = mappingReferenceIdRef.current;
+      const nextMappingReferenceId = nextHistory?.kind === "mapping" ? nextHistory.referenceId : null;
       historyDepthRef.current = nextDepth;
+      if (currentMappingReferenceId || nextMappingReferenceId) {
+        updateMappingReference(nextMappingReferenceId);
+        if (currentMappingReferenceId !== nextMappingReferenceId) return;
+      }
+      if (removedDepth <= 0 || pagesRef.current.length <= 1) return;
       updatePages(pagesRef.current.slice(0, Math.max(1, pagesRef.current.length - removedDepth)));
     }
     window.addEventListener("popstate", handlePopState);
@@ -137,7 +164,7 @@ export function LineageDetailsDrawer({
     const historyState = window.history.state && typeof window.history.state === "object"
       ? { ...(window.history.state as Record<string, unknown>) }
       : {};
-    window.history.pushState({ ...historyState, [LINEAGE_DRAWER_HISTORY_KEY]: { depth: nextDepth } }, "", window.location.href);
+    window.history.pushState({ ...historyState, [LINEAGE_DRAWER_HISTORY_KEY]: { kind: "details", depth: nextDepth } }, "", window.location.href);
     historyDepthRef.current = nextDepth;
     updatePages([...pagesRef.current, next]);
   };
@@ -150,10 +177,57 @@ export function LineageDetailsDrawer({
     if (pagesRef.current.length > 1) updatePages(pagesRef.current.slice(0, -1));
   };
 
+  const openReferenceMapping = (referenceId: string) => {
+    const nextDepth = historyDepthRef.current + 1;
+    const historyState = window.history.state && typeof window.history.state === "object"
+      ? { ...(window.history.state as Record<string, unknown>) }
+      : {};
+    window.history.pushState({
+      ...historyState,
+      [LINEAGE_DRAWER_HISTORY_KEY]: { kind: "mapping", depth: nextDepth, referenceId },
+    }, "", window.location.href);
+    historyDepthRef.current = nextDepth;
+    updateMappingReference(referenceId);
+  };
+
+  const backFromReferenceMapping = () => {
+    const currentHistory = lineageDrawerHistoryFromState(window.history.state);
+    if (currentHistory?.kind === "mapping" && currentHistory.referenceId === mappingReferenceIdRef.current) {
+      window.history.back();
+      return;
+    }
+    updateMappingReference(null);
+  };
+
+  async function clearReferenceMapping(reference: LineageReference) {
+    const mappingId = reference.manual_mapping?.mapping_id;
+    if (!mappingId) return;
+    if (clearReferenceId !== reference.id) {
+      setClearReferenceId(reference.id);
+      setMappingActionError(null);
+      return;
+    }
+    setMappingActionError(null);
+    try {
+      await onDeleteReferenceMapping(mappingId);
+      await onRefreshReferenceMappings();
+      setClearReferenceId(null);
+    } catch (error) {
+      setMappingActionError({
+        referenceId: reference.id,
+        message: error instanceof Error ? error.message : "Mapping could not be cleared.",
+      });
+    }
+  }
+
   return (
     <aside className={`lineage-detail-drawer selection-${page.tone}${suspended ? " is-suspended" : ""}`} aria-label="Lineage details" aria-hidden={suspended || undefined}>
       <div className="lineage-detail-nav">
-        {pages.length > 1 ? (
+        {mappingReferenceId ? (
+          <button type="button" aria-label="Back to reference details" onClick={backFromReferenceMapping}>
+            <ArrowLeft size={16} />
+          </button>
+        ) : pages.length > 1 ? (
           <button type="button" aria-label="Back to previous details" onClick={backPage}>
             <ArrowLeft size={16} />
           </button>
@@ -164,16 +238,16 @@ export function LineageDetailsDrawer({
         const reference = index.entityById.get(mappingReferenceId);
         if (!reference || isLineageAsset(reference)) return null;
         return <div className="lineage-reference-mapping-overlay">
-          <ReferenceMappingEditor
+          <ReferenceMappingDrawer
+            className="lineage-reference-mapping-drawer"
             reference={lineageReferenceAsAssetReference(reference)}
             assets={mappingAssets}
-            mappings={mappings}
             busy={mappingBusy}
             onCreate={onCreateReferenceMapping}
             onUpdate={onUpdateReferenceMapping}
             onDelete={onDeleteReferenceMapping}
             onRefresh={onRefreshReferenceMappings}
-            onBack={() => setMappingReferenceId(null)}
+            onBack={backFromReferenceMapping}
           />
         </div>;
       })() : <InspectorContent
@@ -188,13 +262,18 @@ export function LineageDetailsDrawer({
         onOpenRelated={openRelated}
         onOpenDataflowDetails={onOpenDataflowDetails}
         onFocus={() => onFocusItem({ kind: page.kind, id: page.id })}
-        onOpenReferenceMapping={setMappingReferenceId}
+        onOpenReferenceMapping={openReferenceMapping}
+        mappingBusy={mappingBusy}
+        clearReferenceId={clearReferenceId}
+        mappingActionError={mappingActionError}
+        onClearReferenceMapping={clearReferenceMapping}
+        onDismissClearReference={() => setClearReferenceId(null)}
       />}
     </aside>
   );
 }
 
-function InspectorContent({ environmentId, page, index, latestStatus, metadataDataflowIds, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onFocus, onOpenReferenceMapping }: {
+function InspectorContent({ environmentId, page, index, latestStatus, metadataDataflowIds, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onFocus, onOpenReferenceMapping, mappingBusy, clearReferenceId, mappingActionError, onClearReferenceMapping, onDismissClearReference }: {
   environmentId: number;
   page: InspectorPage;
   index: LineageGraphIndex;
@@ -205,13 +284,18 @@ function InspectorContent({ environmentId, page, index, latestStatus, metadataDa
   onOpenDataflowDetails: OpenDataflowDetails;
   onFocus: () => void;
   onOpenReferenceMapping: (referenceId: string) => void;
+  mappingBusy: boolean;
+  clearReferenceId: string | null;
+  mappingActionError: { referenceId: string; message: string } | null;
+  onClearReferenceMapping: (reference: LineageReference) => Promise<void>;
+  onDismissClearReference: () => void;
 }) {
   if (page.kind === "asset" || page.kind === "reference") {
     const entity = index.entityById.get(page.id);
     if (!entity) return <MissingDetails />;
     return isLineageAsset(entity)
       ? <AssetDetails environmentId={environmentId} asset={entity} full={page.view === "full"} index={index} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onFocus={onFocus} />
-      : <ReferenceDetails reference={entity} full={page.view === "full"} index={index} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onFocus={onFocus} onOpenMapping={() => onOpenReferenceMapping(entity.id)} />;
+      : <ReferenceDetails environmentId={environmentId} reference={entity} full={page.view === "full"} index={index} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onFocus={onFocus} onOpenMapping={() => onOpenReferenceMapping(entity.id)} mappingBusy={mappingBusy} clearConfirming={clearReferenceId === entity.id} mappingActionError={mappingActionError?.referenceId === entity.id ? mappingActionError.message : null} onClearMapping={onClearReferenceMapping} onDismissClear={onDismissClearReference} />;
   }
   if (page.kind === "dataflow") {
     const dataflow = index.dataflowById.get(page.id);
@@ -221,7 +305,7 @@ function InspectorContent({ environmentId, page, index, latestStatus, metadataDa
   }
   const dependency = index.dependencyById.get(page.id);
   return dependency
-    ? <DependencyDetails dependency={dependency} full={page.view === "full"} index={index} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onFocus={onFocus} />
+    ? <DependencyDetails environmentId={environmentId} dependency={dependency} full={page.view === "full"} index={index} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onFocus={onFocus} />
     : <MissingDetails />;
 }
 
@@ -229,6 +313,7 @@ function AssetDetails({ environmentId, asset, full, index, onToggleDetails, onOp
   environmentId: number; asset: LineageAsset; full: boolean; index: LineageGraphIndex;
   onToggleDetails: () => void; onOpenRelated: OpenRelated; onFocus: () => void;
 }) {
+  const detail = useQuery({ ...assetDetailOptions(environmentId, asset.id), enabled: full });
   const presentation = presentLineageAsset(asset);
   const incoming = index.incoming.get(asset.id) ?? [];
   const outgoing = index.outgoing.get(asset.id) ?? [];
@@ -249,50 +334,24 @@ function AssetDetails({ environmentId, asset, full, index, onToggleDetails, onOp
       </section>
       <LineageAssetDefinition key={asset.id} environmentId={environmentId} asset={asset} />
       <RelationshipSummary incoming={incoming} outgoing={outgoing} index={index} onOpenRelated={onOpenRelated} />
-      {full ? <AssetProvenance asset={asset} /> : null}
+      {full ? <AssetProvenance asset={detail.data?.asset ?? asset} loading={detail.isFetching} /> : null}
     </>
   );
 }
 
 function LineageAssetDefinition({ environmentId, asset }: { environmentId: number; asset: LineageAsset }) {
   const supported = asset.asset_type === "sql_query" || asset.asset_type === "python_function";
-  const [definition, setDefinition] = useState<AssetDefinitionResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const closeDialog = useCallback(() => {
-    setDialogOpen(false);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    if (!supported || !dialogOpen) return undefined;
-    if (definition) {
-      setLoading(false);
-      return undefined;
-    }
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    api.getAsset(environmentId, asset.id)
-      .then((response) => {
-        if (!cancelled) setDefinition(response.definition ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load the code definition.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [asset.id, definition, dialogOpen, environmentId, supported]);
+  const source = useQuery({ ...assetSourceOptions(environmentId, asset.id), enabled: supported && dialogOpen });
+  const definition = source.data ?? null;
+  const error = source.error instanceof Error ? source.error.message : source.error ? "Unable to load the code definition." : null;
 
   if (!supported) return null;
 
   const content = lineageDefinitionContent(asset, definition);
   const label = asset.asset_type === "sql_query" ? "SQL definition" : "Python definition";
   const summary = lineageDefinitionSummary(asset, definition, content);
-  const status = loading
+  const status = source.isFetching
     ? "Loading details…"
     : error
       ? "Unable to load"
@@ -311,12 +370,12 @@ function LineageAssetDefinition({ environmentId, asset }: { environmentId: numbe
           <strong>{status}</strong>
           <small>{summary}</small>
         </div>
-        <button type="button" onClick={() => { setError(null); setDialogOpen(true); }}>
+        <button type="button" onClick={() => { setDialogOpen(true); if (source.isError) void source.refetch(); }}>
           <Code2 size={13} />
           {error ? "Retry" : "View code"}
         </button>
       </div>
-      {dialogOpen ? <LineageCodeDialog asset={asset} definition={definition} loading={loading || (!definition && !error)} error={error} onClose={closeDialog} /> : null}
+      {dialogOpen ? <LineageCodeDialog asset={asset} definition={definition} loading={source.isFetching || (!definition && !error)} error={error} onClose={() => setDialogOpen(false)} /> : null}
     </section>
   );
 }
@@ -336,12 +395,12 @@ function lineageDefinitionSummary(asset: LineageAsset, definition: AssetDefiniti
   ].filter(Boolean).join(" · ");
 }
 
-function AssetProvenance({ asset }: { asset: LineageAsset }) {
+function AssetProvenance({ asset, loading }: { asset: Pick<LineageAsset, "observations" | "identifiers">; loading: boolean }) {
   const observations = asset.observations ?? [];
   const metadataSources = [...new Set(observations.map(metadataSourceTitle))];
   return <section className="lineage-asset-provenance">
     <span className="lineage-detail-section-title">Origin and provenance</span>
-    {metadataSources.length ? <MetadataSourceList sources={metadataSources} /> : <p className="lineage-detail-note">No source observation is available for this asset.</p>}
+    {loading ? <p className="lineage-detail-note">Loading provenance…</p> : metadataSources.length ? <MetadataSourceList sources={metadataSources} /> : <p className="lineage-detail-note">No source observation is available for this asset.</p>}
     {asset.identifiers?.length ? <CodeBlock label={`Canonical identifiers (${asset.identifiers.length})`} value={JSON.stringify(asset.identifiers, null, 2)} kind="json" /> : null}
     {observations.length ? <CodeBlock label="Raw observations" value={JSON.stringify(observations, null, 2)} kind="json" /> : null}
   </section>;
@@ -388,20 +447,25 @@ function metadataSourceTitle(observation: Record<string, unknown>, index: number
   return observation.metadata_source_id ? `Metadata source ${String(observation.metadata_source_id)}` : `Observation ${index + 1}`;
 }
 
-function ReferenceDetails({ reference, full, index, onToggleDetails, onOpenRelated, onFocus, onOpenMapping }: {
-  reference: LineageReference; full: boolean; index: LineageGraphIndex;
+function ReferenceDetails({ environmentId, reference, full, index, onToggleDetails, onOpenRelated, onFocus, onOpenMapping, mappingBusy, clearConfirming, mappingActionError, onClearMapping, onDismissClear }: {
+  environmentId: number; reference: LineageReference; full: boolean; index: LineageGraphIndex;
   onToggleDetails: () => void; onOpenRelated: OpenRelated; onFocus: () => void; onOpenMapping: () => void;
+  mappingBusy: boolean; clearConfirming: boolean; mappingActionError: string | null;
+  onClearMapping: (reference: LineageReference) => Promise<void>; onDismissClear: () => void;
 }) {
+  const detail = useQuery({ ...referenceDetailOptions(environmentId, reference.id), enabled: full });
   const resolvedIds = reference.resolved_asset_ids.length ? reference.resolved_asset_ids : reference.resolved_asset_id ? [reference.resolved_asset_id] : [];
-  const occurrences = reference.occurrence_ids.flatMap((id) => index.occurrenceById.get(id) ?? []);
+  const occurrences = detail.data?.occurrences ?? [];
   const usageRelations = index.relations.filter((relation) => relation.dependency?.reference_id === reference.id);
   const referenceObjectType = referenceTypeAssetType(reference.reference_type);
   const referenceBadge = humanize(reference.reference_type);
+  const mappingAction = referenceMappingAction(lineageReferenceAsAssetReference(reference));
+  const mappingActionLabel = referenceMappingActionLabel(mappingAction);
   const informationRows = [
     ["Normalized value", reference.normalized_value],
     ["Provenance", reference.provenances.map(humanize).join(" · ") || "not available"],
     ["Consumers", String(new Set(reference.consumer_asset_ids).size)],
-    ["Occurrences", String(reference.occurrence_ids.length)],
+    ["Occurrences", String(reference.occurrence_count)],
     ["Dependencies", String(reference.dependency_count)]
   ] satisfies Array<[string, string]>;
   return (
@@ -409,7 +473,7 @@ function ReferenceDetails({ reference, full, index, onToggleDetails, onOpenRelat
       <InspectorHeader
         eyebrow={`Reference · ${referenceBadge}`}
         title={reference.display_name}
-        status={reference.group_status}
+        status={reference.resolution.state}
         statusPlacement="second-line"
         statusVariant="reference-badge"
         icon={<LineageEntityIcon iconKind={assetIconKind(referenceObjectType)} badge={referenceBadge} referenceType={reference.reference_type} size={20} />}
@@ -417,7 +481,13 @@ function ReferenceDetails({ reference, full, index, onToggleDetails, onOpenRelat
       />
       <IdentityField label="Reference identity" value={reference.id} />
       <PrimaryActions full={full} onToggleDetails={onToggleDetails} onFocus={onFocus} />
-      <button className="text-action primary lineage-reference-map-action" type="button" onClick={onOpenMapping}>Change mapping</button>
+      {mappingActionLabel ? (
+        <div className="lineage-reference-mapping-actions">
+          <button className={`text-action ${mappingAction === "edit" ? "reference-mapping-action-edit" : "reference-mapping-action-map"}`} type="button" disabled={mappingBusy} onClick={onOpenMapping}>{mappingActionLabel}</button>
+          {reference.manual_mapping?.mapping_id ? <ReferenceMappingClearAction confirming={clearConfirming} disabled={mappingBusy} onClear={() => void onClearMapping(reference)} onDismiss={onDismissClear} /> : null}
+          {mappingActionError ? <small className="reference-mapping-action-error" role="alert">{mappingActionError}</small> : null}
+        </div>
+      ) : null}
       <section className="lineage-reference-information">
         <span className="lineage-detail-section-title">Reference information</span>
         <DetailRows rows={informationRows} />
@@ -431,7 +501,7 @@ function ReferenceDetails({ reference, full, index, onToggleDetails, onOpenRelat
         <RelationshipGroup title="Outputs" tone="output" relations={usageRelations} direction="target" index={index} emptyText="No consumer asset." onOpenRelated={onOpenRelated} />
       </section>
       {full ? <>
-        <OccurrenceList occurrences={occurrences} />
+        {detail.isFetching ? <p className="lineage-detail-note">Loading usage evidence…</p> : <OccurrenceList occurrences={occurrences} />}
       </> : null}
     </>
   );
@@ -440,6 +510,8 @@ function ReferenceDetails({ reference, full, index, onToggleDetails, onOpenRelat
 function lineageReferenceAsAssetReference(reference: LineageReference): AssetReferenceGroupItem {
   return {
     ...reference,
+    occurrence_ids: [],
+    observations: [],
     resolved_asset: null,
     candidate_assets: [],
     consumer_assets: [],
@@ -492,11 +564,12 @@ function DataflowDetails({ environmentId, dataflow, full, index, run, canOpenDat
   );
 }
 
-function DependencyDetails({ dependency, full, index, onToggleDetails, onOpenRelated, onFocus }: {
-  dependency: LineageDependency; full: boolean; index: LineageGraphIndex;
+function DependencyDetails({ environmentId, dependency, full, index, onToggleDetails, onOpenRelated, onFocus }: {
+  environmentId: number; dependency: LineageDependency; full: boolean; index: LineageGraphIndex;
   onToggleDetails: () => void; onOpenRelated: OpenRelated; onFocus: () => void;
 }) {
-  const occurrence = index.occurrenceById.get(dependency.reference_occurrence_id);
+  const detail = useQuery({ ...referenceDetailOptions(environmentId, dependency.reference_id), enabled: full });
+  const occurrence = detail.data?.occurrences.find((item) => item.id === dependency.reference_occurrence_id);
   const sourceId = dependency.resolved_asset_id || dependency.reference_id;
   const sourceEntity = index.entityById.get(sourceId);
   const targetEntity = index.entityById.get(dependency.target_asset_id);
@@ -507,7 +580,7 @@ function DependencyDetails({ dependency, full, index, onToggleDetails, onOpenRel
       <InspectorHeader
         eyebrow="Dependency"
         title={dependencyTitle}
-        status={dependency.resolution_status}
+        status={dependency.resolution.state}
         statusPlacement="second-line"
         statusVariant="reference-badge"
         statusLabel={`${humanize(dependency.provenance)} · ${humanize(dependency.kind)} · resolution`}
@@ -531,8 +604,13 @@ function DependencyDetails({ dependency, full, index, onToggleDetails, onOpenRel
       </section>
       {full ? <section className="lineage-dependency-details">
         <span className="lineage-detail-section-title">Usage evidence</span>
-        {occurrence ? <DependencyOccurrenceDetails occurrence={occurrence} /> : <p className="lineage-detail-note">Occurrence evidence is not available.</p>}
-        {dependency.observations.length ? <CodeBlock label="Raw observations" value={JSON.stringify(dependency.observations, null, 2)} kind="json" /> : <p className="lineage-detail-note">No dependency observations are available.</p>}
+        {detail.isFetching
+          ? <p className="lineage-detail-note">Loading usage evidence…</p>
+          : detail.isError
+            ? <p className="lineage-detail-note">Unable to load usage evidence.</p>
+            : occurrence
+              ? <DependencyOccurrenceDetails occurrence={occurrence} />
+              : <p className="lineage-detail-note">Occurrence evidence is not available.</p>}
       </section> : null}
     </>
   );
@@ -586,7 +664,7 @@ function RelationshipGroup({ title, tone, relations, direction, attentionCount =
     return <div className="lineage-neighbor-group" key={group.entityId}>
       <EntityButton entity={entity} fallback={group.entityId} tone={tone} statusOverride={referenceNeighborAttentionStatus(entity, group.relations)} onOpenRelated={onOpenRelated} />
       <div className="lineage-via-list">{group.relations.map((relation) => {
-        const attentionStatusValue = attentionStatus(relation.dependency?.resolution_status);
+        const attentionStatusValue = attentionStatus(relation.dependency?.resolution.state);
         return <div className="lineage-via-row" key={relation.id}><button className={`lineage-via-button${attentionStatusValue ? ` has-attention status-${attentionStatusValue}` : ""}`} type="button" onClick={() => onOpenRelated({ kind: relation.type, id: relation.id }, tone)}>
         <span className="lineage-via-direction" title={`${title} ${relation.type}`}>{tone === "input" ? <LogIn size={14} /> : <LogOut size={14} />}</span>
         <span className="lineage-via-copy">
@@ -635,7 +713,7 @@ function DependencyReferenceField({ reference, fallback, onOpenRelated }: { refe
   </button></dd></div>;
 }
 
-function DependencyOccurrenceDetails({ occurrence }: { occurrence: LineageReferenceOccurrence }) {
+function DependencyOccurrenceDetails({ occurrence }: { occurrence: AssetReferenceOccurrenceItem }) {
   const locationText = occurrenceLocationText(occurrence.source_location);
   return <DetailRows rows={[
     ["Raw value", occurrence.raw_value],
@@ -648,39 +726,19 @@ function DependencyOccurrenceDetails({ occurrence }: { occurrence: LineageRefere
   ]} />;
 }
 
-function OccurrenceList({ occurrences }: { occurrences: LineageReferenceOccurrence[] }) {
+function OccurrenceList({ occurrences }: { occurrences: AssetReferenceOccurrenceItem[] }) {
   return <section className="lineage-object-list"><strong>Usage evidence<span>{occurrences.length}</span></strong>{occurrences.map((occurrence) => <OccurrenceDetails key={occurrence.id} occurrence={occurrence} />)}</section>;
 }
 
-function OccurrenceDetails({ occurrence }: { occurrence: LineageReferenceOccurrence }) {
+function OccurrenceDetails({ occurrence }: { occurrence: AssetReferenceOccurrenceItem }) {
   const locationText = occurrenceLocationText(occurrence.source_location);
-  return <div className="lineage-occurrence"><div><span>{occurrence.raw_value}</span><StatusPill status={occurrence.resolution_status} /></div><small>{occurrence.provenance} · {humanize(occurrence.resolution_method)}{locationText ? ` · ${locationText}` : ""}</small>{occurrence.observations.length ? <CodeBlock label="Evidence" value={JSON.stringify(occurrence.observations, null, 2)} kind="json" /> : null}</div>;
+  return <div className="lineage-occurrence"><div><span>{occurrence.raw_value}</span><StatusPill status={occurrence.resolution.state} /></div><small>{occurrence.provenance} · {humanize(occurrence.resolution_method)}{locationText ? ` · ${locationText}` : ""}</small>{occurrence.observations.length ? <CodeBlock label="Evidence" value={JSON.stringify(occurrence.observations, null, 2)} kind="json" /> : null}</div>;
 }
 
 function RunHistory({ environmentId, dataflow }: { environmentId: number; dataflow: LineageDataflow }) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [runs, setRuns] = useState<MonitoringRecord[]>([]);
-
-  useEffect(() => {
-    if (!open || loaded) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    api.getMonitoringDataflows(environmentId, { search: dataflow.dataflow_id, range: "all", limit: 25, offset: 0, sortBy: "start_time", sortDir: "desc" })
-      .then((response) => {
-        if (cancelled) return;
-        setRuns(response.records.filter((row) => row.dataflow_id === dataflow.dataflow_id || row.dataflow_name === dataflow.name));
-        setLoaded(true);
-      })
-      .catch((reason: unknown) => { if (!cancelled) { setError(reason instanceof Error ? reason.message : "Unable to load run history."); setLoaded(true); } })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, environmentId, dataflow.dataflow_id, dataflow.name, loaded]);
-
-  return <section className="lineage-run-history"><button type="button" onClick={() => setOpen((value) => !value)}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}Run history</button>{open ? <div>{loading ? <small>Loading run history…</small> : error ? <small className="error">{error}</small> : runs.length ? runs.map((run, index) => <div className="lineage-run-row" key={String(run.dataflow_run_id ?? run.started_at ?? index)}><StatusPill status={typeof run.status === "string" ? run.status : "unknown"} /><span>{formatTimestamp(firstValue(run, "completed_at", "end_time", "started_at", "start_time"))}</span><small>{formatDuration(run.duration_seconds)}</small></div>) : <small>No run history available.</small>}</div> : null}</section>;
+  const runs = useQuery({ ...lineageDataflowRunsOptions(environmentId, dataflow.dataflow_id, dataflow.name), enabled: open });
+  return <section className="lineage-run-history"><button type="button" onClick={() => setOpen((value) => !value)}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}Run history</button>{open ? <div>{runs.isFetching ? <small>Loading run history…</small> : runs.error ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load run history."}</small> : runs.data?.length ? runs.data.map((run, index) => <div className="lineage-run-row" key={String(run.dataflow_run_id ?? run.started_at ?? index)}><StatusPill status={typeof run.status === "string" ? run.status : "unknown"} /><span>{formatTimestamp(firstValue(run, "completed_at", "end_time", "started_at", "start_time"))}</span><small>{formatDuration(run.duration_seconds)}</small></div>) : <small>No run history available.</small>}</div> : null}</section>;
 }
 
 function DetailRows({ rows }: { rows: Array<[string, string]> }) { return <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd title={value}>{value}</dd></div>)}</dl>; }
@@ -709,7 +767,7 @@ function entityPresentation(entity: LineageEntity | undefined, fallback: string)
       iconKind: assetIconKind(objectType),
       badge: humanize(entity.reference_type),
       referenceType: entity.reference_type,
-      referenceStatus: entity.group_status
+      referenceStatus: entity.resolution.state
     };
   }
   return { title: fallback, subtitle: "Entity unavailable", iconKind: assetIconKind("unresolved"), badge: "Unavailable entity", referenceType: null, referenceStatus: null };
@@ -720,13 +778,13 @@ function relationTitle(relation: Relation) {
 }
 function relationSubtitle(relation: Relation) {
   if (relation.type === "dataflow") return [relation.dataflow?.stage, relation.dataflow?.load_type].filter(Boolean).map((value) => humanize(value)).join(" · ") || "dataflow";
-  if (attentionStatus(relation.dependency?.resolution_status)) return humanize(relation.dependency?.resolution_method);
-  return [relation.dependency?.resolution_status, relation.dependency?.resolution_method].filter(Boolean).map((value) => humanize(value)).join(" · ") || "dependency";
+  if (attentionStatus(relation.dependency?.resolution.state)) return humanize(relation.dependency?.resolution_method);
+  return [relation.dependency?.resolution.state, relation.dependency?.resolution_method].filter(Boolean).map((value) => humanize(value)).join(" · ") || "dependency";
 }
-function attentionReferenceCount(relations: Relation[]) { return new Set(relations.flatMap((relation) => attentionStatus(relation.dependency?.resolution_status) && relation.dependency?.reference_id ? [relation.dependency.reference_id] : [])).size; }
+function attentionReferenceCount(relations: Relation[]) { return new Set(relations.flatMap((relation) => attentionStatus(relation.dependency?.resolution.state) && relation.dependency?.reference_id ? [relation.dependency.reference_id] : [])).size; }
 function attentionStatus(value: string | null | undefined) { return isAttentionResolutionStatus(value) ? value! : null; }
 function humanize(value: string | null | undefined) { return value ? value.replace(/_/g, " ") : "not available"; }
-function occurrenceLocationText(location: LineageReferenceOccurrence["source_location"]) { return [location?.path || location?.module, location?.function_path, location?.line ? `line ${location.line}` : null].filter(Boolean).join(" · "); }
+function occurrenceLocationText(location: AssetReferenceOccurrenceItem["source_location"]) { return [location?.path || location?.module, location?.function_path, location?.line ? `line ${location.line}` : null].filter(Boolean).join(" · "); }
 function stringValue(value: unknown) { return typeof value === "string" && value.trim() ? value.trim() : null; }
 function compactRows(rows: Array<[string, string | null | undefined]>): Array<[string, string]> { return rows.filter((row): row is [string, string] => Boolean(row[1])); }
 function firstValue(record: MonitoringRecord | null, ...keys: string[]) { if (!record) return null; for (const key of keys) { const value = record[key]; if (value !== null && value !== undefined && value !== "") return value; } return null; }

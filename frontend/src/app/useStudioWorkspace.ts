@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   environmentDefaultModule,
   moduleByKey,
@@ -9,19 +10,14 @@ import {
 import type { StudioRouter } from "./useStudioRouter";
 import { api } from "../shared/api/client";
 import type {
-  AssetInventoryResponse,
-  EnvironmentOverview,
   Environment,
-  EnvironmentFreshness,
-  LatestStatusResponse,
-  LineageResponse,
   MetadataBackup,
   MetadataEditorDocument,
-  MonitoringReport,
   ProjectReferenceMapping,
   Project,
   ProjectSummary,
   SourceImportResponse,
+  LogSyncRequest,
   SourceDeleteImpact,
   SourcePath,
   SourceReadCheckResult,
@@ -31,19 +27,12 @@ import type {
 } from "../shared/api/types";
 import { toErrorMessage } from "../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../shared/lib/sources";
-import { createProjectReferenceMappingsLoadGuard } from "./projectReferenceMappingsLoadGuard";
-import { moduleUsesMetadataDataflowEditor, moduleUsesProjectReferenceMappings } from "./environmentModuleData";
-import { subscribeToEnvironmentHeaderRevalidation } from "./environmentHeaderRevalidation";
+import { projectRouteResources } from "./projectRouteResources";
+import { addEnvironmentToProject, addProjectSummary, changeProjectReferenceMappingCount, removeEnvironmentFromProject } from "./projectSummaryMutations";
 import { ResourceCache } from "../shared/data/resourceCache";
-import { EnvironmentResourceStore, type EnvironmentResourceName } from "./environmentResourceStore";
-import {
-  fetchEnvironmentHeader,
-  sourceCacheVersionChanged,
-  sourceCheckIntervalMs,
-  structuralCacheVersionChanged,
-  type EnvironmentHeaderData
-} from "./environmentHeaderResource";
 import { fetchEnvironmentSources } from "./environmentSourcesResource";
+import { environmentQueryKeys } from "../features/environments/environmentQueries";
+import { useEnvironmentMetadataEditor } from "../features/metadata-explorer/metadataEditorQueries";
 
 export type SourceBatchAction = "validate" | "sync" | "delete";
 
@@ -63,28 +52,23 @@ export type SourceBatchResult = {
 export interface StudioWorkspace {
   projects: Project[];
   projectSummaries: ProjectSummary[];
-  projectReferenceMappings: ProjectReferenceMapping[];
+  projectSummariesLoading: boolean;
+  projectSummariesLoaded: boolean;
+  projectSummariesError: string | null;
   environments: Environment[];
   selectedProject: Project | null;
   selectedProjectSummary: ProjectSummary | null;
   metadataSources: SourcePath[];
   logPaths: SourcePath[];
   codeArtifacts: SourcePath[];
-  environmentFreshness: EnvironmentFreshness | null;
   sourceSyncStatuses: Record<string, SourceSyncStatus>;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
-  lineage: LineageResponse | null;
-  assets: AssetInventoryResponse | null;
-  overview: EnvironmentOverview | null;
-  monitoringReport: MonitoringReport | null;
-  latestStatus: LatestStatusResponse | null;
   loading: boolean;
   busy: boolean;
   error: string | null;
   refreshCurrentEnvironment: () => Promise<void>;
-  ensureLatestRuns: () => Promise<void>;
-  reloadProjectReferenceMappings: () => Promise<void>;
+  reloadProjectSummaries: () => Promise<void>;
   createProject: (name: string) => Promise<void>;
   deleteProject: (projectId: number) => Promise<void>;
   createProjectReferenceMapping: (payload: {
@@ -134,62 +118,52 @@ export interface StudioWorkspace {
   deleteSource: (kind: SourceKind, id: number) => Promise<void>;
   getSourceDeleteImpact: (kind: SourceKind, id: number) => Promise<SourceDeleteImpact>;
   validateSource: (kind: SourceKind, id: number) => Promise<SourceReadCheckResult>;
-  syncSource: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
-  runSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[]) => Promise<SourceBatchResult>;
+  syncSource: (kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest) => Promise<SourceSyncStatus>;
+  runSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest) => Promise<SourceBatchResult>;
   ensureMetadataEditorContext: () => Promise<void>;
   validateMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   saveMetadataEditorDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  discardMetadataEditorDraft: (sourceId: number) => Promise<void>;
+  discardMetadataEditorDraft: () => Promise<void>;
   saveMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  listMetadataBackups: (sourceId: number) => Promise<MetadataBackup[]>;
+  listMetadataBackups: () => Promise<MetadataBackup[]>;
   previewMetadataBackup: (backupId: number) => Promise<MetadataEditorDocument>;
   restoreMetadataBackup: (backup: MetadataBackup, document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   deleteMetadataBackup: (backupId: number) => Promise<void>;
-  clearMetadataBackups: (sourceId: number) => Promise<void>;
+  clearMetadataBackups: () => Promise<void>;
 }
 
 /**
- * Owns all workspace domain data (projects, environments, sources, metadata,
- * lineage, monitoring) and the mutations that act on it. Route-driven loading
+ * Owns workspace mutations plus the remaining Project, Environment-source,
+ * and Monitoring compatibility state. Feature server reads are query-owned. Route-driven loading
  * is coordinated through the supplied {@link StudioRouter}. Presentation lives
  * entirely in feature components; this hook is the container/data layer.
  */
 export function useStudioWorkspace(
   router: StudioRouter,
-  options?: { sourceCheckIntervalSeconds?: number }
+  options?: {
+    onEnvironmentChanged?: (environmentId: number) => Promise<void> | void;
+  }
 ): StudioWorkspace {
   const { route, activeScope, setStudioRoute } = router;
-
+  const queryClient = useQueryClient();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
-  const [projectReferenceMappings, setProjectReferenceMappings] = useState<ProjectReferenceMapping[]>([]);
+  const [projectSummariesLoading, setProjectSummariesLoading] = useState(false);
+  const [projectSummariesLoaded, setProjectSummariesLoaded] = useState(false);
+  const [projectSummariesError, setProjectSummariesError] = useState<string | null>(null);
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [metadataSources, setMetadataSources] = useState<SourcePath[]>([]);
   const [logPaths, setLogPaths] = useState<SourcePath[]>([]);
   const [codeArtifacts, setCodeArtifacts] = useState<SourcePath[]>([]);
-  const [environmentFreshness, setEnvironmentFreshness] = useState<EnvironmentFreshness | null>(null);
   const [sourceSyncStatuses, setSourceSyncStatuses] = useState<Record<string, SourceSyncStatus>>({});
-  const [metadataEditorDocument, setMetadataEditorDocument] = useState<MetadataEditorDocument | null>(null);
-  const [metadataEditorDraft, setMetadataEditorDraft] = useState<MetadataEditorDocument | null>(null);
-  const [lineage, setLineage] = useState<LineageResponse | null>(null);
-  const [assets, setAssets] = useState<AssetInventoryResponse | null>(null);
-  const [overview, setOverview] = useState<EnvironmentOverview | null>(null);
-  const [monitoringReport, setMonitoringReport] = useState<MonitoringReport | null>(null);
-  const [latestStatus, setLatestStatus] = useState<LatestStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastLoadedEnvironmentId = useRef<number | null>(null);
-  const activeProjectIdRef = useRef<number | null>(route.projectId);
   const activeEnvironmentIdRef = useRef<number | null>(route.environmentId);
   const environmentModuleLoadGeneration = useRef(0);
-  const environmentHeaderCache = useRef(new ResourceCache<number, EnvironmentHeaderData>());
-  const environmentResourceStore = useRef(new EnvironmentResourceStore());
-  const projectReferenceMappingsLoadGuard = useRef(createProjectReferenceMappingsLoadGuard());
+  const projectSummariesCache = useRef(new ResourceCache<"directory", ProjectSummary[]>());
+  const projectSummariesGeneration = useRef(0);
 
-  // Keep async mapping responses tied to the project visible in this render.
-  // Updating the ref during render closes the gap before the route effects run.
-  activeProjectIdRef.current = route.projectId;
   activeEnvironmentIdRef.current = route.environmentId;
 
   const selectedProject = useMemo(
@@ -201,16 +175,46 @@ export function useStudioWorkspace(
     [projectSummaries, route.projectId]
   );
 
-  function clearEnvironmentData() {
-    setMetadataEditorDocument(null);
-    setMetadataEditorDraft(null);
-    setLineage(null);
-    setAssets(null);
-    setOverview(null);
-    setMonitoringReport(null);
-    setLatestStatus(null);
-    setEnvironmentFreshness(null);
-  }
+  const sourcesQuery = useQuery({
+    queryKey: route.environmentId ? environmentQueryKeys.sources(route.environmentId) : ["environments", "no-sources"],
+    queryFn: async () => {
+      const environmentId = route.environmentId!;
+      const sources = await fetchEnvironmentSources(environmentId);
+      const statuses = await fetchSourceSyncStatuses(
+        environmentId,
+        sources.metadataSources,
+        sources.logPaths,
+        sources.codeArtifacts,
+      );
+      return { ...sources, statuses };
+    },
+    enabled: route.environmentId !== null && route.module === "sources",
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const metadataEditor = useEnvironmentMetadataEditor(route.environmentId, {
+    enabled: route.module === "metadata",
+    onCatalogChanged: async (mayChangeSources) => {
+      if (mayChangeSources) invalidateProjectSummaries();
+      await refreshEnvironmentHeader(route.environmentId);
+    },
+  });
+  // The source lists are derived solely from the query so the displayed data can
+  // never desync from the cache. Clearing here (instead of in a separate
+  // environment-change effect) avoids a race that could wipe freshly loaded data.
+  useEffect(() => {
+    const data = sourcesQuery.data;
+    if (data) {
+      setMetadataSources(data.metadataSources);
+      setLogPaths(data.logPaths);
+      setCodeArtifacts(data.codeArtifacts);
+      setSourceSyncStatuses(data.statuses);
+    } else {
+      setMetadataSources([]);
+      setLogPaths([]);
+      setCodeArtifacts([]);
+      setSourceSyncStatuses({});
+    }
+  }, [sourcesQuery.data]);
 
   function clearEnvironmentSources() {
     setMetadataSources([]);
@@ -238,39 +242,52 @@ export function useStudioWorkspace(
     }
   }
 
-  async function loadProjectSummaries() {
-    setError(null);
-    try {
-      setProjectSummaries(await api.listProjectSummaries());
-    } catch (err) {
-      setError(toErrorMessage(err));
-    }
+  function applyProjectSummaries(items: ProjectSummary[]) {
+    setProjectSummaries(items);
+    setProjects(items.map(({ id, name, description, created_at, updated_at }) => ({
+      id,
+      name,
+      description,
+      created_at,
+      updated_at,
+    })));
+    setProjectSummariesLoaded(true);
+    setProjectSummariesError(null);
   }
 
-  async function loadProjectReferenceMappings(projectId = route.projectId, showBusy = true) {
-    // A mutation started in a prior route render can resume after navigation.
-    // It must not start a request for the project that is no longer active.
-    if (projectId !== activeProjectIdRef.current) return;
+  function invalidateProjectSummaries() {
+    projectSummariesGeneration.current += 1;
+    projectSummariesCache.current.invalidate("directory");
+  }
 
-    const request = projectReferenceMappingsLoadGuard.current.begin(projectId, showBusy);
-    if (request.projectChanged) {
-      setProjectReferenceMappings([]);
-    }
-    if (!projectId) {
-      if (projectReferenceMappingsLoadGuard.current.finish(request)) setBusy(false);
-      return;
-    }
-    if (showBusy) setBusy(true);
+  function updateProjectSummaries(updater: (items: ProjectSummary[]) => ProjectSummary[]) {
+    invalidateProjectSummaries();
+    setProjectSummaries(updater);
+    setProjectSummariesLoaded(true);
+    setProjectSummariesLoading(false);
+    setProjectSummariesError(null);
+  }
+
+  async function loadProjectSummaries(force = false) {
+    const generation = projectSummariesGeneration.current;
+    setProjectSummariesLoading(true);
+    setProjectSummariesError(null);
     setError(null);
     try {
-      const items = await api.listProjectReferenceMappings(projectId);
-      if (!projectReferenceMappingsLoadGuard.current.isCurrent(request) || activeProjectIdRef.current !== projectId) return;
-      setProjectReferenceMappings(items.filter((mapping) => mapping.project_id === projectId));
+      const result = await projectSummariesCache.current.load(
+        "directory",
+        api.listProjectSummaries,
+        { ttlMs: Number.MAX_SAFE_INTEGER, force }
+      );
+      if (result.current && generation === projectSummariesGeneration.current) {
+        applyProjectSummaries(result.data);
+      }
     } catch (err) {
-      if (!projectReferenceMappingsLoadGuard.current.isCurrent(request) || activeProjectIdRef.current !== projectId) return;
-      setError(toErrorMessage(err));
+      if (generation !== projectSummariesGeneration.current) return;
+      const message = toErrorMessage(err);
+      setProjectSummariesError(message);
     } finally {
-      if (projectReferenceMappingsLoadGuard.current.finish(request)) setBusy(false);
+      if (generation === projectSummariesGeneration.current) setProjectSummariesLoading(false);
     }
   }
 
@@ -306,84 +323,9 @@ export function useStudioWorkspace(
     }
   }
 
-  function applyEnvironmentHeader(environmentId: number, header: EnvironmentHeaderData) {
-    if (activeEnvironmentIdRef.current !== environmentId) return;
-    setEnvironmentFreshness(header.freshness);
-  }
-
-  async function loadEnvironmentHeader(environmentId: number, force = false) {
-    const cached = environmentHeaderCache.current.peek(environmentId);
-    if (cached) applyEnvironmentHeader(environmentId, cached.data);
-    const result = await environmentHeaderCache.current.load(
-      environmentId,
-      () => fetchEnvironmentHeader(environmentId),
-      { ttlMs: sourceCheckIntervalMs(options?.sourceCheckIntervalSeconds), force }
-    );
-    if (result.current) applyEnvironmentHeader(environmentId, result.data);
-    const sourceCacheChanged = Boolean(
-      cached
-      && result.current
-      && !result.fromCache
-      && sourceCacheVersionChanged(cached.data, result.data)
-    );
-    const structuralCacheChanged = Boolean(
-      cached
-      && result.current
-      && !result.fromCache
-      && structuralCacheVersionChanged(cached.data, result.data)
-    );
-    if (sourceCacheChanged) invalidateEnvironmentResources(environmentId);
-    else if (structuralCacheChanged) environmentResourceStore.current.invalidateStructural(environmentId);
-    return result.current ? { data: result.data, sourceCacheChanged, structuralCacheChanged } : null;
-  }
-
-  function invalidateEnvironmentHeader(environmentId = route.environmentId) {
-    if (environmentId) environmentHeaderCache.current.invalidate(environmentId);
-  }
-
-  async function loadEnvironmentResource<T>(
-    environmentId: number,
-    resource: EnvironmentResourceName,
-    fetcher: () => Promise<T>,
-    force = false
-  ) {
-    return environmentResourceStore.current.load(
-      environmentId,
-      resource,
-      fetcher,
-      { force }
-    );
-  }
-
-  function invalidateEnvironmentResources(environmentId = route.environmentId) {
-    if (!environmentId) return;
-    environmentResourceStore.current.invalidateEnvironment(environmentId);
-  }
-
-  function invalidateEnvironmentResource(environmentId: number, resource: EnvironmentResourceName) {
-    environmentResourceStore.current.invalidateResource(environmentId, resource);
-  }
-
   function isCurrentEnvironmentLoad(environmentId: number, generation: number) {
     return activeEnvironmentIdRef.current === environmentId
       && environmentModuleLoadGeneration.current === generation;
-  }
-
-  function loadMetadataEditorContext(environmentId: number, force = false) {
-    return Promise.all([
-      loadEnvironmentResource(
-        environmentId,
-        "editor-document",
-        () => api.getEnvironmentMetadataEditorDocument(environmentId),
-        force,
-      ),
-      loadEnvironmentResource(
-        environmentId,
-        "editor-draft",
-        () => api.getEnvironmentMetadataEditorDraft(environmentId),
-        force,
-      ),
-    ]);
   }
 
   async function loadEnvironmentModule(
@@ -392,96 +334,11 @@ export function useStudioWorkspace(
     generation: number,
     force = false
   ) {
-    if (module === "settings") return;
-    if (module === "sources") {
-      const sources = await loadEnvironmentResource(
-        environmentId,
-        "sources",
-        () => fetchEnvironmentSources(environmentId),
-        force,
-      );
-      if (isCurrentEnvironmentLoad(environmentId, generation)) {
-        setMetadataSources(sources.metadataSources);
-        setLogPaths(sources.logPaths);
-        setCodeArtifacts(sources.codeArtifacts);
-      }
-      const statuses = await fetchSourceSyncStatuses(
-        environmentId,
-        sources.metadataSources,
-        sources.logPaths,
-        sources.codeArtifacts,
-      );
-      if (!isCurrentEnvironmentLoad(environmentId, generation)) return;
-      setSourceSyncStatuses(statuses);
-      return;
+    // Source mutations force a module refresh; refetch the Sources list so the UI
+    // reflects the change without a full page reload.
+    if (module === "sources" && force) {
+      await queryClient.invalidateQueries({ queryKey: environmentQueryKeys.sources(environmentId) });
     }
-
-    if (module === "overview") {
-      const overviewData = await loadEnvironmentResource(
-        environmentId,
-        "overview",
-        () => api.getEnvironmentOverview(environmentId),
-        force,
-      );
-      if (isCurrentEnvironmentLoad(environmentId, generation)) setOverview(overviewData);
-      return;
-    }
-
-    if (moduleUsesMetadataDataflowEditor(module)) {
-      const editorContext = await loadMetadataEditorContext(environmentId, force);
-      if (!isCurrentEnvironmentLoad(environmentId, generation)) return;
-      setMetadataEditorDocument(editorContext[0]);
-      setMetadataEditorDraft(editorContext[1]);
-      return;
-    }
-
-    if (module === "lineage") {
-      const lineageData = await loadEnvironmentResource(
-        environmentId,
-        "lineage",
-        () => api.getLineage(environmentId),
-        force,
-      );
-      if (!isCurrentEnvironmentLoad(environmentId, generation)) return;
-      setLineage(lineageData);
-      return;
-    }
-
-    if (module === "assets") {
-      const assetsData = await loadEnvironmentResource(
-        environmentId,
-        "assets",
-        () => api.getAssets(environmentId),
-        force,
-      );
-      if (!isCurrentEnvironmentLoad(environmentId, generation)) return;
-      setAssets(assetsData);
-      return;
-    }
-
-    if (module === "monitoring") return;
-  }
-
-  async function ensureLatestRuns() {
-    const environmentId = route.environmentId;
-    if (!environmentId) return;
-    const generation = environmentModuleLoadGeneration.current;
-    const statusData = await loadEnvironmentResource(
-      environmentId,
-      "latest-status",
-      () => api.getLatestStatus(environmentId),
-      false,
-    );
-    if (isCurrentEnvironmentLoad(environmentId, generation)) setLatestStatus(statusData);
-  }
-
-  async function ensureMetadataEditorContext() {
-    const environmentId = route.environmentId;
-    if (!environmentId) return;
-    const [document, draft] = await loadMetadataEditorContext(environmentId);
-    if (activeEnvironmentIdRef.current !== environmentId) return;
-    setMetadataEditorDocument(document);
-    setMetadataEditorDraft(draft);
   }
 
   async function refreshEnvironment(
@@ -494,30 +351,10 @@ export function useStudioWorkspace(
     setLoading(true);
     setError(null);
     try {
-      const header = await loadEnvironmentHeader(environmentId, refreshOptions?.forceHeader ?? false);
-      await loadEnvironmentModule(
-        environmentId,
-        module,
-        generation,
-        Boolean(refreshOptions?.forceModule || header?.sourceCacheChanged),
-      );
-    } catch (err) {
-      if (isCurrentEnvironmentLoad(environmentId, generation)) setError(toErrorMessage(err));
-    } finally {
-      if (isCurrentEnvironmentLoad(environmentId, generation)) setLoading(false);
-    }
-  }
-
-  async function revalidateEnvironmentSourceCache(
-    environmentId: number,
-    module: ModuleKey,
-  ) {
-    const header = await loadEnvironmentHeader(environmentId);
-    if (!header?.sourceCacheChanged) return;
-    const generation = ++environmentModuleLoadGeneration.current;
-    setLoading(true);
-    try {
-      await loadEnvironmentModule(environmentId, module, generation, true);
+      await Promise.all([
+        loadEnvironmentModule(environmentId, module, generation, Boolean(refreshOptions?.forceModule)),
+        refreshOptions?.forceHeader ? options?.onEnvironmentChanged?.(environmentId) : undefined,
+      ]);
     } catch (err) {
       if (isCurrentEnvironmentLoad(environmentId, generation)) setError(toErrorMessage(err));
     } finally {
@@ -545,8 +382,7 @@ export function useStudioWorkspace(
 
   async function refreshEnvironmentHeader(environmentId = route.environmentId) {
     if (!environmentId) return;
-    invalidateEnvironmentHeader(environmentId);
-    await loadEnvironmentHeader(environmentId, true);
+    await options?.onEnvironmentChanged?.(environmentId);
   }
 
   async function refreshEnvironmentAfterHeaderMutation(
@@ -554,9 +390,7 @@ export function useStudioWorkspace(
     module: ModuleKey = route.module
   ) {
     if (!environmentId) return;
-    invalidateEnvironmentHeader(environmentId);
-    invalidateEnvironmentResources(environmentId);
-    await refreshEnvironment(environmentId, module, { forceHeader: true });
+    await refreshEnvironment(environmentId, module, { forceHeader: true, forceModule: true });
   }
 
   async function createProject(name: string) {
@@ -565,10 +399,11 @@ export function useStudioWorkspace(
     try {
       const project = await api.createProject({ name });
       setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name)));
-      await loadProjectSummaries();
+      updateProjectSummaries((current) => addProjectSummary(current, project));
       setStudioRoute({ projectId: project.id, environmentId: null, module: "projects", projectSection: projectDefaultSection });
     } catch (err) {
       setError(toErrorMessage(err));
+      throw err;
     } finally {
       setBusy(false);
     }
@@ -583,13 +418,9 @@ export function useStudioWorkspace(
         setStudioRoute({ projectId: null, environmentId: null, module: "projects" });
       }
       setProjects((current) => current.filter((project) => project.id !== projectId));
-      setProjectSummaries((current) => current.filter((project) => project.id !== projectId));
-      setProjectReferenceMappings([]);
+      updateProjectSummaries((current) => current.filter((project) => project.id !== projectId));
       setEnvironments([]);
       clearEnvironmentSources();
-      clearEnvironmentData();
-      await loadProjects();
-      await loadProjectSummaries();
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -607,11 +438,13 @@ export function useStudioWorkspace(
     note?: string | null;
   }) {
     if (!route.projectId) throw new Error("Select a project before creating a mapping.");
+    const projectId = route.projectId;
     setBusy(true);
     setError(null);
     try {
-      const mapping = await api.createProjectReferenceMapping(route.projectId, payload);
-      await loadProjectReferenceMappings(route.projectId, false);
+      const mapping = await api.createProjectReferenceMapping(projectId, payload);
+      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
+      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, 1));
       return mapping;
     } catch (err) {
       setError(toErrorMessage(err));
@@ -633,11 +466,12 @@ export function useStudioWorkspace(
     }
   ) {
     if (!route.projectId) throw new Error("Select a project before updating a mapping.");
+    const projectId = route.projectId;
     setBusy(true);
     setError(null);
     try {
-      const mapping = await api.updateProjectReferenceMapping(route.projectId, mappingId, payload);
-      await loadProjectReferenceMappings(route.projectId, false);
+      const mapping = await api.updateProjectReferenceMapping(projectId, mappingId, payload);
+      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
       return mapping;
     } catch (err) {
       setError(toErrorMessage(err));
@@ -649,11 +483,13 @@ export function useStudioWorkspace(
 
   async function deleteProjectReferenceMapping(mappingId: number) {
     if (!route.projectId) throw new Error("Select a project before removing a mapping.");
+    const projectId = route.projectId;
     setBusy(true);
     setError(null);
     try {
-      await api.deleteProjectReferenceMapping(route.projectId, mappingId);
-      await loadProjectReferenceMappings(route.projectId, false);
+      await api.deleteProjectReferenceMapping(projectId, mappingId);
+      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
+      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, -1));
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -669,8 +505,9 @@ export function useStudioWorkspace(
     setError(null);
     try {
       const environment = await api.createEnvironment(pid, { name });
-      await loadProjectSummaries();
-      await loadEnvironments(pid, environment.id);
+      updateProjectSummaries((current) => addEnvironmentToProject(current, pid, environment));
+      setEnvironments((current) => [...current.filter((item) => item.id !== environment.id), environment]
+        .sort((left, right) => left.name.localeCompare(right.name)));
       return environment.id;
     } catch (err) {
       setError(toErrorMessage(err));
@@ -686,12 +523,12 @@ export function useStudioWorkspace(
     setError(null);
     try {
       await api.deleteEnvironment(environmentId);
-      environmentHeaderCache.current.invalidate(environmentId);
-      invalidateEnvironmentResources(environmentId);
-      await loadProjectSummaries();
-      if (pid) await loadEnvironments(pid);
+      queryClient.removeQueries({ queryKey: ["environments", environmentId] });
+      updateProjectSummaries((current) => removeEnvironmentFromProject(current, pid, environmentId));
+      setEnvironments((current) => current.filter((environment) => environment.id !== environmentId));
     } catch (err) {
       setError(toErrorMessage(err));
+      throw err;
     } finally {
       setBusy(false);
     }
@@ -703,6 +540,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       await api.addMetadataSource(route.environmentId, { uri, label, enabled: true });
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -717,7 +555,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       const result = await api.importMetadataSources(route.environmentId, { uri, label, enabled: true });
-      await loadProjectSummaries();
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
       return result;
     } catch (err) {
@@ -742,7 +580,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       const result = await api.importDatacoolieProjectSources(route.environmentId, { ...payload, enabled: true });
-      await loadProjectSummaries();
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
       return result;
     } catch (err) {
@@ -759,6 +597,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       await api.addLogSource(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -774,6 +613,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       await api.addCodeArtifact(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -807,7 +647,7 @@ export function useStudioWorkspace(
       } else {
         await api.updateCodeArtifact(environmentId, id, payload);
       }
-      await loadProjectSummaries();
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -829,7 +669,7 @@ export function useStudioWorkspace(
       } else {
         await api.deleteCodeArtifact(environmentId, id);
       }
-      await loadProjectSummaries();
+      invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -854,7 +694,6 @@ export function useStudioWorkspace(
           : kind === "logs"
             ? await api.validateLogSource(environmentId, id)
             : await api.validateCodeArtifact(environmentId, id);
-      invalidateEnvironmentResource(environmentId, "sources");
       await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
       return result;
     } catch (err) {
@@ -866,7 +705,7 @@ export function useStudioWorkspace(
     }
   }
 
-  async function syncSource(kind: SourceKind, id: number): Promise<SourceSyncStatus> {
+  async function syncSource(kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest): Promise<SourceSyncStatus> {
     const environmentId = route.environmentId;
     if (!environmentId) {
       const message = "Select an environment before syncing a source";
@@ -887,15 +726,16 @@ export function useStudioWorkspace(
         kind === "metadata"
           ? await api.refreshMetadataSource(environmentId, id)
           : kind === "logs"
-            ? await api.refreshLogSource(environmentId, id)
+            ? await api.refreshLogSource(environmentId, id, logSyncRequest ?? { mode: "incremental" })
             : await api.refreshCodeArtifact(environmentId, id);
-      setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
-      invalidateEnvironmentResources(environmentId);
-      await refreshEnvironment(environmentId, route.module, { forceHeader: true, forceModule: true });
+      if (activeEnvironmentIdRef.current === environmentId) {
+        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
+        await refreshEnvironment(environmentId, route.module, { forceHeader: true, forceModule: true });
+      }
       return result;
     } catch (err) {
       const message = toErrorMessage(err);
-      setError(message);
+      if (activeEnvironmentIdRef.current === environmentId) setError(message);
       const result: SourceSyncStatus = {
         source_id: id,
         source_kind: kind,
@@ -905,12 +745,14 @@ export function useStudioWorkspace(
         checked_at: new Date().toISOString(),
         latest_job: null
       };
-      setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
+      if (activeEnvironmentIdRef.current === environmentId) {
+        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
+      }
       return result;
     }
   }
 
-  async function runSourceBatch(action: SourceBatchAction, entries: SourceBatchEntry[]): Promise<SourceBatchResult> {
+  async function runSourceBatch(action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest): Promise<SourceBatchResult> {
     const uniqueEntries = Array.from(
       new Map(entries.map((entry) => [`${entry.kind}:${entry.id}`, entry])).values()
     );
@@ -951,7 +793,7 @@ export function useStudioWorkspace(
             : entry.kind === "metadata"
               ? await api.refreshMetadataSource(environmentId, entry.id)
               : entry.kind === "logs"
-                ? await api.refreshLogSource(environmentId, entry.id)
+                ? await api.refreshLogSource(environmentId, entry.id, logSyncRequest ?? { mode: "incremental" })
                 : await api.refreshCodeArtifact(environmentId, entry.id);
 
           if (operationResult.status === "error") {
@@ -968,9 +810,7 @@ export function useStudioWorkspace(
         }
       }
 
-      if (action === "delete") await loadProjectSummaries();
-      if (action === "validate") invalidateEnvironmentResource(environmentId, "sources");
-      else invalidateEnvironmentResources(environmentId);
+      if (action === "delete") invalidateProjectSummaries();
       await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
     } finally {
       setBusy(false);
@@ -978,82 +818,6 @@ export function useStudioWorkspace(
 
     if (result.failed) setError(`${result.failed} source ${result.failed === 1 ? "action" : "actions"} failed`);
     return result;
-  }
-
-  async function validateMetadataEditorDocument(document: MetadataEditorDocument) {
-    setBusy(true);
-    setError(null);
-    try {
-      if (!route.environmentId) return document;
-      const validation = await api.validateEnvironmentMetadataEditorDocument(route.environmentId, document);
-      return { ...document, issues: validation.issues };
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveMetadataEditorDraft(document: MetadataEditorDocument) {
-    setBusy(true);
-    setError(null);
-    try {
-      if (!route.environmentId) return document;
-      const nextDocument = await api.saveEnvironmentMetadataEditorDraft(route.environmentId, document);
-      invalidateEnvironmentResources(route.environmentId);
-      setMetadataEditorDraft(nextDocument);
-      return nextDocument;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function discardMetadataEditorDraft(_sourceId: number) {
-    setBusy(true);
-    setError(null);
-    try {
-      if (!route.environmentId) return;
-      await api.discardEnvironmentMetadataEditorDraft(route.environmentId);
-      invalidateEnvironmentResources(route.environmentId);
-      setMetadataEditorDraft(null);
-      setMetadataEditorDocument(await api.getEnvironmentMetadataEditorDocument(route.environmentId));
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveMetadataEditorDocument(document: MetadataEditorDocument) {
-    setBusy(true);
-    setError(null);
-    try {
-      if (!route.environmentId) return document;
-      const savedDocument = await api.saveEnvironmentMetadataEditorDocument(route.environmentId, document);
-      invalidateEnvironmentResources(route.environmentId);
-      setMetadataEditorDocument(savedDocument);
-      setMetadataEditorDraft(null);
-      if (route.environmentId) {
-        await loadProjectSummaries();
-        await refreshEnvironmentHeader(route.environmentId);
-      }
-      return savedDocument;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function listMetadataBackups(_sourceId: number) {
-    if (!route.environmentId) return [];
-    return api.listEnvironmentMetadataBackups(route.environmentId);
   }
 
   async function getSourceDeleteImpact(kind: SourceKind, id: number): Promise<SourceDeleteImpact> {
@@ -1064,152 +828,70 @@ export function useStudioWorkspace(
     return api.getCodeArtifactDeleteImpact(environmentId, id);
   }
 
-  async function previewMetadataBackup(backupId: number) {
-    return api.getMetadataBackupDocument(backupId);
-  }
+  const routeResources = projectRouteResources(route);
 
-  async function restoreMetadataBackup(backup: MetadataBackup, document: MetadataEditorDocument) {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.restoreMetadataBackup(backup.id, sourceRevisionForBackup(document, backup));
-      invalidateEnvironmentResources(route.environmentId);
-      const nextDocument = route.environmentId
-        ? await api.getEnvironmentMetadataEditorDocument(route.environmentId)
-        : document;
-      setMetadataEditorDocument(nextDocument);
-      setMetadataEditorDraft(null);
-      if (route.environmentId) {
-        await refreshEnvironmentHeader(route.environmentId);
-      }
-      return nextDocument;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteMetadataBackup(backupId: number) {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteMetadataBackup(backupId);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function clearMetadataBackups(_sourceId: number) {
-    setBusy(true);
-    setError(null);
-    try {
-      if (!route.environmentId) return;
-      await api.deleteEnvironmentMetadataBackups(route.environmentId);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Initial load.
+  // Load project identity only for routes that consume project context.
   useEffect(() => {
+    if (!routeResources.projects) return;
     void loadProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeResources.projects]);
+
+  // Project summaries are specific to the project hub/detail experience.
+  useEffect(() => {
+    if (!routeResources.projectSummaries) return;
     void loadProjectSummaries();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Reload summaries when viewing project hub/detail routes.
-  useEffect(() => {
-    if (route.module === "projects") {
-      void loadProjectSummaries();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.module, route.projectSection]);
-
-  useEffect(() => {
-    if (moduleUsesProjectReferenceMappings(route.module) && route.projectId) {
-      void loadProjectReferenceMappings(route.projectId, false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.module, route.projectId]);
+  }, [routeResources.projectSummaries]);
 
   // Load environments when the selected project changes.
   useEffect(() => {
-    if (route.projectId) {
+    if (routeResources.environments && route.projectId) {
       void loadEnvironments(route.projectId);
     } else {
-      void loadProjectReferenceMappings(null, false);
       setEnvironments([]);
+    }
+    if (!route.projectId) {
       clearEnvironmentSources();
-      clearEnvironmentData();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.projectId]);
+  }, [route.projectId, routeResources.environments]);
 
-  // Load environment-scoped data when the environment or module changes.
+  // Load environment-scoped data when the environment or module changes. Source
+  // list state is cleared/repopulated by the sources query effect above, keyed on
+  // the active environment, so it must not be cleared here (that race left the
+  // Sources tab blank until a full reload).
   useEffect(() => {
-    if (!route.environmentId) {
-      lastLoadedEnvironmentId.current = null;
-      clearEnvironmentSources();
-      clearEnvironmentData();
-      return;
-    }
-    if (lastLoadedEnvironmentId.current !== route.environmentId) {
-      lastLoadedEnvironmentId.current = route.environmentId;
-      clearEnvironmentSources();
-      clearEnvironmentData();
-    }
+    if (!route.environmentId) return;
     void refreshEnvironment(route.environmentId, route.module);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.environmentId, route.module]);
 
-  // The configured interval is the header's stale threshold, not a polling
-  // cadence. Module data remains until its materialized source-cache version changes.
-  useEffect(() => {
-    if (route.environmentId) void loadEnvironmentHeader(route.environmentId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options?.sourceCheckIntervalSeconds]);
-
-  useEffect(() => {
-    if (!route.environmentId) return;
-    const environmentId = route.environmentId;
-    const module = route.module;
-    return subscribeToEnvironmentHeaderRevalidation(() => {
-      void revalidateEnvironmentSourceCache(environmentId, module);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.environmentId, route.module, options?.sourceCheckIntervalSeconds]);
+  const activeQueryError = [sourcesQuery]
+    .find((query) => query.error)?.error;
 
   return {
     projects,
     projectSummaries,
-    projectReferenceMappings,
+    projectSummariesLoading,
+    projectSummariesLoaded,
+    projectSummariesError,
     environments,
     selectedProject,
     selectedProjectSummary,
     metadataSources,
     logPaths,
     codeArtifacts,
-    environmentFreshness,
     sourceSyncStatuses,
-    metadataEditorDocument,
-    metadataEditorDraft,
-    lineage,
-    assets,
-    overview,
-    monitoringReport,
-    latestStatus,
-    loading,
-    busy,
-    error,
+    metadataEditorDocument: metadataEditor.workspace?.document ?? null,
+    metadataEditorDraft: metadataEditor.workspace?.draft ?? null,
+    loading: loading || sourcesQuery.isFetching || metadataEditor.loading,
+    busy: busy || metadataEditor.busy,
+    error: error
+      ?? (activeQueryError ? toErrorMessage(activeQueryError) : null)
+      ?? (metadataEditor.error ? toErrorMessage(metadataEditor.error) : null),
     refreshCurrentEnvironment: () => refreshEnvironment(route.environmentId, route.module, { forceHeader: true, forceModule: true }),
-    ensureLatestRuns,
-    reloadProjectReferenceMappings: () => loadProjectReferenceMappings(route.projectId),
+    reloadProjectSummaries: () => loadProjectSummaries(true),
     createProject,
     deleteProject,
     createProjectReferenceMapping,
@@ -1228,30 +910,15 @@ export function useStudioWorkspace(
     validateSource,
     syncSource,
     runSourceBatch,
-    ensureMetadataEditorContext,
-    validateMetadataEditorDocument,
-    saveMetadataEditorDraft,
-    discardMetadataEditorDraft,
-    saveMetadataEditorDocument,
-    listMetadataBackups,
-    previewMetadataBackup,
-    restoreMetadataBackup,
-    deleteMetadataBackup,
-    clearMetadataBackups
+    ensureMetadataEditorContext: async () => { await metadataEditor.ensureContext(); },
+    validateMetadataEditorDocument: metadataEditor.validateDocument,
+    saveMetadataEditorDraft: metadataEditor.saveDraft,
+    discardMetadataEditorDraft: metadataEditor.discardDraft,
+    saveMetadataEditorDocument: metadataEditor.saveDocument,
+    listMetadataBackups: metadataEditor.listBackups,
+    previewMetadataBackup: metadataEditor.previewBackup,
+    restoreMetadataBackup: metadataEditor.restoreBackup,
+    deleteMetadataBackup: metadataEditor.deleteBackup,
+    clearMetadataBackups: metadataEditor.clearBackups
   };
-}
-
-function sourceRevisionForBackup(document: MetadataEditorDocument, backup: MetadataBackup) {
-  const revision = document.source.revision;
-  const sources = Array.isArray(revision.sources) ? revision.sources : [];
-  for (const item of sources) {
-    if (!item || typeof item !== "object") continue;
-    const source = item as Record<string, unknown>;
-    if (Number(source.source_id) !== backup.source_id) continue;
-    const sourceRevision = source.revision;
-    return sourceRevision && typeof sourceRevision === "object"
-      ? sourceRevision as Record<string, unknown>
-      : source;
-  }
-  return revision;
 }

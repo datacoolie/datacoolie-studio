@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  CalendarRange,
   CheckCircle2,
   Clock,
   Code2,
@@ -14,13 +15,13 @@ import {
   Settings2,
   TimerReset,
   Trash2,
-  X,
   XCircle
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { SourceBatchAction, SourceBatchEntry, SourceBatchResult } from "../../app/useStudioWorkspace";
-import type { SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/types";
+import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/types";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
+import { OperationNotification, type OperationNotice } from "../../shared/components/OperationNotification";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 import {
@@ -30,6 +31,16 @@ import {
   logScheduleLabel,
   summarizeSourceHealth
 } from "./sourceWorkspaceModel";
+import {
+  clearLogSyncActivity,
+  DEFAULT_LOG_SYNC_DRAFT,
+  setLogSyncActivity,
+  toLogSyncRequest,
+  validateLogSyncDraft,
+  type LogSyncActivities,
+  type LogSyncActivity,
+  type LogSyncDraft
+} from "./logSyncModel";
 
 export type { SourceKind } from "../../shared/lib/sources";
 
@@ -66,18 +77,13 @@ interface SourcesPageProps {
   onDeleteSource: (kind: SourceKind, id: number) => Promise<void>;
   onGetDeleteImpact: (kind: SourceKind, id: number) => Promise<SourceDeleteImpact>;
   onValidateSource: (kind: SourceKind, id: number) => Promise<SourceReadCheckResult>;
-  onSyncSource: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
-  onRunSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[]) => Promise<SourceBatchResult>;
+  onSyncSource: (kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest) => Promise<SourceSyncStatus>;
+  onRunSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest) => Promise<SourceBatchResult>;
   onRefreshSources: () => Promise<void>;
   syncStatuses: Record<string, SourceSyncStatus>;
 }
 
-type SourceOperationNotice = {
-  tone: "success" | "warning" | "error";
-  title: string;
-  detail: string;
-  errors: string[];
-} | null;
+type SourceOperationNotice = OperationNotice | null;
 
 type SourceEntry = {
   source: SourcePath;
@@ -95,6 +101,10 @@ type BulkProgress = {
 type DeletePrompt = {
   entries: SourceEntry[];
   impacts: SourceDeleteImpact[];
+};
+
+type LogSyncPrompt = {
+  entries: SourceEntry[];
 };
 
 export function SourcesPage({
@@ -119,6 +129,11 @@ export function SourcesPage({
   const [notice, setNotice] = useState<SourceOperationNotice>(null);
   const [bulkProgress, setBulkProgress] = useState<BulkProgress>(null);
   const [deletePrompt, setDeletePrompt] = useState<DeletePrompt | null>(null);
+  const [logSyncPrompt, setLogSyncPrompt] = useState<LogSyncPrompt | null>(null);
+  const [logSyncActivities, setLogSyncActivities] = useState<LogSyncActivities>({});
+  const logSyncTimers = useRef<Record<number, number>>({});
+  const selectedEnvironmentIdRef = useRef(selectedEnvironmentId);
+  selectedEnvironmentIdRef.current = selectedEnvironmentId;
   const [loadingDeleteImpact, setLoadingDeleteImpact] = useState(false);
   const configurationSources = useMemo(
     () => [
@@ -147,7 +162,16 @@ export function SourcesPage({
 
   useEffect(() => {
     setNotice(null);
+    setLogSyncPrompt(null);
+    setLogSyncActivities({});
+    setBulkProgress(null);
+    Object.values(logSyncTimers.current).forEach((timer) => window.clearTimeout(timer));
+    logSyncTimers.current = {};
   }, [selectedEnvironmentId]);
+
+  useEffect(() => () => {
+    Object.values(logSyncTimers.current).forEach((timer) => window.clearTimeout(timer));
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
@@ -198,12 +222,74 @@ export function SourcesPage({
 
   async function runSectionSync(scope: SectionBulkScope, entries: SourceEntry[]) {
     if (!entries.length) return;
+    if (scope === "logs") {
+      setLogSyncPrompt({ entries });
+      return;
+    }
     try {
       setBulkProgress({ scope, action: "sync" });
       const result = await onRunSourceBatch("sync", toBatchEntries(entries));
       setNotice(batchNotice("sync", result));
     } finally {
       setBulkProgress(null);
+    }
+  }
+
+  function setBackgroundLogSyncState(sourceIds: number[], activity: LogSyncActivity) {
+    sourceIds.forEach((sourceId) => {
+      const existingTimer = logSyncTimers.current[sourceId];
+      if (existingTimer) window.clearTimeout(existingTimer);
+    });
+    setLogSyncActivities((current) => setLogSyncActivity(current, sourceIds, activity));
+  }
+
+  function finishBackgroundLogSync(sourceIds: number[], activity: Exclude<LogSyncActivity, "syncing">) {
+    setBackgroundLogSyncState(sourceIds, activity);
+    sourceIds.forEach((sourceId) => {
+      logSyncTimers.current[sourceId] = window.setTimeout(() => {
+        setLogSyncActivities((current) => clearLogSyncActivity(current, [sourceId]));
+        delete logSyncTimers.current[sourceId];
+      }, 4_000);
+    });
+  }
+
+  function confirmLogSync(request: LogSyncRequest) {
+    if (!logSyncPrompt) return;
+    const entries = logSyncPrompt.entries;
+    const sourceIds = entries.map((entry) => entry.source.id);
+    setLogSyncPrompt(null);
+    setBackgroundLogSyncState(sourceIds, "syncing");
+    if (entries.length > 1) setBulkProgress({ scope: "logs", action: "sync" });
+    void runLogSyncInBackground(entries, sourceIds, request, selectedEnvironmentId);
+  }
+
+  async function runLogSyncInBackground(
+    entries: SourceEntry[],
+    sourceIds: number[],
+    request: LogSyncRequest,
+    environmentId: number | null
+  ) {
+    const isCurrentEnvironment = () => selectedEnvironmentIdRef.current === environmentId;
+    try {
+      if (entries.length === 1) {
+        const entry = entries[0];
+        const result = await onSyncSource("logs", entry.source.id, request);
+        if (!isCurrentEnvironment()) return;
+        setNotice(logSyncNotice(result, request));
+        finishBackgroundLogSync(sourceIds, result.status === "error" ? "error" : "done");
+      } else {
+        const result = await onRunSourceBatch("sync", toBatchEntries(entries), request);
+        if (!isCurrentEnvironment()) return;
+        setNotice(batchNotice("sync", result, logSyncModeLabel(request)));
+        finishBackgroundLogSync(sourceIds, result.failed ? "error" : "done");
+      }
+    } catch (error) {
+      if (!isCurrentEnvironment()) return;
+      const message = toErrorMessage(error);
+      finishBackgroundLogSync(sourceIds, "error");
+      setNotice(operationFailureNotice("Log sync failed", message));
+    } finally {
+      if (isCurrentEnvironment()) setBulkProgress(null);
     }
   }
 
@@ -389,8 +475,13 @@ export function SourcesPage({
               onDelete={requestSourceDelete}
               onValidate={onValidateSource}
               onSync={onSyncSource}
+              onRequestLogSync={(id) => {
+                const source = logPaths.find((item) => item.id === id);
+                if (source) setLogSyncPrompt({ entries: [{ source, kind: "logs" }] });
+              }}
               onRefresh={onRefreshSources}
               syncStatuses={syncStatuses}
+              externalSyncActivities={logSyncActivities}
             />
           </div>
           </div>
@@ -403,8 +494,15 @@ export function SourcesPage({
           onConfirm={() => void confirmDelete()}
         />
       ) : null}
+      {logSyncPrompt ? (
+        <LogSyncDialog
+          sourceCount={logSyncPrompt.entries.length}
+          onCancel={() => setLogSyncPrompt(null)}
+          onConfirm={confirmLogSync}
+        />
+      ) : null}
       {loadingDeleteImpact ? <div className="source-delete-impact-loading" role="status">Reviewing cached data…</div> : null}
-      {notice ? <SourceOperationNotification notice={notice} onClose={() => setNotice(null)} /> : null}
+      {notice ? <OperationNotification notice={notice} onClose={() => setNotice(null)} /> : null}
     </div>
   );
 }
@@ -710,8 +808,10 @@ function SourceGroup({
   onDelete,
   onValidate,
   onSync,
+  onRequestLogSync,
   onRefresh,
-  syncStatuses
+  syncStatuses,
+  externalSyncActivities = {}
 }: {
   title: string;
   description: string;
@@ -725,8 +825,10 @@ function SourceGroup({
   onDelete: SourcesPageProps["onDeleteSource"];
   onValidate: SourcesPageProps["onValidateSource"];
   onSync: SourcesPageProps["onSyncSource"];
+  onRequestLogSync?: (id: number) => void;
   onRefresh: SourcesPageProps["onRefreshSources"];
   syncStatuses: Record<string, SourceSyncStatus>;
+  externalSyncActivities?: LogSyncActivities;
 }) {
   const [syncStatus, setSyncStatus] = useState<Record<number, SourceSyncStatus>>({});
   const [syncing, setSyncing] = useState<Record<number, boolean>>({});
@@ -737,17 +839,14 @@ function SourceGroup({
   }
 
   async function sync(id: number) {
+    if (kind === "logs" && onRequestLogSync) {
+      onRequestLogSync(id);
+      return;
+    }
     setSyncing((current) => ({ ...current, [id]: true }));
     setSyncStatus((current) => ({
       ...current,
-      [id]: {
-        source_id: id,
-        source_kind: kind,
-        status: "running",
-        message: "Sync in progress",
-        checked_at: new Date().toISOString(),
-        latest_job: null
-      }
+      [id]: runningSourceSyncStatus(kind, id)
     }));
     try {
       const result = await onSync(kind, id);
@@ -779,9 +878,11 @@ function SourceGroup({
             item={item}
             kind={kind}
             busy={busy}
-            syncing={Boolean(syncing[item.id])}
+            syncActivity={syncing[item.id] ? "syncing" : externalSyncActivities[item.id]}
             validation={item.latest_validation ?? null}
-            syncStatus={syncStatus[item.id] ?? syncStatuses[sourceKey(kind, item.id)] ?? null}
+            syncStatus={externalSyncActivities[item.id] === "syncing"
+              ? runningSourceSyncStatus(kind, item.id)
+              : syncStatus[item.id] ?? syncStatuses[sourceKey(kind, item.id)] ?? null}
             onUpdate={onUpdate}
             onDelete={onDelete}
             onValidate={validate}
@@ -806,7 +907,7 @@ function SourceCard({
   item,
   kind,
   busy,
-  syncing,
+  syncActivity,
   validation,
   syncStatus,
   onUpdate,
@@ -817,7 +918,7 @@ function SourceCard({
   item: SourcePath;
   kind: SourceKind;
   busy: boolean;
-  syncing: boolean;
+  syncActivity?: LogSyncActivity;
   validation: SourceReadCheckResult | null;
   syncStatus: SourceSyncStatus | null;
   onUpdate: SourcesPageProps["onUpdateSource"];
@@ -842,6 +943,14 @@ function SourceCard({
   const displayName = item.label || basename(item.uri);
   const typeLabel = sourceTypeLabel(kind, item, modeLabel);
   const scheduleInterval = logRefreshInterval(item);
+  const syncing = syncActivity === "syncing";
+  const syncAction = syncActivity === "done"
+    ? { icon: <CheckCircle2 size={13} />, label: "Done" }
+    : syncActivity === "error"
+      ? { icon: <XCircle size={13} />, label: "Failed" }
+      : syncing
+        ? { icon: <RefreshCw size={13} className="spin" />, label: "Sync" }
+        : { icon: <RefreshCw size={13} />, label: "Sync" };
 
   return (
     <article className="source-card">
@@ -893,9 +1002,16 @@ function SourceCard({
               <CheckCircle2 size={13} />
               <span>Validate</span>
             </button>
-            <button className="source-action-btn" onClick={() => onSync(item.id)} disabled={busy || syncing} title="Sync cache now" aria-label={`Sync cache for ${displayName}`}>
-              <RefreshCw size={13} className={syncing ? "spin" : undefined} />
-              <span>Sync</span>
+            <button
+              className={`source-action-btn${syncActivity ? ` is-${syncActivity}` : ""}`}
+              onClick={() => onSync(item.id)}
+              disabled={busy || syncing}
+              title={syncing ? "Sync in progress" : syncActivity === "done" ? "Sync completed" : syncActivity === "error" ? "Sync failed" : "Sync cache now"}
+              aria-label={`Sync cache for ${displayName}`}
+              aria-busy={syncing}
+            >
+              {syncAction.icon}
+              <span>{syncAction.label}</span>
             </button>
             <button
               className="source-action-btn danger"
@@ -932,6 +1048,81 @@ function SourceCard({
         </div>
       </div>
     </article>
+  );
+}
+
+function LogSyncDialog({
+  sourceCount,
+  onCancel,
+  onConfirm
+}: {
+  sourceCount: number;
+  onCancel: () => void;
+  onConfirm: (request: LogSyncRequest) => void;
+}) {
+  const [draft, setDraft] = useState<LogSyncDraft>(DEFAULT_LOG_SYNC_DRAFT);
+  const validationError = validateLogSyncDraft(draft);
+  const sourceLabel = sourceCount === 1 ? "this log source" : `${sourceCount} log sources`;
+
+  return (
+    <OperationConfirmationDialog
+      confirmDisabled={Boolean(validationError)}
+      confirmIcon={<RefreshCw size={14} />}
+      confirmLabel={sourceCount === 1 ? "Sync logs" : `Sync ${sourceCount} sources`}
+      description={`Choose how Datacoolie Studio discovers files for ${sourceLabel}.`}
+      icon={<CalendarRange size={18} />}
+      onCancel={onCancel}
+      onConfirm={() => onConfirm(toLogSyncRequest(draft))}
+      title="Sync log data"
+    >
+      <div className="source-log-sync-options" role="radiogroup" aria-label="Log sync mode">
+        <label className={draft.mode === "incremental" ? "is-selected" : ""}>
+          <input
+            type="radio"
+            name="log-sync-mode"
+            checked={draft.mode === "incremental"}
+            onChange={() => setDraft((current) => ({ ...current, mode: "incremental" }))}
+          />
+          <span>
+            <strong>Incremental</strong>
+            <small>Load new or updated files from the current partition checkpoint.</small>
+          </span>
+        </label>
+        <label className={draft.mode === "incremental_with_lookback" ? "is-selected" : ""}>
+          <input
+            type="radio"
+            name="log-sync-mode"
+            checked={draft.mode === "incremental_with_lookback"}
+            onChange={() => setDraft((current) => ({ ...current, mode: "incremental_with_lookback" }))}
+          />
+          <span>
+            <strong>Incremental + lookback</strong>
+            <small>Recheck an older date range, then continue from the current checkpoint.</small>
+          </span>
+        </label>
+      </div>
+      {draft.mode === "incremental_with_lookback" ? (
+        <div className="source-log-sync-range">
+          <label>
+            From
+            <input
+              type="date"
+              value={draft.fromPartition}
+              onChange={(event) => setDraft((current) => ({ ...current, fromPartition: event.target.value }))}
+            />
+          </label>
+          <label>
+            To
+            <input
+              type="date"
+              value={draft.toPartition}
+              onChange={(event) => setDraft((current) => ({ ...current, toPartition: event.target.value }))}
+            />
+          </label>
+          {validationError ? <p className="source-log-sync-error" role="alert">{validationError}</p> : null}
+        </div>
+      ) : null}
+    </OperationConfirmationDialog>
   );
 }
 
@@ -1056,6 +1247,17 @@ function SyncBadge({ status }: { status: SourceSyncStatus | null }) {
   );
 }
 
+function runningSourceSyncStatus(kind: SourceKind, sourceId: number): SourceSyncStatus {
+  return {
+    source_id: sourceId,
+    source_kind: kind,
+    status: "running",
+    message: "Sync in progress",
+    checked_at: new Date().toISOString(),
+    latest_job: null
+  };
+}
+
 function toBatchEntries(entries: SourceEntry[]): SourceBatchEntry[] {
   return entries.map((entry) => ({ kind: entry.kind, id: entry.source.id }));
 }
@@ -1069,7 +1271,7 @@ function operationFailureNotice(title: string, detail = "Review the error and re
   };
 }
 
-function batchNotice(action: SourceBatchAction, result: SourceBatchResult): SourceOperationNotice {
+function batchNotice(action: SourceBatchAction, result: SourceBatchResult, context?: string): SourceOperationNotice {
   const actionLabel = action === "validate" ? "Validation" : action === "sync" ? "Sync" : "Deletion";
   const completed = result.succeeded + result.warnings;
   const parts = [
@@ -1080,32 +1282,34 @@ function batchNotice(action: SourceBatchAction, result: SourceBatchResult): Sour
   return {
     tone: result.failed === result.total ? "error" : result.failed || result.warnings ? "warning" : "success",
     title: result.failed ? `${actionLabel} completed with issues` : `${actionLabel} complete`,
-    detail: `${completed}/${result.total} sources processed · ${parts.join(" · ")}`,
+    detail: `${context ? `${context} · ` : ""}${completed}/${result.total} sources processed · ${parts.join(" · ")}`,
     errors: result.errors
   };
 }
 
-function SourceOperationNotification({ notice, onClose }: { notice: NonNullable<SourceOperationNotice>; onClose: () => void }) {
-  const Icon = notice.tone === "success" ? CheckCircle2 : notice.tone === "warning" ? AlertTriangle : XCircle;
-  return (
-    <aside className={`source-operation-notification tone-${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live="polite">
-      <Icon className="source-operation-notification-icon" size={18} aria-hidden="true" />
-      <div className="source-operation-notification-body">
-        <strong>{notice.title}</strong>
-        <span>{notice.detail}</span>
-        {notice.errors.length ? (
-          <ul>
-            {notice.errors.map((error, index) => (
-              <li key={`${error}-${index}`}>{error}</li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-      <button type="button" className="source-operation-notification-close" onClick={onClose} aria-label="Dismiss notification" title="Dismiss notification">
-        <X size={15} />
-      </button>
-    </aside>
-  );
+function logSyncNotice(status: SourceSyncStatus, request: LogSyncRequest): SourceOperationNotice {
+  const result = status.latest_job?.result ?? {};
+  const counts = [
+    countSummary(result, "candidate_files", "candidate files"),
+    countSummary(result, "replaced_files", "replaced"),
+    countSummary(result, "inserted_rows", "rows"),
+    countSummary(result, "unchanged_files", "unchanged")
+  ].filter(Boolean);
+  return {
+    tone: status.status === "error" ? "error" : status.status === "warning" ? "warning" : "success",
+    title: status.status === "error" ? "Log sync failed" : "Log sync complete",
+    detail: [logSyncModeLabel(request), ...counts, status.message].filter(Boolean).join(" · "),
+    errors: status.status === "error" ? [status.message] : []
+  };
+}
+
+function logSyncModeLabel(request: LogSyncRequest) {
+  return request.mode === "incremental" ? "Incremental" : "Incremental + lookback";
+}
+
+function countSummary(result: Record<string, unknown>, key: string, label: string) {
+  const value = result[key];
+  return typeof value === "number" ? `${value.toLocaleString()} ${label}` : "";
 }
 
 function importNotice(result: SourceImportResponse | null, title: string): SourceOperationNotice {

@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, CheckCircle2, Database, GitBranch, SlidersHorizontal } from "lucide-react";
-import type { EnvironmentOverview } from "../../shared/api/types";
+import type { EnvironmentOverview, ResolutionState } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { RelativeTime } from "../../shared/components/RelativeTime";
 import { elapsedWholeDays } from "../../shared/time";
@@ -7,11 +7,10 @@ import type { ModuleKey } from "../../app/moduleRegistry";
 
 interface OverviewPageProps {
   overview: EnvironmentOverview | null;
-  loading: boolean;
   onNavigate: (module: ModuleKey, search?: string) => void;
 }
 
-export function OverviewPage({ overview, loading, onNavigate }: OverviewPageProps) {
+export function OverviewPage({ overview, onNavigate }: OverviewPageProps) {
   const sources = overview?.sources;
   const metadata = overview?.metadata;
   const lineage = overview?.lineage;
@@ -64,13 +63,13 @@ export function OverviewPage({ overview, loading, onNavigate }: OverviewPageProp
   const stageSummary = metadata?.stages ?? [];
   const loadTypeSummary = metadata?.load_types ?? [];
   const lineageCoverage = metadata?.dataflows ? Math.round(((lineage?.dataflows ?? 0) / metadata.dataflows) * 100) : 0;
-  const dependencyCoverage = lineage?.dependencies
+  const referenceMappingCoverage = lineage?.references
     ? Math.round(
-      (lineage.resolved_dependencies / lineage.dependencies) * 100
+      ((lineage.automatic_references + lineage.manual_references) / lineage.references) * 100
     )
-    : 100;
+    : 0;
 
-  if (!metadataSourceCount && !logPathCount && !loading) {
+  if (!metadataSourceCount && !logPathCount) {
     return (
       <EmptyState
         icon={<SlidersHorizontal size={24} />}
@@ -179,11 +178,11 @@ export function OverviewPage({ overview, loading, onNavigate }: OverviewPageProp
           <RatioStat label="Dataflows" enabled={metadata?.enabled_dataflows ?? 0} total={metadata?.dataflows ?? 0} suffix="enabled" />
           <RatioStat label="Schema hints" enabled={metadata?.enabled_schema_hints ?? 0} total={metadata?.schema_hints ?? 0} suffix="enabled" />
           <CompactStat label="Lineage coverage" value={`${lineageCoverage}%`} />
-          <CompactStat label="Dependency coverage" value={`${dependencyCoverage}%`} />
-          <CompactStat
-            label="Input attention"
-            value={`${lineage?.ambiguous_dependencies ?? 0} ambiguous, ${lineage?.unresolved_dependencies ?? 0} unresolved`}
-            intent={(lineage?.ambiguous_dependencies ?? 0) + (lineage?.unresolved_dependencies ?? 0) ? "warning" : "good"}
+          <CompactStat label="Mapping coverage" value={`${referenceMappingCoverage}%`} />
+          <ResolutionStat
+            automatic={lineage?.automatic_references ?? 0}
+            manual={lineage?.manual_references ?? 0}
+            unresolved={lineage?.unresolved_references ?? 0}
           />
           <PillSummary label="Stages" items={stageSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
           <PillSummary label="Load types" items={loadTypeSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
@@ -261,6 +260,24 @@ function CompactStat({ label, value, intent = "neutral" }: { label: string; valu
     <div className={`summary-row compact-stat stat-${intent}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ResolutionStat({ automatic, manual, unresolved }: Record<ResolutionState, number>) {
+  const values: Array<[ResolutionState, number]> = [
+    ["automatic", automatic],
+    ["manual", manual],
+    ["unresolved", unresolved],
+  ];
+  return (
+    <div className="summary-row compact-stat resolution-stat">
+      <span>Reference resolution</span>
+      <strong className="resolution-stat-values">
+        {values.map(([state, value]) => (
+          <span className={`assets-status-chip status-${state}`} key={state}>{value} {state}</span>
+        ))}
+      </strong>
     </div>
   );
 }

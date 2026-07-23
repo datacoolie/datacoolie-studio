@@ -14,7 +14,7 @@ const reference = {
   reference_type: "table_reference",
   normalized_value: "silver.customer",
   display_name: "customer",
-  group_status: "unresolved",
+  resolution: { state: "unresolved", reason: "no_match" },
   candidate_asset_ids: [],
   occurrence_ids: ["occurrence:1"],
   dependency_count: 1,
@@ -69,10 +69,10 @@ describe("reference mapping model", () => {
     });
   });
 
-  it("prioritizes repair and edit actions before resolution status", () => {
-    expect(referenceMappingAction({ ...reference, group_status: "mapping_target_missing" }, [mapping])).toBe("repair");
-    expect(referenceMappingAction({ ...reference, group_status: "unresolved" }, [mapping])).toBe("edit");
-    expect(referenceMappingAction({ ...reference, group_status: "resolved_single" }, [])).toBe("edit");
+  it("uses Edit for saved mappings and Map for automatic or unresolved references without one", () => {
+    expect(referenceMappingAction({ ...reference, resolution: { state: "unresolved", reason: "target_missing" } }, [mapping])).toBe("edit");
+    expect(referenceMappingAction({ ...reference, resolution: { state: "unresolved", reason: "no_match" } }, [])).toBe("map");
+    expect(referenceMappingAction({ ...reference, resolution: { state: "automatic" } }, [])).toBe("map");
   });
 
   it("filters the target catalog by connection without changing its canonical target kinds", () => {
@@ -116,5 +116,22 @@ describe("reference mapping model", () => {
 
     expect(targets.find((item) => item.assetId === "asset:table")?.context).toBe("main.warehouse");
     expect(targets.find((item) => item.assetId === "asset:api")?.context).toBe("/api/v1/customers");
+  });
+
+  it("does not invent a mapping target from display-only asset fields", () => {
+    const targets = buildReferenceMappingTargets([{
+      id: "asset:function",
+      asset_type: "python_function",
+      display_name: "load_customer",
+      connection_name: "workspace",
+      path: "/Workspace/load_customer.py",
+      catalog: "main",
+      database: "warehouse",
+      schema_name: "silver",
+      table: "customer",
+      identifiers: [],
+    }] as unknown as AssetInventoryItem[]);
+
+    expect(targets).toEqual([]);
   });
 });

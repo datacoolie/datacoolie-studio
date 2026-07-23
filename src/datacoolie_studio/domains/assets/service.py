@@ -4,11 +4,15 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlglot import errors as sqlglot_errors, parse
 
-from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.db.models import Environment, EnvironmentSource
 from datacoolie_studio.domains.code_artifacts.indexer import ArtifactIndexError
+from datacoolie_studio.domains.assets.manual_mapping import manual_mapping_from_observations
+from datacoolie_studio.domains.assets.mapping_target import asset_mapping_target
+from datacoolie_studio.domains.assets.project_reference_registry import build_project_reference_registry
 from datacoolie_studio.domains.code_artifacts.service import (
     extract_python_function_source,
     read_code_artifact_function_source,
@@ -19,13 +23,14 @@ from datacoolie_studio.domains.read_models.cache import (
     cached_read_model,
     empty_parameters_fingerprint,
     read_model_build_lock,
+    read_model_generation,
     replace_read_model,
 )
 from datacoolie_studio.domains.read_models.keys import ASSETS_CATALOG
 from datacoolie_studio.domains.workspace import service as workspace
 
 
-ASSETS_PROJECTOR_VERSION = "assets-catalog-v2-paged-contract"
+ASSETS_PROJECTOR_VERSION = "assets-catalog-v3-reference-resolution"
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,45 @@ class AssetAttention:
             "reference_occurrence_id": self.reference_occurrence_id,
             "details": self.details or {},
         }
+
+
+def list_project_reference_registry(session: Session, project_id: int) -> dict[str, Any]:
+    mappings = workspace.list_project_reference_mappings(session, project_id)
+    environments = list(session.scalars(
+        select(Environment)
+        .where(Environment.project_id == project_id)
+        .order_by(Environment.name, Environment.id)
+    ))
+    snapshots: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for environment in environments:
+        try:
+            catalog = load_or_build_assets_catalog(session, environment.id)
+            assets = _sort_asset_rows(list(catalog.payload.get("assets") or []), sort_by="display_name", sort_dir="asc")
+            references = _sort_reference_rows(
+                list(catalog.payload.get("reference_groups") or []),
+                sort_by="display_name",
+                sort_dir="asc",
+            )
+            snapshots.append({
+                "environment": {"id": environment.id, "name": environment.name},
+                "assets": [_compact_asset_row(item) for item in assets],
+                "reference_groups": [_compact_reference_row(item) for item in references],
+                "catalog_version": catalog.input_fingerprint,
+            })
+        except Exception as exc:  # Keep one broken Environment from hiding the rest of the Project registry.
+            failures.append({
+                "environment_id": environment.id,
+                "environment_name": environment.name,
+                "message": str(exc) or "The environment asset registry could not be loaded.",
+            })
+    registry = build_project_reference_registry(snapshots, mappings)
+    return {
+        "project_id": project_id,
+        "mappings": mappings,
+        **registry,
+        "failures": failures,
+    }
 
 
 def list_environment_assets(
@@ -104,7 +148,7 @@ def list_environment_asset_references(
     query: str | None = None,
     reference_type: str | None = None,
     provenance: str | None = None,
-    group_status: str | None = None,
+    resolution_state: str | None = None,
     attention_state: str | None = None,
     sort_by: str = "display_name",
     sort_dir: str = "asc",
@@ -116,7 +160,7 @@ def list_environment_asset_references(
         query=query,
         reference_type=reference_type,
         provenance=provenance,
-        group_status=group_status,
+        resolution_state=resolution_state,
         attention_state=attention_state,
     )
     rows = _sort_reference_rows(rows, sort_by=sort_by, sort_dir=sort_dir)
@@ -272,16 +316,17 @@ def build_assets_inventory(
                     _append_attention(attention_by_asset, attention_keys_by_asset, related_asset_id, attention)
 
     for reference in reference_occurrences:
-        resolution = str(reference.get("resolution_status") or "")
-        if resolution not in {"ambiguous", "unresolved", "mapping_target_missing"}:
+        resolution_state = _resolution_state(reference)
+        if resolution_state != "unresolved":
             continue
+        resolution_reason = _resolution_reason(reference)
         reference_occurrence_id = _string_or_none(reference.get("id"))
         reference_id = _string_or_none(reference.get("reference_id"))
         reference_message = str(reference.get("raw_value") or reference.get("display_name") or reference_occurrence_id or "reference")
         reference_attention = AssetAttention(
-            severity="warning" if resolution == "ambiguous" else "info",
-            code=f"reference_{resolution}",
-            message=f"{resolution.replace('_', ' ')} reference: {reference_message}",
+            severity="warning" if resolution_reason in {"multiple_matches", "conflicting_targets", "target_missing"} else "info",
+            code=f"reference_{resolution_reason or 'unresolved'}",
+            message=f"{(resolution_reason or 'unresolved').replace('_', ' ')} reference: {reference_message}",
             source_type=_reference_attention_source_type(reference),
             subject_type="reference",
             dataflow_id=_string_or_none(reference.get("dataflow_id")),
@@ -365,13 +410,13 @@ def build_assets_inventory(
             for candidate_id in (_string_or_none(value) for value in (occurrence.get("candidate_asset_ids") or []))
             if candidate_id
         ]
-        resolution_status = str(occurrence.get("resolution_status") or "unresolved")
+        resolution = _resolution_dict(occurrence)
         observations = list(occurrence.get("observations") or [])
         reference_attention = _reference_attention(occurrence)
         attention_items = [reference_attention] if reference_attention is not None else []
         raw_value = _string_or_none(occurrence.get("raw_value")) or str(occurrence.get("display_name") or occurrence_id)
         display_name = str(occurrence.get("display_name") or raw_value)
-        manual_mapping = _manual_mapping_from_observations(observations)
+        manual_mapping = manual_mapping_from_observations(observations)
         occurrence_rows.append({
             "id": occurrence_id,
             "reference_id": reference_id,
@@ -386,7 +431,7 @@ def build_assets_inventory(
             "consumer_asset_id": consumer_asset_id,
             "consumer_asset": _asset_brief(consumer_asset_id, asset_by_id) if consumer_asset_id else None,
             "connection_name": consumer_asset.get("connection_name") if consumer_asset else None,
-            "resolution_status": resolution_status,
+            "resolution": resolution,
             "resolution_method": _string_or_none(occurrence.get("resolution_method")),
             "resolved_asset_id": resolved_asset_id,
             "resolved_asset": _asset_brief(resolved_asset_id, asset_by_id) if resolved_asset_id else None,
@@ -444,7 +489,7 @@ def build_assets_inventory(
             "reference_type": str(reference.get("reference_type") or "unknown"),
             "normalized_value": _string_or_none(reference.get("normalized_value")) or str(reference.get("display_name") or reference_id),
             "display_name": str(reference.get("display_name") or reference.get("normalized_value") or reference_id),
-            "group_status": str(reference.get("group_status") or "unresolved"),
+            "resolution": _resolution_dict(reference),
             "resolved_asset_id": resolved_asset_id,
             "resolved_asset_ids": resolved_asset_ids,
             "resolved_asset": _asset_brief(resolved_asset_id, asset_by_id) if resolved_asset_id else None,
@@ -459,6 +504,11 @@ def build_assets_inventory(
                 for value in [_string_or_none(occurrence.get("provenance"))]
                 if value
             } or {str(value) for value in (reference.get("provenances") or []) if str(value)}),
+            "resolution_methods": sorted({
+                str(occurrence.get("resolution_method"))
+                for occurrence in group_occurrences
+                if occurrence.get("resolution_method")
+            }),
             "dependency_count": int(dependency_counts_by_reference.get(reference_id, 0)),
             "dataflow_ids": sorted({
                 dataflow_id
@@ -473,13 +523,13 @@ def build_assets_inventory(
 
     asset_rows.sort(key=_asset_inventory_sort_key)
     occurrence_rows.sort(key=lambda item: (
-        _dependency_status_rank(str(item.get("resolution_status") or "")),
+        _resolution_state_rank(_resolution_state(item)),
         str(item.get("connection_name") or "").lower(),
         str(item.get("display_name") or "").lower(),
         str(item.get("id") or ""),
     ))
     reference_group_rows.sort(key=lambda item: (
-        _reference_group_status_rank(str(item.get("group_status") or "")),
+        _resolution_state_rank(_resolution_state(item)),
         str(item.get("display_name") or "").lower(),
         str(item.get("id") or ""),
     ))
@@ -501,15 +551,9 @@ def build_assets_inventory(
         "visible": len(asset_rows) + len(reference_group_rows),
         "asset_attention": sum(1 for item in asset_rows if item["attention_count"] > 0),
         "with_attention": sum(1 for item in asset_rows if item["attention_count"] > 0),
-        "references_needing_mapping": sum(
-            1 for item in reference_group_rows
-            if str(item.get("group_status") or "") in {"ambiguous", "unresolved", "mapping_target_missing", "resolved_mixed", "partially_resolved"}
-        ),
-        "references_ambiguous": sum(1 for item in reference_group_rows if item.get("group_status") == "ambiguous"),
-        "references_unresolved": sum(1 for item in reference_group_rows if item.get("group_status") == "unresolved"),
-        "references_mapping_target_missing": sum(
-            1 for item in reference_group_rows if item.get("group_status") == "mapping_target_missing"
-        ),
+        "automatic_references": sum(1 for item in reference_group_rows if _resolution_state(item) == "automatic"),
+        "manual_references": sum(1 for item in reference_group_rows if _resolution_state(item) == "manual"),
+        "unresolved_references": sum(1 for item in reference_group_rows if _resolution_state(item) == "unresolved"),
     }
     return {
         "summary": summary,
@@ -893,6 +937,13 @@ def load_or_build_assets_catalog(
             )
             if cached is not None:
                 return AssetsCatalog(cached.payload, input_fingerprint)
+            generation = read_model_generation(
+                environment_id=environment_id,
+                model_key=ASSETS_CATALOG,
+                parameters_fingerprint=parameters_fingerprint,
+                input_fingerprint=input_fingerprint,
+                producer_version=ASSETS_PROJECTOR_VERSION,
+            )
             lineage = load_or_build_lineage_graph(session, environment_id)
             payload = build_assets_inventory(lineage, _metadata_source_uri_by_id({}, lineage))
             current_fingerprint = lineage_input_fingerprint(session, environment_id)
@@ -906,6 +957,7 @@ def load_or_build_assets_catalog(
                 input_fingerprint=input_fingerprint,
                 producer_version=ASSETS_PROJECTOR_VERSION,
                 payload=payload,
+                expected_generation=generation,
             )
             return AssetsCatalog(payload, input_fingerprint)
     raise RuntimeError("Unable to build a stable Assets catalog")
@@ -1019,7 +1071,7 @@ def _depends_on_row(
         "id": str(item.get("id") or ""),
         "kind": str(item.get("kind") or "reads"),
         "provenance": str(item.get("provenance") or "sql"),
-        "resolution_status": str(item.get("resolution_status") or "unresolved"),
+        "resolution": _resolution_dict(item),
         "resolution_method": str(item.get("resolution_method") or ""),
         "reference_id": reference_id,
         "resolved_asset_id": resolved_asset_id,
@@ -1044,7 +1096,7 @@ def _used_by_row(
         "id": str(item.get("id") or ""),
         "kind": str(item.get("kind") or "reads"),
         "provenance": str(item.get("provenance") or "sql"),
-        "resolution_status": str(item.get("resolution_status") or "unresolved"),
+        "resolution": _resolution_dict(item),
         "resolution_method": str(item.get("resolution_method") or ""),
         "target_asset": _asset_brief(target_asset_id, asset_by_id),
         "reference": _reference_brief(reference_id, reference_by_id) if reference_id else None,
@@ -1058,7 +1110,7 @@ def _reference_brief(reference_id: str, reference_by_id: dict[str, dict[str, Any
             "id": reference_id,
             "display_name": reference_id or "reference",
             "reference_type": "unknown",
-            "resolution_status": "unresolved",
+            "resolution": {"state": "unresolved", "reason": "no_match"},
             "raw_value": None,
             "provenance": None,
         }
@@ -1066,7 +1118,7 @@ def _reference_brief(reference_id: str, reference_by_id: dict[str, dict[str, Any
         "id": reference_id,
         "display_name": str(reference.get("display_name") or reference_id),
         "reference_type": str(reference.get("reference_type") or "unknown"),
-        "resolution_status": str(reference.get("resolution_status") or reference.get("group_status") or "unresolved"),
+        "resolution": _resolution_dict(reference),
         "raw_value": _string_or_none(reference.get("raw_value")) or _string_or_none(reference.get("normalized_value")),
         "provenance": _string_or_none(reference.get("provenance")) or _first_string(reference.get("provenances") or []),
     }
@@ -1205,7 +1257,7 @@ def _depends_on_sort_key(item: dict[str, Any]) -> tuple[int, int, str, str]:
     ).lower()
     return (
         0 if item.get("resolved_asset_id") else 1,
-        _dependency_status_rank(str(item.get("resolution_status") or "")),
+        _resolution_state_rank(_resolution_state(item)),
         display_name,
         str(item.get("id") or ""),
     )
@@ -1214,25 +1266,33 @@ def _depends_on_sort_key(item: dict[str, Any]) -> tuple[int, int, str, str]:
 def _used_by_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
     target_asset = item.get("target_asset") or {}
     return (
-        _dependency_status_rank(str(item.get("resolution_status") or "")),
+        _resolution_state_rank(_resolution_state(item)),
         str(target_asset.get("friendly_name") or "").lower(),
         str(item.get("id") or ""),
     )
 
 
-def _dependency_status_rank(value: str) -> int:
-    return {"unresolved": 0, "mapping_target_missing": 1, "ambiguous": 2, "resolved_auto": 3, "resolved_manual": 4}.get(value, 5)
+def _resolution_state_rank(value: str) -> int:
+    return {"unresolved": 0, "manual": 1, "automatic": 2}.get(value, 3)
 
 
-def _reference_group_status_rank(value: str) -> int:
-    return {
-        "unresolved": 0,
-        "mapping_target_missing": 1,
-        "ambiguous": 2,
-        "resolved_mixed": 3,
-        "partially_resolved": 4,
-        "resolved_single": 5,
-    }.get(value, 6)
+def _resolution_dict(item: dict[str, Any]) -> dict[str, str | None]:
+    resolution = item.get("resolution")
+    if not isinstance(resolution, dict):
+        return {"state": "unresolved", "reason": "no_match"}
+    state = str(resolution.get("state") or "unresolved")
+    if state not in {"automatic", "manual", "unresolved"}:
+        state = "unresolved"
+    reason = _string_or_none(resolution.get("reason")) if state == "unresolved" else None
+    return {"state": state, "reason": reason}
+
+
+def _resolution_state(item: dict[str, Any]) -> str:
+    return str(_resolution_dict(item)["state"])
+
+
+def _resolution_reason(item: dict[str, Any]) -> str | None:
+    return _resolution_dict(item)["reason"]
 
 
 def _asset_position(upstream_count: int, downstream_count: int) -> str:
@@ -1253,26 +1313,9 @@ def _compact_asset_row(asset: dict[str, Any]) -> dict[str, Any]:
         "identifier_count": len(identifiers),
         "observation_count": len(asset.get("observations") or []),
         "metadata_source_count": len(asset.get("metadata_source_ids") or []),
-        "mapping_target": _mapping_target(identifiers, asset),
+        "mapping_target": asset_mapping_target(identifiers, asset),
     })
     return result
-
-
-def _mapping_target(identifiers: list[dict[str, Any]], asset: dict[str, Any]) -> dict[str, str] | None:
-    preferred_kinds = ["api_endpoint"] if asset.get("asset_type") == "api" else []
-    preferred_kinds.extend(["logical_table", "physical_path"])
-    for kind in preferred_kinds:
-        identifier = next((item for item in identifiers if str(item.get("kind") or "") == kind), None)
-        if identifier and identifier.get("normalized_value"):
-            return {
-                "kind": kind,
-                "value": str(identifier["normalized_value"]),
-                "display": str(identifier.get("display_value") or identifier["normalized_value"]),
-            }
-    if asset.get("path"):
-        return {"kind": "physical_path", "value": str(asset["path"]), "display": str(asset["path"])}
-    logical = ".".join(str(asset.get(key)) for key in ("catalog", "database", "schema_name", "table") if asset.get(key))
-    return {"kind": "logical_table", "value": logical, "display": logical} if logical else None
 
 
 def _compact_reference_row(reference: dict[str, Any]) -> dict[str, Any]:
@@ -1357,7 +1400,7 @@ def _filter_reference_rows(
     query: str | None,
     reference_type: str | None,
     provenance: str | None,
-    group_status: str | None,
+    resolution_state: str | None,
     attention_state: str | None,
 ) -> list[dict[str, Any]]:
     needle = (query or "").strip().lower()
@@ -1367,11 +1410,7 @@ def _filter_reference_rows(
             continue
         if provenance and provenance not in (row.get("provenances") or []):
             continue
-        if group_status == "__needs_mapping" and str(row.get("group_status") or "") not in {
-            "ambiguous", "unresolved", "mapping_target_missing", "resolved_mixed", "partially_resolved",
-        }:
-            continue
-        if group_status and group_status != "__needs_mapping" and row.get("group_status") != group_status:
+        if resolution_state and _resolution_state(row) != resolution_state:
             continue
         has_attention = int(row.get("attention_count") or 0) > 0
         if attention_state == "with_attention" and not has_attention:
@@ -1380,7 +1419,9 @@ def _filter_reference_rows(
             continue
         values = [
             row.get("id"), row.get("display_name"), row.get("normalized_value"), row.get("reference_type"),
-            row.get("group_status"), *(row.get("provenances") or []),
+            _resolution_state(row), _resolution_reason(row), *(row.get("provenances") or []), *(row.get("resolution_methods") or []),
+            (row.get("resolved_asset") or {}).get("full_identity"),
+            (row.get("resolved_asset") or {}).get("display_name"),
             *(asset.get("full_identity") or asset.get("display_name") for asset in row.get("consumer_assets") or []),
             *(asset.get("full_identity") or asset.get("display_name") for asset in row.get("candidate_assets") or []),
         ]
@@ -1394,7 +1435,7 @@ def _sort_reference_rows(rows: list[dict[str, Any]], *, sort_by: str, sort_dir: 
     sort_keys = {
         "display_name": lambda row: str(row.get("display_name") or "").lower(),
         "reference_type": lambda row: str(row.get("reference_type") or "").lower(),
-        "group_status": lambda row: str(row.get("group_status") or "").lower(),
+        "resolution_state": lambda row: _resolution_state(row),
         "dependency_count": lambda row: int(row.get("dependency_count") or 0),
         "attention_count": lambda row: int(row.get("attention_count") or 0),
     }
@@ -1446,11 +1487,7 @@ def _reference_group_filter_options(rows: list[dict[str, Any]]) -> dict[str, lis
     return {
         "reference_types": sorted({item["reference_type"] for item in rows if item.get("reference_type")}),
         "provenances": sorted({value for item in rows for value in (item.get("provenances") or []) if value}),
-        "group_statuses": sorted({
-            str(item["group_status"])
-            for item in rows
-            if item.get("group_status") not in (None, "")
-        }),
+        "resolution_states": sorted({_resolution_state(item) for item in rows}),
         "attention_states": sorted(attention),
     }
 
@@ -1461,11 +1498,7 @@ def _reference_occurrence_filter_options(rows: list[dict[str, Any]]) -> dict[str
         "connections": sorted({item["connection_name"] for item in rows if item.get("connection_name")}),
         "reference_types": sorted({item["reference_type"] for item in rows if item.get("reference_type")}),
         "provenances": sorted({item["provenance"] for item in rows if item.get("provenance")}),
-        "resolution_statuses": sorted({
-            str(item["resolution_status"])
-            for item in rows
-            if item.get("resolution_status") not in (None, "")
-        }),
+        "resolution_states": sorted({_resolution_state(item) for item in rows}),
         "resolution_methods": sorted({item["resolution_method"] for item in rows if item.get("resolution_method")}),
         "attention_states": sorted(attention),
     }
@@ -1532,34 +1565,18 @@ def _is_reference_resolution_diagnostic(diagnostic: dict[str, Any]) -> bool:
     return has_reference_identity and code.startswith(("dependency_", "reference_"))
 
 
-def _manual_mapping_from_observations(observations: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for item in observations:
-        if str(item.get("source_type") or "") != "manual_mapping":
-            continue
-        mapping_id = _to_int(item.get("mapping_id"))
-        if mapping_id is None:
-            continue
-        return {
-            "mapping_id": mapping_id,
-            "status": str(item.get("mapping_status") or "matched"),
-            "note": _string_or_none(item.get("mapping_note")),
-            "target_identifier_kind": _string_or_none(item.get("target_identifier_kind")),
-            "target_normalized_value": _string_or_none(item.get("target_normalized_value")),
-        }
-    return None
-
-
 def _reference_attention(reference: dict[str, Any]) -> AssetAttention | None:
-    resolution = str(reference.get("resolution_status") or "unresolved")
-    if resolution not in {"ambiguous", "unresolved", "mapping_target_missing"}:
+    resolution_state = _resolution_state(reference)
+    if resolution_state != "unresolved":
         return None
+    resolution_reason = _resolution_reason(reference)
     reference_occurrence_id = _string_or_none(reference.get("id"))
     reference_id = _string_or_none(reference.get("reference_id"))
     reference_message = str(reference.get("raw_value") or reference.get("display_name") or reference_occurrence_id or "reference")
     return AssetAttention(
-        severity="warning" if resolution == "ambiguous" else "info",
-        code=f"reference_{resolution}",
-        message=f"{resolution.replace('_', ' ')} reference: {reference_message}",
+        severity="warning" if resolution_reason in {"multiple_matches", "conflicting_targets", "target_missing"} else "info",
+        code=f"reference_{resolution_reason or 'unresolved'}",
+        message=f"{(resolution_reason or 'unresolved').replace('_', ' ')} reference: {reference_message}",
         source_type=_reference_attention_source_type(reference),
         subject_type="reference",
         reference_id=reference_id,

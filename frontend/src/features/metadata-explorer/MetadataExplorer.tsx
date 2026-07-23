@@ -1,4 +1,5 @@
 import "react-datasheet-grid/dist/style.css";
+import "./metadata-explorer.css";
 
 import { DynamicDataSheetGrid, type Column, type DataSheetGridRef } from "react-datasheet-grid";
 import { Database } from "lucide-react";
@@ -60,13 +61,13 @@ interface MetadataExplorerProps {
   busy: boolean;
   onValidate: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  onDiscardDraft: (sourceId: number) => Promise<void>;
+  onDiscardDraft: () => Promise<void>;
   onSave: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  onListBackups: (sourceId: number) => Promise<MetadataBackup[]>;
+  onListBackups: () => Promise<MetadataBackup[]>;
   onPreviewBackup: (backupId: number) => Promise<MetadataEditorDocument>;
   onRestoreBackup: (backup: MetadataBackup, document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onDeleteBackup: (backupId: number) => Promise<void>;
-  onClearBackups: (sourceId: number) => Promise<void>;
+  onClearBackups: () => Promise<void>;
 }
 
 const sheetKeys = ["connections", "dataflows", "schema_hints"] satisfies SheetKey[];
@@ -104,6 +105,7 @@ export function MetadataExplorer({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [mode, setMode] = useState<"view" | "edit">("view");
   const [draft, setDraft] = useState<MetadataEditorDocument | null>(null);
+  const [serverConflict, setServerConflict] = useState(false);
   const [pendingSourceSave, setPendingSourceSave] = useState<MetadataEditorDocument | null>(null);
   const [selection, setSelection] = useState<SelectionState>(null);
   const [selectedDataflow, setSelectedDataflow] = useState<MetadataDataflowSelection | null>(null);
@@ -112,7 +114,10 @@ export function MetadataExplorer({
   const dataflowDrawerStackRef = useRef(dataflowDrawerStack);
   const dataflowDrawerHistoryDepthRef = useRef(0);
   const suppressNextDataflowDrawerPopRef = useRef(false);
-  const preserveEditModeOnNextDocumentRefreshRef = useRef(false);
+  const serverBaseRef = useRef({ document: editorDocument, draft: serverDraft });
+  const workingDocumentRef = useRef<MetadataEditorDocument | null>(draft);
+  const busyRef = useRef(busy);
+  const acceptingServerUpdateRef = useRef(false);
   const [pendingFocus, setPendingFocus] = useState<{ sheet: SheetKey; row: number; col: number } | null>(null);
   const [columnWidthsBySheet, setColumnWidthsBySheet] = useState<Record<SheetKey, Record<string, number>>>({
     connections: {},
@@ -121,26 +126,33 @@ export function MetadataExplorer({
   });
   const activeColumnWidths = columnWidthsBySheet[activeSheet];
   const activeDocument = draft ?? editorDocument;
+  workingDocumentRef.current = draft;
+  busyRef.current = busy;
   const hasActiveDocument = Boolean(activeDocument);
   const activeStudioRouting = useMemo(() => studioRoutingValues(activeDocument), [activeDocument]);
   const readOnlyDocument = Boolean(activeDocument?.source.read_only);
+  const draftState = useMemo(
+    () => metadataDraftState(editorDocument, serverDraft, activeDocument),
+    [activeDocument, editorDocument, serverDraft],
+  );
 
   useEffect(() => {
-    setDraft(serverDraft ?? editorDocument);
-  }, [serverDraft]);
-
-  useEffect(() => {
-    setDraft(serverDraft ?? editorDocument);
-    if (preserveEditModeOnNextDocumentRefreshRef.current) {
-      preserveEditModeOnNextDocumentRefreshRef.current = false;
+    const previous = serverBaseRef.current;
+    const hadLocalChanges = metadataDraftState(
+      previous.document,
+      previous.draft,
+      workingDocumentRef.current,
+    ).hasLocalChanges;
+    const documentChanged = previous.document !== editorDocument;
+    serverBaseRef.current = { document: editorDocument, draft: serverDraft };
+    if (hadLocalChanges && !busyRef.current && !acceptingServerUpdateRef.current) {
+      setServerConflict(true);
       return;
     }
-    setMode("view");
-  }, [editorDocument]);
-
-  useEffect(() => {
-    if (!busy) preserveEditModeOnNextDocumentRefreshRef.current = false;
-  }, [busy]);
+    setDraft(serverDraft ?? editorDocument);
+    setServerConflict(false);
+    if (documentChanged) setMode("view");
+  }, [editorDocument, serverDraft]);
 
   useEffect(() => {
     const params = new URLSearchParams(routeSearch ?? "");
@@ -232,8 +244,8 @@ export function MetadataExplorer({
   const needsVerticalScroll =
     metadataHeaderRowHeight + displayedRows.length * metadataRowHeight + metadataScrollbarAllowance > gridHeight;
   const dataflowRecords = useMemo(
-    () => buildMetadataDataflowRecords(activeDocument),
-    [activeDocument]
+    () => selectedDataflow ? buildMetadataDataflowRecords(activeDocument) : [],
+    [activeDocument, selectedDataflow]
   );
   const selectedDataflowRecord = useMemo(
     () => findMetadataDataflowRecord(dataflowRecords, selectedDataflow),
@@ -425,7 +437,6 @@ export function MetadataExplorer({
     return <EmptyState icon={<Database size={24} />} title={loading ? "Loading metadata" : "No metadata editor document"} />;
   }
 
-  const draftState = metadataDraftState(editorDocument, serverDraft, activeDocument);
   const dirty = draftState.hasLocalChanges;
   const sourceSaveConfirmation = pendingSourceSave ? metadataSaveConfirmation(editorDocument, pendingSourceSave) : null;
   const enabledDataflows = countEnabled(activeDocument.sheets.dataflows?.rows ?? []);
@@ -541,35 +552,46 @@ export function MetadataExplorer({
 
   async function saveDraft(document = activeDocument) {
     if (!document) return;
+    acceptingServerUpdateRef.current = true;
     try {
       const saved = await onSaveDraft(document);
       setDraft(saved);
+      setServerConflict(false);
       return saved;
     } catch {
       return undefined;
+    } finally {
+      acceptingServerUpdateRef.current = false;
     }
   }
 
   async function discardDraft() {
     if (!editorDocument) return;
-    preserveEditModeOnNextDocumentRefreshRef.current = true;
+    acceptingServerUpdateRef.current = true;
     try {
-      await onDiscardDraft(editorDocument.source.source_id);
+      await onDiscardDraft();
       setDraft(editorDocument);
+      setServerConflict(false);
     } catch {
-      preserveEditModeOnNextDocumentRefreshRef.current = false;
+      return;
+    } finally {
+      acceptingServerUpdateRef.current = false;
     }
   }
 
   async function saveChanges(document = activeDocument) {
     if (!document) return;
+    acceptingServerUpdateRef.current = true;
     try {
       const saved = await onSave(document);
       setDraft(saved);
       setMode("view");
+      setServerConflict(false);
       return saved;
     } catch {
       return undefined;
+    } finally {
+      acceptingServerUpdateRef.current = false;
     }
   }
 
@@ -589,9 +611,15 @@ export function MetadataExplorer({
 
   async function restoreBackup(backup: MetadataBackup) {
     if (!activeDocument) return;
-    const restored = await onRestoreBackup(backup, activeDocument);
-    setDraft(restored);
-    setMode("view");
+    acceptingServerUpdateRef.current = true;
+    try {
+      const restored = await onRestoreBackup(backup, activeDocument);
+      setDraft(restored);
+      setMode("view");
+      setServerConflict(false);
+    } finally {
+      acceptingServerUpdateRef.current = false;
+    }
   }
 
   function addRow(afterIndex?: number | null) {
@@ -705,6 +733,11 @@ export function MetadataExplorer({
 
   return (
     <div className="view-stack metadata-sheet-page">
+      {serverConflict ? (
+        <div className="metadata-editor-conflict" role="alert">
+          Metadata changed on the server while this editor has unsaved changes. Your local edits are preserved; discard them or reload before saving.
+        </div>
+      ) : null}
       <MetadataMetrics
         connections={activeDocument.sheets.connections?.rows.length ?? 0}
         dataflows={activeDocument.sheets.dataflows?.rows.length ?? 0}
@@ -729,7 +762,10 @@ export function MetadataExplorer({
           sourceFormat={activeDocument.source.format}
           sourceUri={activeDocument.source.uri}
           onActiveSheetChange={changeActiveSheet}
-          onDiscard={() => setDraft(serverDraft ?? editorDocument)}
+          onDiscard={() => {
+            setDraft(serverDraft ?? editorDocument);
+            setServerConflict(false);
+          }}
           onDiscardDraft={discardDraft}
           onHistoryOpen={() => setHistoryOpen(true)}
           onModeChange={changeMode}

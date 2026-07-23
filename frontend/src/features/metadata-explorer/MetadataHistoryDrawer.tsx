@@ -8,10 +8,10 @@ import type { SheetKey } from "./metadataSheetTypes";
 interface MetadataHistoryDrawerProps {
   currentDocument: MetadataEditorDocument;
   dirty: boolean;
-  onClear: (sourceId: number) => Promise<void>;
+  onClear: () => Promise<void>;
   onClose: () => void;
   onDelete: (backupId: number) => Promise<void>;
-  onList: (sourceId: number) => Promise<MetadataBackup[]>;
+  onList: () => Promise<MetadataBackup[]>;
   onPreview: (backupId: number) => Promise<MetadataEditorDocument>;
   onRestore: (backup: MetadataBackup) => Promise<void>;
 }
@@ -51,7 +51,7 @@ export function MetadataHistoryDrawer({
     setLoading(true);
     setError("");
     try {
-      const items = await onList(currentDocument.source.source_id);
+      const items = await onList();
       setBackups(items);
       if (selectedBackup && !items.some((item) => item.id === selectedBackup.id)) {
         setSelectedBackup(null);
@@ -119,7 +119,7 @@ export function MetadataHistoryDrawer({
     setActionBusy(true);
     setError("");
     try {
-      await onClear(currentDocument.source.source_id);
+      await onClear();
       setBackups([]);
       setSelectedBackup(null);
       setPreview(null);

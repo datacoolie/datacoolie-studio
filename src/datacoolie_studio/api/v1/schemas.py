@@ -4,17 +4,32 @@ from datetime import datetime
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 TargetIdentifierKind = Literal["logical_table", "physical_path", "api_endpoint"]
-ResolutionStatus = Literal["resolved_auto", "resolved_manual", "ambiguous", "unresolved", "mapping_target_missing"]
 ReferenceType = Literal["table_reference", "path_reference", "api_endpoint_reference", "unknown"]
-ReferenceGroupStatus = Literal["resolved_single", "resolved_mixed", "partially_resolved", "ambiguous", "unresolved", "mapping_target_missing"]
+ResolutionState = Literal["automatic", "manual", "unresolved"]
+ResolutionReason = Literal["no_match", "multiple_matches", "conflicting_targets", "incomplete", "target_missing"]
+
+
+class ReferenceResolutionResponse(BaseModel):
+    state: ResolutionState
+    reason: ResolutionReason | None = None
 
 
 class ProjectCreate(BaseModel):
     name: str
     description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_project_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Project name cannot be blank")
+        if len(normalized) > 255:
+            raise ValueError("Project name cannot exceed 255 characters")
+        return normalized
 
 
 class ProjectRead(BaseModel):
@@ -27,6 +42,16 @@ class ProjectRead(BaseModel):
     updated_at: datetime
 
 
+class ProjectEnvironmentSummaryResponse(BaseModel):
+    id: int
+    name: str
+    metadata_source_count: int
+    etl_log_path_count: int
+    code_artifact_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectSummaryResponse(BaseModel):
     id: int
     name: str
@@ -34,7 +59,8 @@ class ProjectSummaryResponse(BaseModel):
     environment_count: int
     metadata_source_count: int
     etl_log_path_count: int
-    environments: list[dict[str, Any]]
+    reference_mapping_count: int
+    environments: list[ProjectEnvironmentSummaryResponse]
     created_at: datetime
     updated_at: datetime
 
@@ -117,9 +143,15 @@ class EnvironmentRead(BaseModel):
 
 
 class StudioPathInfo(BaseModel):
+    backend: str
     path: str
     exists: bool
     size_bytes: int | None = None
+    maintenance_supported: bool = False
+
+
+class StudioWorkspaceDatabaseMaintenanceRequest(BaseModel):
+    confirm: Literal[True]
 
 
 class StudioAnalyticsCacheInfo(BaseModel):
@@ -127,6 +159,10 @@ class StudioAnalyticsCacheInfo(BaseModel):
     path: str
     exists: bool
     size_bytes: int | None = None
+    schema_version: int | None = None
+    generation: int | None = None
+    build_state: Literal["ready", "rebuild_required"] = "rebuild_required"
+    published_at: datetime | None = None
     dataflow_row_count: int = 0
     job_row_count: int = 0
     filter_value_count: int = 0
@@ -136,17 +172,43 @@ class StudioAnalyticsCacheInfo(BaseModel):
     orphan_source_ids: list[int] = Field(default_factory=list)
 
 
-class StudioStorageInfo(BaseModel):
+class StudioDiagnosticsResponse(BaseModel):
     workspace_database: StudioPathInfo
     analytics_cache: StudioAnalyticsCacheInfo
+
+
+class StudioCacheStatusResponse(BaseModel):
+    result_cache: dict[str, Any]
+    analytics_cache: dict[str, Any]
+    sync_job_retention: dict[str, Any] | None = None
+
+
+class StudioCacheClearRequest(BaseModel):
+    scope: Literal["read_models", "analytics", "all_disposable"]
+    environment_id: int | None = Field(default=None, ge=1)
+    features: list[Literal["overview", "assets", "lineage", "monitoring"]] = Field(default_factory=list)
+    confirm: Literal[True]
+
+
+class StudioCacheMaintenanceRequest(BaseModel):
+    confirm: Literal[True]
+
+
+class StudioCacheMutationResponse(BaseModel):
+    scope: str
+    environment_id: int | None = None
+    features: list[str] = Field(default_factory=list)
+    read_models: dict[str, Any] | None = None
+    analytics: dict[str, Any] | None = None
+    analytics_dependent_read_models: dict[str, Any] | None = None
 
 
 class StudioSettingsResponse(BaseModel):
     timezone: str
     timezone_source: Literal["configured", "server_default"]
+    timezone_offset_minutes: int
     source_check_interval_seconds: int
     updated_at: datetime | None = None
-    storage: StudioStorageInfo
 
 
 class StudioSettingsUpdateRequest(BaseModel):
@@ -264,6 +326,44 @@ class SourceSyncStatusResponse(BaseModel):
     latest_job: SourceSyncJobResponse | None = None
 
 
+class LogSyncLookbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    from_partition: str
+    to_partition: str
+
+    @field_validator("from_partition", "to_partition")
+    @classmethod
+    def validate_partition_date(cls, value: str) -> str:
+        normalized = value.strip()
+        try:
+            parsed = datetime.strptime(normalized, "%Y-%m-%d")
+        except ValueError as error:
+            raise ValueError("Partition bounds must use YYYY-MM-DD") from error
+        return parsed.date().isoformat()
+
+    @model_validator(mode="after")
+    def validate_partition_order(self) -> LogSyncLookbackRequest:
+        if self.from_partition > self.to_partition:
+            raise ValueError("Lookback start partition cannot be after end partition")
+        return self
+
+
+class LogSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["incremental", "incremental_with_lookback"]
+    lookback: LogSyncLookbackRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_contract(self) -> LogSyncRequest:
+        if self.mode == "incremental_with_lookback" and self.lookback is None:
+            raise ValueError("Lookback bounds are required for incremental with lookback")
+        if self.mode == "incremental" and self.lookback is not None:
+            raise ValueError("Lookback bounds are only valid for incremental with lookback")
+        return self
+
+
 class FreshnessSourceItemResponse(BaseModel):
     source_id: int
     source_kind: str
@@ -297,6 +397,47 @@ class EnvironmentFreshnessResponse(BaseModel):
     metadata: FreshnessGroupResponse
     etl_logs: FreshnessGroupResponse
     items: list[FreshnessSourceItemResponse]
+
+
+class EnvironmentContextIdentityResponse(BaseModel):
+    id: int
+    name: str
+
+
+class EnvironmentContextEnvironmentResponse(EnvironmentContextIdentityResponse):
+    project_id: int
+
+
+class EnvironmentContextSourceCountsResponse(BaseModel):
+    metadata: int
+    logs: int
+    code: int
+
+
+class EnvironmentContextFreshnessResponse(BaseModel):
+    status: str
+    message: str
+    max_source_modified_at: datetime | None = None
+    metadata: FreshnessGroupResponse
+    etl_logs: FreshnessGroupResponse
+
+
+class EnvironmentDependencyVersionsResponse(BaseModel):
+    source_registry: str
+    metadata_catalog: str
+    code_catalog: str
+    operations: str
+    reference_mappings: str
+
+
+class EnvironmentContextResponse(BaseModel):
+    schema_version: Literal["environment-context.v1"]
+    project: EnvironmentContextIdentityResponse
+    environment: EnvironmentContextEnvironmentResponse
+    source_counts: EnvironmentContextSourceCountsResponse
+    freshness: EnvironmentContextFreshnessResponse
+    versions: EnvironmentDependencyVersionsResponse
+    checked_at: datetime
 
 
 class MetadataSourceRead(BaseModel):
@@ -389,12 +530,12 @@ class OverviewLineageResponse(BaseModel):
     dependencies: int
     stitched_assets: int
     declared_assets: int
-    resolved_auto_dependencies: int
-    resolved_dependencies: int
-    resolved_manual_dependencies: int = 0
-    ambiguous_dependencies: int
+    automatic_references: int
+    manual_references: int
+    unresolved_references: int
+    automatic_dependencies: int
+    manual_dependencies: int
     unresolved_dependencies: int
-    mapping_target_missing_dependencies: int = 0
     diagnostics: int
     error_count: int
 
@@ -416,7 +557,7 @@ class OverviewCacheResponse(BaseModel):
 
 
 class EnvironmentOverviewResponse(BaseModel):
-    schema_version: Literal["environment-overview.v1"]
+    schema_version: Literal["environment-overview.v2"]
     sources: OverviewSourcesResponse
     metadata: OverviewMetadataResponse
     lineage: OverviewLineageResponse
@@ -428,6 +569,14 @@ class MetadataEditorDocumentResponse(BaseModel):
     source: dict[str, Any]
     sheets: dict[str, Any]
     issues: list[dict[str, Any]]
+
+
+class MetadataEditorWorkspaceResponse(BaseModel):
+    schema_version: Literal["metadata-editor-workspace.v1"]
+    environment_id: int
+    metadata_catalog_version: str
+    document: MetadataEditorDocumentResponse
+    draft: MetadataEditorDocumentResponse | None = None
 
 
 class MetadataEditorValidationRequest(BaseModel):
@@ -472,18 +621,16 @@ class LineageSummaryResponse(BaseModel):
     dependencies: int
     stitched_assets: int
     declared_assets: int
-    resolved_auto_dependencies: int
-    resolved_dependencies: int
-    resolved_manual_dependencies: int = 0
-    ambiguous_dependencies: int
+    automatic_references: int
+    manual_references: int
+    unresolved_references: int
+    automatic_dependencies: int
+    manual_dependencies: int
     unresolved_dependencies: int
-    mapping_target_missing_dependencies: int = 0
     diagnostics: int
 
 
 class LineageAssetResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     id: str
     entity_type: Literal["asset"]
     asset_type: Literal["table", "path", "sql_query", "python_function", "api", "unresolved"]
@@ -502,13 +649,11 @@ class LineageAssetResponse(BaseModel):
     schema_name: str | None = None
     table: str | None = None
     path: str | None = None
-    query: str | None = None
     python_function: str | None = None
     metadata_source_ids: list[int] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     connection_names: list[str] = Field(default_factory=list)
-    identifiers: list[dict[str, Any]] = Field(default_factory=list)
-    observations: list[dict[str, Any]] = Field(default_factory=list)
+    mapping_target: dict[str, str] | None = None
 
 
 class LineageReferenceResponse(BaseModel):
@@ -517,15 +662,15 @@ class LineageReferenceResponse(BaseModel):
     reference_type: ReferenceType
     display_name: str
     normalized_value: str
-    group_status: ReferenceGroupStatus
+    resolution: ReferenceResolutionResponse
     resolved_asset_id: str | None = None
     resolved_asset_ids: list[str] = Field(default_factory=list)
     candidate_asset_ids: list[str] = Field(default_factory=list)
-    occurrence_ids: list[str] = Field(default_factory=list)
+    occurrence_count: int = 0
     consumer_asset_ids: list[str] = Field(default_factory=list)
     provenances: list[Literal["sql", "python", "python_sql"]] = Field(default_factory=list)
     dependency_count: int = 0
-    observations: list[dict[str, Any]] = Field(default_factory=list)
+    manual_mapping: dict[str, Any] | None = None
 
     @field_validator("reference_type", mode="before")
     @classmethod
@@ -546,33 +691,6 @@ class SourceLocationResponse(BaseModel):
     coordinate_space: Literal["query_source", "function_source"] | None = None
 
 
-class LineageReferenceOccurrenceResponse(BaseModel):
-    id: str
-    reference_id: str
-    reference_type: ReferenceType
-    display_name: str
-    resolution_status: ResolutionStatus
-    raw_value: str
-    normalized_value: str
-    context_scope: str | None = None
-    context_scope_source: Literal["detected", "metadata_context"] | None = None
-    source_location: SourceLocationResponse | None = None
-    provenance: Literal["sql", "python", "python_sql"]
-    target_asset_id: str
-    consumer_asset_id: str
-    resolved_asset_id: str | None = None
-    candidate_asset_ids: list[str] = Field(default_factory=list)
-    resolution_method: str
-    observations: list[dict[str, Any]] = Field(default_factory=list)
-
-    @field_validator("reference_type", mode="before")
-    @classmethod
-    def normalize_reference_type(cls, value: Any) -> Any:
-        if str(value or "").strip().lower() == "dynamic_expression":
-            return "unknown"
-        return value
-
-
 class LineageDataflowResponse(BaseModel):
     id: str
     dataflow_id: str
@@ -591,33 +709,20 @@ class LineageDependencyResponse(BaseModel):
     consumer_asset_id: str
     kind: Literal["reads", "uses"]
     provenance: Literal["sql", "python", "python_sql"]
-    resolution_status: ResolutionStatus
+    resolution: ReferenceResolutionResponse
     resolution_method: str
     reference_id: str
     reference_occurrence_id: str
     resolved_asset_id: str | None = None
-    observations: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class LineageDiagnosticResponse(BaseModel):
-    severity: Literal["info", "warning", "error"]
-    code: str
-    message: str
-    asset_id: str | None = None
-    dataflow_id: str | None = None
-    metadata_source_id: int | None = None
-    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class LineageResponse(BaseModel):
-    schema_version: Literal["lineage.v2"]
+    schema_version: Literal["lineage.v4"]
     summary: LineageSummaryResponse
     assets: list[LineageAssetResponse]
     references: list[LineageReferenceResponse]
-    reference_occurrences: list[LineageReferenceOccurrenceResponse] = Field(default_factory=list)
     dataflows: list[LineageDataflowResponse]
     dependencies: list[LineageDependencyResponse]
-    diagnostics: list[LineageDiagnosticResponse]
 
 
 class AssetSummaryResponse(BaseModel):
@@ -627,10 +732,9 @@ class AssetSummaryResponse(BaseModel):
     visible: int = 0
     asset_attention: int = 0
     with_attention: int = 0
-    references_needing_mapping: int = 0
-    references_ambiguous: int = 0
-    references_unresolved: int = 0
-    references_mapping_target_missing: int = 0
+    automatic_references: int = 0
+    manual_references: int = 0
+    unresolved_references: int = 0
 
 
 class AssetMetadataSourceResponse(BaseModel):
@@ -699,7 +803,7 @@ class AssetReferenceGroupResponse(BaseModel):
     reference_type: ReferenceType
     normalized_value: str
     display_name: str
-    group_status: ReferenceGroupStatus
+    resolution: ReferenceResolutionResponse
     resolved_asset_id: str | None = None
     resolved_asset_ids: list[str] = Field(default_factory=list)
     resolved_asset: dict[str, Any] | None = None
@@ -709,6 +813,8 @@ class AssetReferenceGroupResponse(BaseModel):
     consumer_asset_ids: list[str] = Field(default_factory=list)
     consumer_assets: list[dict[str, Any]] = Field(default_factory=list)
     provenances: list[str] = Field(default_factory=list)
+    resolution_methods: list[str] = Field(default_factory=list)
+    occurrence_count: int | None = None
     dependency_count: int = 0
     dataflow_ids: list[str] = Field(default_factory=list)
     attention_count: int = 0
@@ -733,7 +839,7 @@ class AssetReferenceOccurrenceResponse(BaseModel):
     consumer_asset_id: str | None = None
     consumer_asset: dict[str, Any] | None = None
     connection_name: str | None = None
-    resolution_status: ResolutionStatus
+    resolution: ReferenceResolutionResponse
     resolution_method: str | None = None
     resolved_asset_id: str | None = None
     resolved_asset: dict[str, Any] | None = None
@@ -791,6 +897,77 @@ class AssetReferenceListResponse(BaseModel):
     items: list[AssetReferenceGroupResponse]
     filter_options: dict[str, list[str]] = Field(default_factory=dict)
     catalog_version: str
+
+
+class ProjectReferenceRegistryTargetResponse(BaseModel):
+    id: str
+    asset_id: str
+    asset_ids: list[str] = Field(default_factory=list)
+    environment_ids: list[int] = Field(default_factory=list)
+    environment_names: list[str] = Field(default_factory=list)
+    asset_type: Literal["table", "path", "sql_query", "python_function", "api", "unresolved"]
+    format: str | None = None
+    connection_name: str
+    display_name: str
+    context: str | None = None
+    kind: TargetIdentifierKind
+    value: str
+    display: str
+
+
+class ProjectReferenceRegistryEnvironmentResponse(BaseModel):
+    environment_id: int
+    environment_name: str
+    resolution: ReferenceResolutionResponse
+    resolved_asset_id: str | None = None
+    resolved_asset_ids: list[str] = Field(default_factory=list)
+    observed_target_ids: list[str] = Field(default_factory=list)
+    candidate_asset_ids: list[str] = Field(default_factory=list)
+    manual_mapping_id: int | None = None
+    manual_mapping_status: str | None = None
+    occurrence_count: int = 0
+    consumer_count: int = 0
+
+
+class ProjectReferenceRegistryObservedTargetResponse(BaseModel):
+    target: ProjectReferenceRegistryTargetResponse
+    environment_ids: list[int] = Field(default_factory=list)
+    environment_names: list[str] = Field(default_factory=list)
+
+
+class ProjectReferenceRegistryTargetCoverageResponse(BaseModel):
+    available_environment_names: list[str] = Field(default_factory=list)
+    missing_environment_names: list[str] = Field(default_factory=list)
+    available: int
+    total: int
+
+
+class ProjectReferenceRegistryRowResponse(BaseModel):
+    id: str
+    reference_type: ReferenceType
+    normalized_value: str
+    mapping: ProjectReferenceMappingRead | None = None
+    resolution: ReferenceResolutionResponse
+    environments: list[ProjectReferenceRegistryEnvironmentResponse] = Field(default_factory=list)
+    candidate_asset_ids: list[str] = Field(default_factory=list)
+    resolved_asset_ids: list[str] = Field(default_factory=list)
+    target: ProjectReferenceRegistryTargetResponse | None = None
+    observed_targets: list[ProjectReferenceRegistryObservedTargetResponse] = Field(default_factory=list)
+    target_coverage: ProjectReferenceRegistryTargetCoverageResponse
+
+
+class ProjectReferenceRegistryFailureResponse(BaseModel):
+    environment_id: int
+    environment_name: str
+    message: str
+
+
+class ProjectReferenceRegistryResponse(BaseModel):
+    project_id: int
+    mappings: list[ProjectReferenceMappingRead]
+    rows: list[ProjectReferenceRegistryRowResponse]
+    targets: list[ProjectReferenceRegistryTargetResponse]
+    failures: list[ProjectReferenceRegistryFailureResponse]
 
 
 class AssetReferenceDetailResponse(BaseModel):
@@ -873,18 +1050,19 @@ class ReferenceOccurrenceSourceResponse(BaseModel):
     diagnostics: list[ReferenceSourceDiagnosticResponse] = Field(default_factory=list)
 
 
-class MonitoringReportResponse(BaseModel):
+class MonitoringPageResponse(BaseModel):
+    schema_version: Literal["monitoring-page.v9"]
+    page: Literal["environment-overview", "overview", "jobs", "dataflows", "failures", "diagnostics", "performance", "volume", "maintenance", "freshness"]
     summary: dict[str, Any]
-    health: dict[str, Any]
-    attention: list[dict[str, Any]]
-    coverage: dict[str, Any]
-    reconciliation: dict[str, Any]
-    metric_definitions: dict[str, Any]
-    operations: dict[str, Any]
-    failures: dict[str, Any]
-    performance: dict[str, Any]
-    volume: dict[str, Any]
-    maintenance: dict[str, Any]
-    diagnostics: dict[str, Any]
-    freshness: dict[str, Any]
-    errors: list[dict[str, Any]]
+    health: dict[str, Any] | None = None
+    attention: list[dict[str, Any]] | None = None
+    coverage: dict[str, Any] | None = None
+    reconciliation: dict[str, Any] | None = None
+    operations: dict[str, Any] | None = None
+    failures: dict[str, Any] | None = None
+    performance: dict[str, Any] | None = None
+    volume: dict[str, Any] | None = None
+    maintenance: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
+    freshness: dict[str, Any] | None = None
+    errors: list[dict[str, Any]] | None = None

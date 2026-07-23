@@ -4,6 +4,7 @@ import {
   diagnosticsCategoryLabel,
   diagnosticsEvidenceItems,
   diagnosticsInvestigationActions,
+  diagnosticsLinkedJobRow,
   diagnosticsLinkagePresentation,
   diagnosticsRuleDescription,
   diagnosticsSeverityPresentation,
@@ -38,11 +39,28 @@ describe("Diagnostics presentation", () => {
       { group: "runtime duration", actionable: true, applicability: "universal", severity: "warning" },
       { group: "identity/linkage", actionable: true, applicability: "universal", severity: "good" },
       { group: "watermark evidence", actionable: false, applicability: "conditional", severity: "bad" },
+      { group: "time/status", actionable: true, applicability: "universal", severity: "info" },
     ]);
     expect(summary.issues).toHaveLength(1);
     expect(summary.ready).toHaveLength(1);
     expect(summary.conditional).toHaveLength(1);
-    expect(summary.visible.map((row) => row.group)).toEqual(["runtime duration", "watermark evidence"]);
+    expect(summary.unavailable).toHaveLength(1);
+    expect(summary.visible.map((row) => row.group)).toEqual(["runtime duration", "watermark evidence", "identity/linkage", "time/status"]);
+  });
+
+  it("links only diagnostics backed by an existing job log", () => {
+    expect(diagnosticsLinkedJobRow(
+      { category: "reconciliation mismatch" },
+      { job_id: "job-7", metric: "total_failed" },
+    )).toMatchObject({ job_id: "job-7", metric: "total_failed" });
+    expect(diagnosticsLinkedJobRow(
+      { category: "job without dataflows" },
+      { job_id: "job-8", job_status: "succeeded" },
+    )).toMatchObject({ job_id: "job-8", status: "succeeded" });
+    expect(diagnosticsLinkedJobRow(
+      { category: "orphan dataflow job id" },
+      { job_id: "job-missing" },
+    )).toBeNull();
   });
 
   it("projects evidence coverage into one category-aware metric list", () => {

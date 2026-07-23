@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.api.v1.schemas import (
     CodeArtifactRead,
     LogSourceRead,
+    LogSyncRequest,
     MetadataSourceRead,
     SourceDeleteImpactResponse,
     SourceSyncStatusResponse,
@@ -15,8 +18,9 @@ from datacoolie_studio.api.v1.schemas import (
 from datacoolie_studio.domains.code_artifacts.service import refresh_code_artifact, validate_code_artifact
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.domains.logs.cache import refresh_log_source_cache
+from datacoolie_studio.domains.logs.discovery import LogSyncMode, LogSyncSpec, LookbackRange
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
-from datacoolie_studio.domains.metadata.service import ensure_metadata_snapshot
+from datacoolie_studio.domains.metadata.service import ensure_metadata_materialization
 from datacoolie_studio.domains.sources import service as sources
 from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.workspace import service as workspace
@@ -80,7 +84,7 @@ def refresh_metadata_source(environment_id: int, source_id: int, session: Sessio
         if not acquired:
             raise HTTPException(status_code=409, detail="Metadata source refresh is already running")
         try:
-            ensure_metadata_snapshot(session, source, force=True)
+            ensure_metadata_materialization(session, source, force=True)
         except MetadataReadError:
             pass
     return sync.source_sync_status(session, source)
@@ -142,14 +146,27 @@ def get_log_source_sync_status(environment_id: int, source_id: int, session: Ses
 
 
 @router.post("/environments/{environment_id}/log-sources/{source_id}/refresh", response_model=SourceSyncStatusResponse)
-def refresh_log_source(environment_id: int, source_id: int, session: Session = Depends(get_session)):
+def refresh_log_source(environment_id: int, source_id: int, payload: LogSyncRequest, session: Session = Depends(get_session)):
     path = workspace.environment_source_by_id(session, environment_id, source_id, "logs")
     if path is None:
         raise HTTPException(status_code=404, detail="Log source not found")
     with sync.source_refresh_guard(path.id) as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail="Log source refresh is already running")
-        return refresh_log_source_cache(session, path)
+        return refresh_log_source_cache(session, path, sync_spec=_log_sync_spec(payload))
+
+
+def _log_sync_spec(payload: LogSyncRequest) -> LogSyncSpec:
+    mode = LogSyncMode(payload.mode)
+    if payload.lookback is None:
+        return LogSyncSpec(mode=mode)
+    return LogSyncSpec(
+        mode=mode,
+        lookback=LookbackRange(
+            from_partition=date.fromisoformat(payload.lookback.from_partition),
+            to_partition=date.fromisoformat(payload.lookback.to_partition),
+        ),
+    )
 
 
 @router.patch("/environments/{environment_id}/code-artifacts/{source_id}", response_model=CodeArtifactRead)

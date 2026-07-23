@@ -11,6 +11,7 @@ interface OperationConfirmationDialogProps {
   description: string;
   icon: ReactNode;
   busy?: boolean;
+  confirmDisabled?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
   title: string;
@@ -24,6 +25,7 @@ export function OperationConfirmationDialog({
   description,
   icon,
   busy = false,
+  confirmDisabled = false,
   onCancel,
   onConfirm,
   title,
@@ -95,7 +97,7 @@ export function OperationConfirmationDialog({
         {children ? <div className="operation-confirmation-body">{children}</div> : null}
         <footer>
           <button ref={cancelButtonRef} type="button" className="operation-confirmation-cancel" onClick={dismiss} disabled={busy}>Cancel</button>
-          <button type="button" className={`operation-confirmation-confirm tone-${tone}`} onClick={onConfirm} disabled={busy}>
+          <button type="button" className={`operation-confirmation-confirm tone-${tone}`} onClick={onConfirm} disabled={busy || confirmDisabled}>
             {confirmIcon}
             {confirmLabel}
           </button>

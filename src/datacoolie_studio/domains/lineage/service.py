@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, load_only
 
 from datacoolie_studio.db.models import (
     Environment,
     EnvironmentSource,
-    CodeArtifactSnapshot,
-    MetadataSourceSnapshot,
+    CodeArtifactMaterialization,
+    MetadataMaterialization,
     ProjectReferenceMapping,
 )
 from datacoolie_studio.domains.analysis.models import AnalysisResult
@@ -18,7 +18,12 @@ from datacoolie_studio.domains.analysis.service import analyze_code_artifact_fun
 from datacoolie_studio.domains.analysis.sql import analyze_sql
 from datacoolie_studio.domains.assets.resolver import AssetResolver
 from datacoolie_studio.domains.assets.registry import AssetRegistry
-from datacoolie_studio.domains.code_artifacts.service import ANALYZER_VERSION, ensure_code_artifact_snapshot
+from datacoolie_studio.domains.assets.manual_mapping import manual_mapping_from_observations
+from datacoolie_studio.domains.assets.mapping_target import asset_mapping_target
+from datacoolie_studio.domains.code_artifacts.service import (
+    ANALYZER_VERSION,
+    ensure_code_artifact_materialization,
+)
 from datacoolie_studio.domains.lineage.graph import build_typed_graph, build_typed_graph_summary
 from datacoolie_studio.domains.metadata.normalizer import enrich_metadata_documents_with_connections
 from datacoolie_studio.domains.read_models.cache import (
@@ -26,18 +31,20 @@ from datacoolie_studio.domains.read_models.cache import (
     empty_parameters_fingerprint,
     fingerprint,
     read_model_build_lock,
+    read_model_generation,
     replace_read_model,
 )
 from datacoolie_studio.domains.read_models.keys import LINEAGE_GRAPH
 
 
-LINEAGE_ANALYZER_VERSION = f"lineage-v2:{ANALYZER_VERSION}:typed-graph-v19-reference-overrides"
+LINEAGE_ANALYZER_VERSION = f"lineage-v3:{ANALYZER_VERSION}:reference-resolution-v1"
+LINEAGE_RESPONSE_VERSION = "lineage-v4-compact"
 
 
 @dataclass(frozen=True)
 class _LineageInput:
     metadata_sources: list[EnvironmentSource]
-    metadata_snapshots: dict[int, object]
+    metadata_materializations: dict[int, object]
     code_artifacts: list[EnvironmentSource]
     reference_mappings: list[dict]
     fingerprint: str
@@ -45,12 +52,42 @@ class _LineageInput:
 
 def lineage_graph_etag(session: Session, environment_id: int) -> str:
     input_fingerprint = _load_lineage_input(session, environment_id).fingerprint
-    return f'"{input_fingerprint}:{LINEAGE_ANALYZER_VERSION}"'
+    return f'"{input_fingerprint}:{LINEAGE_ANALYZER_VERSION}:{LINEAGE_RESPONSE_VERSION}"'
 
 
 def lineage_input_fingerprint(session: Session, environment_id: int) -> str:
-    """Return the persisted structural version without loading snapshot payloads."""
+    """Return the persisted structural version without loading materialization payloads."""
     return _load_lineage_input(session, environment_id).fingerprint
+
+
+def project_lineage_graph(graph: dict) -> dict:
+    return {
+        "schema_version": "lineage.v4",
+        "summary": graph.get("summary") or {},
+        "assets": [_project_lineage_asset(item) for item in graph.get("assets") or []],
+        "references": [_project_lineage_reference(item) for item in graph.get("references") or []],
+        "dataflows": list(graph.get("dataflows") or []),
+        "dependencies": [_project_lineage_dependency(item) for item in graph.get("dependencies") or []],
+    }
+
+
+def _project_lineage_asset(asset: dict) -> dict:
+    excluded = {"query", "identifiers", "observations"}
+    projected = {key: value for key, value in asset.items() if key not in excluded}
+    projected["mapping_target"] = asset_mapping_target(list(asset.get("identifiers") or []), asset)
+    return projected
+
+
+def _project_lineage_reference(reference: dict) -> dict:
+    excluded = {"occurrence_ids", "observations"}
+    projected = {key: value for key, value in reference.items() if key not in excluded}
+    projected["occurrence_count"] = len(reference.get("occurrence_ids") or [])
+    projected["manual_mapping"] = manual_mapping_from_observations(reference.get("observations") or [])
+    return projected
+
+
+def _project_lineage_dependency(dependency: dict) -> dict:
+    return {key: value for key, value in dependency.items() if key != "observations"}
 
 
 def load_or_build_lineage_graph(
@@ -99,10 +136,17 @@ def load_or_build_lineage_graph(
             )
             if cached is not None:
                 return cached.payload
+            generation = read_model_generation(
+                environment_id=environment_id,
+                model_key=LINEAGE_GRAPH,
+                parameters_fingerprint=parameters_fingerprint,
+                input_fingerprint=lineage_input.fingerprint,
+                producer_version=LINEAGE_ANALYZER_VERSION,
+            )
 
-            lineage_input = _load_lineage_input(session, environment_id, include_snapshot_payload=True)
+            lineage_input = _load_lineage_input(session, environment_id, include_materialization_payload=True)
             graph = build_lineage(
-                _materialized_metadata(lineage_input.metadata_sources, lineage_input.metadata_snapshots),
+                _materialized_metadata(lineage_input.metadata_sources, lineage_input.metadata_materializations),
                 environment_id,
                 lineage_input.code_artifacts,
                 reference_mappings=lineage_input.reference_mappings,
@@ -115,10 +159,10 @@ def load_or_build_lineage_graph(
                 current_input = _load_lineage_input(
                     session,
                     environment_id,
-                    include_snapshot_payload=True,
+                    include_materialization_payload=True,
                 )
                 return build_lineage(
-                    _materialized_metadata(current_input.metadata_sources, current_input.metadata_snapshots),
+                    _materialized_metadata(current_input.metadata_sources, current_input.metadata_materializations),
                     environment_id,
                     current_input.code_artifacts,
                     reference_mappings=current_input.reference_mappings,
@@ -131,6 +175,7 @@ def load_or_build_lineage_graph(
                 input_fingerprint=lineage_input.fingerprint,
                 producer_version=LINEAGE_ANALYZER_VERSION,
                 payload=graph,
+                expected_generation=generation,
             )
             return graph
 
@@ -190,7 +235,7 @@ def build_lineage_overview_summary(
     """
     for source in code_artifacts:
         if source.enabled:
-            ensure_code_artifact_snapshot(session, source)
+            ensure_code_artifact_materialization(session, source)
 
     registry = AssetRegistry(environment_id)
     documents = enrich_metadata_documents_with_connections(metadata.get("_documents", []))
@@ -303,7 +348,7 @@ def _load_lineage_input(
     session: Session,
     environment_id: int,
     *,
-    include_snapshot_payload: bool = False,
+    include_materialization_payload: bool = False,
 ) -> _LineageInput:
     environment = session.get(Environment, environment_id)
     if environment is None:
@@ -317,17 +362,17 @@ def _load_lineage_input(
     )
     metadata_sources = [source for source in sources if source.source_kind == "metadata"]
     code_artifacts = [source for source in sources if source.source_kind == "code"]
-    metadata_snapshots = _latest_snapshots(
+    metadata_materializations = _materializations(
         session,
-        MetadataSourceSnapshot,
+        MetadataMaterialization,
         [item.id for item in metadata_sources],
-        include_payload=include_snapshot_payload,
+        include_payload=include_materialization_payload,
     )
-    code_snapshots = _latest_snapshots(
+    code_materializations = _materializations(
         session,
-        CodeArtifactSnapshot,
+        CodeArtifactMaterialization,
         [item.id for item in code_artifacts],
-        include_payload=include_snapshot_payload,
+        include_payload=include_materialization_payload,
     )
     reference_mappings = _load_project_reference_mappings(session, environment.project_id)
     input_fingerprint = fingerprint({
@@ -338,24 +383,39 @@ def _load_lineage_input(
                 "kind": source.source_kind,
                 "uri": source.uri,
                 "config": source.source_config_json,
-                "snapshot_id": _source_snapshot(source, metadata_snapshots, code_snapshots).id
-                if _source_snapshot(source, metadata_snapshots, code_snapshots) else None,
-                "revision": _source_snapshot(source, metadata_snapshots, code_snapshots).source_revision_json
-                if _source_snapshot(source, metadata_snapshots, code_snapshots) else None,
+                "materialization_fingerprint": _source_materialization(
+                    source, metadata_materializations, code_materializations
+                ).materialization_fingerprint
+                if _source_materialization(source, metadata_materializations, code_materializations)
+                else None,
             }
             for source in sources
         ],
         "reference_mappings": reference_mappings,
         "analyzer_version": LINEAGE_ANALYZER_VERSION,
     })
-    return _LineageInput(metadata_sources, metadata_snapshots, code_artifacts, reference_mappings, input_fingerprint)
+    return _LineageInput(
+        metadata_sources,
+        metadata_materializations,
+        code_artifacts,
+        reference_mappings,
+        input_fingerprint,
+    )
 
 
-def _source_snapshot(source: EnvironmentSource, metadata_snapshots: dict, code_snapshots: dict):
-    return (metadata_snapshots if source.source_kind == "metadata" else code_snapshots).get(source.id)
+def _source_materialization(
+    source: EnvironmentSource,
+    metadata_materializations: dict,
+    code_materializations: dict,
+):
+    return (
+        metadata_materializations
+        if source.source_kind == "metadata"
+        else code_materializations
+    ).get(source.id)
 
 
-def _latest_snapshots(
+def _materializations(
     session: Session,
     model,
     source_ids: list[int],
@@ -364,44 +424,32 @@ def _latest_snapshots(
 ) -> dict[int, object]:
     if not source_ids:
         return {}
-    ranked = (
-        select(
-            model.id.label("snapshot_id"),
-            func.row_number().over(
-                partition_by=model.source_id,
-                order_by=(model.created_at.desc(), model.id.desc()),
-            ).label("snapshot_rank"),
-        )
-        .where(model.source_id.in_(source_ids))
-        .subquery()
-    )
-    statement = (
-        select(model)
-        .join(ranked, model.id == ranked.c.snapshot_id)
-        .where(ranked.c.snapshot_rank == 1)
-        .order_by(model.source_id)
-    )
+    statement = select(model).where(model.source_id.in_(source_ids)).order_by(model.source_id)
     if not include_payload:
         statement = statement.options(
             load_only(
                 model.id,
                 model.source_id,
                 model.source_revision_json,
-                model.created_at,
+                model.materialization_fingerprint,
+                model.materialized_at,
             )
         )
-    return {int(snapshot.source_id): snapshot for snapshot in session.scalars(statement)}
+    return {
+        int(materialization.source_id): materialization
+        for materialization in session.scalars(statement)
+    }
 
 
 def _materialized_metadata(
     sources: list[EnvironmentSource],
-    snapshots: dict[int, object],
+    materializations: dict[int, object],
 ) -> dict:
     documents = []
     errors = []
     for source in sources:
-        snapshot = snapshots.get(source.id)
-        if snapshot is None:
+        materialization = materializations.get(source.id)
+        if materialization is None:
             errors.append({
                 "metadata_source_id": source.id,
                 "uri": source.uri,
@@ -409,7 +457,7 @@ def _materialized_metadata(
             })
             continue
         try:
-            normalized = json.loads(snapshot.normalized_metadata_json or "{}")
+            normalized = json.loads(materialization.normalized_metadata_json or "{}")
         except (TypeError, json.JSONDecodeError) as exc:
             errors.append({"metadata_source_id": source.id, "uri": source.uri, "message": str(exc)})
             continue

@@ -13,6 +13,20 @@ SAMPLE_XLSX = METADATA_DIR / "local_use_cases.xlsx"
 DATACOOLIE_NS = uuid.UUID("da7ac001-e000-4000-8000-000000000000")
 
 
+def _editor_workspace(client, environment_id: int) -> dict:
+    response = client.get(f"/api/v1/environments/{environment_id}/metadata-editor-workspace")
+    assert response.status_code == 200
+    workspace = response.json()
+    assert workspace["schema_version"] == "metadata-editor-workspace.v1"
+    assert workspace["environment_id"] == environment_id
+    assert workspace["metadata_catalog_version"]
+    return workspace
+
+
+def _editor_document(client, environment_id: int) -> dict:
+    return _editor_workspace(client, environment_id)["document"]
+
+
 def test_metadata_editor_document_loads_json_yaml_and_xlsx(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
 
@@ -29,7 +43,13 @@ def test_metadata_editor_document_loads_json_yaml_and_xlsx(tmp_path: Path, monke
                 f"/api/v1/environments/{env['id']}/metadata-sources",
                 json={"uri": str(sample_path), "label": expected_format},
             ).json()
-            document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+            workspace = _editor_workspace(client, env["id"])
+            document = workspace["document"]
+            assert workspace["draft"] is None
+            context = client.get(f"/api/v1/environments/{env['id']}/context").json()
+            assert workspace["metadata_catalog_version"] == context["versions"]["metadata_catalog"]
+            assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").status_code != 200
+            assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft").status_code != 200
             source_revision = next(item for item in document["source"]["revision"]["sources"] if item["source_id"] == source["id"])
 
             assert document["source"]["format"] == "merged"
@@ -90,7 +110,7 @@ def test_metadata_editor_validation_catches_invalid_references(tmp_path: Path, m
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(SAMPLE_JSON), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
         document["sheets"]["dataflows"]["rows"][0]["source_connection_name"] = "missing_connection"
 
         validation = client.post(f"/api/v1/environments/{env['id']}/metadata-editor-document/validate", json=document).json()
@@ -134,7 +154,7 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
 
     columns = _column_keys(document, "dataflows")
     row = document["sheets"]["dataflows"]["rows"][0]
@@ -197,7 +217,7 @@ def test_metadata_editor_materializes_default_is_active_for_studio(tmp_path: Pat
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
 
     connections = {row["name"]: row["is_active"] for row in document["sheets"]["connections"]["rows"]}
     dataflows = {row["name"]: row["is_active"] for row in document["sheets"]["dataflows"]["rows"]}
@@ -243,7 +263,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
         original_text = metadata_path.read_text(encoding="utf-8")
 
         document["sheets"]["dataflows"]["rows"][0]["description"] = "draft only"
@@ -259,7 +279,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 "editor_document": document,
                 "confirm_overwrite": True,
             },
-        ).json()
+        ).json()["document"]
         assert saved["sheets"]["dataflows"]["rows"][0]["description"] == "saved"
         assert "saved" in metadata_path.read_text(encoding="utf-8")
         saved_file = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -268,7 +288,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         backups = client.get(f"/api/v1/environments/{env['id']}/metadata-backups").json()
         assert len(backups) == 1
         assert Path(backups[0]["backup_path"]).exists()
-        assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft").json() is None
+        assert _editor_workspace(client, env["id"])["draft"] is None
 
         preview = client.get(f"/api/v1/metadata-backups/{backups[0]['id']}/editor-document").json()
         assert preview["source"]["backup_id"] == backups[0]["id"]
@@ -282,10 +302,9 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 "expected_revision": _source_revision(saved, source["id"]),
                 "confirm_restore": True,
             },
-        ).json()
+        ).json()["document"]
         assert restored["sheets"]["dataflows"]["rows"][0].get("description") is None
-        client.delete(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft")
-        assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft").json() is None
+        assert _editor_workspace(client, env["id"])["draft"] is None
         backups = client.get(f"/api/v1/environments/{env['id']}/metadata-backups").json()
         assert len(backups) == 2
         backup_paths = [Path(backup["backup_path"]) for backup in backups]
@@ -297,7 +316,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         assert all(not path.exists() for path in backup_paths)
         assert metadata_path.exists()
 
-        restored = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        restored = _editor_document(client, env["id"])
         restored["sheets"]["dataflows"]["rows"][0]["description"] = "save before source delete"
         saved_for_delete = client.put(
             f"/api/v1/environments/{env['id']}/metadata-editor-document",
@@ -306,7 +325,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 "editor_document": restored,
                 "confirm_overwrite": True,
             },
-        ).json()
+        ).json()["document"]
         saved_for_delete["sheets"]["dataflows"]["rows"][0]["description"] = "draft before source delete"
         client.put(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft", json=saved_for_delete)
         with sqlite3.connect(tmp_path / "studio.db") as connection:
@@ -314,14 +333,6 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 """
                 insert into metadata_validation_results (source_id, base_revision_json, status, result_json, created_at)
                 values (?, '{}', 'ok', '{}', CURRENT_TIMESTAMP)
-                """,
-                (source["id"],),
-            )
-            connection.execute(
-                """
-                insert into metadata_source_snapshots
-                    (source_id, source_revision_json, editor_document_json, normalized_metadata_json, created_at)
-                values (?, '{}', '{}', '{}', CURRENT_TIMESTAMP)
                 """,
                 (source["id"],),
             )
@@ -337,7 +348,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         assert impact_counts["environment_draft"] == 1
         assert impact_counts["backup"] == 1
         assert impact_counts["validation_result"] == 1
-        assert impact_counts["snapshot"] >= 1
+        assert impact_counts["materialization"] == 1
         assert impact_counts["save_event"] >= 1
         assert impact_counts["source_revision"] == 1
         assert impact_counts["sync_job"] >= 1
@@ -354,7 +365,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 "metadata_backups",
                 "metadata_validation_results",
                 "metadata_save_events",
-                "metadata_source_snapshots",
+                "metadata_materializations",
                 "source_revisions",
                 "sync_jobs",
             ]:
@@ -424,7 +435,7 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(second_path), "label": "second"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
         assert document["source"]["scope"] == "environment"
         assert document["source"]["read_only"] is False
         assert {row["__metadata_source_id"] for row in document["sheets"]["dataflows"]["rows"]} == {first["id"], second["id"]}
@@ -433,7 +444,7 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
         flow_a["description"] = "draft in merge view"
         draft = client.put(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft", json=document).json()
         assert draft["sheets"]["dataflows"]["rows"][0]["description"] == "draft in merge view"
-        assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft").json()["source"]["scope"] == "environment"
+        assert _editor_workspace(client, env["id"])["draft"]["source"]["scope"] == "environment"
         assert "draft in merge view" not in first_path.read_text(encoding="utf-8")
 
         flow_a["description"] = "saved from merge view"
@@ -444,11 +455,11 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
                 "editor_document": document,
                 "confirm_overwrite": True,
             },
-        ).json()
+        ).json()["document"]
         assert saved["source"]["scope"] == "environment"
         assert "saved from merge view" in first_path.read_text(encoding="utf-8")
         assert "saved from merge view" not in second_path.read_text(encoding="utf-8")
-        assert client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft").json() is None
+        assert _editor_workspace(client, env["id"])["draft"] is None
         backups = client.get(f"/api/v1/environments/{env['id']}/metadata-backups").json()
         assert len(backups) == 1
         assert backups[0]["source_id"] == first["id"]
@@ -487,7 +498,7 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
                 "editor_document": saved,
                 "confirm_overwrite": True,
             },
-        ).json()
+        ).json()["document"]
         third_path = tmp_path / "third.json"
         assert third_path.exists()
         third_file = json.loads(third_path.read_text(encoding="utf-8"))
@@ -638,7 +649,7 @@ def test_metadata_editor_save_rejects_stale_revision(tmp_path: Path, monkeypatch
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
         metadata_path.write_text(json.dumps({"connections": [{"name": "changed"}], "dataflows": [], "schema_hints": []}), encoding="utf-8")
 
         response = client.put(
@@ -680,7 +691,7 @@ def test_metadata_backup_restore_rejects_stale_current_revision(tmp_path: Path, 
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
-        document = client.get(f"/api/v1/environments/{env['id']}/metadata-editor-document").json()
+        document = _editor_document(client, env["id"])
         document["sheets"]["dataflows"]["rows"][0]["destination_table"] = "after"
         saved = client.put(
             f"/api/v1/environments/{env['id']}/metadata-editor-document",
@@ -689,7 +700,7 @@ def test_metadata_backup_restore_rejects_stale_current_revision(tmp_path: Path, 
                 "editor_document": document,
                 "confirm_overwrite": True,
             },
-        ).json()
+        ).json()["document"]
         backup = client.get(f"/api/v1/environments/{env['id']}/metadata-backups").json()[0]
         metadata_path.write_text(
             json.dumps({"connections": [{"name": "external"}], "dataflows": [], "schema_hints": []}),

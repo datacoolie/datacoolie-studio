@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { childFanoutDistributionOption, jobWorkloadEfficiencyOption } from "./monitoringShared";
+import {
+  childFanoutDistributionOption,
+  durationDistributionBoxOption,
+  lifecycleStatusItems,
+  jobWorkloadEfficiencyOption,
+  statusColor
+} from "./monitoringShared";
 
 describe("Jobs page chart layout", () => {
   it("anchors workload efficiency to the bottom of its chart area", () => {
@@ -19,5 +25,32 @@ describe("Jobs page chart layout", () => {
     expect((option.grid as { bottom?: number; top?: number; containLabel?: boolean }).containLabel).toBe(false);
     expect((option.grid as { bottom?: number; top?: number }).top).toBeGreaterThanOrEqual(16);
     expect((option.yAxis as { max?: unknown }).max).toBeUndefined();
+  });
+
+  it("uses the canonical trend colors for lifecycle KPI values", () => {
+    expect(lifecycleStatusItems(7, 3, 5)).toEqual([
+      { status: "skipped", value: 7, color: statusColor("skipped") },
+      { status: "running", value: 3, color: statusColor("running") },
+      { status: "pending", value: 5, color: statusColor("pending") }
+    ]);
+  });
+
+  it("shows runtime context without job identity or operation in duration outlier tooltips", () => {
+    const option = durationDistributionBoxOption([
+      {
+        operation_type: "etl, maintenance",
+        count: 5,
+        outliers: [[100, "job-1", "job-1", "failed", "etl, maintenance", "duckdb", "file", "local"]]
+      }
+    ], "operation_type", "job");
+    const outlierSeries = (option.series as Array<{ name?: string; tooltip?: { formatter?: (params: unknown) => string }; data?: unknown[] }>)
+      .find((series) => series.name === "Outliers");
+    const tooltip = outlierSeries?.tooltip?.formatter?.({ data: outlierSeries.data?.[0] }) ?? "";
+
+    expect(tooltip).toContain("Runtime: duckdb / file / local");
+    expect(tooltip).not.toContain("Job ID:");
+    expect(tooltip).not.toContain("Operation:");
+    expect(tooltip).not.toContain("Job:");
+    expect(tooltip).not.toContain("etl, maintenance");
   });
 });

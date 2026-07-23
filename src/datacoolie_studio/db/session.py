@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -29,6 +31,7 @@ def init_db() -> None:
     engine = get_engine()
     _migrate_project_reference_mappings(engine)
     Base.metadata.create_all(bind=engine)
+    _migrate_current_materializations(engine)
     _drop_legacy_derived_cache_tables(engine)
     _ensure_scan_run_columns(engine)
     _ensure_environment_source_columns(engine)
@@ -43,6 +46,7 @@ def _drop_legacy_derived_cache_tables(engine) -> None:
     legacy_tables = {
         "lineage_graph_cache_entries",
         "environment_summary_cache_entries",
+        "environment_read_model_cache_entries",
     }
     existing = legacy_tables.intersection(inspect(engine).get_table_names())
     if not existing:
@@ -50,6 +54,170 @@ def _drop_legacy_derived_cache_tables(engine) -> None:
     with engine.begin() as connection:
         for table_name in sorted(existing):
             connection.execute(text(f"DROP TABLE {table_name}"))
+
+
+def _migrate_current_materializations(engine) -> None:
+    """Keep only the newest legacy payload for each source, then remove history tables."""
+    tables = set(inspect(engine).get_table_names())
+    legacy_metadata = "metadata_source_snapshots"
+    legacy_code = "code_artifact_snapshots"
+    if not {legacy_metadata, legacy_code}.intersection(tables):
+        return
+
+    with engine.begin() as connection:
+        if legacy_metadata in tables:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT source_id, source_revision_json, editor_document_json,
+                           normalized_metadata_json, created_at
+                    FROM (
+                        SELECT source_id, source_revision_json, editor_document_json,
+                               normalized_metadata_json, created_at, id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY source_id ORDER BY created_at DESC, id DESC
+                               ) AS row_rank
+                        FROM metadata_source_snapshots
+                    ) ranked
+                    WHERE row_rank = 1
+                    """
+                )
+            ).mappings()
+            for row in rows:
+                exists = connection.execute(
+                    text("SELECT 1 FROM metadata_materializations WHERE source_id = :source_id"),
+                    {"source_id": row["source_id"]},
+                ).first()
+                if exists:
+                    continue
+                normalizer_version, schema_version = _metadata_payload_versions(row["normalized_metadata_json"])
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO metadata_materializations (
+                            source_id, source_revision_json, normalizer_version,
+                            materialization_fingerprint, editor_document_json,
+                            normalized_metadata_json, materialized_at
+                        ) VALUES (
+                            :source_id, :source_revision_json, :normalizer_version,
+                            :materialization_fingerprint, :editor_document_json,
+                            :normalized_metadata_json, :materialized_at
+                        )
+                        """
+                    ),
+                    {
+                        **dict(row),
+                        "normalizer_version": normalizer_version,
+                        "materialization_fingerprint": _materialization_fingerprint(
+                            row["source_revision_json"], normalizer_version, schema_version
+                        ),
+                        "materialized_at": row["created_at"],
+                    },
+                )
+            _verify_materialization_migration(
+                connection, legacy_metadata, "metadata_materializations"
+            )
+            connection.execute(text(f"DROP TABLE {legacy_metadata}"))
+
+        if legacy_code in tables:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT source_id, source_revision_json, artifact_manifest_json,
+                           module_index_json, diagnostics_json, analyzer_version, created_at
+                    FROM (
+                        SELECT source_id, source_revision_json, artifact_manifest_json,
+                               module_index_json, diagnostics_json, analyzer_version,
+                               created_at, id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY source_id ORDER BY created_at DESC, id DESC
+                               ) AS row_rank
+                        FROM code_artifact_snapshots
+                    ) ranked
+                    WHERE row_rank = 1
+                    """
+                )
+            ).mappings()
+            for row in rows:
+                exists = connection.execute(
+                    text("SELECT 1 FROM code_artifact_materializations WHERE source_id = :source_id"),
+                    {"source_id": row["source_id"]},
+                ).first()
+                if exists:
+                    continue
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO code_artifact_materializations (
+                            source_id, source_revision_json, materialization_fingerprint,
+                            artifact_manifest_json, module_index_json, diagnostics_json,
+                            analyzer_version, materialized_at
+                        ) VALUES (
+                            :source_id, :source_revision_json, :materialization_fingerprint,
+                            :artifact_manifest_json, :module_index_json, :diagnostics_json,
+                            :analyzer_version, :materialized_at
+                        )
+                        """
+                    ),
+                    {
+                        **dict(row),
+                        "materialization_fingerprint": _materialization_fingerprint(
+                            row["source_revision_json"], row["analyzer_version"], "code-artifact.v1"
+                        ),
+                        "materialized_at": row["created_at"],
+                    },
+                )
+            _verify_materialization_migration(
+                connection, legacy_code, "code_artifact_materializations"
+            )
+            connection.execute(text(f"DROP TABLE {legacy_code}"))
+
+
+def _metadata_payload_versions(payload_json: str | None) -> tuple[str, str]:
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return (
+        str(payload.get("_normalizer_version") or "legacy"),
+        str(payload.get("schema_version") or "metadata-materialization.v1"),
+    )
+
+
+def _materialization_fingerprint(revision_json: str, transformer_version: str, schema_version: str) -> str:
+    try:
+        revision = json.loads(revision_json)
+    except json.JSONDecodeError:
+        revision = revision_json
+    canonical = json.dumps(
+        {
+            "revision": revision,
+            "transformer_version": transformer_version,
+            "schema_version": schema_version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _verify_materialization_migration(connection, legacy_table: str, target_table: str) -> None:
+    legacy_count = connection.execute(
+        text(f"SELECT COUNT(DISTINCT source_id) FROM {legacy_table}")
+    ).scalar_one()
+    target_count = connection.execute(
+        text(
+            f"SELECT COUNT(*) FROM {target_table} "
+            f"WHERE source_id IN (SELECT DISTINCT source_id FROM {legacy_table})"
+        )
+    ).scalar_one()
+    if int(target_count) != int(legacy_count):
+        raise RuntimeError(
+            f"Materialization migration mismatch for {legacy_table}: "
+            f"expected {legacy_count}, found {target_count}"
+        )
 
 
 def create_session() -> Session:

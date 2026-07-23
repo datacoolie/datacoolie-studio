@@ -33,6 +33,27 @@ def analytics_database_path() -> Path:
     return cache_dir() / "analytics.duckdb"
 
 
+def result_cache_database_path() -> Path:
+    configured_db = os.environ.get("DATACOOLIE_STUDIO_DB")
+    if configured_db:
+        return Path(configured_db).expanduser().parent / "read-models.sqlite3"
+    return cache_dir() / "read-models.sqlite3"
+
+
+def result_cache_url() -> str:
+    configured = os.environ.get("DATACOOLIE_STUDIO_RESULT_CACHE_URL")
+    if configured:
+        if configured == "memory://":
+            return "sqlite://"
+        if not configured.startswith("sqlite:"):
+            scheme = configured.split(":", 1)[0] or "unknown"
+            raise ValueError(f"Unsupported result cache URL scheme: {scheme}")
+        return configured
+    path = result_cache_database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{path.as_posix()}"
+
+
 def logs_dir() -> Path:
     return default_config_dir() / "logs"
 

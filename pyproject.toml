@@ -21,6 +21,7 @@ dependencies = [
   "ruamel.yaml>=0.18",
   "sqlalchemy>=2.0",
   "sqlglot>=27.0",
+  "tzdata>=2024.1",
   "uvicorn[standard]>=0.30",
 ]
 
@@ -38,5 +39,5 @@ packages = ["src/datacoolie_studio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 addopts = "-q"

@@ -1,20 +1,29 @@
 import { Activity, AlertTriangle, BarChart3, Boxes, Clock3, FileWarning, Gauge, HardDrive, RefreshCw, Table2, Workflow } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../shared/api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   JobRecord,
   MonitoringFilterOptionsResponse,
   MonitoringRecord,
-  MonitoringRecordsResponse,
   MonitoringReport
 } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
-import { ResourceCache } from "../../shared/data/resourceCache";
 import type { TableSort } from "./MonitoringCharts";
 import type { MonitoringDetailKind } from "./MonitoringDetailDrawer";
-import { monitoringDetailEvidenceRequest } from "./monitoringDetailEvidence";
+import { mergeDataflowRunDetail, monitoringDetailEvidenceRequest } from "./monitoringDetailEvidence";
 import { MonitoringFilterBar, type MonitoringSearchOption } from "./MonitoringFilterBar";
 import { IntentPrefetchController } from "./intentPrefetch";
+import {
+  monitoringDataflowsOptions,
+  monitoringDataflowRunDetailOptions,
+  monitoringDetailDataflowsOptions,
+  monitoringEvidenceOptions,
+  monitoringJobRunDetailOptions,
+  monitoringJobsOptions,
+  monitoringQueryParams,
+  monitoringReportOptions,
+  type MonitoringPageQueryData,
+} from "./monitoringQueries";
 import {
   DataflowsPage,
   DiagnosticsPage,
@@ -28,22 +37,26 @@ import {
   VolumePage
 } from "./monitoringPageModules";
 import {
-  filterReport,
-  filtersFromSearch,
   hasActiveFilters,
+  type MonitoringFilters,
   type MonitoringTabKey,
-  writeFiltersToSearch
 } from "./monitoringFilters";
 
 const MonitoringDetailDrawer = lazy(() => import("./MonitoringDetailDrawer").then((module) => ({ default: module.MonitoringDetailDrawer })));
 
 interface MonitoringViewProps {
   environmentId: number;
-  sourceCacheVersion?: string | null;
-  report: MonitoringReport | null;
-  loading: boolean;
   activePage: MonitoringTabKey;
   onPageChange: (page: MonitoringTabKey) => void;
+  filters: MonitoringFilters;
+  onFiltersChange: (filters: MonitoringFilters) => void;
+  reportData: MonitoringPageQueryData | null;
+  reportLoading: boolean;
+  reportError: string | null;
+  reportErrorCode: string | null;
+  onRetryReport: () => void;
+  onOpenSources: () => void;
+  filterOptions: MonitoringFilterOptionsResponse | null;
 }
 
 const pages = [
@@ -64,11 +77,21 @@ const DEFAULT_PERFORMANCE_RUN_TABLE_LIMIT = 100;
 const DEFAULT_DETAIL_EVIDENCE_LIMIT = 100;
 const PAGE_INTENT_DELAY_MS = 150;
 
-export function MonitoringView({ environmentId, sourceCacheVersion, loading, activePage, onPageChange }: MonitoringViewProps) {
-  const [filters, setFilters] = useState(() => filtersFromSearch(window.location.search));
-  const [reportData, setReportData] = useState<MonitoringReport | null>(null);
-  const [reportPage, setReportPage] = useState<MonitoringTabKey | null>(null);
-  const reportCache = useRef(new ResourceCache<string, MonitoringReport>(Date.now, { maxEntries: 24 }));
+export function MonitoringView({
+  environmentId,
+  activePage,
+  onPageChange,
+  filters,
+  onFiltersChange,
+  reportData,
+  reportLoading,
+  reportError,
+  reportErrorCode,
+  onRetryReport,
+  onOpenSources,
+  filterOptions,
+}: MonitoringViewProps) {
+  const queryClient = useQueryClient();
   const reportPrefetchRef = useRef<(page: MonitoringTabKey) => void>(() => undefined);
   const intentPrefetch = useRef<IntentPrefetchController<MonitoringTabKey> | null>(null);
   if (!intentPrefetch.current) {
@@ -77,19 +100,9 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
       PAGE_INTENT_DELAY_MS
     );
   }
-  const [filterOptions, setFilterOptions] = useState<MonitoringFilterOptionsResponse | null>(null);
-  const [reportLoading, setReportLoading] = useState(false);
-  const [reportError, setReportError] = useState<string | null>(null);
-  const [reportRetry, setReportRetry] = useState(0);
-  const reportForView = reportData;
-  const displayedPage = reportPage;
-  const pageTransitionPending = reportLoading && displayedPage !== activePage;
-  const filtered = useMemo(() => (reportForView ? filterReport(reportForView, filters) : null), [reportForView, filters]);
-  const [jobRuns, setJobRuns] = useState<MonitoringRecordsResponse<JobRecord> | null>(null);
-  const [dataflowRuns, setDataflowRuns] = useState<MonitoringRecordsResponse<MonitoringRecord> | null>(null);
-  const [performanceRuns, setPerformanceRuns] = useState<MonitoringRecordsResponse<MonitoringRecord> | null>(null);
-  const [runsLoading, setRunsLoading] = useState(false);
-  const [runsError, setRunsError] = useState<string | null>(null);
+  const reportForView = reportData?.report ?? null;
+  const displayedPage = reportData?.page ?? null;
+  const pageTransitionPending = reportLoading && displayedPage !== null && displayedPage !== activePage;
   const [detail, setDetail] = useState<{ kind: MonitoringDetailKind; row: Record<string, unknown> } | null>(null);
   const [detailStack, setDetailStack] = useState<Array<{ kind: MonitoringDetailKind; row: Record<string, unknown> }>>([]);
   const detailRef = useRef(detail);
@@ -105,38 +118,100 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
   const [dataflowLimit, setDataflowLimit] = useState(DEFAULT_DATAFLOW_RUN_TABLE_LIMIT);
   const [performanceOffset, setPerformanceOffset] = useState(0);
   const [performanceLimit, setPerformanceLimit] = useState(DEFAULT_PERFORMANCE_RUN_TABLE_LIMIT);
-  const [detailDataflows, setDetailDataflows] = useState<MonitoringRecordsResponse<MonitoringRecord> | null>(null);
-  const [detailDataflowsLoading, setDetailDataflowsLoading] = useState(false);
-  const [detailDataflowsKey, setDetailDataflowsKey] = useState("");
+  const [freshnessSort, setFreshnessSort] = useState<TableSort>({ sortBy: "latest_freshness_at", sortDir: "desc" });
+  const [freshnessOffset, setFreshnessOffset] = useState(0);
+  const [freshnessLimit, setFreshnessLimit] = useState(100);
+  const [volumeSort, setVolumeSort] = useState<TableSort>({ sortBy: "volume_candidate_priority", sortDir: "desc" });
+  const [volumeOffset, setVolumeOffset] = useState(0);
+  const [volumeLimit, setVolumeLimit] = useState(100);
+  const [maintenanceSort, setMaintenanceSort] = useState<TableSort>({ sortBy: "attention_priority", sortDir: "desc" });
+  const [maintenanceOffset, setMaintenanceOffset] = useState(0);
+  const [maintenanceLimit, setMaintenanceLimit] = useState(100);
   const [detailDataflowOffset, setDetailDataflowOffset] = useState(0);
   const [detailDataflowLimit, setDetailDataflowLimit] = useState(DEFAULT_DETAIL_EVIDENCE_LIMIT);
   const [detailDataflowSort, setDetailDataflowSort] = useState<TableSort>({ sortBy: "start_time", sortDir: "desc" });
+  const jobRunsQuery = useQuery({
+    ...monitoringJobsOptions(environmentId, filters, { limit: jobLimit, offset: jobOffset, sort: jobSort }),
+    enabled: activePage === "jobs",
+  });
+  const dataflowRunsQuery = useQuery({
+    ...monitoringDataflowsOptions(environmentId, filters, { limit: dataflowLimit, offset: dataflowOffset, sort: dataflowSort }),
+    enabled: activePage === "dataflows",
+  });
+  const performanceRunsQuery = useQuery({
+    ...monitoringEvidenceOptions(environmentId, "performance", filters, { limit: performanceLimit, offset: performanceOffset, sort: performanceSort }),
+    enabled: activePage === "performance",
+  });
+  const freshnessEvidenceQuery = useQuery({
+    ...monitoringEvidenceOptions(environmentId, "freshness", filters, { limit: freshnessLimit, offset: freshnessOffset, sort: freshnessSort }),
+    enabled: activePage === "freshness",
+  });
+  const volumeEvidenceQuery = useQuery({
+    ...monitoringEvidenceOptions(environmentId, "volume", filters, { limit: volumeLimit, offset: volumeOffset, sort: volumeSort }),
+    enabled: activePage === "volume",
+  });
+  const maintenanceEvidenceQuery = useQuery({
+    ...monitoringEvidenceOptions(environmentId, "maintenance", filters, { limit: maintenanceLimit, offset: maintenanceOffset, sort: maintenanceSort }),
+    enabled: activePage === "maintenance",
+  });
+  const activeRunsQuery = activePage === "jobs"
+    ? jobRunsQuery
+    : activePage === "dataflows"
+      ? dataflowRunsQuery
+      : activePage === "performance"
+        ? performanceRunsQuery
+        : activePage === "freshness"
+          ? freshnessEvidenceQuery
+          : activePage === "volume"
+            ? volumeEvidenceQuery
+            : activePage === "maintenance"
+              ? maintenanceEvidenceQuery
+        : null;
+  const jobRuns = jobRunsQuery.data ?? null;
+  const dataflowRuns = dataflowRunsQuery.data ?? null;
+  const performanceRuns = performanceRunsQuery.data ?? null;
+  const freshnessEvidence = freshnessEvidenceQuery.data ?? null;
+  const volumeEvidence = volumeEvidenceQuery.data ?? null;
+  const maintenanceEvidence = maintenanceEvidenceQuery.data ?? null;
+  const runsLoading = activeRunsQuery?.isFetching ?? false;
+  const runsError = activeRunsQuery?.error instanceof Error
+    ? activeRunsQuery.error.message
+    : activeRunsQuery?.error ? String(activeRunsQuery.error) : null;
+  const activeDetailEvidenceRequest = monitoringDetailEvidenceRequest(
+    detail,
+    monitoringQueryParams(filters),
+    { limit: detailDataflowLimit, offset: detailDataflowOffset, sort: detailDataflowSort },
+  );
+  const detailDataflowsQuery = useQuery(monitoringDetailDataflowsOptions(environmentId, activeDetailEvidenceRequest));
+  const detailDataflows = detailDataflowsQuery.data ?? null;
+  const detailDataflowRunId = detail?.kind === "dataflow"
+    ? String(detail.row.dataflow_run_id ?? "").trim()
+    : "";
+  const detailDataflowRunQuery = useQuery(monitoringDataflowRunDetailOptions(environmentId, detailDataflowRunId));
+  const detailJobId = detail?.kind === "job" ? String(detail.row.job_id ?? "").trim() : "";
+  const detailJobRunQuery = useQuery(monitoringJobRunDetailOptions(environmentId, detailJobId));
+  const activeDetailRow = detail?.kind === "dataflow"
+    ? mergeDataflowRunDetail(detail.row, detailDataflowRunQuery.data)
+    : detail?.kind === "job"
+      ? mergeDataflowRunDetail(detail.row, detailJobRunQuery.data)
+      : detail?.row;
   const searchOptions = useMemo(
     () => buildMonitoringSearchOptions(
       reportForView,
       jobRuns?.records ?? [],
-      [...(dataflowRuns?.records ?? []), ...(performanceRuns?.records ?? [])]
+      [
+        ...(dataflowRuns?.records ?? []),
+        ...(performanceRuns?.records ?? []),
+        ...(freshnessEvidence?.records ?? []),
+        ...(volumeEvidence?.records ?? []),
+        ...(maintenanceEvidence?.records ?? []),
+      ]
     ),
-    [reportForView, jobRuns, dataflowRuns, performanceRuns]
+    [reportForView, jobRuns, dataflowRuns, performanceRuns, freshnessEvidence, volumeEvidence, maintenanceEvidence]
   );
-  const materializedSourceVersion = sourceCacheVersion ?? "unmaterialized";
-  const loadReport = (page: MonitoringTabKey) => {
-    const params = monitoringQueryParams(filters);
-    const requestKey = monitoringReportRequestKey(
-      environmentId,
-      materializedSourceVersion,
-      page,
-      params
-    );
-    return reportCache.current.load(
-      requestKey,
-      () => api.getMonitoringPage(environmentId, page, params),
-      { ttlMs: Number.MAX_SAFE_INTEGER }
-    );
-  };
   reportPrefetchRef.current = (page) => {
     void preloadMonitoringPage(page).catch(() => undefined);
-    void loadReport(page).catch(() => undefined);
+    void queryClient.prefetchQuery(monitoringReportOptions(environmentId, page, filters)).catch(() => undefined);
   };
 
   useEffect(() => {
@@ -144,19 +219,12 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
   }, []);
 
   useEffect(() => {
-    writeFiltersToSearch(filters);
-  }, [filters]);
-
-  useEffect(() => {
-    setReportData(null);
-    setReportPage(null);
-    setReportError(null);
     setDetail(null);
     setDetailStack([]);
     detailRef.current = null;
     detailStackRef.current = [];
     drawerHistoryDepthRef.current = 0;
-  }, [environmentId, materializedSourceVersion]);
+  }, [environmentId]);
 
   useEffect(() => {
     detailRef.current = detail;
@@ -164,150 +232,27 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
   }, [detail, detailStack]);
 
   useEffect(() => {
-    let cancelled = false;
-    setFilterOptions(null);
-    api.getMonitoringFilterOptions(environmentId)
-      .then((response) => {
-        if (!cancelled) setFilterOptions(response);
-      })
-      .catch(() => {
-        if (!cancelled) setFilterOptions(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, materializedSourceVersion]);
-
-  useEffect(() => {
     setJobOffset(0);
     setDataflowOffset(0);
     setPerformanceOffset(0);
-  }, [filters, jobSort, dataflowSort, performanceSort]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const params = monitoringQueryParams(filters);
-    const requestKey = monitoringReportRequestKey(environmentId, materializedSourceVersion, activePage, params);
-    const cached = reportCache.current.peek(requestKey);
-    if (cached) {
-      setReportData(cached.data);
-      setReportPage(activePage);
-    }
-    setReportError(null);
-    setReportLoading(true);
-    Promise.all([
-      loadReport(activePage),
-      preloadMonitoringPage(activePage)
-    ]).then(([result]) => {
-        if (!cancelled && result.current) {
-          setReportData(result.data);
-          setReportPage(activePage);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setReportError(error instanceof Error ? error.message : String(error));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setReportLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, materializedSourceVersion, filters, activePage, reportRetry]);
-
-  useEffect(() => {
-    if (activePage !== "jobs" && activePage !== "dataflows" && activePage !== "performance") {
-      setRunsLoading(false);
-      setRunsError(null);
-      return;
-    }
-    let cancelled = false;
-    const params = monitoringQueryParams(filters);
-    setRunsLoading(true);
-    setRunsError(null);
-    const request = activePage === "jobs"
-      ? api.getMonitoringJobs(environmentId, { ...params, limit: jobLimit, offset: jobOffset, sortBy: jobSort.sortBy, sortDir: jobSort.sortDir })
-      : activePage === "dataflows"
-        ? api.getMonitoringDataflows(environmentId, {
-            ...params,
-            limit: dataflowLimit,
-            offset: dataflowOffset,
-            sortBy: dataflowSort.sortBy,
-            sortDir: dataflowSort.sortDir
-          })
-        : api.getMonitoringPageEvidence(environmentId, "performance", {
-            ...params,
-            limit: performanceLimit,
-            offset: performanceOffset,
-            sortBy: performanceSort.sortBy,
-            sortDir: performanceSort.sortDir
-          });
-    request
-      .then((response) => {
-        if (cancelled) return;
-        if (activePage === "jobs") {
-          setJobRuns(response as MonitoringRecordsResponse<JobRecord>);
-        } else if (activePage === "dataflows") {
-          setDataflowRuns(response as MonitoringRecordsResponse<MonitoringRecord>);
-        } else {
-          setPerformanceRuns(response as MonitoringRecordsResponse<MonitoringRecord>);
-        }
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        setRunsError(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => {
-        if (!cancelled) setRunsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, materializedSourceVersion, filters, activePage, jobSort, dataflowSort, performanceSort, jobOffset, jobLimit, dataflowOffset, dataflowLimit, performanceOffset, performanceLimit]);
+    setFreshnessOffset(0);
+    setVolumeOffset(0);
+    setMaintenanceOffset(0);
+  }, [
+    filters,
+    jobSort,
+    dataflowSort,
+    performanceSort,
+    freshnessSort,
+    volumeSort,
+    maintenanceSort,
+  ]);
 
   useEffect(() => {
     setDetailDataflowOffset(0);
     setDetailDataflowLimit(DEFAULT_DETAIL_EVIDENCE_LIMIT);
     setDetailDataflowSort({ sortBy: "start_time", sortDir: "desc" });
   }, [detail?.kind, detail?.row]);
-
-  useEffect(() => {
-    const request = monitoringDetailEvidenceRequest(
-      detail,
-      monitoringQueryParams(filters),
-      { limit: detailDataflowLimit, offset: detailDataflowOffset, sort: detailDataflowSort },
-    );
-    if (!request) {
-      setDetailDataflows(null);
-      setDetailDataflowsLoading(false);
-      setDetailDataflowsKey("");
-      return;
-    }
-    const requestKey = `${request.key}:${detailDataflowOffset}:${detailDataflowLimit}:${detailDataflowSort.sortBy}:${detailDataflowSort.sortDir}`;
-    let cancelled = false;
-    setDetailDataflowsLoading(true);
-    api.getMonitoringDataflows(environmentId, request.params)
-      .then((response) => {
-        if (!cancelled) {
-          setDetailDataflows(response);
-          setDetailDataflowsKey(requestKey);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setDetailDataflows(null);
-          setDetailDataflowsKey(requestKey);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setDetailDataflowsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [detail, detailDataflowLimit, detailDataflowOffset, detailDataflowSort, environmentId, filters]);
 
   useEffect(() => {
     const popDetailState = () => {
@@ -342,14 +287,24 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  if (!reportForView && !loading && !reportLoading) {
+  if (!reportForView && !reportLoading) {
     if (reportError) {
+      if (reportErrorCode === "analytics_rebuild_required") {
+        return (
+          <EmptyState
+            icon={<AlertTriangle size={24} />}
+            title="Monitoring analytics need to be rebuilt"
+            detail="Sync the Log sources to recreate the disposable analytics cache. Source configuration and sync history are preserved."
+            action={<button onClick={onOpenSources}>Open Sources</button>}
+          />
+        );
+      }
       return (
         <EmptyState
           icon={<AlertTriangle size={24} />}
           title="Could not load monitoring report"
           detail={reportError}
-          action={<button onClick={() => setReportRetry((value) => value + 1)}>Retry</button>}
+          action={<button onClick={onRetryReport}>Retry</button>}
         />
       );
     }
@@ -362,14 +317,6 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
 
   const activeFilterCount = hasActiveFilters(filters) ? reportForView.summary.dataflow_records + reportForView.summary.job_records : null;
   const grainWarning = grainAdjustmentMessage(filters, reportForView);
-  const activeDetailEvidenceRequest = monitoringDetailEvidenceRequest(
-    detail,
-    monitoringQueryParams(filters),
-    { limit: detailDataflowLimit, offset: detailDataflowOffset, sort: detailDataflowSort },
-  );
-  const activeDetailDataflowsKey = activeDetailEvidenceRequest
-    ? `${activeDetailEvidenceRequest.key}:${detailDataflowOffset}:${detailDataflowLimit}:${detailDataflowSort.sortBy}:${detailDataflowSort.sortDir}`
-    : "";
   const pushDrawerHistory = () => {
     window.history.pushState({ datacoolieMonitoringDrawer: true }, "", window.location.href);
     drawerHistoryDepthRef.current += 1;
@@ -420,7 +367,6 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
       ...[...detailStack].reverse().filter((item) => item.kind === "job").map((item) => item.row),
       ...(detail?.kind === "job" ? [detail.row] : []),
       ...(jobRuns?.records ?? []),
-      ...(filtered?.jobs ?? []),
       ...reportForView.operations.failed_jobs
     ];
     return knownJobRows.find((candidate) => String(candidate.job_id ?? "") === jobId) ?? row;
@@ -479,7 +425,7 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
             filters={filters}
             searchOptions={searchOptions}
             grainWarning={grainWarning}
-            onChange={setFilters}
+            onChange={onFiltersChange}
           />
         </section>
       </div>
@@ -500,21 +446,23 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
             Could not load {pages.find((page) => page.key === activePage)?.label ?? "page"}; showing{" "}
             {pages.find((page) => page.key === displayedPage)?.label ?? "previous page"}.
           </span>
-          <button onClick={() => setReportRetry((value) => value + 1)}>Retry</button>
+          <button onClick={reportErrorCode === "analytics_rebuild_required" ? onOpenSources : onRetryReport}>
+            {reportErrorCode === "analytics_rebuild_required" ? "Open Sources" : "Retry"}
+          </button>
         </div>
       ) : null}
       <div className="monitoring-page-transition-content">
       <Suspense fallback={<EmptyState title="Loading monitoring page…" />}>
-      {displayedPage === "overview" && filtered ? (
+      {displayedPage === "overview" && reportForView ? (
         <MonitoringOverviewPage report={reportForView} filters={filters} onNavigate={onPageChange} />
       ) : null}
       {runsError && displayedPage === activePage ? <div className="app-error">{runsError}</div> : null}
-      {displayedPage === "jobs" && filtered ? (
+      {displayedPage === "jobs" && reportForView ? (
         <JobsPage
           report={reportForView}
           filters={filters}
-          rows={jobRuns?.records ?? filtered.jobs}
-          totalRows={jobRuns?.summary.total_records ?? filtered.jobs.length}
+          rows={jobRuns?.records ?? []}
+          totalRows={jobRuns?.summary.total_records ?? 0}
           loading={runsLoading && displayedPage === activePage}
           filtered={hasActiveFilters(filters)}
           sort={jobSort}
@@ -529,12 +477,12 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
           onInspect={(row) => openDetail({ kind: "job", row })}
         />
       ) : null}
-      {displayedPage === "dataflows" && filtered ? (
+      {displayedPage === "dataflows" && reportForView ? (
         <DataflowsPage
           report={reportForView}
           filters={filters}
-          rows={dataflowRuns?.records ?? filtered.dataflows}
-          totalRows={dataflowRuns?.summary.total_records ?? filtered.dataflows.length}
+          rows={dataflowRuns?.records ?? []}
+          totalRows={dataflowRuns?.summary.total_records ?? 0}
           loading={runsLoading && displayedPage === activePage}
           sort={dataflowSort}
           onSort={setDataflowSort}
@@ -548,10 +496,10 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
           onInspect={(row) => openDetail({ kind: "dataflow", row })}
         />
       ) : null}
-      {displayedPage === "failures" && filtered ? (
+      {displayedPage === "failures" && reportForView ? (
         <FailurePage
           report={reportForView}
-          rows={filtered.failedRecords}
+          rows={reportForView.failures.failed_records}
           filters={filters}
           onInspect={(row) => openDetail({ kind: failureDetailKind(row), row })}
         />
@@ -559,11 +507,11 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
       {displayedPage === "diagnostics" ? (
         <DiagnosticsPage report={reportForView} onInspect={(row) => openDetail({ kind: "diagnostics", row })} />
       ) : null}
-      {displayedPage === "performance" && filtered ? (
+      {displayedPage === "performance" && reportForView ? (
         <PerformancePage
           report={reportForView}
-          rows={performanceRuns?.records ?? filtered.performanceInvestigationQueue}
-          totalRows={performanceRuns?.summary.total_records ?? filtered.performanceInvestigationQueue.length}
+          rows={performanceRuns?.records ?? []}
+          totalRows={performanceRuns?.summary.total_records ?? 0}
           loading={runsLoading && displayedPage === activePage}
           sort={performanceSort}
           onSort={setPerformanceSort}
@@ -582,15 +530,49 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
         <VolumePage
           report={reportForView}
           filters={filters}
-          rows={filtered?.volumeDataflowRegistry}
+          rows={volumeEvidence?.records ?? []}
+          totalRows={volumeEvidence?.summary.total_records ?? 0}
+          loading={volumeEvidenceQuery.isFetching}
+          sort={volumeSort}
+          onSort={setVolumeSort}
+          limit={volumeLimit}
+          offset={volumeEvidence?.summary.offset ?? volumeOffset}
+          onPageChange={setVolumeOffset}
+          onPageSizeChange={(nextLimit) => { setVolumeLimit(nextLimit); setVolumeOffset(0); }}
           onInspect={(row) => openDetail({ kind: "volume", row })}
         />
       ) : null}
       {displayedPage === "maintenance" ? (
-        <MaintenancePage report={reportForView} filters={filters} onInspect={(row) => openDetail({ kind: "maintenance", row })} />
+        <MaintenancePage
+          report={reportForView}
+          filters={filters}
+          rows={maintenanceEvidence?.records ?? []}
+          totalRows={maintenanceEvidence?.summary.total_records ?? 0}
+          loading={maintenanceEvidenceQuery.isFetching}
+          sort={maintenanceSort}
+          onSort={setMaintenanceSort}
+          limit={maintenanceLimit}
+          offset={maintenanceEvidence?.summary.offset ?? maintenanceOffset}
+          onPageChange={setMaintenanceOffset}
+          onPageSizeChange={(nextLimit) => { setMaintenanceLimit(nextLimit); setMaintenanceOffset(0); }}
+          onInspect={(row) => openDetail({ kind: "maintenance", row })}
+        />
       ) : null}
       {displayedPage === "freshness" ? (
-        <FreshnessPage report={reportForView} filters={filters} onInspect={(row) => openDetail({ kind: "freshness", row })} />
+        <FreshnessPage
+          report={reportForView}
+          filters={filters}
+          rows={freshnessEvidence?.records ?? []}
+          totalRows={freshnessEvidence?.summary.total_records ?? 0}
+          loading={freshnessEvidenceQuery.isFetching}
+          sort={freshnessSort}
+          onSort={setFreshnessSort}
+          limit={freshnessLimit}
+          offset={freshnessEvidence?.summary.offset ?? freshnessOffset}
+          onPageChange={setFreshnessOffset}
+          onPageSizeChange={(nextLimit) => { setFreshnessLimit(nextLimit); setFreshnessOffset(0); }}
+          onInspect={(row) => openDetail({ kind: "freshness", row })}
+        />
       ) : null}
       </Suspense>
       </div>
@@ -599,13 +581,13 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
         <Suspense fallback={null}>
         <MonitoringDetailDrawer
           kind={detail.kind}
-          row={detail.row}
+          row={activeDetailRow ?? detail.row}
           environmentId={environmentId}
           timezoneName={reportForView.summary.timezone || "UTC"}
           relatedDataflows={
             detail.kind === "job" || detail.kind === "freshness" || detail.kind === "maintenance" || detail.kind === "volume"
               ? detailDataflows?.records ?? []
-              : relatedDataflows(detail.row, dataflowRuns?.records ?? filtered?.dataflows ?? [])
+              : relatedDataflows(detail.row, dataflowRuns?.records ?? [])
           }
           relatedDataflowsTotal={detailDataflows?.summary.total_records ?? detailDataflows?.records.length ?? 0}
           relatedDataflowsOffset={detailDataflowOffset}
@@ -620,7 +602,7 @@ export function MonitoringView({ environmentId, sourceCacheVersion, loading, act
             setDetailDataflowSort(nextSort);
             setDetailDataflowOffset(0);
           }}
-          relatedDataflowsLoading={Boolean(activeDetailDataflowsKey && (detailDataflowsLoading || detailDataflowsKey !== activeDetailDataflowsKey))}
+          relatedDataflowsLoading={Boolean(activeDetailEvidenceRequest && detailDataflowsQuery.isFetching)}
           reconciliationChecks={relatedReconciliationChecks(detail.row, reportForView.reconciliation.checks)}
           onOpenDataflow={(row) => pushDetail({ kind: "dataflow", row })}
           onOpenJob={openLinkedJobDetail}
@@ -649,37 +631,7 @@ function relatedReconciliationChecks(row: Record<string, unknown>, checks: Array
   return checks.filter((candidate) => String(candidate.job_id ?? "") === jobId);
 }
 
-function monitoringQueryParams(filters: ReturnType<typeof filtersFromSearch>) {
-  return {
-    range: filters.range,
-    grain: filters.grain,
-    startTime: filters.range === "custom" ? filters.startTime : undefined,
-    endTime: filters.range === "custom" ? filters.endTime : undefined,
-    status: filters.status,
-    stage: filters.stage,
-    connection: filters.connection,
-    engine: filters.engine,
-    provider: filters.provider,
-    sourceType: filters.sourceType,
-    destinationType: filters.destinationType,
-    loadType: filters.loadType,
-    operationType: filters.operationType,
-    search: filters.search,
-    investigateKind: filters.investigateKind,
-    investigateValue: filters.investigateValue
-  };
-}
-
-function monitoringReportRequestKey(
-  environmentId: number,
-  sourceVersion: string,
-  page: MonitoringTabKey,
-  params: Record<string, string | number | undefined>
-) {
-  return `${environmentId}:${sourceVersion}:${page}:${JSON.stringify(params)}`;
-}
-
-function grainAdjustmentMessage(filters: ReturnType<typeof filtersFromSearch>, report: MonitoringReport) {
+function grainAdjustmentMessage(filters: MonitoringFilters, report: MonitoringReport) {
   const requested = String(report.summary.requested_grain ?? filters.grain ?? "").trim();
   const effective = String(report.summary.effective_grain ?? "").trim();
   if (!requested || !effective || requested === "auto" || requested === effective) return "";
@@ -696,8 +648,7 @@ function buildMonitoringSearchOptions(
   const dataflows = uniqueRows(
     [
       ...dataflowRows,
-      ...report.failures.failed_records,
-      ...report.performance.slowest_dataflows
+      ...report.failures.failed_records
     ],
     (row) => String(row.dataflow_run_id ?? row.dataflow_id ?? row.dataflow_name ?? "")
   );
@@ -759,32 +710,6 @@ function buildMonitoringSearchOptions(
         detail: compactDetail(["dest", row.destination_name]),
         investigateKind: "destination_table",
         value: tableIdentity
-      });
-    }
-  }
-
-  for (const row of report.maintenance.table_registry ?? []) {
-    const tableIdentity = tableSearchIdentity(row, "destination");
-    const target = firstString(row, ["target"]);
-    const targetDisplay = firstString(row, ["target_display"]);
-    const value = targetDisplay || tableIdentity || target;
-    if (!value) continue;
-    options.push({
-      key: `maintenance-destination-table:${target || value}`,
-      kind: "table",
-      label: value,
-      detail: compactDetail(["dest", row.destination_name, row.destination_connection_type]),
-      investigateKind: "destination_table",
-      value
-    });
-    if (target && target !== value) {
-      options.push({
-        key: `maintenance-destination-target:${target}`,
-        kind: "table",
-        label: target,
-        detail: compactDetail(["dest", targetDisplay || tableIdentity, row.destination_name]),
-        investigateKind: "destination_table",
-        value: target
       });
     }
   }

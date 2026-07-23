@@ -20,7 +20,7 @@ export interface StudioRoute {
   search?: string;
 }
 
-const routePattern = /^\/projects\/(\d+)\/envs\/(\d+)\/([a-z-]+)(?:\/([a-z-]+))?\/?$/;
+const routePattern = /^\/projects\/(\d+)\/environments\/(\d+)\/([a-z-]+)(?:\/([a-z-]+))?\/?$/;
 const projectPattern = /^\/projects\/(\d+)\/?$/;
 const projectSectionPattern = /^\/projects\/(\d+)\/([a-z-]+)\/?$/;
 const projectsPattern = /^\/projects\/?$/;
@@ -73,9 +73,9 @@ export function parseRoute(pathname = defaultPathname(), search = defaultSearch(
 
 export function modulePath(projectId: number, environmentId: number, module: ModuleKey, monitoringPage = monitoringDefaultPage) {
   if (module === "monitoring") {
-    return `/projects/${projectId}/envs/${environmentId}/monitoring/${monitoringPage}`;
+    return `/projects/${projectId}/environments/${environmentId}/monitoring/${monitoringPage}`;
   }
-  return `/projects/${projectId}/envs/${environmentId}/${module}`;
+  return `/projects/${projectId}/environments/${environmentId}/${module}`;
 }
 
 export function pushRoute(next: StudioRoute) {

@@ -4,7 +4,9 @@ import type { MonitoringFilters } from "../monitoringFilters";
 import {
   DetailMetric,
   EndpointImpactTable,
+  FailurePhaseLegend,
   FailureQueueTable,
+  FailureTrendLegend,
   HealthStripCard,
   RepeatedFailureTable,
   ReportChart,
@@ -193,8 +195,8 @@ export function FailurePage({
           </ReportPanel>
           <ReportPanel
             title="Failure trend"
-            subtitle="failed jobs and dataflows"
             titleTooltip="Failure trend by selected grain. Failed dataflows are root-cause events; failed jobs are rollup counts where at least one child dataflow failed."
+            headerAction={<FailureTrendLegend />}
           >
             <ReportChart
               option={failureTrendOption(
@@ -218,8 +220,8 @@ export function FailurePage({
           </ReportPanel>
           <ReportPanel
             title="Error hint x phase"
-            subtitle="rule-based, not guaranteed"
             titleTooltip={failureCategoriesRuleTooltip()}
+            headerAction={<FailurePhaseLegend />}
           >
             <ReportChart option={failureCategoryPhaseMatrixOption(categoryPhaseRows)} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
@@ -234,16 +236,16 @@ export function FailurePage({
           </ReportPanel>
           <ReportPanel
             title="Top failing dataflows"
-            subtitle="failed runs by phase"
             titleTooltip="Ranks dataflows by failed run count in the current filters. Tooltip includes latest stage and error context."
             className="monitoring-failure-records-panel"
+            headerAction={<FailurePhaseLegend />}
           >
             <ReportChart option={failureHorizontalBarOption(topFailingDataflows, "dataflow_name", "error_count", "Failed runs")} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
           <ReportPanel
             title="Failure by stage"
-            subtitle="failed runs by phase"
             titleTooltip="Counts failed dataflow runs by stage. Job-level failures without a dataflow stage are not included here."
+            headerAction={<FailurePhaseLegend />}
           >
             <ReportChart option={failureHorizontalBarOption(stageRows as Array<Record<string, string | number>>, "name", "count", "Failed runs")} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>

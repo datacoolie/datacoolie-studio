@@ -2,13 +2,13 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Database, Loader2, X
 import { Icon } from "@iconify/react";
 import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
-import type { AssetBrief, AssetInventoryItem, AssetReferenceGroupItem, AssetReferenceOccurrenceItem, ProjectReferenceMapping, ReferenceOccurrenceSourceResponse } from "../../shared/api/types";
+import type { AssetBrief, AssetInventoryItem, AssetReferenceGroupItem, AssetReferenceOccurrenceItem, ReferenceOccurrenceSourceResponse } from "../../shared/api/types";
 import { presentReferenceResolution, type ReferenceResolutionPresentation } from "../../shared/referenceResolutionPresentation";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
-import { ReferenceMappingEditor } from "../reference-mappings/ReferenceMappingEditor";
+import { ReferenceMappingDrawer } from "../reference-mappings/ReferenceMappingDrawer";
 import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import {
   groupReferenceUsage,
@@ -28,7 +28,6 @@ interface ReferenceDrawerProps {
   occurrences: AssetReferenceOccurrenceItem[];
   mappingMode: boolean;
   assets: AssetInventoryItem[];
-  mappings: ProjectReferenceMapping[];
   mappingBusy?: boolean;
   canGoBack: boolean;
   onBack: () => void;
@@ -51,7 +50,6 @@ export function ReferenceDrawer({
   occurrences,
   mappingMode,
   assets,
-  mappings,
   mappingBusy,
   canGoBack,
   onBack,
@@ -69,10 +67,10 @@ export function ReferenceDrawer({
 }: ReferenceDrawerProps) {
   const story = referenceResolutionStory(reference, occurrences);
   const resolution = referenceResolutionPresentation(reference);
-  const mappingAction = referenceMappingAction(reference, mappings);
+  const mappingAction = referenceMappingAction(reference);
   const mappingActionLabel = referenceMappingActionLabel(mappingAction);
   const usageGroups = groupReferenceUsage(reference, occurrences);
-  const effectiveMapping = mappings.find((item) => item.id === reference.manual_mapping?.mapping_id) || null;
+  const effectiveMapping = reference.manual_mapping ?? null;
   const resolvedTarget = reference.resolved_asset || null;
   const resolvedTargetState = resolution.state === "automatic" || resolution.state === "manual" ? resolution.state : null;
   const candidates = reference.candidate_assets.filter((candidate) => candidate.id !== resolvedTarget?.id);
@@ -170,10 +168,9 @@ export function ReferenceDrawer({
 
         {mappingMode ? (
           <div className="metadata-drawer-body assets-drawer-body">
-            <ReferenceMappingEditor
+            <ReferenceMappingDrawer
               reference={reference}
               assets={assets}
-              mappings={mappings}
               busy={mappingBusy}
               onCreate={onCreateReferenceMapping}
               onUpdate={onUpdateReferenceMapping}
@@ -257,7 +254,7 @@ export function ReferenceDrawer({
                               key={occurrence.id}
                               occurrence={occurrence}
                               canonicalValue={reference.normalized_value}
-                              showStatus={["resolved_mixed", "partially_resolved"].includes(reference.group_status)}
+                              showStatus={reference.resolution.state === "unresolved"}
                               expanded={expandedOccurrenceIds.has(occurrence.id)}
                               loading={sourceLoadingIds.has(occurrence.id)}
                               source={sourceByOccurrenceId[occurrence.id] || null}
@@ -326,7 +323,7 @@ function OccurrenceEvidenceRow({ occurrence, canonicalValue, showStatus, expande
       <button className="icon-action small reference-occurrence-expand" type="button" title={expanded ? "Hide detail" : "Show detail"} aria-label={expanded ? "Hide detail" : "Show detail"} aria-expanded={expanded} onClick={onToggle}>
         {loading ? <Loader2 className="is-spinning" size={13} /> : <ChevronDown size={13} />}
       </button>
-      {showStatus ? <ResolutionBadge presentation={occurrenceResolutionPresentation(occurrence.resolution_status)} compact /> : null}
+      {showStatus ? <ResolutionBadge presentation={occurrenceResolutionPresentation(occurrence.resolution)} compact /> : null}
     </div>
     {expanded ? <>
       <OccurrenceSourcePreview source={source} error={error} loading={loading} />
@@ -412,11 +409,10 @@ function ResolutionBadge({ presentation, compact = false }: { presentation: Refe
   return <span className={`assets-status-chip status-${presentation.state}${compact ? " is-compact" : ""}`}>{presentation.label}</span>;
 }
 
-function occurrenceResolutionPresentation(status: AssetReferenceOccurrenceItem["resolution_status"]): ReferenceResolutionPresentation {
-  if (status === "resolved_manual") return presentReferenceResolution("manual");
-  if (status === "resolved_auto") return presentReferenceResolution("automatic");
-  if (status === "mapping_target_missing") return presentReferenceResolution("missing_target");
-  return presentReferenceResolution("needs_mapping");
+function occurrenceResolutionPresentation(
+  resolution: AssetReferenceOccurrenceItem["resolution"],
+): ReferenceResolutionPresentation {
+  return presentReferenceResolution(resolution);
 }
 
 function humanize(value: string | null | undefined) {

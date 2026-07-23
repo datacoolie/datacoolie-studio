@@ -1,6 +1,37 @@
 import { useEffect, useRef } from "react";
-import ReactECharts from "echarts-for-react";
+import * as echarts from "echarts/core";
+import { BarChart, BoxplotChart, LineChart, ScatterChart } from "echarts/charts";
+import {
+  AxisPointerComponent,
+  DataZoomComponent,
+  GraphicComponent,
+  GridComponent,
+  LegendComponent,
+  MarkLineComponent,
+  TitleComponent,
+  TooltipComponent,
+} from "echarts/components";
+import { LabelLayout } from "echarts/features";
+import { CanvasRenderer } from "echarts/renderers";
 import type { EChartsOption } from "echarts";
+import { lifecycleStatusPresentations } from "../../shared/statusPresentation";
+
+echarts.use([
+  BarChart,
+  BoxplotChart,
+  LineChart,
+  ScatterChart,
+  AxisPointerComponent,
+  DataZoomComponent,
+  GraphicComponent,
+  GridComponent,
+  LegendComponent,
+  MarkLineComponent,
+  TitleComponent,
+  TooltipComponent,
+  LabelLayout,
+  CanvasRenderer,
+]);
 
 export function ReportChart({
   option,
@@ -11,12 +42,13 @@ export function ReportChart({
   height?: number | string;
   wheelDataZoomStep?: number;
 }) {
-  const chartRef = useRef<ReactECharts | null>(null);
+  const chartHostRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const wheelStep = wheelDataZoomStep ? Math.max(1, Math.floor(wheelDataZoomStep)) : 0;
   const consumeWheelForDataZoom = (deltaY: number) => {
     if (!wheelStep) return;
-    const chart = chartRef.current?.getEchartsInstance();
+    const chart = chartRef.current;
     if (!chart) return false;
     const current = chart.getOption() as Record<string, any>;
     const dataZoom = Array.isArray(current?.dataZoom) ? dataZoomFromOption(current.dataZoom) : [];
@@ -49,6 +81,29 @@ export function ReportChart({
   };
 
   useEffect(() => {
+    const host = chartHostRef.current;
+    if (!host) return;
+    const chart = echarts.init(host, undefined, { renderer: "canvas" });
+    chartRef.current = chart;
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => chart.resize());
+    resizeObserver?.observe(host);
+    const handleWindowResize = () => chart.resize();
+    if (!resizeObserver) window.addEventListener("resize", handleWindowResize);
+    return () => {
+      resizeObserver?.disconnect();
+      if (!resizeObserver) window.removeEventListener("resize", handleWindowResize);
+      chartRef.current = null;
+      chart.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    chartRef.current?.setOption(option, { notMerge: true, lazyUpdate: true });
+  }, [option]);
+
+  useEffect(() => {
     const host = wrapperRef.current;
     if (!host || !wheelStep) return;
     const onWheel = (event: WheelEvent) => {
@@ -64,14 +119,7 @@ export function ReportChart({
 
   return (
     <div ref={wrapperRef} style={{ width: "100%", height: "100%" }}>
-      <ReactECharts
-        ref={chartRef}
-        option={option}
-        notMerge
-        lazyUpdate
-        style={{ width: "100%", height }}
-        opts={{ renderer: "canvas" }}
-      />
+      <div ref={chartHostRef} style={{ width: "100%", height }} />
     </div>
   );
 }
@@ -81,11 +129,11 @@ function dataZoomFromOption(dataZoom: unknown) {
 }
 
 export const reportChartPalette = {
-  success: "#2f8f72",
-  failed: "#c94a4f",
-  skipped: "#d89b42",
-  running: "#4e78bb",
-  pending: "#8a6fd1",
+  success: lifecycleStatusPresentations.succeeded.chartColor,
+  failed: lifecycleStatusPresentations.failed.chartColor,
+  skipped: lifecycleStatusPresentations.skipped.chartColor,
+  running: lifecycleStatusPresentations.running.chartColor,
+  pending: lifecycleStatusPresentations.pending.chartColor,
   unknown: "#8b95a5",
   teal: "#155e59",
   blue: "#3d6fa8",

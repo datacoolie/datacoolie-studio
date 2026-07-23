@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,12 +15,11 @@ from datacoolie_studio.db.models import (
     EnvironmentMetadataEditorDraft,
     EnvironmentSource,
     LogFileManifest,
-    CodeArtifactSnapshot,
-    EnvironmentReadModelCacheEntry,
+    CodeArtifactMaterialization,
     MetadataBackup,
     MetadataEditorDraft,
     MetadataSaveEvent,
-    MetadataSourceSnapshot,
+    MetadataMaterialization,
     MetadataValidationResult,
     ProjectReferenceMapping,
     Project,
@@ -29,12 +28,16 @@ from datacoolie_studio.db.models import (
 )
 from datacoolie_studio.domains.assets.reference_mappings import normalize_target_identifier
 from datacoolie_studio.domains.assets.reference_identity import normalize_reference_signature
-from datacoolie_studio.domains.code_artifacts.service import ensure_code_artifact_snapshot
+from datacoolie_studio.domains.code_artifacts.service import ensure_code_artifact_materialization
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
-from datacoolie_studio.domains.metadata.service import ensure_metadata_snapshot
-from datacoolie_studio.domains.read_models.cache import invalidate_project_read_models
+from datacoolie_studio.domains.metadata.service import ensure_metadata_materialization
+from datacoolie_studio.domains.read_models.cache import (
+    invalidate_environment_read_models,
+    invalidate_project_read_models,
+)
 from datacoolie_studio.domains.read_models.keys import ASSETS_CATALOG, LINEAGE_GRAPH, OVERVIEW
+from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCacheStore
 from datacoolie_studio.domains.sources.discovery import (
     DiscoveredSource,
     discover_datacoolie_project_sources,
@@ -50,7 +53,7 @@ METADATA_SOURCE_DELETE_DEPENDENCIES = [
     ("backup", "backup version", MetadataBackup, "warning"),
     ("validation_result", "validation result", MetadataValidationResult, "info"),
     ("save_event", "save event", MetadataSaveEvent, "info"),
-    ("snapshot", "metadata snapshot", MetadataSourceSnapshot, "info"),
+    ("materialization", "metadata materialization", MetadataMaterialization, "info"),
     ("source_revision", "source revision", SourceRevision, "info"),
     ("sync_job", "sync job", SyncJob, "info"),
 ]
@@ -175,58 +178,86 @@ def delete_project_reference_mapping(session: Session, project_id: int, mapping_
 
 
 def list_project_summaries(session: Session) -> list[dict]:
-    summaries: list[dict] = []
-    for project in list_projects(session):
-        environments = list_environments(session, project.id)
-        env_summaries = []
-        metadata_total = 0
-        log_total = 0
-        for env in environments:
-            metadata_count = session.scalar(
-                select(func.count()).select_from(EnvironmentSource).where(
-                    EnvironmentSource.environment_id == env.id,
-                    EnvironmentSource.source_kind == "metadata",
-                )
-            ) or 0
-            log_count = session.scalar(
-                select(func.count()).select_from(EnvironmentSource).where(
-                    EnvironmentSource.environment_id == env.id,
-                    EnvironmentSource.source_kind == "logs",
-                )
-            ) or 0
-            code_count = session.scalar(
-                select(func.count()).select_from(EnvironmentSource).where(
-                    EnvironmentSource.environment_id == env.id,
-                    EnvironmentSource.source_kind == "code",
-                )
-            ) or 0
-            metadata_total += int(metadata_count)
-            log_total += int(log_count)
-            env_summaries.append(
-                {
-                    "id": env.id,
-                    "name": env.name,
-                    "metadata_source_count": int(metadata_count),
-                    "etl_log_path_count": int(log_count),
-                    "code_artifact_count": int(code_count),
-                    "created_at": env.created_at,
-                    "updated_at": env.updated_at,
-                }
-            )
-        summaries.append(
+    mapping_counts = (
+        select(
+            ProjectReferenceMapping.project_id.label("project_id"),
+            func.count(ProjectReferenceMapping.id).label("reference_mapping_count"),
+        )
+        .group_by(ProjectReferenceMapping.project_id)
+        .subquery()
+    )
+    statement = (
+        select(
+            Project.id.label("project_id"),
+            Project.name.label("project_name"),
+            Project.description.label("project_description"),
+            Project.created_at.label("project_created_at"),
+            Project.updated_at.label("project_updated_at"),
+            func.coalesce(mapping_counts.c.reference_mapping_count, 0).label("reference_mapping_count"),
+            Environment.id.label("environment_id"),
+            Environment.name.label("environment_name"),
+            Environment.created_at.label("environment_created_at"),
+            Environment.updated_at.label("environment_updated_at"),
+            func.sum(case((EnvironmentSource.source_kind == "metadata", 1), else_=0)).label("metadata_count"),
+            func.sum(case((EnvironmentSource.source_kind == "logs", 1), else_=0)).label("log_count"),
+            func.sum(case((EnvironmentSource.source_kind == "code", 1), else_=0)).label("code_count"),
+        )
+        .select_from(Project)
+        .outerjoin(mapping_counts, mapping_counts.c.project_id == Project.id)
+        .outerjoin(Environment, Environment.project_id == Project.id)
+        .outerjoin(EnvironmentSource, EnvironmentSource.environment_id == Environment.id)
+        .group_by(
+            Project.id,
+            Project.name,
+            Project.description,
+            Project.created_at,
+            Project.updated_at,
+            mapping_counts.c.reference_mapping_count,
+            Environment.id,
+            Environment.name,
+            Environment.created_at,
+            Environment.updated_at,
+        )
+        .order_by(Project.name, Environment.name)
+    )
+
+    summaries_by_id: dict[int, dict[str, Any]] = {}
+    for row in session.execute(statement):
+        summary = summaries_by_id.setdefault(
+            row.project_id,
             {
-                "id": project.id,
-                "name": project.name,
-                "description": project.description,
-                "environment_count": len(environments),
-                "metadata_source_count": metadata_total,
-                "etl_log_path_count": log_total,
-                "environments": env_summaries,
-                "created_at": project.created_at,
-                "updated_at": project.updated_at,
+                "id": row.project_id,
+                "name": row.project_name,
+                "description": row.project_description,
+                "environment_count": 0,
+                "metadata_source_count": 0,
+                "etl_log_path_count": 0,
+                "reference_mapping_count": int(row.reference_mapping_count or 0),
+                "environments": [],
+                "created_at": row.project_created_at,
+                "updated_at": row.project_updated_at,
+            },
+        )
+        if row.environment_id is None:
+            continue
+
+        metadata_count = int(row.metadata_count or 0)
+        log_count = int(row.log_count or 0)
+        summary["environment_count"] += 1
+        summary["metadata_source_count"] += metadata_count
+        summary["etl_log_path_count"] += log_count
+        summary["environments"].append(
+            {
+                "id": row.environment_id,
+                "name": row.environment_name,
+                "metadata_source_count": metadata_count,
+                "etl_log_path_count": log_count,
+                "code_artifact_count": int(row.code_count or 0),
+                "created_at": row.environment_created_at,
+                "updated_at": row.environment_updated_at,
             }
         )
-    return summaries
+    return list(summaries_by_id.values())
 
 
 def _project_reference_mapping_to_dict(mapping: ProjectReferenceMapping) -> dict[str, Any]:
@@ -255,9 +286,18 @@ def _require_project(session: Session, project_id: int) -> None:
 
 
 def create_project(session: Session, name: str, description: str | None = None) -> Project:
-    project = Project(name=name.strip(), description=description)
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError("Project name cannot be blank")
+    if len(normalized) > 255:
+        raise ValueError("Project name cannot exceed 255 characters")
+    project = Project(name=normalized, description=description)
     session.add(project)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise ValueError(f"Project already exists: {normalized}") from exc
     session.refresh(project)
     return project
 
@@ -268,6 +308,7 @@ def delete_project(session: Session, project_id: int) -> bool:
         return False
     source_ids = _etl_source_ids_for_project(session, project_id)
     _purge_analytics_cache_by_source_ids(source_ids)
+    invalidate_project_read_models(session, project_id)
     session.delete(project)
     session.commit()
     return True
@@ -301,6 +342,7 @@ def delete_environment(session: Session, environment_id: int) -> bool:
         return False
     source_ids = _etl_source_ids_for_environment(session, environment_id)
     _purge_analytics_cache_by_source_ids(source_ids)
+    invalidate_environment_read_models(session, environment_id)
     session.delete(environment)
     session.commit()
     return True
@@ -492,9 +534,9 @@ def _initialize_discovered_sources(session: Session, sources: list[EnvironmentSo
                     errors.append(_source_initialization_error(source, "Source refresh is already running"))
                     continue
                 if source.source_kind == "metadata":
-                    ensure_metadata_snapshot(session, source)
+                    ensure_metadata_materialization(session, source)
                 elif source.source_kind == "code":
-                    ensure_code_artifact_snapshot(session, source)
+                    ensure_code_artifact_materialization(session, source)
                 else:
                     continue
             status = sync.source_sync_status(session, source)
@@ -627,7 +669,7 @@ def update_code_artifact(
     if structural_changed:
         _clear_source_read_check(source)
         _delete_source_sync_records(session, source)
-        for row in _source_rows(session, CodeArtifactSnapshot, source.id):
+        for row in _source_rows(session, CodeArtifactMaterialization, source.id):
             session.delete(row)
     if label is not None:
         source.label = label
@@ -646,7 +688,7 @@ def delete_code_artifact(session: Session, environment_id: int, source_id: int) 
     if source is None:
         return False
     _delete_source_sync_records(session, source)
-    for row in _source_rows(session, CodeArtifactSnapshot, source.id):
+    for row in _source_rows(session, CodeArtifactMaterialization, source.id):
         session.delete(row)
     invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.delete(source)
@@ -659,7 +701,12 @@ def code_artifact_delete_impact(session: Session, environment_id: int, source_id
     if source is None:
         return None
     impact_specs = [
-        ("snapshot", "code snapshot", _count_source_rows(session, CodeArtifactSnapshot, source.id), "warning"),
+        (
+            "materialization",
+            "code materialization",
+            _count_source_rows(session, CodeArtifactMaterialization, source.id),
+            "warning",
+        ),
         ("lineage_cache", "lineage graph cache entry", _count_environment_read_models(session, source.environment_id, LINEAGE_GRAPH), "warning"),
         ("source_revision", "source revision", _count_source_rows(session, SourceRevision, source.id), "info"),
         ("sync_job", "sync history entry", _count_source_rows(session, SyncJob, source.id), "info"),
@@ -809,6 +856,7 @@ def update_log_source(
     if path is None:
         return None
     changed = False
+    enabled_changed = enabled is not None and enabled != path.enabled
     if uri is not None:
         normalized_uri = uri.strip()
         if normalized_uri != path.uri:
@@ -823,6 +871,9 @@ def update_log_source(
         _clear_source_read_check(path)
         _delete_source_sync_records(session, path)
         _delete_source_log_cache(session, path)
+    elif enabled_changed:
+        _clear_source_read_check(path)
+        logs_cache.purge_cached_source_ids([path.id])
     if label is not None:
         path.label = label
     if enabled is not None:
@@ -975,15 +1026,7 @@ def _count_environment_rows(session: Session, model, environment_id: int) -> int
 
 
 def _count_environment_read_models(session: Session, environment_id: int, model_key: str) -> int:
-    return int(
-        session.scalar(
-            select(func.count()).select_from(EnvironmentReadModelCacheEntry).where(
-                EnvironmentReadModelCacheEntry.environment_id == environment_id,
-                EnvironmentReadModelCacheEntry.model_key == model_key,
-            )
-        )
-        or 0
-    )
+    return SqliteResultCacheStore().entry_count(environment_id, model_key)
 
 
 def _delete_impact_summary(impacts: list[dict]) -> str:

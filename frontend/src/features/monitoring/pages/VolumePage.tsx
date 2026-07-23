@@ -1,4 +1,3 @@
-import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
 import type { MonitoringFilters } from "../monitoringFilters";
@@ -31,38 +30,38 @@ import {
   resolveTrendBucketKeys,
   workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption
 } from "../monitoringShared";
-import { alignedVolumeAxisBounds, sortVolumeRows } from "../volumePageModel";
-
-const VOLUME_PAGE_SIZE = 100;
+import { alignedVolumeAxisBounds } from "../volumePageModel";
 
 export function VolumePage({
   report,
   filters,
   rows,
+  totalRows,
+  loading,
+  sort,
+  onSort,
+  limit,
+  offset,
+  onPageChange,
+  onPageSizeChange,
   onInspect
 }: {
   report: MonitoringReport;
   filters: MonitoringFilters;
-  rows?: MonitoringRecord[];
+  rows: MonitoringRecord[];
+  totalRows: number;
+  loading: boolean;
+  sort: TableSort;
+  onSort: (sort: TableSort) => void;
+  limit: number;
+  offset: number;
+  onPageChange: (offset: number) => void;
+  onPageSizeChange: (limit: number) => void;
   onInspect?: (row: MonitoringRecord) => void;
 }) {
   const kpis = report.volume.kpis ?? {};
   const timezoneName = monitoringTimezone(report);
-  const rawRegistryRows = (rows ?? report.volume.dataflow_registry ?? []) as MonitoringRecord[];
-  const [offset, setOffset] = useState(0);
-  const [limit, setLimit] = useState(VOLUME_PAGE_SIZE);
-  const [registrySort, setRegistrySort] = useState<TableSort | undefined>(undefined);
-
-  const registryRows = useMemo(
-    () => sortVolumeRows(rawRegistryRows, registrySort),
-    [rawRegistryRows, registrySort]
-  );
-
-  useEffect(() => {
-    setOffset(0);
-  }, [report, rows]);
-
-  const visibleRows = registryRows.slice(offset, offset + limit);
+  const registryRows = rows;
   const netBytes = Number(kpis.net_bytes_change ?? 0);
   const highVolumeCount = Number(kpis.high_volume_dataflow_count ?? 0);
   const candidateRunCount = Number(kpis.high_volume_candidate_run_count ?? kpis.high_volume_run_count ?? 0);
@@ -225,31 +224,25 @@ export function VolumePage({
 
         <ReportPanel
           title="Dataflow volume registry"
-          subtitle={`${formatNumber(registryRows.length)} dataflows · totals in current filters`}
+          subtitle={`${formatNumber(totalRows)} dataflows · totals in current filters`}
           className="monitoring-volume-runs-panel"
           titleTooltip="One row per dataflow in the current filters. Totals are aggregated across related runs; click a row to inspect volume evidence and individual runs."
           headerAction={
             <TablePager
               limit={limit}
               offset={offset}
-              loadedRows={visibleRows.length}
-              totalRows={registryRows.length}
-              loading={false}
-              onPageChange={setOffset}
-              onPageSizeChange={(nextLimit) => {
-                setLimit(nextLimit);
-                setOffset(0);
-              }}
+              loadedRows={registryRows.length}
+              totalRows={totalRows}
+              loading={loading}
+              onPageChange={onPageChange}
+              onPageSizeChange={onPageSizeChange}
             />
           }
         >
           <DataflowVolumeRegistryTable
-            rows={visibleRows}
-            sort={registrySort}
-            onSort={(nextSort) => {
-              setRegistrySort(nextSort);
-              setOffset(0);
-            }}
+            rows={registryRows}
+            sort={sort}
+            onSort={onSort}
             onInspect={onInspect}
           />
         </ReportPanel>

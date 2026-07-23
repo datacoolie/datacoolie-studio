@@ -3,7 +3,6 @@ import type {
   LineageDataflow,
   LineageDependency,
   LineageReference,
-  LineageReferenceOccurrence,
   LineageResponse
 } from "../../../shared/api/types";
 import { lineageNodeSearchValues, presentLineageAsset } from "./presentation";
@@ -32,10 +31,10 @@ export interface RelationNeighborGroup {
   relations: Relation[];
 }
 
-const ATTENTION_RESOLUTION_STATUSES = new Set(["ambiguous", "unresolved", "mapping_target_missing"]);
+const graphIndexCache = new WeakMap<LineageResponse, LineageGraphIndex>();
 
 export function isAttentionResolutionStatus(value: string | null | undefined) {
-  return Boolean(value && ATTENTION_RESOLUTION_STATUSES.has(value));
+  return value === "unresolved";
 }
 
 export interface LineageGraphIndex {
@@ -47,7 +46,6 @@ export interface LineageGraphIndex {
   entityById: Map<string, LineageEntity>;
   dataflowById: Map<string, LineageDataflow>;
   dependencyById: Map<string, LineageDependency>;
-  occurrenceById: Map<string, LineageReferenceOccurrence>;
   relations: Relation[];
   incoming: Map<string, Relation[]>;
   outgoing: Map<string, Relation[]>;
@@ -98,18 +96,18 @@ function normalizeDataflowIdentity(value: string | null | undefined) {
 
 export function referenceNeighborAttentionStatus(entity: LineageEntity | undefined, relations: Relation[]) {
   if (!entity || isLineageAsset(entity)) return null;
-  for (const status of ["mapping_target_missing", "ambiguous", "unresolved"]) {
-    if (relations.some((relation) => relation.dependency?.resolution_status === status)) return status;
-  }
-  return null;
+  return relations.some((relation) => relation.dependency?.resolution.state === "unresolved") ? "unresolved" : null;
 }
 
 export function createLineageGraphIndex(lineage: LineageResponse | null): LineageGraphIndex {
+  if (lineage) {
+    const cached = graphIndexCache.get(lineage);
+    if (cached) return cached;
+  }
   const assets = lineage?.assets ?? [];
   const references = lineage?.references ?? [];
   const dataflows = lineage?.dataflows ?? [];
   const dependencies = lineage?.dependencies ?? [];
-  const occurrences = lineage?.reference_occurrences ?? [];
   const entities: LineageEntity[] = [...assets, ...references];
   const entityById = new Map(entities.map((entity) => [entity.id, entity]));
   const relations: Relation[] = [
@@ -150,14 +148,15 @@ export function createLineageGraphIndex(lineage: LineageResponse | null): Lineag
     id: reference.id,
     kind: "reference",
     title: reference.display_name,
-    subtitle: `${reference.group_status} · ${reference.reference_type}`,
+    subtitle: `${reference.resolution.state} · ${reference.reference_type}`,
     identity: reference.id,
     searchText: [
       reference.id,
       reference.display_name,
       reference.normalized_value,
       reference.reference_type,
-      reference.group_status,
+      reference.resolution.state,
+      reference.resolution.reason,
       ...reference.provenances
     ].join(" ").toLowerCase()
   }));
@@ -181,13 +180,14 @@ export function createLineageGraphIndex(lineage: LineageResponse | null): Lineag
     id: dependency.id,
     kind: "dependency",
     title: `${dependency.provenance.replace(/_/g, " ")} ${dependency.kind}`,
-    subtitle: `${dependency.resolution_status} · dependency`,
+    subtitle: `${dependency.resolution.state} · dependency`,
     identity: dependency.id,
     searchText: [
       dependency.id,
       dependency.kind,
       dependency.provenance,
-      dependency.resolution_status,
+      dependency.resolution.state,
+      dependency.resolution.reason,
       dependency.resolution_method,
       dependency.reference_id,
       dependency.resolved_asset_id,
@@ -197,7 +197,7 @@ export function createLineageGraphIndex(lineage: LineageResponse | null): Lineag
     ].filter(Boolean).join(" ").toLowerCase()
   }));
 
-  return {
+  const index: LineageGraphIndex = {
     assets,
     references,
     dataflows,
@@ -206,12 +206,13 @@ export function createLineageGraphIndex(lineage: LineageResponse | null): Lineag
     entityById,
     dataflowById: new Map(dataflows.map((item) => [item.id, item])),
     dependencyById: new Map(dependencies.map((item) => [item.id, item])),
-    occurrenceById: new Map(occurrences.map((item) => [item.id, item])),
     relations,
     incoming,
     outgoing,
     searchResults: [...assetResults, ...dataflowResults, ...dependencyResults, ...referenceResults]
   };
+  if (lineage) graphIndexCache.set(lineage, index);
+  return index;
 }
 
 export function lineageFilterOptions(index: LineageGraphIndex): LineageFilterOptions {
@@ -221,8 +222,8 @@ export function lineageFilterOptions(index: LineageGraphIndex): LineageFilterOpt
     formats: uniqueSorted(index.assets.map((asset) => asset.format || asset.endpoint_kind).filter(isPresent)),
     resolutions: uniqueSorted([
       ...index.assets.map((asset) => asset.declaration_status),
-      ...index.references.map((reference) => reference.group_status),
-      ...index.dependencies.map((dependency) => dependency.resolution_status)
+      ...index.references.map((reference) => reference.resolution.state),
+      ...index.dependencies.map((dependency) => dependency.resolution.state)
     ])
   };
 }
@@ -249,26 +250,51 @@ export function selectVisibleLineage(
     || filters.stages.length > 0
     || filters.formats.length > 0
     || filters.resolutions.length > 0;
-  const allowed = index.relations.filter((relation) => relationMatchesFilters(index, relation, filters));
-  const allowedIds = new Set(allowed.map((relation) => relation.id));
+  const includeUnresolvedReferences = focuses.length > 0
+    || showReferences
+    || filters.resolutions.includes("unresolved");
+  const available = includeUnresolvedReferences
+    ? index.relations
+    : index.relations.filter((relation) => relation.type === "dataflow"
+      || Boolean(relation.dependency?.resolved_asset_id));
+  const availableIds = new Set(available.map((relation) => relation.id));
 
-  if (!focuses.length) {
-    const fullRelations = showReferences
-      ? allowed
-      : allowed.filter((relation) => relation.type === "dataflow"
-        || Boolean(relation.dependency?.resolved_asset_id));
-    return visibleFromRelations(index, fullRelations, new Set(), new Set(), filtersActive, false);
+  if (!focuses.length && !filtersActive) {
+    return visibleFromRelations(index, available, new Set(), new Set(), false, false);
   }
 
-  const visibleIds = new Set<string>();
+  const scopeIds = new Set<string>();
   const focusNodeIds = new Set<string>();
   const focusEdgeIds = new Set<string>();
-  for (const focus of focuses) {
-    traceFocus(index, focus, direction, allowedIds, visibleIds, focusNodeIds, focusEdgeIds);
+  if (focuses.length) {
+    for (const focus of focuses) {
+      traceFocus(index, focus, direction, availableIds, scopeIds, focusNodeIds, focusEdgeIds);
+    }
+  } else {
+    for (const relation of available) scopeIds.add(relation.id);
   }
 
-  const relations = allowed.filter((relation) => visibleIds.has(relation.id));
-  const visible = visibleFromRelations(index, relations, focusNodeIds, focusEdgeIds, filtersActive, true);
+  let visibleIds = scopeIds;
+  if (filtersActive) {
+    visibleIds = new Set<string>();
+    const seeds = available.filter((relation) => (
+      scopeIds.has(relation.id) && relationMatchesFilters(index, relation, filters)
+    ));
+    for (const seed of seeds) {
+      traceRelation(index, seed, direction, scopeIds, visibleIds);
+    }
+  }
+
+  const relations = available.filter((relation) => visibleIds.has(relation.id));
+  const visibleFocusEdgeIds = new Set([...focusEdgeIds].filter((id) => visibleIds.has(id)));
+  const visible = visibleFromRelations(
+    index,
+    relations,
+    focusNodeIds,
+    visibleFocusEdgeIds,
+    filtersActive,
+    focuses.length > 0,
+  );
   for (const focus of focuses) {
     if (focus.kind === "asset" || focus.kind === "reference") {
       const entity = index.entityById.get(focus.id);
@@ -276,6 +302,22 @@ export function selectVisibleLineage(
     }
   }
   return visible;
+}
+
+function traceRelation(
+  index: LineageGraphIndex,
+  relation: Relation,
+  direction: TraceDirection,
+  allowedIds: Set<string>,
+  visibleIds: Set<string>,
+) {
+  visibleIds.add(relation.id);
+  if (direction !== "downstream") {
+    walk(index, relation.source, "incoming", allowedIds, visibleIds);
+  }
+  if (direction !== "upstream") {
+    walk(index, relation.target, "outgoing", allowedIds, visibleIds);
+  }
 }
 
 function traceFocus(
@@ -299,6 +341,23 @@ function traceFocus(
     }
     if (direction !== "upstream") {
       walk(index, dataflow.destination_asset_id, "outgoing", allowedIds, visibleIds);
+    }
+  } else if (focus.kind === "reference") {
+    if (!index.entityById.has(focus.id)) return;
+    focusNodeIds.add(focus.id);
+    for (const dependency of index.dependencies) {
+      if (dependency.reference_id !== focus.id || !allowedIds.has(dependency.id)) continue;
+      const sourceId = dependency.resolved_asset_id || dependency.reference_id;
+      visibleIds.add(dependency.id);
+      focusEdgeIds.add(dependency.id);
+      focusNodeIds.add(sourceId);
+      focusNodeIds.add(dependency.target_asset_id);
+      if (direction !== "downstream") {
+        walk(index, sourceId, "incoming", allowedIds, visibleIds);
+      }
+      if (direction !== "upstream") {
+        walk(index, dependency.target_asset_id, "outgoing", allowedIds, visibleIds);
+      }
     }
   } else if (focus.kind === "dependency") {
     const dependency = index.dependencyById.get(focus.id);
@@ -371,7 +430,7 @@ function visibleFromRelations(
   const attentionReferenceIdsByAsset = new Map<string, Set<string>>();
   for (const dependency of index.dependencies) {
     if (!entityIds.has(dependency.target_asset_id)) continue;
-    if (!isAttentionResolutionStatus(dependency.resolution_status)) continue;
+    if (!isAttentionResolutionStatus(dependency.resolution.state)) continue;
     const referenceIds = attentionReferenceIdsByAsset.get(dependency.target_asset_id) ?? new Set<string>();
     referenceIds.add(dependency.reference_id);
     attentionReferenceIdsByAsset.set(dependency.target_asset_id, referenceIds);
@@ -403,8 +462,8 @@ function relationMatchesFilters(index: LineageGraphIndex, relation: Relation, fi
     || assets.some((asset) => [asset.format, asset.endpoint_kind].some((value) => value && filters.formats.includes(value)));
   const matchesResolution = !filters.resolutions.length
     || assets.some((asset) => filters.resolutions.includes(asset.declaration_status))
-    || (relation.dependency?.resolution_status && filters.resolutions.includes(relation.dependency.resolution_status))
-    || (source?.entity_type === "reference" && filters.resolutions.includes(source.group_status));
+    || (relation.dependency?.resolution.state && filters.resolutions.includes(relation.dependency.resolution.state))
+    || (source?.entity_type === "reference" && filters.resolutions.includes(source.resolution.state));
   return matchesConnection && matchesStage && matchesFormat && matchesResolution;
 }
 
@@ -448,7 +507,8 @@ function referenceSearchValues(entity: LineageEntity | undefined) {
     entity.display_name,
     entity.normalized_value,
     entity.reference_type,
-    entity.group_status,
+    entity.resolution.state,
+    entity.resolution.reason,
     ...entity.provenances,
   ];
 }

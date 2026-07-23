@@ -606,7 +606,11 @@ def save_environment_editor_document(
     from datacoolie_studio.domains.metadata import service as metadata_service
 
     for source in enabled_sources:
-        metadata_service.ensure_metadata_snapshot(session, source, force=source.id in saved_source_ids)
+        metadata_service.ensure_metadata_materialization(
+            session,
+            source,
+            force=source.id in saved_source_ids,
+        )
     return metadata_service.load_environment_editor_document(session, enabled_sources)
 
 

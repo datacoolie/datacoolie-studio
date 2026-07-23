@@ -1,0 +1,457 @@
+.project-detail-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.project-overview-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 270px);
+  align-items: start;
+  gap: 12px;
+}
+
+.project-overview-operations {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  padding: 11px;
+}
+
+.project-overview-operations-label {
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.project-overview-operation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--color-accent-soft), var(--color-surface) 72%);
+  color: var(--color-text);
+  padding: 10px;
+  text-align: left;
+}
+
+.project-overview-operation:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-strong);
+}
+
+.project-overview-operation-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-accent-strong);
+}
+
+.project-overview-operation-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-overview-operation-copy strong {
+  font-size: var(--font-size-sm);
+}
+
+.project-overview-operation-copy small {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}
+
+
+@media (max-width: 860px) {
+  .project-detail-header {
+    grid-template-columns: 1fr;
+  }
+
+  .project-detail-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-overview-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .context-trail {
+    width: 100%;
+  }
+
+  .project-delete-confirm {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .reference-mappings-toolbar,
+  .reference-mappings-statusline {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .reference-mappings-controls {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .reference-mappings-search {
+    width: 100%;
+  }
+
+  .reference-mappings-filter-row {
+    padding-bottom: 6px;
+  }
+
+  .reference-mapping-table-picker .reference-mapping-picker-menu {
+    width: min(440px, 88vw);
+  }
+
+  .reference-mappings-load-warning {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .project-mapping-drawer-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-mapping-environment-list,
+  .project-mapping-target-controls {
+    grid-template-columns: 1fr;
+  }
+
+}
+
+
+/* Project setup workspace: metadata is required; log paths are optional context. */
+.project-detail-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  padding: 8px 14px;
+}
+
+.project-detail-summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+}
+
+.project-detail-summary > span > svg {
+  color: var(--color-accent-strong);
+}
+
+.project-detail-summary em {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.project-detail-readiness {
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  font-weight: var(--font-weight-semibold) !important;
+}
+
+.project-detail-readiness.ready {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.project-detail-readiness.ready svg {
+  color: var(--color-success);
+}
+
+.project-detail-readiness.needs-metadata {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.project-detail-readiness.needs-metadata svg {
+  color: var(--color-warning);
+}
+
+.project-overview-empty {
+  display: grid;
+  gap: 3px;
+  padding: 16px 14px 10px;
+}
+
+.project-overview-empty strong {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.project-overview-empty span {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.proj-env-card-ready,
+.proj-env-card-needs-metadata {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+
+.proj-env-card-needs-metadata {
+  border-color: color-mix(in srgb, var(--color-warning) 42%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warning-soft) 36%, var(--color-surface));
+}
+
+.proj-env-card-ready:hover,
+.proj-env-card-needs-metadata:hover {
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.proj-env-card-main {
+  min-height: 88px;
+}
+
+.proj-env-card-cta {
+  opacity: 1;
+}
+
+.proj-env-card-reason {
+  color: var(--color-warning);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.proj-env-badge-ready {
+  color: var(--color-success);
+}
+
+.proj-env-badge-needs-metadata {
+  color: var(--color-warning);
+}
+
+.proj-env-card-configure {
+  position: absolute;
+  right: 10px;
+  bottom: 9px;
+  min-height: 28px;
+  margin: 0;
+  opacity: 1;
+  transform: none;
+}
+
+.proj-env-card .proj-env-card-cta {
+  padding-right: 92px;
+}
+
+.project-suggested-environments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  border-top: 1px dashed var(--color-border);
+  margin: 0 12px;
+  padding: 9px 0;
+}
+
+.project-suggested-environments > span {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.project-suggested-environments > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.project-suggested-environments button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  gap: 5px;
+  border: 1px dashed color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 0 8px;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-medium);
+}
+
+.project-suggested-environments button:hover:not(:disabled),
+.project-suggested-environments button:focus-visible {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.project-overview-operation-copy small {
+  line-height: 1.3;
+}
+
+.env-badge-needs-metadata {
+  color: var(--color-warning);
+}
+
+@media (max-width: 620px) {
+  .project-detail-summary {
+    align-items: flex-start;
+    padding: 8px 12px;
+  }
+
+  .project-detail-readiness {
+    flex-basis: 100%;
+  }
+
+  .proj-env-card-configure {
+    min-height: 34px;
+  }
+}
+
+/* Project sections: peer destinations with a clear, accessible active state. */
+.project-section-panel {
+  min-width: 0;
+}
+
+.project-detail-title h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+}
+
+.project-detail-title h2 span {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.content-area:has(.project-detail-page-reference-mappings) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.project-detail-page-reference-mappings {
+  min-height: 0;
+  flex: 1;
+}
+
+.project-detail-page-reference-mappings .project-section-panel-reference-mappings,
+.project-detail-page-reference-mappings .reference-mappings-view,
+.project-detail-page-reference-mappings .reference-mappings-panel {
+  min-height: 0;
+  flex: 1;
+}
+
+.project-detail-page-reference-mappings .project-section-panel-reference-mappings {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-detail-page-reference-mappings .reference-mappings-view,
+.project-detail-page-reference-mappings .reference-mappings-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-detail-page-reference-mappings .reference-mappings-table-wrap {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.project-local-tabs .project-local-tab {
+  --project-section-accent: var(--color-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.project-local-tabs .project-local-tab svg {
+  flex: 0 0 auto;
+  color: var(--project-section-accent);
+  opacity: 0.82;
+}
+
+.project-local-tabs .project-local-tab-environments {
+  --project-section-accent: var(--color-success);
+}
+
+.project-local-tabs .project-local-tab-reference-mappings {
+  --project-section-accent: var(--color-info);
+}
+
+.project-local-tabs .project-local-tab.active {
+  border-color: color-mix(in srgb, var(--project-section-accent) 42%, var(--color-border));
+  color: var(--project-section-accent);
+  box-shadow: inset 0 -2px 0 var(--project-section-accent);
+}
+
+.project-local-tabs .project-local-tab.active svg {
+  opacity: 1;
+}
+
+.project-tab-label-compact {
+  display: none;
+}
+
+.project-local-tabs .project-local-tab:focus-visible {
+  outline-color: var(--project-section-accent);
+  box-shadow: var(--ring-accent-soft), inset 0 -2px 0 var(--project-section-accent);
+}
+
+.reference-mappings-statusline > span {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.project-mapping-registry-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.project-mapping-registry-row:focus-visible > td {
+  background: color-mix(in srgb, var(--color-accent-soft) 52%, var(--color-surface));
+}
+
+@media (max-width: 620px) {
+  .project-local-tabs .project-local-tab {
+    min-height: 38px;
+  }
+
+  .project-local-tabs .project-local-tab-reference-mappings .project-tab-label-full {
+    display: none;
+  }
+
+  .project-local-tabs .project-tab-label-compact {
+    display: inline;
+  }
+
+  .reference-mappings-statusline strong {
+    white-space: normal;
+  }
+}

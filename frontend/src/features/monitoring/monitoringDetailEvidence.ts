@@ -44,6 +44,13 @@ export function isPagedEvidenceKind(kind: MonitoringDetailKind) {
   return kind === "job" || kind === "freshness" || kind === "maintenance" || kind === "volume";
 }
 
+export function mergeDataflowRunDetail(
+  summaryRow: Record<string, unknown>,
+  canonicalRow: Record<string, unknown> | null | undefined,
+) {
+  return canonicalRow ? { ...summaryRow, ...canonicalRow } : summaryRow;
+}
+
 function detailEvidenceValue(detail: MonitoringDetailTarget) {
   if (detail.kind === "job") return String(detail.row.job_id ?? "").trim();
   if (detail.kind === "maintenance") {

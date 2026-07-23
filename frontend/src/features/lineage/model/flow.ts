@@ -58,7 +58,7 @@ export function buildLineageFlow(
         focused,
         issueCount: visible.issueCountByAsset.get(entity.id) ?? 0,
         declarationStatus: isLineageAsset(entity) ? entity.declaration_status : undefined,
-        referenceStatus: isLineageAsset(entity) ? undefined : entity.group_status,
+        referenceStatus: isLineageAsset(entity) ? undefined : entity.resolution.state,
         nodeWidth: NODE_WIDTH,
         selectionState
       }
@@ -122,18 +122,18 @@ export function buildLineageFlow(
         color
       },
       selected,
-      ariaLabel: `${dependency.provenance} dependency, ${dependency.resolution_status}`,
+      ariaLabel: `${dependency.provenance} dependency, ${dependency.resolution.state}`,
       zIndex: selected ? 23 : isRelatedSelection(selectionState) ? 17 : hovered ? 13 : focused ? 9 : 0,
       style: {
         stroke: color,
         strokeDasharray: "6 5",
         strokeLinecap: "round",
         strokeWidth: selected ? 3 : isRelatedSelection(selectionState) ? 2.3 : hovered || focused ? 2.2 : 1.4,
-        opacity: dependency.resolution_status === "resolved_auto" ? 0.82 : 1
+        opacity: dependency.resolution.state === "automatic" ? 0.82 : 1
       },
       data: {
         relationType: "dependency",
-        resolutionStatus: dependency.resolution_status,
+        resolutionStatus: dependency.resolution.state,
         routeLane: dependencyRouteLanes.get(dependency.id) ?? 0,
         selectionState,
       }
@@ -163,7 +163,7 @@ function presentReference(reference: LineageReference) {
   return {
     locator: reference.display_name,
     connection: referenceSubtitle(reference),
-    badge: reference.group_status.toUpperCase(),
+    badge: reference.resolution.state.toUpperCase(),
     iconKind: assetIconKind(referenceObjectType),
     fullIdentity: reference.normalized_value
   };

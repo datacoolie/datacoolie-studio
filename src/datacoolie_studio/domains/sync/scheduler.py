@@ -9,10 +9,16 @@ from sqlalchemy import select
 
 from datacoolie_studio.db.models import EnvironmentSource, utc_now
 from datacoolie_studio.db.session import create_session
-from datacoolie_studio.domains.code_artifacts.service import ensure_code_artifact_snapshot, latest_code_artifact_snapshot
+from datacoolie_studio.domains.code_artifacts.service import (
+    code_artifact_materialization,
+    ensure_code_artifact_materialization,
+)
 from datacoolie_studio.domains.logs.cache import refresh_log_source_cache
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
-from datacoolie_studio.domains.metadata.service import ensure_metadata_snapshot, latest_metadata_snapshot
+from datacoolie_studio.domains.metadata.service import (
+    ensure_metadata_materialization,
+    metadata_materialization,
+)
 from datacoolie_studio.domains.studio_settings.service import source_check_interval_seconds
 from datacoolie_studio.domains.sync import service as sync
 
@@ -49,7 +55,11 @@ def configured_source_check_interval_seconds() -> int:
 
 
 def run_automatic_source_checks_once() -> int:
-    """Refresh enabled Metadata and Code only when their source revision changed."""
+    """Refresh enabled Metadata and Code only when their source revision changed.
+
+    Logs are intentionally excluded: they are synced only through a schedule
+    (``run_due_schedules_once``) or a manual refresh, never automatically here.
+    """
     session = create_session()
     refreshed = 0
     try:
@@ -119,16 +129,18 @@ def _is_due(source: EnvironmentSource, now: datetime) -> bool:
 
 def _refresh_automatic_source(session, source: EnvironmentSource) -> bool:
     if source.source_kind == "metadata":
-        previous = latest_metadata_snapshot(session, source.id)
+        previous = metadata_materialization(session, source.id)
+        previous_fingerprint = previous.materialization_fingerprint if previous else None
         try:
-            current = ensure_metadata_snapshot(session, source)
+            current = ensure_metadata_materialization(session, source)
         except MetadataReadError:
             return False
-        return previous is None or previous.id != current.id
+        return previous_fingerprint != current.materialization_fingerprint
     if source.source_kind == "code":
-        previous = latest_code_artifact_snapshot(session, source.id)
-        current = ensure_code_artifact_snapshot(session, source)
-        return current is not None and (previous is None or previous.id != current.id)
+        previous = code_artifact_materialization(session, source.id)
+        previous_fingerprint = previous.materialization_fingerprint if previous else None
+        current = ensure_code_artifact_materialization(session, source)
+        return current is not None and previous_fingerprint != current.materialization_fingerprint
     return False
 
 

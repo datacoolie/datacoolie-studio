@@ -33,6 +33,7 @@ describe("Monitoring failure chart semantics", () => {
     expect(series.map((item) => item.name)).toEqual(["Source", "Transform", "Destination", "Overhead", "Unknown"]);
     expect(series.every((item) => item.stack === "failures")).toBe(true);
     expect(series.map((item) => item.data)).toEqual([[2], [1], [1], [1], [0]]);
+    expect((option as { legend?: unknown }).legend).toEqual({ show: false });
   });
 
   it("keeps category on the Y axis and assigns unattributed totals to Unknown", () => {
@@ -46,6 +47,7 @@ describe("Monitoring failure chart semantics", () => {
     expect(yAxisLabels(option)).toEqual(["Other"]);
     expect(unknown?.data).toEqual([3]);
     expect(unknown?.itemStyle?.color).not.toBe(overhead?.itemStyle?.color);
+    expect((option as { legend?: unknown }).legend).toEqual({ show: false });
   });
 
   it("uses distinct entity-level colors for dataflow and job failure trends", () => {

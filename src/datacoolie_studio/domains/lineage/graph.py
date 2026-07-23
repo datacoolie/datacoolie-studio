@@ -8,6 +8,12 @@ from typing import Any
 from datacoolie_studio.domains.assets.reference_identity import canonical_reference_id, normalize_reference_signature
 from datacoolie_studio.domains.assets.registry import AssetRegistry
 from datacoolie_studio.domains.assets.resolver import Resolution
+from datacoolie_studio.domains.assets.reference_resolution import (
+    ReferenceResolution,
+    group_resolution,
+    merge_resolution,
+    unresolved_resolution,
+)
 from datacoolie_studio.domains.lineage.models import (
     LineageDataflow,
     LineageDependency,
@@ -36,7 +42,7 @@ def build_typed_graph(
     serialized_diagnostics = [item.to_dict() for item in diagnostics]
     summary = _summary(assets, references, typed_dataflows, dependencies, serialized_diagnostics)
     return {
-        "schema_version": "lineage.v2",
+        "schema_version": "lineage.v3",
         "summary": summary,
         "assets": sorted(assets, key=lambda item: (str(item.get("display_name", "")).lower(), item["id"])),
         "references": [
@@ -196,9 +202,9 @@ def _add_resolution(
         reference_occurrences[occurrence.id] = occurrence
         existing_occurrence = occurrence
     else:
-        existing_occurrence.resolution_status = _merge_resolution_status(
-            existing_occurrence.resolution_status,
-            occurrence.resolution_status,
+        existing_occurrence.resolution = merge_resolution(
+            existing_occurrence.resolution,
+            occurrence.resolution,
         )
         if existing_occurrence.resolved_asset_id is None and occurrence.resolved_asset_id is not None:
             existing_occurrence.resolved_asset_id = occurrence.resolved_asset_id
@@ -226,9 +232,9 @@ def _add_resolution(
     resolved_asset_id = resolution.asset_id or None
     if not resolved_asset_id:
         diagnostics.append(LineageDiagnostic(
-            severity="warning" if resolution.status in {"ambiguous", "mapping_target_missing"} else "info",
-            code=f"dependency_{resolution.status}",
-            message=f"{resolution.status.replace('_', ' ')} input: {resolution.evidence.value}",
+            severity="warning" if resolution.resolution.reason in {"multiple_matches", "target_missing"} else "info",
+            code=f"dependency_{resolution.resolution.reason or 'unresolved'}",
+            message=f"{(resolution.resolution.reason or 'unresolved').replace('_', ' ')} input: {resolution.evidence.value}",
             asset_id=target_asset_id,
             dataflow_id=dataflow.dataflow_id,
             metadata_source_id=dataflow.metadata_source_id,
@@ -248,7 +254,7 @@ def _add_resolution(
             consumer_asset_id=target_asset_id,
             kind="reads",
             provenance=provenance,
-            resolution_status=resolution.status,
+            resolution=resolution.resolution,
             resolution_method=resolution.method,
             reference_id=existing_reference.id,
             reference_occurrence_id=existing_occurrence.id,
@@ -256,7 +262,7 @@ def _add_resolution(
         )
         dependencies[dependency_id] = dependency
     else:
-        dependency.resolution_status = _merge_resolution_status(dependency.resolution_status, resolution.status)
+        dependency.resolution = merge_resolution(dependency.resolution, resolution.resolution)
         if resolved_asset_id:
             dependency.resolved_asset_id = resolved_asset_id
     _append_observation(dependency.observations, evidence)
@@ -291,7 +297,7 @@ def _add_unresolved_diagnostic_reference(
         reference_type="unknown",
         display_name=_compact_reference_name(raw_value),
         normalized_value=signature.normalized_value,
-        group_status="unresolved",
+        resolution=unresolved_resolution("no_match"),
         resolved_asset_id=None,
     ))
     occurrence = reference_occurrences.setdefault(occurrence_id, LineageReferenceOccurrence(
@@ -299,7 +305,7 @@ def _add_unresolved_diagnostic_reference(
         reference_id=reference_id,
         reference_type="unknown",
         display_name=_compact_reference_name(raw_value),
-        resolution_status="unresolved",
+        resolution=unresolved_resolution("no_match"),
         raw_value=raw_value,
         normalized_value=signature.normalized_value,
         context_scope=None,
@@ -323,7 +329,7 @@ def _add_unresolved_diagnostic_reference(
         consumer_asset_id=target_asset_id,
         kind="reads",
         provenance=provenance,
-        resolution_status="unresolved",
+        resolution=unresolved_resolution("no_match"),
         resolution_method=str(diagnostic.get("code") or "unresolved_reference"),
         reference_id=reference_id,
         reference_occurrence_id=occurrence_id,
@@ -343,7 +349,7 @@ def _reference_from_resolution(
         reference_type=signature.reference_type,
         display_name=_compact_reference_name(evidence.value),
         normalized_value=signature.normalized_value,
-        group_status=_initial_group_status(resolution.status),
+        resolution=resolution.resolution,
         resolved_asset_id=resolution.asset_id,
         resolved_asset_ids=([resolution.asset_id] if resolution.asset_id else []),
         candidate_asset_ids=resolution.candidates[:MAX_CANDIDATES],
@@ -378,7 +384,7 @@ def _reference_occurrence_from_resolution(
         reference_id=reference_id,
         reference_type=signature.reference_type,
         display_name=_compact_reference_name(evidence.value),
-        resolution_status=_normalize_resolution_status(resolution.status),
+        resolution=resolution.resolution,
         raw_value=evidence.value,
         normalized_value=signature.normalized_value,
         context_scope=resolution.context_scope,
@@ -500,7 +506,8 @@ def _summary(
     dependencies: dict[str, LineageDependency],
     diagnostics: list[Any],
 ) -> dict[str, int]:
-    statuses = Counter(item.resolution_status for item in dependencies.values())
+    dependency_states = Counter(item.resolution.state for item in dependencies.values())
+    reference_states = Counter(item.resolution.state for item in references.values())
     return {
         "assets": len(assets),
         "references": len(references),
@@ -508,12 +515,12 @@ def _summary(
         "dependencies": len(dependencies),
         "stitched_assets": sum(1 for item in assets if len(item.get("metadata_source_ids") or []) > 1),
         "declared_assets": sum(1 for item in assets if item["declaration_status"] == "declared"),
-        "resolved_auto_dependencies": statuses["resolved_auto"],
-        "resolved_dependencies": statuses["resolved_auto"] + statuses["resolved_manual"],
-        "resolved_manual_dependencies": statuses["resolved_manual"],
-        "ambiguous_dependencies": statuses["ambiguous"],
-        "unresolved_dependencies": statuses["unresolved"],
-        "mapping_target_missing_dependencies": statuses["mapping_target_missing"],
+        "automatic_references": reference_states["automatic"],
+        "manual_references": reference_states["manual"],
+        "unresolved_references": reference_states["unresolved"],
+        "automatic_dependencies": dependency_states["automatic"],
+        "manual_dependencies": dependency_states["manual"],
+        "unresolved_dependencies": dependency_states["unresolved"],
         "diagnostics": len(diagnostics),
     }
 
@@ -574,9 +581,9 @@ def _finalize_references(
     dependencies: dict[str, LineageDependency],
 ) -> None:
     counts = Counter(item.reference_id for item in dependencies.values())
-    statuses_by_reference: dict[str, list[str]] = {}
+    resolutions_by_reference: dict[str, list[ReferenceResolution]] = {}
     for dependency in dependencies.values():
-        statuses_by_reference.setdefault(dependency.reference_id, []).append(dependency.resolution_status)
+        resolutions_by_reference.setdefault(dependency.reference_id, []).append(dependency.resolution)
     for reference in references.values():
         reference.dependency_count = int(counts.get(reference.id, 0))
         reference.resolved_asset_ids = sorted(set(reference.resolved_asset_ids))
@@ -584,32 +591,11 @@ def _finalize_references(
         reference.occurrence_ids = sorted(set(reference.occurrence_ids))
         reference.consumer_asset_ids = sorted(set(reference.consumer_asset_ids))
         reference.provenances = sorted(set(reference.provenances))
-        reference.group_status = _reference_group_status(statuses_by_reference.get(reference.id, []), reference.resolved_asset_ids)
+        reference.resolution = group_resolution(
+            resolutions_by_reference.get(reference.id, []),
+            reference.resolved_asset_ids,
+        )
         reference.resolved_asset_id = reference.resolved_asset_ids[0] if len(reference.resolved_asset_ids) == 1 else None
-
-
-def _reference_group_status(statuses: list[str], resolved_asset_ids: list[str]) -> str:
-    normalized = [_normalize_resolution_status(value) for value in statuses]
-    if len(resolved_asset_ids) > 1:
-        return "resolved_mixed"
-    if resolved_asset_ids:
-        return "resolved_single" if all(value in {"resolved_auto", "resolved_manual"} for value in normalized) else "partially_resolved"
-    if "ambiguous" in normalized:
-        return "ambiguous"
-    if "mapping_target_missing" in normalized:
-        return "mapping_target_missing"
-    return "unresolved"
-
-
-def _initial_group_status(status: str) -> str:
-    normalized = _normalize_resolution_status(status)
-    if normalized in {"resolved_auto", "resolved_manual"}:
-        return "resolved_single"
-    if normalized == "ambiguous":
-        return "ambiguous"
-    if normalized == "mapping_target_missing":
-        return "mapping_target_missing"
-    return "unresolved"
 
 
 def _add_unique(values: list[str], value: str | None, *, limit: int | None = None) -> None:
@@ -623,30 +609,6 @@ def _add_unique(values: list[str], value: str | None, *, limit: int | None = Non
 def _dependency_id(reference_id: str, target_asset_id: str, kind: str) -> str:
     value = f"reference:{reference_id}:{target_asset_id}:{kind}"
     return f"dependency:{_digest(value)}"
-
-
-def _merge_resolution_status(current: str, candidate: str) -> str:
-    ranks = {
-        "unresolved": 0,
-        "mapping_target_missing": 1,
-        "ambiguous": 2,
-        "resolved_auto": 3,
-        "resolved_manual": 4,
-    }
-    current_status = _normalize_resolution_status(current)
-    candidate_status = _normalize_resolution_status(candidate)
-    if ranks[candidate_status] >= ranks[current_status]:
-        return candidate_status
-    return current_status
-
-
-def _normalize_resolution_status(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized == "resolved":
-        return "resolved_auto"
-    if normalized in {"resolved_auto", "resolved_manual", "ambiguous", "unresolved", "mapping_target_missing"}:
-        return normalized
-    return "unresolved"
 
 
 def _provenance(value: str) -> str:

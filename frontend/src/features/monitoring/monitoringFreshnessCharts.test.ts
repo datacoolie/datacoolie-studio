@@ -21,8 +21,8 @@ describe("Monitoring freshness chart semantics", () => {
   it("fills missing dates in the watermark timeline and renders missing rates as zero", () => {
     const rows = fillMissingWatermarkMovementTrendRows(
       [
-        { date: "2026-06-18", bucket: "2026-06-18", advanced: 2, total: 2, advanced_rate: 100 },
-        { date: "2026-06-20", bucket: "2026-06-20", unchanged: 1, total: 1, advanced_rate: 0 },
+        { date: "2026-06-18T07:00:00+07:00", bucket: "2026-06-18T07:00:00+07:00", grain: "day", advanced: 2, adjusted: 1, watermark_enabled_runs: 2, advanced_rate: 100 },
+        { date: "2026-06-20T07:00:00+07:00", bucket: "2026-06-20T07:00:00+07:00", grain: "day", unchanged: 1, watermark_enabled_runs: 1, advanced_rate: 0 },
       ],
       {
         ...DEFAULT_MONITORING_FILTERS,
@@ -32,15 +32,17 @@ describe("Monitoring freshness chart semantics", () => {
         endTime: "2026-06-20T23:59:59Z",
       },
       { min: "2026-06-18", max: "2026-06-20" },
-      "UTC",
+      "Asia/Saigon",
       "day",
     );
 
-    expect(rows.map((row) => row.bucket)).toEqual(["2026-06-18", "2026-06-19", "2026-06-20"]);
-    expect(rows[1]).toMatchObject({ advanced: 0, unchanged: 0, adjusted: 0, total: 0, advanced_rate: 0 });
+    expect(rows.map((row) => row.bucket)).toEqual(["2026-06-18", "2026-06-19", "2026-06-20", "2026-06-21"]);
+    expect(rows[1]).toMatchObject({ advanced: 0, unchanged: 0, adjusted: 0, watermark_enabled_runs: 0, advanced_rate: 0 });
 
     const option = watermarkMovementTrendOption(rows) as { series?: Array<{ name?: string; data?: unknown[] }> };
-    expect(option.series?.find((series) => series.name === "Advanced %")?.data).toEqual([100, 0, 0]);
+    expect(option.series?.find((series) => series.name === "Advanced")?.data).toEqual([2, 0, 0, 0]);
+    expect(option.series?.find((series) => series.name === "Advanced %")?.data).toEqual([100, 0, 0, 0]);
+    expect((watermarkAdjustmentOption(rows) as { series?: Array<{ data?: unknown[] }> }).series?.[0]?.data).toEqual([1, 0, 0, 0]);
   });
 
   it("colors age by the fixed seven-day threshold instead of run status", () => {
@@ -56,10 +58,10 @@ describe("Monitoring freshness chart semantics", () => {
 
   it("uses distinct age-band colors and reserves warning colors for stale bands", () => {
     const option = freshnessAgeDistributionOption([
-      { bucket: "<24h", dataflows: 1 },
-      { bucket: "1-3d", dataflows: 2 },
-      { bucket: "3-7d", dataflows: 3 },
-      { bucket: "7-30d", dataflows: 4 },
+      { bucket: "≤1d", dataflows: 1 },
+      { bucket: "1–3d", dataflows: 2 },
+      { bucket: "3–7d", dataflows: 3 },
+      { bucket: "7–30d", dataflows: 4 },
       { bucket: ">30d", dataflows: 5 },
       { bucket: "Unknown", dataflows: 6 },
     ]);
@@ -83,19 +85,58 @@ describe("Monitoring freshness chart semantics", () => {
     expect(option.legend?.show).toBe(false);
   });
 
+  it("shows the advanced rate only once in the movement tooltip", () => {
+    const option = watermarkMovementTrendOption([
+      { date: "2026-07-15", advanced: 2, unchanged: 1, watermark_enabled_runs: 3, advanced_rate: 66.67 },
+    ]) as { tooltip?: { formatter?: (params: unknown) => string } };
+    const tooltip = option.tooltip?.formatter?.([
+      { dataIndex: 0, seriesName: "Advanced", value: 2, marker: "" },
+      { dataIndex: 0, seriesName: "Advanced %", value: 66.67, marker: "" },
+    ]);
+
+    expect(tooltip).toContain("Advanced rate: 66.67%");
+    expect(tooltip).not.toContain("Advanced %:");
+  });
+
+  it.each([
+    ["freshness age distribution", freshnessAgeDistributionOption([{ bucket: "≤1d", dataflows: 130 }])],
+    ["watermark adjustments", watermarkAdjustmentOption([{ date: "2026-07-15", adjusted: 12 }])],
+  ])("lets ECharts auto-scale the %s Y-axis", (_name, option) => {
+    const yAxis = (option as { yAxis?: { max?: unknown } }).yAxis;
+
+    expect(yAxis?.max).toBeUndefined();
+  });
+
   it("keeps the coverage legend out of the chart plot area", () => {
     const option = watermarkCoverageByStageOption([
-      { stage: "bronze", total: 2, enabled: 1, coverage_rate: 50 },
+      { stage: "bronze", observed_dataflows: 2, watermark_enabled_dataflows: 1, not_configured_dataflows: 1, coverage_rate: 50 },
     ]) as { legend?: { show?: boolean } };
 
     expect(option.legend?.show).toBe(false);
   });
 
+  it("maps the canonical SQL aggregate fields into non-zero chart data", () => {
+    const age = freshnessAgeDistributionOption([{ bucket: "≤1d", dataflows: 130 }]);
+    const coverage = watermarkCoverageByStageOption([{
+      stage: "bronze",
+      observed_dataflows: 12,
+      watermark_enabled_dataflows: 3,
+      not_configured_dataflows: 9,
+      coverage_rate: 25,
+    }]);
+    const streak = skippedStreakDistributionOption([{ bucket: "2–3", dataflows: 14 }]);
+
+    expect((firstSeries(age)?.data?.[0] as { value: number }).value).toBe(130);
+    expect(((coverage as { series?: ChartSeries[] }).series ?? []).map((series) => series.data?.[0])).toEqual([25, 75]);
+    expect((streak as { xAxis?: { data?: string[] } }).xAxis?.data).toEqual(["2–3"]);
+    expect(firstSeries(streak)?.data).toEqual([14]);
+  });
+
   it.each([
-    ["movement trend", watermarkMovementTrendOption([{ date: "2026-07-15", total: 1, advanced: 1, advanced_rate: 100 }])],
+    ["movement trend", watermarkMovementTrendOption([{ date: "2026-07-15", watermark_enabled_runs: 1, advanced: 1, advanced_rate: 100 }])],
     ["age distribution", freshnessAgeDistributionOption([{ bucket: "1-3d", dataflows: 1 }])],
     ["consecutive skipped", skippedStreakDistributionOption([{ bucket: ">7", dataflows: 1 }])],
-    ["watermark adjustments", watermarkAdjustmentOption([{ date: "2026-07-15", adjusted: 1, total: 1 }])],
+    ["watermark adjustments", watermarkAdjustmentOption([{ date: "2026-07-15", adjusted: 1, watermark_enabled_runs: 1 }])],
   ])("keeps the %s X-axis five pixels from the panel bottom", (_name, option) => {
     const grid = (option as { grid?: { bottom?: number; containLabel?: boolean } }).grid;
 
@@ -105,7 +146,7 @@ describe("Monitoring freshness chart semantics", () => {
 
   it.each([
     ["oldest dataflows", freshnessAgeByDataflowOption(Array.from({ length: 9 }, (_, index) => ({ dataflow_name: `flow_${index}`, age_days: index + 1 })))],
-    ["watermark coverage", watermarkCoverageByStageOption(Array.from({ length: 9 }, (_, index) => ({ stage: `stage_${index}`, total: 2, enabled: 1, coverage_rate: 50 })))],
+    ["watermark coverage", watermarkCoverageByStageOption(Array.from({ length: 9 }, (_, index) => ({ stage: `stage_${index}`, observed_dataflows: 2, watermark_enabled_dataflows: 1, not_configured_dataflows: 1, coverage_rate: 50 })))],
   ])("locks the %s vertical navigator to the shared horizontal-bar scroll pattern", (_name, option) => {
     const dataZoom = (option as { dataZoom?: Array<Record<string, unknown>> }).dataZoom ?? [];
     const slider = dataZoom.find((item) => item.type === "slider");

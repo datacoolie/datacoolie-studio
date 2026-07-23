@@ -39,7 +39,7 @@ describe("assets presentation", () => {
     reference_type: "table_reference",
     normalized_value: "silver.customer",
     display_name: "silver.customer",
-    group_status: "ambiguous",
+    resolution: { state: "unresolved", reason: "multiple_matches" },
     resolved_asset_id: null,
     resolved_asset_ids: [],
     resolved_asset: null,
@@ -70,8 +70,8 @@ describe("assets presentation", () => {
     attention_count: 1,
     attention_items: [{
       severity: "warning",
-      code: "reference_ambiguous",
-      message: "ambiguous reference: silver.customer",
+      code: "reference_multiple_matches",
+      message: "multiple matches reference: silver.customer",
       source_type: "sql_reference",
       subject_type: "reference",
       reference_id: "reference:abc",
@@ -104,7 +104,7 @@ describe("assets presentation", () => {
     const presented = presentReference(reference);
     expect(presented.badge).toBe("REF");
     expect(presented.fullIdentity).toContain("silver.customer");
-    expect(referenceSearchValues(reference)).toContain("ambiguous");
+    expect(referenceSearchValues(reference)).toContain("multiple_matches");
   });
 
   it("shows useful canonical reference context without inferred scope", () => {
@@ -145,7 +145,7 @@ describe("assets presentation", () => {
   });
 
   it("summarizes attention origin, condition, and fix target", () => {
-    expect(attentionContextLine(reference.attention_items[0])).toBe("sql_reference · ambiguous · fix: reference mapping");
+    expect(attentionContextLine(reference.attention_items[0])).toBe("sql_reference · multiple matches · fix: reference mapping");
     expect(attentionContextLine({
       ...reference.attention_items[0],
       code: "reference_unresolved",
@@ -154,14 +154,14 @@ describe("assets presentation", () => {
   });
 
   it("uses shared primary resolution labels and retains technical detail", () => {
-    expect(referenceResolutionPresentation({ ...reference, group_status: "resolved_single" })).toEqual({
+    expect(referenceResolutionPresentation({ ...reference, resolution: { state: "automatic" } })).toEqual({
       state: "automatic",
       label: "Automatic",
       detail: "Resolved target",
     });
     expect(referenceResolutionPresentation({
       ...reference,
-      group_status: "resolved_single",
+      resolution: { state: "manual" },
       manual_mapping: { mapping_id: 7 },
     })).toEqual({
       state: "manual",

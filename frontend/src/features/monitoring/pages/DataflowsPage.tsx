@@ -2,6 +2,7 @@ import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/typ
 import type { MonitoringFilters } from "../monitoringFilters";
 import {
   DataflowEndpointHealthPanel,
+  LifecycleStatusValues,
   DataflowNameStatusHealthPanel,
   DataflowRunsTable,
   DetailMetric,
@@ -12,6 +13,8 @@ import {
   ReportPanel,
   RuntimePhaseContribution,
   RuntimePhaseLegend,
+  StatusHealthLegend,
+  StatusTrendLegend,
   type TableSort,
   TablePager,
   WindowPairDetail,
@@ -23,6 +26,7 @@ import {
   formatNumber,
   formatPercent,
   monitoringTimezone,
+  runtimePhaseContributionTooltip,
   successRateIntent
 } from "../monitoringShared";
 
@@ -77,8 +81,10 @@ export function DataflowsPage({
             <WindowPairDetail
               firstLabel="24h"
               firstValue={formatNumber(last24Window.dataflow_runs ?? 0)}
+              firstTone="headline"
               secondLabel="7d"
               secondValue={formatNumber(last7Window.dataflow_runs ?? 0)}
+              secondTone="headline"
             />
           }
           intent="neutral"
@@ -91,10 +97,10 @@ export function DataflowsPage({
             <WindowPairDetail
               firstLabel="24h"
               firstValue={formatPercent(last24Window.dataflow_success_rate ?? 0)}
-              firstTone={successRateIntent(last24Window.dataflow_success_rate ?? 0, last24Window.dataflow_failure_rate ?? 0, (last24Window.dataflow_succeeded ?? 0) + (last24Window.dataflow_failed ?? 0))}
+              firstTone={rateIntent}
               secondLabel="7d"
               secondValue={formatPercent(last7Window.dataflow_success_rate ?? 0)}
-              secondTone={successRateIntent(last7Window.dataflow_success_rate ?? 0, last7Window.dataflow_failure_rate ?? 0, (last7Window.dataflow_succeeded ?? 0) + (last7Window.dataflow_failed ?? 0))}
+              secondTone={rateIntent}
             />
           }
           intent={rateIntent}
@@ -120,15 +126,33 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Skipped / Running / Pending"
-          value={`${formatNumber(kpis.skipped ?? 0)} / ${formatNumber(kpis.running ?? 0)} / ${formatNumber(kpis.pending ?? 0)}`}
+          value={
+            <LifecycleStatusValues
+              skipped={kpis.skipped ?? 0}
+              running={kpis.running ?? 0}
+              pending={kpis.pending ?? 0}
+            />
+          }
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={`${formatNumber(last24Window.dataflow_skipped ?? 0)} / ${formatNumber(last24Window.dataflow_running ?? 0)} / ${formatNumber(last24Window.dataflow_pending ?? 0)}`}
-              firstTone={(last24Window.dataflow_skipped ?? 0) ? "warning" : "neutral"}
+              firstValue={
+                <LifecycleStatusValues
+                  skipped={last24Window.dataflow_skipped ?? 0}
+                  running={last24Window.dataflow_running ?? 0}
+                  pending={last24Window.dataflow_pending ?? 0}
+                />
+              }
+              firstTone="neutral"
               secondLabel="7d"
-              secondValue={`${formatNumber(last7Window.dataflow_skipped ?? 0)} / ${formatNumber(last7Window.dataflow_running ?? 0)} / ${formatNumber(last7Window.dataflow_pending ?? 0)}`}
-              secondTone={(last7Window.dataflow_skipped ?? 0) ? "warning" : "neutral"}
+              secondValue={
+                <LifecycleStatusValues
+                  skipped={last7Window.dataflow_skipped ?? 0}
+                  running={last7Window.dataflow_running ?? 0}
+                  pending={last7Window.dataflow_pending ?? 0}
+                />
+              }
+              secondTone="neutral"
             />
           }
           intent={(kpis.running ?? 0) || (kpis.pending ?? 0) ? "warning" : "neutral"}
@@ -161,8 +185,8 @@ export function DataflowsPage({
         <section className="monitoring-dataflow-primary-grid">
           <ReportPanel
             title="Dataflow status trend"
-            subtitle="runs by status and success rate"
             titleTooltip="Dataflow run status over the selected time range. Success rate line uses succeeded / (succeeded + failed)."
+            headerAction={<StatusTrendLegend />}
           >
             <div className="monitoring-job-chart-fill">
               <ReportChart
@@ -186,7 +210,7 @@ export function DataflowsPage({
         <section className="monitoring-dataflow-secondary-grid">
           <ReportPanel
             title="Stage phase contribution"
-            titleTooltip="Shows source, transform, and destination runtime contribution for dataflow runs grouped by stage. Stage is used as a diagnosis category; the underlying grain remains dataflow runs."
+            titleTooltip={runtimePhaseContributionTooltip("stage")}
             headerAction={<RuntimePhaseLegend />}
           >
             <RuntimePhaseContribution
@@ -205,8 +229,8 @@ export function DataflowsPage({
           </ReportPanel>
           <ReportPanel
             title="Dataflow name x status health"
-            subtitle="runs by dataflow name"
             titleTooltip="Groups dataflow runs by dataflow_name and splits them by status. Sort prioritizes failed, active, slow, and high-volume dataflows."
+            headerAction={<StatusHealthLegend />}
           >
             <DataflowNameStatusHealthPanel rows={dataflowNameStatusRows} />
           </ReportPanel>

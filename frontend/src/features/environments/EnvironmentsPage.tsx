@@ -53,8 +53,12 @@ export function EnvironmentsPage({
   }
 
   async function handleDelete(id: number) {
-    await onDeleteEnvironment(id);
-    setDeletingId(null);
+    try {
+      await onDeleteEnvironment(id);
+      setDeletingId(null);
+    } catch {
+      // The workspace renders the mutation error and the confirmation stays open.
+    }
   }
 
   return (

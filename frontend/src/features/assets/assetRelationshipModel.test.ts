@@ -14,7 +14,7 @@ describe("assetRelationshipGroups", () => {
       id: "dependency:input",
       kind: "reads",
       provenance: "sql",
-      resolution_status: "resolved_auto",
+      resolution: { state: "automatic" },
       resolution_method: "canonical_identity",
       reference_id: "reference:orders",
       resolved_asset_id: upstream.id,
@@ -35,10 +35,10 @@ describe("assetRelationshipGroups", () => {
       id: "dependency:output",
       kind: "reads",
       provenance: "python",
-      resolution_status: "resolved_auto",
+      resolution: { state: "automatic" },
       resolution_method: "canonical_identity",
       target_asset: downstream,
-      reference: { id: "reference:downstream", display_name: "orders", reference_type: "table", resolution_status: "resolved_auto" },
+      reference: { id: "reference:downstream", display_name: "orders", reference_type: "table", resolution: { state: "automatic" } },
     }];
 
     const groups = assetRelationshipGroups(detail, "downstream");

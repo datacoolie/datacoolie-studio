@@ -16,7 +16,7 @@ export type AssetRelationshipVia =
       dependencyKind: string;
       provenance: string;
       resolutionMethod: string;
-      resolutionStatus: string;
+      resolutionState: string;
       referenceId: string | null;
     };
 
@@ -66,7 +66,7 @@ function addUpstreamDependency(
     dependencyKind: dependency.kind,
     provenance: dependency.provenance,
     resolutionMethod: dependency.resolution_method,
-    resolutionStatus: dependency.resolution_status,
+    resolutionState: dependency.resolution.state,
     referenceId: dependency.reference_id || dependency.source_reference?.id || null,
   });
 }
@@ -81,7 +81,7 @@ function addDownstreamDependency(
     dependencyKind: dependency.kind,
     provenance: dependency.provenance,
     resolutionMethod: dependency.resolution_method,
-    resolutionStatus: dependency.resolution_status,
+    resolutionState: dependency.resolution.state,
     referenceId: dependency.reference?.id || null,
   });
 }

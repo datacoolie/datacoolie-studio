@@ -16,3 +16,4 @@ frontend/vite.config.d.ts
 skills-lock.json
 .agents/
 .ruff_cache/
+.scratch/

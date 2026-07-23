@@ -5,7 +5,7 @@ import {
   freshnessRunTimeLines,
   isFreshnessWatermarkConfigured,
 } from "./MonitoringDetailDrawer";
-import { formatPhasePercent } from "./monitoringShared";
+import { formatPhasePercent, monitoringEndpointPresentation } from "./monitoringShared";
 
 describe("Freshness registry drawer semantics", () => {
   it("formats runtime phase contribution with one decimal place", () => {
@@ -59,5 +59,21 @@ describe("Freshness registry drawer semantics", () => {
       .toBe("Fn_Source - python function");
     expect(freshnessEndpointLabel({ destination_connection_name: "Lakehouse_Gold", destination_table: "Orders" }, "destination"))
       .toBe("Lakehouse_Gold - Orders");
+  });
+
+  it("uses one asset resolver for registry cells and drawer routes", () => {
+    const source = monitoringEndpointPresentation({
+      source_name: "landing",
+      source_format: "parquet",
+      source_path: "/lakehouse/raw/orders/part-001.parquet",
+    }, "source");
+    const destination = monitoringEndpointPresentation({
+      destination_name: "warehouse",
+      destination_format: "delta",
+      destination_full_table: "catalog.curated.orders",
+    }, "destination");
+
+    expect(source.locator).toBe("part-001.parquet");
+    expect(destination.locator).toBe("orders");
   });
 });

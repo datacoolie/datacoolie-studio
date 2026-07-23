@@ -190,10 +190,36 @@ export function diagnosticsCoverageSummary(rows: DiagnosticsRow[]) {
   const issues = normalized.filter((row) => row.actionable && (row.severity === "bad" || row.severity === "error" || row.severity === "warning"));
   const conditional = normalized.filter((row) => row.applicability === "conditional");
   const ready = normalized.filter((row) => row.actionable && row.severity === "good");
+  const unavailable = normalized.filter((row) => row.actionable && row.severity === "info");
   return {
     issues,
     conditional,
     ready,
-    visible: [...issues, ...conditional],
+    unavailable,
+    visible: normalized.slice().sort((left, right) => {
+      const rank = (row: DiagnosticsRow & { applicability: string; actionable: boolean; severity: string }) => {
+        if (row.actionable && ["bad", "error", "warning"].includes(row.severity)) return 0;
+        if (row.applicability === "conditional") return 1;
+        if (row.actionable && row.severity === "good") return 2;
+        return 3;
+      };
+      return rank(left) - rank(right)
+        || String(left.record_type ?? "").localeCompare(String(right.record_type ?? ""))
+        || String(left.group ?? "").localeCompare(String(right.group ?? ""));
+    }),
+  };
+}
+
+export function diagnosticsLinkedJobRow(row: DiagnosticsRow, evidence: DiagnosticsRow) {
+  const category = String(row.category ?? "").trim().toLowerCase();
+  if (category === "orphan dataflow job id") return null;
+  if (!["job without dataflows", "reconciliation mismatch"].includes(category)) return null;
+  const jobId = String(evidence.job_id ?? row.job_id ?? "").trim();
+  if (!jobId) return null;
+  return {
+    ...row,
+    ...evidence,
+    job_id: jobId,
+    status: evidence.job_status ?? row.job_status ?? row.status,
   };
 }

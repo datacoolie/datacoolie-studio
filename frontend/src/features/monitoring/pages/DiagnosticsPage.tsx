@@ -118,7 +118,7 @@ export function DiagnosticsPage({
               <DetailMetric label="conditional" value={formatNumber(coverageSummary.conditional.length)} tone="neutral" />
             </span>
           }
-          title="Coverage for evidence fields used by Monitoring. Watermark and maintenance groups are conditional context and do not create incidents until applicability is known."
+          title="Coverage across required evidence fields used by Monitoring. Conditional watermark and maintenance groups are shown separately and do not reduce this rate."
           intent={fieldIssues ? "warning" : "good"}
           accent="intent"
         />
@@ -184,6 +184,7 @@ function DiagnosticsCoverageHeader({ summary }: { summary: ReturnType<typeof dia
       <span className={summary.issues.length ? "is-warning" : "is-clear"}>{formatNumber(summary.issues.length)} {summary.issues.length === 1 ? "issue" : "issues"}</span>
       <span>{formatNumber(summary.ready.length)} ready</span>
       <span className="is-conditional">{formatNumber(summary.conditional.length)} conditional</span>
+      {summary.unavailable.length ? <span className="is-unavailable">{formatNumber(summary.unavailable.length)} unavailable</span> : null}
     </span>
   );
 }
@@ -221,13 +222,13 @@ function DiagnosticsLinkageStatus({ row }: { row: DiagnosticsRow }) {
 }
 
 function FieldCompleteness({ rows }: { rows: DiagnosticsRow[] }) {
-  if (!rows.length) return <div className="table-empty diagnostics-coverage-clear">All required evidence groups are ready.</div>;
+  if (!rows.length) return <div className="table-empty diagnostics-coverage-clear">No evidence groups available.</div>;
   return (
     <DataTable
       rows={rows}
       columns={[
         { key: "record_type", label: "Type", sortable: true, autoFit: true, render: (row) => humanLabel(row.record_type) },
-        { key: "group", label: "Evidence", sortable: true, minWidth: 132, fillPriority: "last", render: (row) => humanLabel(row.group) },
+        { key: "group", label: "Evidence", sortable: true, minWidth: 132, fillPriority: "last", render: (row) => <EvidenceGroupCell row={row} /> },
         { key: "applicability", label: "Scope", sortable: true, autoFit: true, minWidth: 82, maxWidth: 108, render: (row) => <EvidenceScope row={row} /> },
         { key: "completeness_rate", label: "Coverage", sortable: true, autoFit: true, render: (row) => <CompletenessValue row={row} /> },
         { key: "missing_values", label: "Missing", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.missing_values)) }
@@ -235,6 +236,20 @@ function FieldCompleteness({ rows }: { rows: DiagnosticsRow[] }) {
       maxRows={12}
       className="diagnostics-compact-table monitoring-table-one-line"
     />
+  );
+}
+
+function EvidenceGroupCell({ row }: { row: DiagnosticsRow }) {
+  const fields = String(row.fields ?? "-");
+  const present = formatNumber(toNumber(row.present_values));
+  const expected = formatNumber(toNumber(row.records) * toNumber(row.required_fields));
+  return (
+    <span
+      className="monitoring-ellipsis"
+      title={`Fields: ${fields}\nPresent / expected values: ${present} / ${expected}\nMissing values: ${formatNumber(toNumber(row.missing_values))}`}
+    >
+      {humanLabel(row.group)}
+    </span>
   );
 }
 

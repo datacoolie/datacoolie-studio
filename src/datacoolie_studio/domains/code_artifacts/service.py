@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.db.models import CodeArtifactSnapshot, EnvironmentSource, utc_now
+from datacoolie_studio.db.models import CodeArtifactMaterialization, EnvironmentSource, utc_now
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 from datacoolie_studio.domains.code_artifacts.indexer import (
     ArtifactIndexError,
@@ -20,6 +20,7 @@ from datacoolie_studio.domains.sync import service as sync
 
 
 ANALYZER_VERSION = "artifact-index-v1"
+CODE_MATERIALIZATION_SCHEMA_VERSION = "code-artifact.v1"
 
 
 def validate_code_artifact(session: Session, source: EnvironmentSource) -> dict[str, Any]:
@@ -39,22 +40,37 @@ def refresh_code_artifact(
     *,
     job_type: str = "force_refresh",
 ) -> dict[str, Any]:
-    latest = latest_code_artifact_snapshot(session, source.id)
+    materialization = code_artifact_materialization(session, source.id)
     job = sync.begin_sync_job(session, source, job_type)
     try:
         indexed = _build_index(source)
         revision = _revision(source, indexed)
-        revision_changed = latest is None or not _same_revision_json(revision, latest.source_revision_json)
-        analyzer_changed = latest is None or latest.analyzer_version != ANALYZER_VERSION
+        revision_changed = materialization is None or not _same_revision_json(
+            revision, materialization.source_revision_json
+        )
+        analyzer_changed = materialization is None or materialization.analyzer_version != ANALYZER_VERSION
         if revision_changed or analyzer_changed:
-            session.add(CodeArtifactSnapshot(
-                source_id=source.id,
-                source_revision_json=json.dumps(revision, sort_keys=True),
-                artifact_manifest_json=json.dumps(indexed["manifest"], sort_keys=True),
-                module_index_json=json.dumps(indexed["modules"], sort_keys=True),
-                diagnostics_json=json.dumps(indexed["diagnostics"], sort_keys=True),
-                analyzer_version=ANALYZER_VERSION,
-            ))
+            revision_json = json.dumps(revision, sort_keys=True)
+            fingerprint = _materialization_fingerprint(revision)
+            if materialization is None:
+                materialization = CodeArtifactMaterialization(
+                    source_id=source.id,
+                    source_revision_json=revision_json,
+                    materialization_fingerprint=fingerprint,
+                    artifact_manifest_json=json.dumps(indexed["manifest"], sort_keys=True),
+                    module_index_json=json.dumps(indexed["modules"], sort_keys=True),
+                    diagnostics_json=json.dumps(indexed["diagnostics"], sort_keys=True),
+                    analyzer_version=ANALYZER_VERSION,
+                )
+                session.add(materialization)
+            else:
+                materialization.source_revision_json = revision_json
+                materialization.materialization_fingerprint = fingerprint
+                materialization.artifact_manifest_json = json.dumps(indexed["manifest"], sort_keys=True)
+                materialization.module_index_json = json.dumps(indexed["modules"], sort_keys=True)
+                materialization.diagnostics_json = json.dumps(indexed["diagnostics"], sort_keys=True)
+                materialization.analyzer_version = ANALYZER_VERSION
+                materialization.materialized_at = utc_now()
         if revision_changed or analyzer_changed:
             invalidate_environment_derived_caches(session, source.environment_id, structural=True)
         sync.record_source_revision(session, source=source, status="ok", revision=revision, error=None, checked_at=utc_now())
@@ -85,33 +101,32 @@ def refresh_code_artifact(
     return sync.source_sync_status(session, source)
 
 
-def latest_code_artifact_snapshot(session: Session, source_id: int) -> CodeArtifactSnapshot | None:
-    return session.scalars(
-        select(CodeArtifactSnapshot)
-        .where(CodeArtifactSnapshot.source_id == source_id)
-        .order_by(CodeArtifactSnapshot.created_at.desc(), CodeArtifactSnapshot.id.desc())
-    ).first()
+def code_artifact_materialization(session: Session, source_id: int) -> CodeArtifactMaterialization | None:
+    return session.scalar(
+        select(CodeArtifactMaterialization).where(CodeArtifactMaterialization.source_id == source_id)
+    )
 
 
-def ensure_code_artifact_snapshot(
+def ensure_code_artifact_materialization(
     session: Session,
     source: EnvironmentSource,
-) -> CodeArtifactSnapshot | None:
-    latest = latest_code_artifact_snapshot(session, source.id)
+) -> CodeArtifactMaterialization | None:
+    materialization = code_artifact_materialization(session, source.id)
     config = _source_config(source)
     artifact_type = str(config.get("artifact_type") or _infer_artifact_type(source.uri))
-    if artifact_type == "installed_distribution" and latest is not None:
-        return latest
+    if artifact_type == "installed_distribution" and materialization is not None:
+        return materialization
     current_stat = sync.stat_source(source, include_content_hash=False)
-    if latest is not None:
+    if materialization is not None:
         try:
-            stored_revision = json.loads(latest.source_revision_json)
+            stored_revision = json.loads(materialization.source_revision_json)
         except json.JSONDecodeError:
             stored_revision = {}
         if stored_revision.get("source_stat") == current_stat:
-            return latest
+            if materialization.analyzer_version == ANALYZER_VERSION:
+                return materialization
     refresh_code_artifact(session, source, job_type="auto_refresh")
-    return latest_code_artifact_snapshot(session, source.id)
+    return code_artifact_materialization(session, source.id)
 
 
 def read_code_artifact_function_source(
@@ -230,6 +245,17 @@ def _same_revision_json(revision: dict[str, Any], stored_revision_json: str) -> 
     except json.JSONDecodeError:
         return False
     return stored_revision == revision
+
+
+def _materialization_fingerprint(revision: dict[str, Any]) -> str:
+    payload = {
+        "revision": revision,
+        "analyzer_version": ANALYZER_VERSION,
+        "schema_version": CODE_MATERIALIZATION_SCHEMA_VERSION,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _validation_result(source: EnvironmentSource, indexed: dict[str, Any], status: str) -> dict[str, Any]:

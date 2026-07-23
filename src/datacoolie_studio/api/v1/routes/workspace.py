@@ -7,6 +7,7 @@ from datacoolie_studio.api.v1.schemas import (
     CodeArtifactRead,
     DatacoolieProjectSourceImportRequest,
     EnvironmentCreate,
+    EnvironmentContextResponse,
     EnvironmentFreshnessResponse,
     EnvironmentRead,
     LogSourceRead,
@@ -20,11 +21,19 @@ from datacoolie_studio.api.v1.schemas import (
     ProjectSummaryResponse,
     SourceCreate,
     SourceImportResponse,
+    StudioDiagnosticsResponse,
+    StudioCacheClearRequest,
+    StudioCacheMaintenanceRequest,
+    StudioCacheMutationResponse,
+    StudioCacheStatusResponse,
     StudioSettingsResponse,
     StudioSettingsUpdateRequest,
+    StudioPathInfo,
+    StudioWorkspaceDatabaseMaintenanceRequest,
 )
 from datacoolie_studio.db.session import get_session
-from datacoolie_studio.domains.freshness.service import environment_freshness
+from datacoolie_studio.domains.freshness.service import environment_context, environment_freshness
+from datacoolie_studio.domains.cache_admin import service as cache_admin
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace
 
@@ -36,18 +45,54 @@ def get_studio_settings(session: Session = Depends(get_session)):
     return studio_settings.get_studio_settings(session)
 
 
+@router.get("/studio/diagnostics", response_model=StudioDiagnosticsResponse)
+def get_studio_diagnostics(session: Session = Depends(get_session)):
+    return studio_settings.get_studio_diagnostics(session)
+
+
+@router.post("/studio/workspace-database/compact", response_model=StudioPathInfo)
+def compact_workspace_database(_payload: StudioWorkspaceDatabaseMaintenanceRequest):
+    try:
+        return studio_settings.compact_workspace_database()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/studio/cache", response_model=StudioCacheStatusResponse)
+def get_studio_cache(session: Session = Depends(get_session)):
+    return cache_admin.cache_status(session)
+
+
+@router.post("/studio/cache/clear", response_model=StudioCacheMutationResponse)
+def clear_studio_cache(payload: StudioCacheClearRequest, session: Session = Depends(get_session)):
+    try:
+        return cache_admin.clear_cache(
+            session,
+            scope=payload.scope,
+            environment_id=payload.environment_id,
+            features=set(payload.features),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/studio/cache/prune", response_model=StudioCacheMutationResponse)
+def prune_studio_cache(_payload: StudioCacheMaintenanceRequest):
+    return cache_admin.prune_cache()
+
+
+@router.post("/studio/cache/compact", response_model=StudioCacheMutationResponse)
+def compact_studio_cache(_payload: StudioCacheMaintenanceRequest):
+    return cache_admin.compact_cache()
+
+
 @router.patch("/studio/settings", response_model=StudioSettingsResponse)
 def patch_studio_settings(payload: StudioSettingsUpdateRequest, session: Session = Depends(get_session)):
     try:
         changes = payload.model_dump(exclude_unset=True)
-        if "timezone" in changes:
-            studio_settings.set_studio_timezone(session, changes["timezone"])
-        if "source_check_interval_seconds" in changes:
-            interval_seconds = changes["source_check_interval_seconds"]
-            if interval_seconds is None:
-                raise ValueError("Source check interval cannot be null")
-            studio_settings.set_source_check_interval(session, interval_seconds)
-        return studio_settings.get_studio_settings(session)
+        return studio_settings.update_studio_settings(session, changes)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -64,7 +109,10 @@ def get_project_summaries(session: Session = Depends(get_session)):
 
 @router.post("/projects", response_model=ProjectRead)
 def post_project(payload: ProjectCreate, session: Session = Depends(get_session)):
-    return workspace.create_project(session, payload.name, payload.description)
+    try:
+        return workspace.create_project(session, payload.name, payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get(
@@ -176,6 +224,14 @@ def delete_environment(environment_id: int, session: Session = Depends(get_sessi
 def get_environment_freshness(environment_id: int, session: Session = Depends(get_session)):
     try:
         return environment_freshness(session, environment_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/environments/{environment_id}/context", response_model=EnvironmentContextResponse)
+def get_environment_context(environment_id: int, session: Session = Depends(get_session)):
+    try:
+        return environment_context(session, environment_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

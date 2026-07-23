@@ -51,7 +51,8 @@ export function summarizeSourceHealth(
   for (const { source, kind } of entries) {
     if (source.enabled) enabled += 1;
     if (source.latest_validation?.status === "ok" || source.latest_validation?.status === "warning") readable += 1;
-    if (syncStatuses[sourceKey(kind, source.id)]?.status === "ok") current += 1;
+    const status = syncStatuses[sourceKey(kind, source.id)];
+    if (status?.status === "ok") current += 1;
   }
 
   return { enabled, readable, current };

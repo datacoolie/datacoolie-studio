@@ -11,7 +11,9 @@ import {
   ReportPanel,
   RuntimePhaseContribution,
   RuntimePhaseLegend,
+  StatusTrendLegend,
   WorkloadVolumeContextPanel,
+  WorkloadVolumeLegend,
   attentionQueueRuleTooltip,
   dataflowStatusTrendOption,
   durationIntent,
@@ -25,8 +27,18 @@ import {
   healthReasonsTooltip,
   jobStatusTrendOption,
   resolveAttentionTarget,
+  runtimePhaseContributionTooltip,
   successRateIntent
 } from "../monitoringShared";
+
+function RunCountHeadline({ jobRuns, dataflowRuns }: { jobRuns: number; dataflowRuns: number }) {
+  return (
+    <>
+      {formatNumber(jobRuns)}<span className="overview-run-count-label"> jobs / </span>
+      {formatNumber(dataflowRuns)}<span className="overview-run-count-label"> flows</span>
+    </>
+  );
+}
 
 export function MonitoringOverviewPage({
   report,
@@ -86,14 +98,14 @@ export function MonitoringOverviewPage({
         />
         <HealthStripCard
           label="Today"
-          value={`${formatNumber(todayWindow.job_runs ?? 0)} jobs / ${formatNumber(todayWindow.dataflow_runs ?? 0)} flows`}
+          value={<RunCountHeadline jobRuns={todayWindow.job_runs ?? 0} dataflowRuns={todayWindow.dataflow_runs ?? 0} />}
           detail={<FailureBreakdownDetail jobFailed={todayWindow.job_failed ?? 0} flowFailed={todayWindow.dataflow_failed ?? 0} />}
           title={`Today uses the current date in Studio global timezone: ${reportTimezone} (${reportTimezoneSource}).`}
           intent="neutral"
         />
         <HealthStripCard
           label="Last 7d"
-          value={`${formatNumber(last7Window.job_runs ?? 0)} jobs / ${formatNumber(last7Window.dataflow_runs ?? 0)} flows`}
+          value={<RunCountHeadline jobRuns={last7Window.job_runs ?? 0} dataflowRuns={last7Window.dataflow_runs ?? 0} />}
           detail={<FailureBreakdownDetail jobFailed={last7Window.job_failed ?? 0} flowFailed={last7Window.dataflow_failed ?? 0} />}
           title={`Last 7d uses the rolling last 7 * 24 hours in Studio global timezone: ${reportTimezone}.`}
           intent="neutral"
@@ -143,13 +155,13 @@ export function MonitoringOverviewPage({
 
       <div className="monitoring-overview-content">
         <section className="overview-trends-grid">
-          <ReportPanel title="Job status trend by date">
+          <ReportPanel title="Job status trend by date" headerAction={<StatusTrendLegend />}>
             <ReportChart
               option={jobStatusTrendOption(jobTrendRows, filters, report.summary.date_range, reportTimezone, report.summary.effective_grain ?? undefined)}
               height="100%"
             />
           </ReportPanel>
-          <ReportPanel title="Dataflow status trend by date">
+          <ReportPanel title="Dataflow status trend by date" headerAction={<StatusTrendLegend />}>
             <ReportChart
               option={dataflowStatusTrendOption(dataflowTrendRows, filters, report.summary.date_range, reportTimezone, report.summary.effective_grain ?? undefined)}
               height="100%"
@@ -177,7 +189,7 @@ export function MonitoringOverviewPage({
           </ReportPanel>
           <ReportPanel
             title="Runtime phase contribution"
-            titleTooltip="Includes all operation types. Operations without source or transform phases contribute only to phases they report."
+            titleTooltip={runtimePhaseContributionTooltip("operation type")}
             headerAction={<RuntimePhaseLegend />}
           >
             {phaseHealthRows.length ? (
@@ -191,8 +203,8 @@ export function MonitoringOverviewPage({
         <section className="overview-bottom-grid">
           <ReportPanel
             title="Input / output workload"
-            subtitle="rows read, estimated write rows and lakehouse bytes"
             titleTooltip="Rows read is actual source input. Estimated rows written preserves observed lakehouse destination rows and estimates successful non-lakehouse writes from rows read. Lakehouse bytes added/removed come from destination file metrics."
+            headerAction={<WorkloadVolumeLegend />}
           >
             <WorkloadVolumeContextPanel
               report={report}

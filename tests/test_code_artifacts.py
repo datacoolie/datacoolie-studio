@@ -86,7 +86,7 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
         assert validation["record_counts"] == {"python_files": 2, "modules": 2}
 
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 1
+            assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
             assert connection.execute("select count(*) from source_revisions").fetchone()[0] == 1
             # Initial auto-materialization plus the explicit manual refresh.
             assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
@@ -97,14 +97,14 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
         assert impact_body["metadata_file_deleted"] is False
         assert "original code artifact will not be deleted" in impact_body["summary"]
         impact_counts = {item["kind"]: item["count"] for item in impact_body["impacts"]}
-        assert impact_counts["snapshot"] == 1
+        assert impact_counts["materialization"] == 1
         assert impact_counts["source_revision"] == 1
         assert impact_counts["sync_job"] == 2
 
         response = client.delete(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}")
         assert response.status_code == 204
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 0
+            assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 0
             assert connection.execute("select count(*) from source_revisions").fetchone()[0] == 0
             assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 0
 

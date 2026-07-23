@@ -3,23 +3,24 @@ from __future__ import annotations
 import json
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import (
-    CodeArtifactSnapshot,
+    CodeArtifactMaterialization,
     Environment,
     EnvironmentSource,
     LogFileManifest,
-    MetadataSourceSnapshot,
+    MetadataMaterialization,
     ProjectReferenceMapping,
     SourceRevision,
 )
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
+from datacoolie_studio.domains.logs.cache import AnalyticsRebuildRequired
 from datacoolie_studio.domains.metadata.service import load_environment_metadata
 from datacoolie_studio.domains.monitoring import service as monitoring
 from datacoolie_studio.domains.studio_settings import service as studio_settings
@@ -28,13 +29,14 @@ from datacoolie_studio.domains.read_models.cache import (
     cached_read_model,
     fingerprint,
     read_model_build_lock,
+    read_model_generation,
     replace_read_model,
 )
 from datacoolie_studio.domains.read_models.keys import OVERVIEW
 
 
 OVERVIEW_SUMMARY_KEY = OVERVIEW
-OVERVIEW_CALCULATOR_VERSION = "environment-overview-v1"
+OVERVIEW_CALCULATOR_VERSION = "environment-overview-v2-reference-resolution"
 OVERVIEW_RANGE = "30d"
 
 
@@ -96,6 +98,13 @@ def load_environment_overview(session: Session, environment_id: int) -> dict[str
         )
         if cached is not None:
             return _cached_response(cached.payload, cached.computed_at)
+        generation = read_model_generation(
+            environment_id=environment_id,
+            model_key=OVERVIEW_SUMMARY_KEY,
+            parameters_fingerprint=parameters_fingerprint,
+            input_fingerprint=input_fingerprint,
+            producer_version=OVERVIEW_CALCULATOR_VERSION,
+        )
 
         metadata_sources = workspace.list_metadata_sources(session, environment_id)
         code_artifacts = workspace.list_code_artifacts(session, environment_id)
@@ -117,7 +126,7 @@ def load_environment_overview(session: Session, environment_id: int) -> dict[str
             monitoring_summary = monitoring_future.result()
         log_sources = workspace.list_log_sources(session, environment_id)
         payload = {
-            "schema_version": "environment-overview.v1",
+            "schema_version": "environment-overview.v2",
             "sources": _source_summary(metadata_sources, log_sources),
             "metadata": _metadata_summary(metadata),
             "lineage": lineage,
@@ -135,6 +144,7 @@ def load_environment_overview(session: Session, environment_id: int) -> dict[str
             input_fingerprint=input_fingerprint,
             producer_version=OVERVIEW_CALCULATOR_VERSION,
             payload=payload,
+            expected_generation=generation,
         )
         return {**payload, "cache": {"state": "miss", "computed_at": entry.computed_at}}
 
@@ -149,19 +159,15 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
         )
     )
     source_ids = [source.id for source in sources]
-    metadata_snapshots = _latest_by_source(
+    metadata_materializations = _materializations_by_source(
         session,
-        MetadataSourceSnapshot,
+        MetadataMaterialization,
         source_ids,
-        MetadataSourceSnapshot.source_id,
-        MetadataSourceSnapshot.created_at,
     )
-    code_snapshots = _latest_by_source(
+    code_materializations = _materializations_by_source(
         session,
-        CodeArtifactSnapshot,
+        CodeArtifactMaterialization,
         source_ids,
-        CodeArtifactSnapshot.source_id,
-        CodeArtifactSnapshot.created_at,
     )
     revisions = {
         item.source_id: item
@@ -197,24 +203,21 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
             }
             for source in sources
         ],
-        "metadata_snapshots": [
+        "metadata_materializations": [
             {
                 "source_id": source_id,
-                "id": snapshot.id,
-                "revision": snapshot.source_revision_json,
-                "created_at": snapshot.created_at,
+                "fingerprint": materialization.materialization_fingerprint,
+                "materialized_at": materialization.materialized_at,
             }
-            for source_id, snapshot in sorted(metadata_snapshots.items())
+            for source_id, materialization in sorted(metadata_materializations.items())
         ],
-        "code_snapshots": [
+        "code_materializations": [
             {
                 "source_id": source_id,
-                "id": snapshot.id,
-                "revision": snapshot.source_revision_json,
-                "analyzer_version": snapshot.analyzer_version,
-                "created_at": snapshot.created_at,
+                "fingerprint": materialization.materialization_fingerprint,
+                "materialized_at": materialization.materialized_at,
             }
-            for source_id, snapshot in sorted(code_snapshots.items())
+            for source_id, materialization in sorted(code_materializations.items())
         ],
         "source_revisions": [
             {
@@ -252,18 +255,11 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
     })
 
 
-def _latest_by_source(session: Session, model, source_ids: list[int], source_column, created_column) -> dict[int, Any]:
+def _materializations_by_source(session: Session, model, source_ids: list[int]) -> dict[int, Any]:
     if not source_ids:
         return {}
-    rows = session.scalars(
-        select(model)
-        .where(source_column.in_(source_ids))
-        .order_by(source_column, created_column.desc(), model.id.desc())
-    )
-    latest: dict[int, Any] = {}
-    for row in rows:
-        latest.setdefault(int(row.source_id), row)
-    return latest
+    rows = session.scalars(select(model).where(model.source_id.in_(source_ids)))
+    return {int(row.source_id): row for row in rows}
 
 
 def _source_summary(metadata_sources: list[EnvironmentSource], log_sources: list[EnvironmentSource]) -> dict[str, Any]:
@@ -310,44 +306,11 @@ def _monitoring_summary(
     timezone_context: dict[str, Any],
 ) -> dict[str, Any]:
     timezone_info = timezone_context["timezone_info"]
-    cached = monitoring.cached_environment_overview_summary(
+    return monitoring.cached_environment_overview_summary(
         session,
         paths,
         timezone_info=timezone_info,
     )
-    if cached is not None:
-        return cached
-
-    filters = monitoring._normalize_monitoring_filters_for_timezone(
-        {"range": OVERVIEW_RANGE},
-        timezone_info=timezone_info,
-    )
-    rows, jobs, errors = monitoring._monitoring_rows(
-        paths,
-        session=session,
-        enrich_for_investigation=False,
-    )
-    rows = monitoring._filter_log_rows(rows, filters, include_dataflow_filters=True)
-    jobs = monitoring._filter_log_rows(jobs, filters, include_dataflow_filters=False)
-    jobs = monitoring._filter_jobs_for_dataflow_scope(jobs, rows, filters)
-    job_statuses = Counter(monitoring._status(job) for job in jobs)
-    dataflow_statuses = Counter(monitoring._status(row) for row in rows)
-    executable_dataflows = dataflow_statuses["succeeded"] + dataflow_statuses["failed"]
-    trend_context = monitoring._trend_context(filters, [*rows, *jobs], timezone_info)
-    failed_windows = _failed_job_windows(
-        monitoring._status_by_date(jobs, trend_context=trend_context),
-        datetime.now(timezone_info).date(),
-    )
-    return {
-        "job_records": len(jobs),
-        "total_failures": job_statuses["failed"],
-        "dataflow_success_rate": monitoring._rate(dataflow_statuses["succeeded"], executable_dataflows),
-        "failed_job_windows": failed_windows,
-        "active_engines": len({job.get("engine_name") for job in jobs if job.get("engine_name")}),
-        "latest_log_at": monitoring._latest_log_at([*rows, *jobs]),
-        "date_range": monitoring._date_range([*rows, *jobs]),
-        "errors": errors,
-    }
 
 
 def _load_monitoring_summary(environment_id: int, timezone_context: dict[str, Any]) -> dict[str, Any]:
@@ -355,29 +318,25 @@ def _load_monitoring_summary(environment_id: int, timezone_context: dict[str, An
     monitoring_session = create_session()
     try:
         paths = workspace.list_log_sources(monitoring_session, environment_id)
-        return _monitoring_summary(monitoring_session, paths, timezone_context)
+        try:
+            return _monitoring_summary(monitoring_session, paths, timezone_context)
+        except AnalyticsRebuildRequired as exc:
+            return _empty_monitoring_summary(errors=[exc.detail()])
     finally:
         monitoring_session.close()
 
 
-def _failed_job_windows(rows: list[dict[str, Any]], today: date) -> dict[str, int]:
-    windows = {"last7": 0, "last30": 0, "last365": 0}
-    for row in rows:
-        try:
-            row_date = date.fromisoformat(str(row.get("date") or "")[:10])
-        except ValueError:
-            continue
-        age = (today - row_date).days
-        if age < 0:
-            continue
-        failed = int(row.get("failed") or 0)
-        if age <= 7:
-            windows["last7"] += failed
-        if age <= 30:
-            windows["last30"] += failed
-        if age <= 365:
-            windows["last365"] += failed
-    return windows
+def _empty_monitoring_summary(*, errors: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "job_records": 0,
+        "total_failures": 0,
+        "dataflow_success_rate": 0.0,
+        "failed_job_windows": {"last7": 0, "last30": 0, "last365": 0},
+        "active_engines": 0,
+        "latest_log_at": None,
+        "date_range": {"min": None, "max": None},
+        "errors": errors,
+    }
 
 
 def _validation_status(source: EnvironmentSource) -> str:

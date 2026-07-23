@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { healthCardAccentClass } from "./monitoringShared";
+import { healthCardAccentClass, runtimePhaseContributionTooltip } from "./monitoringShared";
 
 describe("Monitoring KPI accent contract", () => {
   it("keeps neutral cards structurally accented", () => {
@@ -19,5 +19,13 @@ describe("Monitoring KPI accent contract", () => {
     expect(healthCardAccentClass("destination", "bad")).toBe("health-card-accent-destination");
     expect(healthCardAccentClass("storage", "neutral")).toBe("health-card-accent-storage");
     expect(healthCardAccentClass("overhead", "neutral")).toBe("health-card-accent-overhead");
+  });
+
+  it("documents the runtime phase contribution population and failure fallback", () => {
+    const tooltip = runtimePhaseContributionTooltip("stage");
+
+    expect(tooltip).toContain("exclude pending and running");
+    expect(tooltip).toContain("eligible statuses are succeeded, failed, and skipped");
+    expect(tooltip).toContain("attributed to Overhead");
   });
 });

@@ -19,7 +19,7 @@ import {
 interface ReferenceMappingEditorProps {
   reference: AssetReferenceGroupItem;
   assets: AssetInventoryItem[];
-  mappings: ProjectReferenceMapping[];
+  mappings?: ProjectReferenceMapping[];
   busy?: boolean;
   onCreate: (payload: ReferenceMappingPayload) => Promise<unknown>;
   onUpdate: (mappingId: number, payload: ReferenceMappingPayload) => Promise<unknown>;
@@ -32,7 +32,7 @@ interface ReferenceMappingEditorProps {
 export function ReferenceMappingEditor({
   reference,
   assets,
-  mappings,
+  mappings = [],
   busy = false,
   onCreate,
   onUpdate,
@@ -42,8 +42,21 @@ export function ReferenceMappingEditor({
   onSearchTargets,
 }: ReferenceMappingEditorProps) {
   const action = referenceMappingAction(reference, mappings);
-  const mapping = mappings.find((item) => item.id === reference.manual_mapping?.mapping_id)
+  const projectMapping = mappings.find((item) => item.id === reference.manual_mapping?.mapping_id)
     || findReferenceMapping(reference, mappings);
+  const mapping = projectMapping ? {
+    mappingId: projectMapping.id,
+    note: projectMapping.note,
+    targetIdentifierKind: projectMapping.target_identifier_kind,
+    targetNormalizedValue: projectMapping.target_normalized_value,
+    targetDisplayValue: projectMapping.target_display_value,
+  } : reference.manual_mapping ? {
+    mappingId: reference.manual_mapping.mapping_id,
+    note: reference.manual_mapping.note,
+    targetIdentifierKind: reference.manual_mapping.target_identifier_kind,
+    targetNormalizedValue: reference.manual_mapping.target_normalized_value,
+    targetDisplayValue: reference.manual_mapping.target_normalized_value,
+  } : null;
   const [remoteAssets, setRemoteAssets] = useState<AssetInventoryItem[]>([]);
   const [targetsLoading, setTargetsLoading] = useState(false);
   const targetAssets = useMemo(() => {
@@ -51,7 +64,10 @@ export function ReferenceMappingEditor({
     return [...new Map([...assets, ...remoteAssets].map((asset) => [asset.id, asset])).values()];
   }, [assets, onSearchTargets, remoteAssets]);
   const targets = useMemo(() => buildReferenceMappingTargets(targetAssets), [targetAssets]);
-  const currentTarget = mappingTargetForMapping(mapping, targets);
+  const currentTarget = mappingTargetForMapping(mapping ? {
+    target_identifier_kind: mapping.targetIdentifierKind,
+    target_normalized_value: mapping.targetNormalizedValue,
+  } : null, targets);
   const resolvedTarget = mappingTargetForAssetId(reference.resolved_asset_id, targets);
   const [query, setQuery] = useState("");
   const [connectionName, setConnectionName] = useState("");
@@ -62,13 +78,13 @@ export function ReferenceMappingEditor({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setSelectedTarget(currentTarget || (action === "complete" ? resolvedTarget : null));
+    setSelectedTarget(currentTarget || resolvedTarget);
     setNote(mapping?.note || "");
     setQuery("");
     setConnectionName("");
     setError(null);
     setConfirmRemove(false);
-  }, [action, currentTarget, mapping?.id, mapping?.note, reference.id, resolvedTarget]);
+  }, [action, currentTarget, mapping?.mappingId, mapping?.note, reference.id, resolvedTarget]);
 
   useEffect(() => {
     if (!onSearchTargets) return;
@@ -103,7 +119,7 @@ export function ReferenceMappingEditor({
 
   const canSave = Boolean(selectedTarget) && !saving && !busy;
   const actionLabel = referenceMappingActionLabel(action);
-  const impact = `${reference.occurrence_ids.length || reference.dependency_count} occurrences · ${reference.consumer_asset_ids.length} consumers`;
+  const impact = `${reference.occurrence_count || reference.occurrence_ids.length || reference.dependency_count} occurrences · ${reference.consumer_asset_ids.length} consumers`;
 
   async function save() {
     if (!selectedTarget) {
@@ -114,7 +130,7 @@ export function ReferenceMappingEditor({
     setError(null);
     try {
       const payload = buildReferenceMappingPayload(reference, selectedTarget, note);
-      if (mapping) await onUpdate(mapping.id, payload);
+      if (mapping) await onUpdate(mapping.mappingId, payload);
       else await onCreate(payload);
       await onRefresh();
       onBack();
@@ -134,7 +150,7 @@ export function ReferenceMappingEditor({
     setSaving(true);
     setError(null);
     try {
-      await onDelete(mapping.id);
+      await onDelete(mapping.mappingId);
       await onRefresh();
       onBack();
     } catch (cause) {
@@ -153,19 +169,12 @@ export function ReferenceMappingEditor({
       </section>
 
       <>
-          {action === "repair" && mapping ? (
+          {reference.resolution.reason === "target_missing" && mapping ? (
             <section className="reference-mapping-warning">
               <strong>Mapped target is missing in this environment.</strong>
-              <span>{mapping.target_display_value || mapping.target_normalized_value}</span>
+              <span>{mapping.targetDisplayValue || mapping.targetNormalizedValue}</span>
             </section>
           ) : null}
-          {action === "complete" && resolvedTarget ? (
-            <section className="reference-mapping-hint">
-              <strong>{resolvedTarget.displayName}</strong>
-              <span>Preselected to complete the unresolved occurrences without creating a mixed result.</span>
-            </section>
-          ) : null}
-
           <div className="reference-mapping-target-controls">
             <label className="reference-mapping-search">
               <span>Target asset</span>
@@ -187,6 +196,7 @@ export function ReferenceMappingEditor({
             {visibleTargets.map((target) => {
               const selected = target.id === selectedTarget?.id;
               const candidate = reference.candidate_asset_ids.includes(target.assetId);
+              const targetDetails = [target.connectionName, target.context].filter(Boolean).join(" · ");
               return (
                 <button
                   key={target.id}
@@ -200,8 +210,8 @@ export function ReferenceMappingEditor({
                     <LineageFormatIcon kind={assetIconKind(target.format || target.assetType)} label={target.assetType} size={14} />
                   </span>
                   <span className="reference-mapping-target-copy">
-                    <strong>{target.displayName}</strong>
-                    <small>
+                    <strong title={target.displayName}>{target.displayName}</strong>
+                    <small title={targetDetails}>
                       <span className={`reference-mapping-target-connection asset-tone-${assetTypeTone(target.assetType)}`}>{target.connectionName}</span>
                       {target.context ? <><span className="reference-mapping-target-separator"> · </span><span>{target.context}</span></> : null}
                     </small>

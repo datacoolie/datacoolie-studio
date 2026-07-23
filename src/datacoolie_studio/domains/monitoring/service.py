@@ -9,28 +9,33 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.core.time import parse_utc_datetime
-from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest
+from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.logs.cache import (
-    cached_dataflow_logs,
+    AnalyticsRebuildRequired,
+    analytics_materialization_token,
     cached_monitoring_summary,
-    cached_monitoring_rows,
     query_cached_dataflow_logs,
-    query_cached_filter_values,
     query_cached_job_logs,
     query_cached_latest_dataflow_runs,
-    query_cached_monitoring_rows,
 )
 from datacoolie_studio.domains.logs.reader import read_dataflow_logs, read_job_logs
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
+from datacoolie_studio.domains.monitoring.repository import monitoring_filter_options_read_model
+from datacoolie_studio.domains.monitoring.metrics.failure import (
+    categorize_failure,
+    classify_failure,
+    dataflow_failed_phases,
+    dataflow_failure_phase_and_message,
+)
+from datacoolie_studio.domains.monitoring.metrics.health import environment_health
 from datacoolie_studio.domains.read_models.cache import (
     cached_read_model,
     empty_parameters_fingerprint,
-    fingerprint,
     read_model_build_lock,
+    read_model_generation,
     replace_read_model,
 )
 from datacoolie_studio.domains.read_models.keys import LINEAGE_LATEST_RUNS
@@ -43,128 +48,14 @@ _SKIPPED_STREAK_RUNS = 3
 _MAINTENANCE_LAG_WARNING_DAYS = 7
 _LATEST_RUNS_PRODUCER_VERSION = "lineage-latest-runs-v1"
 
-_DATAFLOW_SUMMARY_COLUMNS = (
-    "job_id",
-    "dataflow_id",
-    "dataflow_run_id",
-    "dataflow_name",
-    "stage",
-    "status",
-    "start_time",
-    "end_time",
-    "duration_seconds",
-    "operation_type",
-    "source_name",
-    "source_connection_type",
-    "source_format",
-    "source_status",
-    "source_duration_seconds",
-    "source_rows_read",
-    "transform_status",
-    "transform_duration_seconds",
-    "destination_name",
-    "destination_connection_type",
-    "destination_format",
-    "destination_status",
-    "destination_duration_seconds",
-    "destination_operation_type",
-    "destination_rows_written",
-    "destination_bytes_added",
-    "destination_bytes_removed",
-    "overhead_duration_seconds",
-)
-
-_JOB_SUMMARY_COLUMNS = (
-    "job_id",
-    "status",
-    "start_time",
-    "end_time",
-    "duration_seconds",
-    "engine_name",
-    "metadata_provider_name",
-    "platform_name",
-    "total_dataflows",
-    "total_failed",
-    "total_skipped",
-    "total_succeeded",
-)
-
-_DATAFLOW_REPORT_COLUMNS = tuple(dict.fromkeys((
-    *_DATAFLOW_SUMMARY_COLUMNS,
-    "workspace_id", "source_id", "destination_id", "destination_load_type",
-    "source_catalog", "source_database", "source_schema", "source_table",
-    "source_full_table", "source_path", "source_watermark_before",
-    "source_watermark_after", "source_watermark_effective", "source_action",
-    "destination_catalog", "destination_database", "destination_schema",
-    "destination_table", "destination_full_table", "destination_path",
-    "destination_rows_inserted", "destination_rows_updated", "destination_rows_deleted",
-    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
-    "destination_operation_details", "error_message", "retry_attempts",
-    "source_error_message", "transform_error_message", "destination_error_message",
-)))
-
-_JOB_REPORT_COLUMNS = tuple(dict.fromkeys((
-    *_JOB_SUMMARY_COLUMNS,
-    "workspace_id", "job_index", "job_num", "error_message", "dry_run",
-    "stop_on_error", "max_workers", "retry_count", "retry_delay",
-    "total_running", "total_pending", "total_rows_read", "total_rows_written",
-    "total_rows_inserted", "total_rows_updated", "total_rows_deleted",
-    "total_files_added", "total_files_removed", "total_bytes_added",
-    "total_bytes_removed", "operation_types",
-)))
-
-_PERFORMANCE_COLUMNS = tuple(dict.fromkeys((
-    *_DATAFLOW_SUMMARY_COLUMNS,
-    "destination_rows_inserted", "destination_rows_updated", "destination_rows_deleted",
-    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
-    "source_full_table", "source_table", "source_path",
-    "destination_full_table", "destination_table", "destination_path",
-    "error_message", "source_error_message", "transform_error_message",
-    "destination_error_message",
-)))
-_VOLUME_COLUMNS = tuple(dict.fromkeys((
-    *_DATAFLOW_SUMMARY_COLUMNS,
-    "destination_load_type", "destination_rows_inserted", "destination_rows_updated",
-    "destination_rows_deleted", "destination_files_added", "destination_files_removed",
-    "destination_bytes_saved", "source_full_table", "source_table", "source_path",
-    "destination_full_table", "destination_table", "destination_path",
-)))
-_MAINTENANCE_COLUMNS = tuple(dict.fromkeys((
-    *_DATAFLOW_SUMMARY_COLUMNS,
-    "destination_full_table", "destination_table", "destination_path",
-    "destination_files_added", "destination_files_removed", "destination_bytes_saved",
-    "destination_operation_details",
-)))
-_FRESHNESS_COLUMNS = tuple(dict.fromkeys((
-    *_DATAFLOW_SUMMARY_COLUMNS,
-    "source_full_table", "source_table", "source_path", "source_watermark_before",
-    "source_watermark_after", "source_watermark_effective", "source_action",
-    "destination_full_table", "destination_table", "destination_path",
-    "error_message", "source_error_message", "transform_error_message",
-    "destination_error_message",
-)))
-_DATAFLOW_PAGE_COLUMNS = {
-    "performance": _PERFORMANCE_COLUMNS,
-    "volume": _VOLUME_COLUMNS,
-    "maintenance": _MAINTENANCE_COLUMNS,
-    "freshness": _FRESHNESS_COLUMNS,
-    "diagnostics": _DATAFLOW_SUMMARY_COLUMNS,
-}
-
-
 def cached_environment_overview_summary(
     session: Session,
     paths: list[EnvironmentSource],
     *,
     timezone_info: tzinfo,
     now: datetime | None = None,
-) -> dict[str, Any] | None:
-    """Return Environment Overview Monitoring metrics without materializing runs.
-
-    The typed DuckDB cache is an optimization, not a source-of-truth contract:
-    callers receive ``None`` when it cannot answer and keep their direct-reader
-    fallback.
-    """
+) -> dict[str, Any]:
+    """Return the SQL-backed Environment Overview Monitoring summary."""
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     local_boundary = now_utc.astimezone(timezone_info).replace(
         hour=0,
@@ -177,7 +68,7 @@ def cached_environment_overview_summary(
     now_offset = now_utc.astimezone(timezone_info).utcoffset()
     cutoff_offset = cutoff.astimezone(timezone_info).utcoffset()
     if not timezone_name and now_offset != cutoff_offset:
-        return None
+        raise ValueError("Environment timezone must have a stable name across the overview range")
     cached = cached_monitoring_summary(
         session,
         paths,
@@ -187,7 +78,7 @@ def cached_environment_overview_summary(
         local_today=now_utc.astimezone(timezone_info).date(),
     )
     if cached is None:
-        return None
+        raise ValueError("Environment timezone must provide a name or fixed UTC offset")
 
     summary, errors = cached
     succeeded = int(summary["dataflow_succeeded"] or 0)
@@ -299,7 +190,7 @@ def _dataflows_operations_page(
     result.update({
         "windows": _operation_windows(rows, jobs, timezone_info=timezone_info),
         "dataflows_by_date_status": _status_by_date(rows, trend_context=trend_context),
-        "dataflow_duration_by_stage": _dataflow_duration_by_group(
+        "dataflow_duration_by_stage": _duration_by_group(
             rows,
             "stage",
             lambda row: str(row.get("stage") or "unknown"),
@@ -472,6 +363,7 @@ def dataflow_logs(
                 "errors": errors,
                 "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
             }
+        raise _analytics_unavailable(paths)
     enabled_paths = _enabled_etl_paths(paths)
     rows, errors = read_dataflow_logs(enabled_paths)
     jobs, job_errors = read_job_logs(enabled_paths)
@@ -513,6 +405,7 @@ def job_logs(
                 "errors": errors,
                 "summary": {"records": len(rows), "total_records": total, "limit": limit, "offset": offset, "cache": "duckdb"},
             }
+        raise _analytics_unavailable(paths)
     enabled_paths = _enabled_etl_paths(paths)
     rows, errors = read_job_logs(enabled_paths)
     all_dataflow_rows, dataflow_errors = read_dataflow_logs(enabled_paths)
@@ -546,6 +439,7 @@ def latest_status(paths: list[EnvironmentSource], session: Session | None = None
 
     build_key = f"{environment_id}:{LINEAGE_LATEST_RUNS}:{parameters_fingerprint}"
     lock = read_model_build_lock(build_key) if session is not None and environment_id is not None else nullcontext()
+    generation: str | None = None
     with lock:
         if session is not None and environment_id is not None:
             input_fingerprint = _latest_runs_input_fingerprint(session, paths)
@@ -559,6 +453,13 @@ def latest_status(paths: list[EnvironmentSource], session: Session | None = None
             )
             if cached_model is not None:
                 return cached_model.payload
+            generation = read_model_generation(
+                environment_id=environment_id,
+                model_key=LINEAGE_LATEST_RUNS,
+                parameters_fingerprint=parameters_fingerprint,
+                input_fingerprint=input_fingerprint,
+                producer_version=_LATEST_RUNS_PRODUCER_VERSION,
+            )
             focused = query_cached_latest_dataflow_runs(session, paths)
         else:
             focused = None
@@ -577,6 +478,7 @@ def latest_status(paths: list[EnvironmentSource], session: Session | None = None
                 input_fingerprint=input_fingerprint,
                 producer_version=_LATEST_RUNS_PRODUCER_VERSION,
                 payload=response,
+                expected_generation=generation,
             )
         return response
 
@@ -623,53 +525,22 @@ def _latest_runs_response(
 
 
 def monitoring_input_fingerprint(session: Session, paths: list[EnvironmentSource]) -> str:
-    enabled = sorted((path for path in paths if path.enabled), key=lambda item: item.id)
-    source_ids = [path.id for path in enabled]
-    manifests = [] if not source_ids else list(
-        session.scalars(
-            select(LogFileManifest)
-            .where(LogFileManifest.source_id.in_(source_ids))
-            .order_by(LogFileManifest.source_id, LogFileManifest.file_uri, LogFileManifest.id)
-        )
-    )
-    return fingerprint({
-        "sources": [
-            {"id": path.id, "uri": path.uri, "config": path.source_config_json}
-            for path in enabled
-        ],
-        "manifests": [
-            {
-                "id": item.id,
-                "source_id": item.source_id,
-                "file_uri": item.file_uri,
-                "revision": item.revision_json,
-                "row_count": item.row_count,
-                "status": item.status,
-            }
-            for item in manifests
-        ],
-    })
+    del session  # Core manifests belong to sync change detection, not request cache keys.
+    return analytics_materialization_token(paths)
 
 
 def _latest_runs_input_fingerprint(session: Session, paths: list[EnvironmentSource]) -> str:
     return monitoring_input_fingerprint(session, paths)
 
 
-def monitoring_filter_options(paths: list[EnvironmentSource], session: Session | None = None) -> dict[str, Any]:
-    if session is not None:
-        cached = query_cached_filter_values(session, paths)
-        if cached is not None:
-            values, errors = cached
-            return {
-                "options": values,
-                "summary": {"source": "duckdb_filter_values", "fields": len(values)},
-                "errors": errors,
-            }
-    rows, jobs, errors = _monitoring_rows(paths, session=session)
+def monitoring_filter_options(paths: list[EnvironmentSource], session: Session) -> dict[str, Any]:
+    del session
+    read_model = monitoring_filter_options_read_model(paths)
+    values = read_model["options"]
     return {
-        "options": _filter_options_from_rows(rows, jobs),
-        "summary": {"source": "runtime_rows", "fields": 0},
-        "errors": errors,
+        "options": values,
+        "summary": {"source": "duckdb_filter_values", "fields": len(values)},
+        "errors": [],
     }
 
 
@@ -1041,11 +912,10 @@ def _tail_path(path: str) -> str:
 
 
 def _phase_health(row: dict[str, Any]) -> str:
-    execution_phases = ("source", "transform", "destination")
-    for phase in execution_phases:
-        if str(row.get(f"{phase}_status") or "").lower() == "failed" or row.get(f"{phase}_error_message"):
-            return f"{phase}_failed"
-    phases = (*execution_phases, "overhead")
+    failed_phases = dataflow_failed_phases(row)
+    if failed_phases:
+        return f"{failed_phases[0]}_failed"
+    phases = ("source", "transform", "destination", "overhead")
     durations = {phase: _performance_phase_duration(row, phase) for phase in phases}
     if any(durations.values()):
         slowest = max(durations.items(), key=lambda item: item[1])
@@ -1054,8 +924,11 @@ def _phase_health(row: dict[str, Any]) -> str:
 
 
 def _error_phase(row: dict[str, Any]) -> str:
+    failed_phases = dataflow_failed_phases(row)
+    if failed_phases:
+        return failed_phases[0]
     for phase in ("source", "transform", "destination"):
-        if row.get(f"{phase}_error_message") or str(row.get(f"{phase}_status") or "").lower() == "failed":
+        if row.get(f"{phase}_error_message"):
             return phase
     return "job" if row.get("error_message") else ""
 
@@ -1182,62 +1055,6 @@ def _is_later(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
     return _time_value(candidate_time) > _time_value(current_time)
 
 
-def _monitoring_rows(
-    paths: list[EnvironmentSource],
-    session: Session | None = None,
-    enrich_for_investigation: bool = True,
-    filters: dict[str, str] | None = None,
-    report_columns: bool = False,
-    page: str | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
-    if session is not None:
-        dataflow_columns = _DATAFLOW_PAGE_COLUMNS.get(
-            page or "",
-            _DATAFLOW_REPORT_COLUMNS if report_columns else _DATAFLOW_SUMMARY_COLUMNS,
-        )
-        job_columns = (
-            _JOB_REPORT_COLUMNS
-            if page in {"jobs", "failures"} or (page is None and report_columns)
-            else _JOB_SUMMARY_COLUMNS
-        )
-        cached = (
-            query_cached_monitoring_rows(
-                session,
-                paths,
-                filters,
-                dataflow_columns=dataflow_columns,
-                job_columns=job_columns,
-            )
-            if filters is not None
-            else cached_monitoring_rows(
-                session,
-                paths,
-                dataflow_columns=_DATAFLOW_REPORT_COLUMNS if report_columns else (_DATAFLOW_SUMMARY_COLUMNS if not enrich_for_investigation else None),
-                job_columns=_JOB_REPORT_COLUMNS if report_columns else (_JOB_SUMMARY_COLUMNS if not enrich_for_investigation else None),
-            )
-        )
-        if cached is not None:
-            rows, jobs, errors = cached
-            if not enrich_for_investigation:
-                return rows, jobs, errors
-            rows = [_enrich_dataflow_run_for_investigation(row) for row in rows]
-            jobs = _enrich_job_runs_for_investigation(jobs, rows)
-            return rows, jobs, errors
-    enabled_paths = _enabled_etl_paths(paths)
-    rows, dataflow_errors = read_dataflow_logs(enabled_paths)
-    jobs, job_errors = read_job_logs(enabled_paths)
-    job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
-    enriched = [_enrich_dataflow(row, job_by_id.get(row.get("job_id"))) for row in rows]
-    if filters is not None:
-        enriched = _filter_log_rows(enriched, filters, include_dataflow_filters=True)
-        jobs = _filter_log_rows(jobs, filters, include_dataflow_filters=False)
-    if not enrich_for_investigation:
-        return enriched, jobs, [*dataflow_errors, *job_errors]
-    enriched = [_enrich_dataflow_run_for_investigation(row) for row in enriched]
-    jobs = _enrich_job_runs_for_investigation(jobs, enriched)
-    return enriched, jobs, [*dataflow_errors, *job_errors]
-
-
 def _enabled_etl_paths(paths: list[EnvironmentSource]) -> list[str]:
     return [
         resolved.etl_logs_uri or path.uri
@@ -1245,6 +1062,16 @@ def _enabled_etl_paths(paths: list[EnvironmentSource]) -> list[str]:
         if path.enabled
         for resolved in [resolve_log_source_paths(path)]
     ]
+
+
+def _analytics_unavailable(paths: list[EnvironmentSource]) -> AnalyticsRebuildRequired:
+    source_ids = sorted(path.id for path in paths if path.enabled)
+    return AnalyticsRebuildRequired(
+        "Monitoring analytics are unavailable; sync the Log sources to rebuild them",
+        source_ids=source_ids,
+        missing_source_ids=source_ids,
+        reason="not_ready",
+    )
 
 
 def _enrich_dataflow(row: dict[str, Any], job: dict[str, Any] | None) -> dict[str, Any]:
@@ -1304,8 +1131,13 @@ def _operations_page(
         "job_status_distribution": _counter_rows(job_status, "status"),
         "job_runs_by_operation_type": job_runs_by_dataflow_operation_type,
         "job_runs_by_dataflow_operation_type": job_runs_by_dataflow_operation_type,
-        "dataflow_duration_by_operation_type": _dataflow_duration_by_group(rows, "operation_type", _dataflow_operation_type),
-        "dataflow_duration_by_stage": _dataflow_duration_by_group(rows, "stage", lambda row: str(row.get("stage") or "unknown"), limit=100),
+        "job_duration_by_operation_types": _duration_by_group(
+            jobs,
+            "operation_type",
+            _job_operation_types_value,
+            entity_kind="job",
+        ),
+        "dataflow_duration_by_stage": _duration_by_group(rows, "stage", lambda row: str(row.get("stage") or "unknown"), limit=100),
         "job_workload_efficiency": _job_workload_efficiency(jobs, rows),
         "job_child_fanout_distribution": _job_child_fanout_distribution(jobs),
         "jobs_by_date_status": _status_by_date(jobs, trend_context=trend_context),
@@ -1359,11 +1191,13 @@ def _slowest_jobs(jobs: list[dict[str, Any]], limit: int = 20) -> list[dict[str,
     return sorted(completed, key=lambda job: _num(job, "duration_seconds") or 0, reverse=True)[:limit]
 
 
-def _dataflow_duration_by_group(
+def _duration_by_group(
     rows: list[dict[str, Any]],
     group_key: str,
     resolve_group,
     limit: int = 12,
+    *,
+    entity_kind: str = "dataflow",
 ) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1380,7 +1214,10 @@ def _dataflow_duration_by_group(
         clean = [duration for duration in durations if duration is not None]
         statuses = Counter(_status(item) for item in items)
         executable = statuses.get("succeeded", 0) + statuses.get("failed", 0)
-        operation_mix = Counter(_dataflow_operation_type(item) for item in items)
+        operation_mix = Counter(
+            _job_operation_types_value(item) if entity_kind == "job" else _dataflow_operation_type(item)
+            for item in items
+        )
         q1_duration = _percentile(clean, 0.25)
         q3_duration = _percentile(clean, 0.75)
         iqr = q3_duration - q1_duration
@@ -1394,10 +1231,17 @@ def _dataflow_duration_by_group(
         outliers = [
             {
                 "duration_seconds": round(duration, 3),
-                "dataflow_name": item.get("dataflow_name") or item.get("dataflow_id") or "unknown",
-                "dataflow_run_id": item.get("dataflow_run_id"),
+                "dataflow_name": (
+                    item.get("job_id") if entity_kind == "job"
+                    else item.get("dataflow_name") or item.get("dataflow_id")
+                ) or "unknown",
+                "dataflow_run_id": item.get("job_id") if entity_kind == "job" else item.get("dataflow_run_id"),
                 "status": _status(item),
-                "operation_type": _dataflow_operation_type(item),
+                "operation_type": (
+                    _job_operation_types_value(item)
+                    if entity_kind == "job"
+                    else _dataflow_operation_type(item)
+                ),
             }
             for item in items
             for duration in [_num(item, "duration_seconds")]
@@ -1699,8 +1543,17 @@ def _failure_kpis(failed: list[dict[str, Any]], failed_jobs: list[dict[str, Any]
 
 
 def _failure_enriched_dataflow(row: dict[str, Any]) -> dict[str, Any]:
-    phase, message = _failure_phase_and_message(row)
-    category = _error_category(message)
+    phase, message = dataflow_failure_phase_and_message(row)
+    all_evidence = "\n".join(
+        str(row.get(key) or "").strip()
+        for key in (
+            "source_error_message", "transform_error_message",
+            "destination_error_message", "error_message",
+        )
+        if _has_value(row.get(key))
+    )
+    classification = classify_failure(message, all_evidence=all_evidence)
+    category = classification.category
     signature = _failure_signature(category, phase, message)
     target = _failure_target(row)
     return {
@@ -1709,6 +1562,8 @@ def _failure_enriched_dataflow(row: dict[str, Any]) -> dict[str, Any]:
         "failure_phase": phase,
         "failure_message": message,
         "failure_category": category,
+        "failure_tags": list(classification.tags),
+        "failure_rule_id": classification.rule_id,
         "failure_signature": signature,
         "failure_target": target,
         "failure_time": row.get("end_time") or row.get("start_time"),
@@ -1717,7 +1572,8 @@ def _failure_enriched_dataflow(row: dict[str, Any]) -> dict[str, Any]:
 
 def _failure_enriched_job(job: dict[str, Any]) -> dict[str, Any]:
     message = str(job.get("error_message") or "")
-    category = _error_category(message)
+    classification = classify_failure(message)
+    category = classification.category
     phase = "job"
     return {
         **job,
@@ -1725,66 +1581,14 @@ def _failure_enriched_job(job: dict[str, Any]) -> dict[str, Any]:
         "failure_phase": phase,
         "failure_message": message,
         "failure_category": category,
+        "failure_tags": list(classification.tags),
+        "failure_rule_id": classification.rule_id,
         "failure_signature": _failure_signature(category, phase, message),
         "failure_target": job.get("job_id") or "unknown",
         "failure_time": job.get("end_time") or job.get("start_time"),
         "job_key": _job_key(job),
         "job_shape_label": _job_shape_label(job),
     }
-
-
-def _failure_phase_and_message(row: dict[str, Any]) -> tuple[str, str]:
-    phase_messages = [
-        ("source", row.get("source_error_message")),
-        ("transform", row.get("transform_error_message")),
-        ("destination", row.get("destination_error_message")),
-    ]
-    for phase, message in phase_messages:
-        if _has_value(message):
-            return phase, str(message)
-
-    top_level_message = ""
-    for message_key in ("error_messages", "error_message"):
-        message = row.get(message_key)
-        if _has_value(message):
-            top_level_message = str(message)
-            break
-
-    for phase in ("source", "transform", "destination"):
-        if str(row.get(f"{phase}_status") or "").strip().lower() == "failed":
-            return phase, top_level_message
-
-    if top_level_message:
-        return _failure_phase_from_message(top_level_message), top_level_message
-    return "unknown", ""
-
-
-def _failure_phase_from_message(message: str) -> str:
-    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
-    phase_patterns = {
-        "source": (
-            r"\bfailed to (?:read|load|fetch) (?:the )?source\b",
-            r"\bsource (?:read|load|fetch)(?: operation)? (?:failed|failure|error)\b",
-        ),
-        "transform": (
-            r"\bfailed to transform\b",
-            r"\btransform(?:er|ation)?(?: pipeline)? (?:failed|failure|error)\b",
-        ),
-        "destination": (
-            r"\bfailed to (?:write|load|save) (?:the )?destination\b",
-            r"\bdestination (?:write|load|save)(?: operation)? (?:failed|failure|error)\b",
-        ),
-        "overhead": (
-            r"\bscheduler\b",
-            r"\borchestrat(?:e|or|ion|ing)\b",
-            r"\bdispatch(?:er|ing)?\b",
-            r"\b(?:runtime|executor) (?:setup|initialization)\b",
-        ),
-    }
-    for phase, patterns in phase_patterns.items():
-        if any(re.search(pattern, text) for pattern in patterns):
-            return phase
-    return "unknown"
 
 
 def _failure_signature(category: str, phase: str, message: str) -> str:
@@ -1955,6 +1759,7 @@ def _performance_page(
     rows: list[dict[str, Any]],
     trend_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    phase_runs = [row for row in rows if _status(row) in {"succeeded", "failed", "skipped"}]
     executable = [
         row
         for row in rows
@@ -2012,7 +1817,7 @@ def _performance_page(
             "phase_skew_count": candidate_counts.get("phase_skew", 0),
         },
         "duration_distribution_by_stage": _performance_duration_distribution_by_stage(executable),
-        "phase_contribution_by_stage_operation": _performance_phase_contribution_by_stage_operation(executable),
+        "phase_contribution_by_stage_operation": _performance_phase_contribution_by_stage_operation(phase_runs),
         "workload_efficiency_points": _performance_workload_efficiency_points(executable),
         "slowest_dataflow_profiles": _performance_slowest_dataflow_profiles(executable),
         "runtime_context_profiles": _performance_runtime_context_profiles(executable),
@@ -2878,7 +2683,6 @@ def _health_page(
     latest_log_at = _latest_log_at([*rows, *jobs])
     latest_job_log_at = _latest_log_at(jobs)
     latest_dataflow_log_at = _latest_log_at(rows)
-    age_days = _age_days(latest_log_at)
     failed_jobs_3 = _failed_count_in_window(jobs, 3)
     failed_jobs_7 = _failed_count_in_window(jobs, 7)
     failed_dataflows_3 = _failed_count_in_window(rows, 3)
@@ -2886,63 +2690,21 @@ def _health_page(
     maintenance_failed_7 = _maintenance_count_in_window(rows, 7, {"failed"})
     maintenance_failed_14 = _maintenance_count_in_window(rows, 14, {"failed"})
     maintenance_skipped_7 = _maintenance_count_in_window(rows, 7, {"skipped"})
-    reasons = []
-    status = "healthy"
-
-    if coverage.get("status") in {"missing_sources", "no_records"}:
-        status = "no_log_evidence"
-        reasons.append("No complete ETL log evidence is available.")
-    if coverage.get("status") in {"error", "partial"}:
-        status = _max_status(status, "warning")
-        reasons.append("Log coverage is partial or has read errors.")
-    if age_days is not None and age_days > 30:
-        status = "has_issues"
-        reasons.append(f"Latest log is {age_days} days old.")
-    elif age_days is not None and age_days > 7:
-        status = _max_status(status, "warning")
-        reasons.append(f"Latest log is {age_days} days old.")
-    if failed_jobs_3 or failed_dataflows_3:
-        status = "has_issues"
-        reasons.append("Recent failures were found in the last 3 days.")
-    elif failed_jobs_7 or failed_dataflows_7:
-        status = _max_status(status, "warning")
-        reasons.append("Failures were found in the last 7 days.")
-    if maintenance_failed_7:
-        status = "has_issues"
-        reasons.append("Maintenance failures were found in the last 7 days.")
-    elif maintenance_failed_14:
-        status = _max_status(status, "warning")
-        reasons.append("Maintenance failures were found in the last 14 days.")
-    if maintenance_skipped_7:
-        status = _max_status(status, "warning")
-        reasons.append("Skipped maintenance operations were found in the last 7 days.")
-    if reconciliation.get("mismatch_count"):
-        status = _max_status(status, "warning")
-        reasons.append("Job and dataflow log totals do not fully reconcile.")
-    if not reasons and operations.get("kpis", {}).get("total_jobs"):
-        reasons.append("No immediate monitoring issues detected.")
-
-    return {
-        "status": status,
-        "label": {
-            "healthy": "Healthy",
-            "warning": "Warning",
-            "has_issues": "Has issues",
-            "no_log_evidence": "No log evidence",
-        }.get(status, status),
-        "reasons": reasons,
-        "latest_log_at": latest_log_at,
-        "latest_job_log_at": latest_job_log_at,
-        "latest_dataflow_log_at": latest_dataflow_log_at,
-        "latest_log_age_days": age_days,
-        "failed_jobs_last_3_days": failed_jobs_3,
-        "failed_jobs_last_7_days": failed_jobs_7,
-        "failed_dataflows_last_3_days": failed_dataflows_3,
-        "failed_dataflows_last_7_days": failed_dataflows_7,
-        "maintenance_failed_last_7_days": maintenance_failed_7,
-        "maintenance_failed_last_14_days": maintenance_failed_14,
-        "maintenance_skipped_last_7_days": maintenance_skipped_7,
-    }
+    return environment_health(
+        latest_log_at=latest_log_at,
+        latest_job_log_at=latest_job_log_at,
+        latest_dataflow_log_at=latest_dataflow_log_at,
+        coverage=coverage,
+        reconciliation=reconciliation,
+        failed_jobs_last_3_days=failed_jobs_3,
+        failed_jobs_last_7_days=failed_jobs_7,
+        failed_dataflows_last_3_days=failed_dataflows_3,
+        failed_dataflows_last_7_days=failed_dataflows_7,
+        maintenance_failed_last_7_days=maintenance_failed_7,
+        maintenance_failed_last_14_days=maintenance_failed_14,
+        maintenance_skipped_last_7_days=maintenance_skipped_7,
+        has_jobs=bool(operations.get("kpis", {}).get("total_jobs")),
+    )
 
 
 def _attention_queue(
@@ -3348,55 +3110,12 @@ def _performance_phase_contribution_by_stage_operation(
     rows: list[dict[str, Any]],
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    return _performance_phase_contribution(
+    return _phase_duration_summary(
         rows,
         group_key="context",
         resolve_group=lambda row: f"{_dataflow_operation_type(row)} · {_dimension_value(row.get('stage'))}",
         limit=limit,
     )
-
-
-def _performance_phase_contribution(
-    rows: list[dict[str, Any]],
-    *,
-    group_key: str,
-    resolve_group,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        buckets[resolve_group(row)].append(row)
-
-    result: list[dict[str, Any]] = []
-    for group_value, items in buckets.items():
-        phase_values = {
-            phase: [_performance_phase_duration(item, phase) for item in items]
-            for phase in ("source", "transform", "destination", "overhead")
-        }
-        total_duration = sum(sum(values) for values in phase_values.values())
-        if total_duration <= 0:
-            continue
-        durations = [_num(item, "duration_seconds") for item in items if _num(item, "duration_seconds") is not None]
-        statuses = Counter(_status(item) for item in items)
-        row: dict[str, Any] = {
-            group_key: group_value,
-            "group": group_value,
-            "total_duration_seconds": round(total_duration, 3),
-            "run_count": len(items),
-            "p95_duration_seconds": _percentile_clean(durations, 0.95),
-            "failed": statuses.get("failed", 0),
-        }
-        for phase, values in phase_values.items():
-            duration = sum(values)
-            row[f"{phase}_duration_seconds"] = round(duration, 3)
-            row[f"{phase}_duration_percent"] = _rate(duration, total_duration)
-            row[f"{phase}_run_count"] = sum(1 for value in values if value > 0)
-            row[f"{phase}_avg_duration_seconds"] = _avg(values)
-            row[f"{phase}_p95_duration_seconds"] = _percentile_clean(values, 0.95)
-            row[f"{phase}_failed"] = sum(1 for item in items if _status(item) == "failed" and _performance_phase_duration(item, phase) > 0)
-        result.append(row)
-    sorted_result = sorted(result, key=lambda row: (-float(row["total_duration_seconds"]), str(row["group"])))
-    return sorted_result[:limit] if limit is not None else sorted_result
 
 
 def _performance_workload_efficiency_points(rows: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
@@ -3810,13 +3529,24 @@ def _estimated_rows_written(row: dict[str, Any]) -> float:
 
 
 def _is_lakehouse_destination(row: dict[str, Any]) -> bool:
-    candidates = [
+    metadata_candidates = [
         row.get("destination_connection_type"),
         row.get("destination_format"),
+    ]
+    metadata = [
+        str(value).strip().lower()
+        for value in metadata_candidates
+        if str(value or "").strip().lower() not in {"", "unknown", "none", "null", "n/a"}
+    ]
+    if metadata:
+        text = " ".join(metadata)
+        return any(token in text for token in ("lakehouse", "delta", "iceberg", "onelake", "deltalake"))
+
+    fallback_candidates = [
         row.get("destination_name"),
         row.get("destination_path"),
     ]
-    text = " ".join(str(value or "").lower() for value in candidates)
+    text = " ".join(str(value or "").lower() for value in fallback_candidates)
     return any(token in text for token in ("lakehouse", "delta", "iceberg", "onelake", "deltalake"))
 
 
@@ -5205,11 +4935,21 @@ def _failure_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _status_by_date(rows: list[dict[str, Any]], trend_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     trend_context = trend_context or _trend_context({}, rows, timezone.utc)
+    return _status_by_date_counts(
+        [{**row, "count": 1} for row in rows],
+        trend_context,
+    )
+
+
+def _status_by_date_counts(
+    rows: list[dict[str, Any]],
+    trend_context: dict[str, Any],
+) -> list[dict[str, Any]]:
     buckets: dict[str, Counter] = defaultdict(Counter)
     bucket_metadata: dict[str, dict[str, str | None]] = {}
     for row in rows:
         bucket = _date_bucket(row, trend_context)
-        buckets[bucket["bucket"]][_status(row)] += 1
+        buckets[bucket["bucket"]][_status(row)] += int(row.get("count") or 0)
         bucket_metadata[bucket["bucket"]] = bucket
 
     result = []
@@ -5413,6 +5153,10 @@ def _listish_values(value: Any) -> list[str]:
     return [item.strip() for item in text_value.split(",") if item.strip()]
 
 
+def _job_operation_types_value(job: dict[str, Any]) -> str:
+    return ", ".join(_listish_values(job.get("operation_types"))) or "unknown"
+
+
 def _destination_operation_type(row: dict[str, Any]) -> str:
     return _dimension_value(row.get("destination_operation_type"))
 
@@ -5450,27 +5194,42 @@ def _phase_duration_summary(
         "statuses": {phase: Counter() for phase, _, _ in phase_definitions},
         "durations": {phase: [] for phase, _, _ in phase_definitions},
     })
-    for row in rows:
-        group_value = resolve_group(row)
-        bucket = buckets[group_value]
+    total_bucket = {
+        "statuses": {phase: Counter() for phase, _, _ in phase_definitions},
+        "durations": {phase: [] for phase, _, _ in phase_definitions},
+    }
+
+    def add_run(bucket: dict[str, Any], row: dict[str, Any]) -> None:
+        failed_phases = set(dataflow_failed_phases(row))
         for phase, status_key, duration_key in phase_definitions:
             if status_key and row.get(status_key):
-                bucket["statuses"][phase][_status({**row, "status": row.get(status_key)})] += 1
+                phase_status = _status({**row, "status": row.get(status_key)})
+                bucket["statuses"][phase][phase_status] += 1
             duration = _phase_duration(row, phase, duration_key)
-            if duration is not None and (phase != "overhead" or duration > 0):
+            if duration is not None:
                 bucket["durations"][phase].append(duration)
+        if "overhead" in failed_phases:
+            bucket["statuses"]["overhead"]["failed"] += 1
 
-    result: list[dict[str, Any]] = []
-    for group_value, bucket in buckets.items():
+    for row in rows:
+        if _status(row) not in {"succeeded", "failed", "skipped"}:
+            continue
+        group_value = resolve_group(row)
+        add_run(buckets[group_value], row)
+        add_run(total_bucket, row)
+
+    def summary_row(group_value: str, bucket: dict[str, Any], is_total: bool = False) -> dict[str, Any] | None:
         phase_durations = bucket["durations"]
         total_duration = sum(sum(values) for values in phase_durations.values())
         if total_duration <= 0:
-            continue
+            return None
         row: dict[str, Any] = {
             group_key: group_value,
             "group": group_value,
             "total_duration_seconds": round(total_duration, 3),
         }
+        if is_total:
+            row["is_total"] = 1
         for phase, _, _ in phase_definitions:
             statuses = bucket["statuses"][phase]
             durations = phase_durations[phase]
@@ -5486,16 +5245,31 @@ def _phase_duration_summary(
             row[f"{phase}_running"] = statuses.get("running", 0)
             row[f"{phase}_pending"] = statuses.get("pending", 0)
             row[f"{phase}_unknown"] = statuses.get("unknown", 0)
-        result.append(row)
+        return row
+
+    result = [
+        row
+        for group_value, bucket in buckets.items()
+        if (row := summary_row(group_value, bucket)) is not None
+    ]
     sorted_result = sorted(result, key=lambda item: (-float(item["total_duration_seconds"]), str(item["group"])))
-    return sorted_result[:limit] if limit is not None else sorted_result
+    if limit is not None:
+        sorted_result = sorted_result[:limit]
+    total = summary_row("Total", total_bucket, is_total=True)
+    return ([total] if total is not None else []) + sorted_result
 
 
 def _phase_duration(row: dict[str, Any], phase: str, duration_key: str) -> float | None:
     if phase != "overhead":
         return _num(row, duration_key)
-    overhead = _num(row, duration_key)
-    return max(0.0, overhead) if overhead is not None else None
+    total_duration = _num(row, "duration_seconds")
+    if total_duration is None:
+        return None
+    known_duration = sum(
+        _num(row, known_key) or 0
+        for known_key in ("source_duration_seconds", "transform_duration_seconds", "destination_duration_seconds")
+    )
+    return max(0.0, total_duration - known_duration)
 
 
 def _dataflow_name_status_health(rows: list[dict[str, Any]], limit: int = 40) -> list[dict[str, Any]]:
@@ -5834,97 +5608,8 @@ def _row_timestamp(row: dict[str, Any]) -> datetime | None:
     return None
 
 
-_DEPENDENCY_PATTERNS = (
-    re.compile(r"\b(pip|conda|poetry)\s+install\b"),
-    re.compile(r"\bmodulenotfounderror\b"),
-    re.compile(r"\bmodule not found\b"),
-    re.compile(r"\bno module named\b"),
-    re.compile(r"\brequired package\b"),
-    re.compile(r"\bmissing package\b"),
-)
-_CONNECTIVITY_PATTERNS = (
-    re.compile(r"\bconnection refused\b"),
-    re.compile(r"\bconnection reset\b"),
-    re.compile(r"\btimeout\b"),
-    re.compile(r"\btimed out\b"),
-    re.compile(r"\bnetwork is unreachable\b"),
-    re.compile(r"\bunreachable\b"),
-    re.compile(r"\bgetaddrinfo\b"),
-    re.compile(r"\bdns\b"),
-    re.compile(r"\bname or service not known\b"),
-    re.compile(r"\bfailed to establish a new connection\b"),
-)
-_AUTHENTICATION_PATTERNS = (
-    re.compile(r"\boauth\b"),
-    re.compile(r"\bauth(?:entication)?\b"),
-    re.compile(r"\bcredential\b"),
-    re.compile(r"\btoken\b"),
-    re.compile(r"\bunauthorized\b"),
-    re.compile(r"\bforbidden\b"),
-    re.compile(r"\binvalid[_ ](?:client|token)\b"),
-    re.compile(r"\b401\b"),
-    re.compile(r"\b403\b"),
-)
-_MISSING_OBJECT_PATTERNS = (
-    re.compile(r"\bnot found\b"),
-    re.compile(r"\bdoes not exist\b"),
-    re.compile(r"\bno such (?:table|view|file|path|column|database|schema)\b"),
-    re.compile(r"\bmissing (?:table|view|column|schema|path|file|object)\b"),
-    re.compile(r"\btable or view\b"),
-    re.compile(r"\bpath does not exist\b"),
-    re.compile(r"\bmissing delta table\b"),
-    re.compile(r"\bis not a delta table\b"),
-)
-_SCHEMA_PATTERNS = (
-    re.compile(r"\bschema\b"),
-    re.compile(r"\bcolumn\b"),
-    re.compile(r"\bdata[\s_-]?type\b"),
-    re.compile(r"\btype mismatch\b"),
-    re.compile(r"\bcannot cast\b"),
-    re.compile(r"\bfailed to merge fields\b"),
-    re.compile(r"\bincompatible schema\b"),
-)
-_VALIDATION_PATTERNS = (
-    re.compile(r"\breplay\b"),
-    re.compile(r"\bassert(?:ion)?\b"),
-    re.compile(r"\bvalidation\b"),
-    re.compile(r"\bexpect(?:ation)?\b"),
-    re.compile(r"\bconstraint\b"),
-)
-
-
-def _is_list_like_identifier_message(message: str) -> bool:
-    if ";" not in message:
-        return False
-    parts = [part.strip() for part in message.split(";") if part.strip()]
-    if len(parts) < 2:
-        return False
-    return all(re.fullmatch(r"[a-z0-9_:\-./]+", part) for part in parts)
-
-
-def _matches_any_pattern(message: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
-    return any(pattern.search(message) for pattern in patterns)
-
-
 def _error_category(message: str) -> str:
-    lower = message.lower().strip()
-    if not lower or lower == "none":
-        return "Unspecified"
-    if _is_list_like_identifier_message(lower):
-        return "Other"
-    if _matches_any_pattern(lower, _DEPENDENCY_PATTERNS):
-        return "Dependency"
-    if _matches_any_pattern(lower, _CONNECTIVITY_PATTERNS):
-        return "Connectivity"
-    if _matches_any_pattern(lower, _AUTHENTICATION_PATTERNS):
-        return "Authentication"
-    if _matches_any_pattern(lower, _MISSING_OBJECT_PATTERNS):
-        return "Missing object"
-    if _matches_any_pattern(lower, _SCHEMA_PATTERNS):
-        return "Schema"
-    if _matches_any_pattern(lower, _VALIDATION_PATTERNS):
-        return "Validation"
-    return "Other"
+    return categorize_failure(message)
 
 
 def _status(row: dict[str, Any]) -> str:

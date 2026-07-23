@@ -179,7 +179,10 @@ export function DataTable<T extends Record<string, unknown>>({
     () => sortRows(rows, columns, activeSort),
     [rows, columns, activeSort]
   );
-  const visible = sortedRows.slice(offset, offset + maxRows);
+  const visible = useMemo(
+    () => sortedRows.slice(offset, offset + maxRows),
+    [sortedRows, offset, maxRows]
+  );
   const autoWidths = useMemo(
     () => calculateAutoFitWidths(visible, columns, timezoneName),
     [visible, columns, timezoneName]

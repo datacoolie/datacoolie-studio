@@ -1,29 +1,32 @@
-export type ReferenceResolutionState =
-  | "automatic"
-  | "manual"
-  | "needs_mapping"
-  | "review"
-  | "partial"
-  | "missing_target"
-  | "inactive"
-  | "stored_only";
+import type { ReferenceResolution, ResolutionReason, ResolutionState } from "./api/types";
 
 export interface ReferenceResolutionPresentation {
-  state: ReferenceResolutionState;
+  state: ResolutionState;
   label: string;
+  detail: string | null;
 }
 
-const labels: Record<ReferenceResolutionState, string> = {
+const labels: Record<ResolutionState, string> = {
   automatic: "Automatic",
   manual: "Manual",
-  needs_mapping: "Needs mapping",
-  review: "Review",
-  partial: "Review",
-  missing_target: "Target missing",
-  inactive: "Saved, not applied",
-  stored_only: "Saved only",
+  unresolved: "Unresolved",
 };
 
-export function presentReferenceResolution(state: ReferenceResolutionState): ReferenceResolutionPresentation {
-  return { state, label: labels[state] };
+const reasonLabels: Record<ResolutionReason, string> = {
+  no_match: "No matching asset found",
+  multiple_matches: "Multiple matching assets found",
+  conflicting_targets: "Occurrences resolve to different assets",
+  incomplete: "Some occurrences are not resolved",
+  target_missing: "The saved mapping target is unavailable",
+};
+
+export function presentReferenceResolution(
+  value: ReferenceResolution | ResolutionState,
+): ReferenceResolutionPresentation {
+  const resolution = typeof value === "string" ? { state: value, reason: null } : value;
+  return {
+    state: resolution.state,
+    label: labels[resolution.state],
+    detail: resolution.reason ? reasonLabels[resolution.reason] : null,
+  };
 }

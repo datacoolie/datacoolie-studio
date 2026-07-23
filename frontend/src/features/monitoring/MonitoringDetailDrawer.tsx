@@ -1,20 +1,22 @@
 import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
-import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react";
+import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { MonitoringRecord } from "../../shared/api/types";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
-import { formatTimestampForDisplay, isTimestampFieldName } from "../../shared/time";
+import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../shared/time";
+import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../shared/statusPresentation";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableSort } from "./MonitoringCharts";
 import {
   diagnosticsCategoryLabel,
   diagnosticsEvidenceItems,
   diagnosticsInvestigationActions,
+  diagnosticsLinkedJobRow,
   diagnosticsRuleDescription,
   diagnosticsSeverityPresentation,
 } from "./diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
-import { formatPhasePercent, TablePager } from "./monitoringShared";
+import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./monitoringShared";
 import { SystemLogViewer } from "./SystemLogViewer";
 
 export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";
@@ -59,6 +61,7 @@ const PRIMARY_FIELDS = [
 ];
 
 const SOURCE_FIELDS = [
+  "source_name",
   "source_connection_name",
   "source_connection_type",
   "source_format",
@@ -82,6 +85,7 @@ const TRANSFORM_FIELDS = [
 ];
 
 const DESTINATION_FIELDS = [
+  "destination_name",
   "destination_connection_name",
   "destination_connection_type",
   "destination_format",
@@ -119,7 +123,7 @@ const ERROR_FIELDS = [
 ];
 
 type DetailRow = [label: string, value: unknown, field?: string];
-type SemanticIntent = "success" | "failed" | "skipped" | "bad" | "neutral";
+type SemanticIntent = "success" | "failed" | "skipped" | "running" | "pending" | "bad" | "neutral";
 type DataflowPhaseKey = "source" | "transform" | "destination" | "overhead";
 type SemanticValueModel =
   | { kind: "status"; value: string }
@@ -198,12 +202,17 @@ export function MonitoringDetailDrawer({
   const jobId = typeof row.job_id === "string" ? row.job_id : "";
   const dataflowId = kind === "dataflow" && typeof row.dataflow_id === "string" ? row.dataflow_id : "";
   const drawerStatusClass = kind === "job" || kind === "dataflow" ? jobStatusTone(row.status) : "";
+  const jobStatusPresentation = kind === "job" ? lifecycleStatusPresentation(row.status) : null;
+  const jobStatusStyle = jobStatusPresentation ? {
+    "--monitoring-job-status-surface": jobStatusPresentation.drawerSurface,
+    "--monitoring-job-status-border": jobStatusPresentation.drawerBorder,
+  } as CSSProperties : undefined;
   const freshnessHealthClass = kind === "freshness" ? ` is-freshness-${freshnessDrawerHealth(row).tone}` : "";
   const maintenanceHealthClass = kind === "maintenance" ? ` is-maintenance-health-${maintenanceTableHealthTone(row.table_health)}` : "";
   const diagnosticsHealthClass = kind === "diagnostics" ? ` is-diagnostics-${diagnosticsSeverityPresentation(row.severity).tone}` : "";
   return createPortal(
     <div className="metadata-drawer-backdrop monitoring-detail-backdrop" onMouseDown={onClose}>
-      <aside className={`metadata-drawer monitoring-detail-drawer is-${kind}${drawerStatusClass ? ` ${drawerStatusClass}` : ""}${freshnessHealthClass}${maintenanceHealthClass}${diagnosticsHealthClass}`} aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
+      <aside className={`metadata-drawer monitoring-detail-drawer is-${kind}${drawerStatusClass ? ` ${drawerStatusClass}` : ""}${freshnessHealthClass}${maintenanceHealthClass}${diagnosticsHealthClass}`} style={jobStatusStyle} aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
         <header className="metadata-drawer-header">
           {onBack ? (
             <button className="icon-action monitoring-detail-back" type="button" aria-label="Back to previous monitoring detail" onClick={onBack}>
@@ -367,7 +376,7 @@ export function MonitoringDetailDrawer({
               timezoneName={timezoneName}
             />
           ) : kind === "diagnostics" ? (
-            <DiagnosticsDetailSections row={row} timezoneName={timezoneName} />
+            <DiagnosticsDetailSections row={row} timezoneName={timezoneName} onOpenJob={onOpenJob} />
           ) : (
             <DetailSection title="Detail" row={row} fields={PRIMARY_FIELDS} timezoneName={timezoneName} />
           )}
@@ -695,19 +704,11 @@ function DataflowRunSummary({ row, timezoneName }: { row: Record<string, unknown
 }
 
 function dataflowEndpointSummary(row: Record<string, unknown>, direction: "source" | "destination") {
-  const sourceQuery = direction === "source" ? firstValue(row, ["source_query"]) : null;
-  const sourcePythonFunction = direction === "source" ? firstValue(row, ["source_python_function"]) : null;
-  const asset = direction === "source"
-    ? sourceQuery
-      ? "SQL query"
-      : sourcePythonFunction || firstValue(row, ["source_table", "source_name"])
-    : firstValue(row, ["destination_table", "destination_name"]);
-  const connection = firstValue(row, [`${direction}_connection_name`, `${direction}_name`]);
-  const format = firstValue(row, [`${direction}_format`, `${direction}_connection_type`]);
+  const endpoint = monitoringEndpointPresentation(row as MonitoringRecord, direction);
   return {
-    asset: String(asset || (direction === "source" ? "Unknown source" : "Unknown destination")),
-    connection: String(connection || "unknown connection"),
-    format: String(format || "unknown format"),
+    asset: endpoint.locator,
+    connection: endpoint.connection,
+    format: endpoint.format || String(firstValue(row, [`${direction}_connection_type`]) || "unknown format"),
   };
 }
 
@@ -731,6 +732,8 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
   return (
     <>
       <DataflowRunSummary row={row} timezoneName={timezoneName} />
+
+      {hasPerformanceEvidence(row) ? <PerformanceDetailSections row={row} /> : null}
 
       <FailureEvidenceSections row={row} timezoneName={timezoneName} />
 
@@ -891,6 +894,19 @@ function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unk
   );
 }
 
+function hasPerformanceEvidence(row: Record<string, unknown>) {
+  return [
+    row.performance_bottleneck_phase,
+    row.performance_candidate_code,
+    row.performance_candidate_reason,
+    row.performance_candidate_priority,
+    row.performance_rows_processed,
+    row.performance_rows_per_second,
+    row.performance_overhead_ratio,
+    row.performance_dominant_phase_ratio,
+  ].some(hasValue);
+}
+
 function MaintenanceDetailSections({
   row,
   relatedDataflows,
@@ -935,6 +951,8 @@ function MaintenanceDetailSections({
               ["Latest maintenance", row.latest_maintenance_time, "latest_maintenance_time"],
               ["Latest ETL write", row.latest_etl_write_time, "latest_etl_write_time"],
               ["Lag", formatMaintenanceLag(num(row, "maintenance_lag_seconds"))],
+              ["Active lakehouse", row.active_lakehouse_table],
+              ["Maintenance coverage", row.maintained_table],
             ]}
             showEmpty
             timezoneName={timezoneName}
@@ -944,9 +962,13 @@ function MaintenanceDetailSections({
             title="Run outcome"
             rows={[
               ["Runs", row.run_count, "run_count"],
+              ["Latest status", row.latest_status, "latest_status"],
               ["Succeeded", row.succeeded, "succeeded"],
               ["Failed", row.failed, "failed"],
               ["Skipped", row.skipped, "skipped"],
+              ["Running", row.running, "running"],
+              ["Pending", row.pending, "pending"],
+              ["Unknown", row.unknown, "unknown"],
               ["No-op runs", <MaintenanceMetricValue key="no-op-runs" tone="warning" value={formatNumber(num(row, "no_op_runs"))} />],
               ["No-op duration", <MaintenanceMetricValue key="no-op-duration" tone="warning" value={formatSeconds(num(row, "no_op_duration_seconds"))} />],
             ]}
@@ -960,6 +982,7 @@ function MaintenanceDetailSections({
               ["Bytes reclaimed", <MaintenanceMetricValue key="bytes-reclaimed" tone="reclaim" value={formatBytes(num(row, "bytes_reclaimed"))} />],
               ["Files removed", <MaintenanceMetricValue key="files-removed" tone="files" value={formatNumber(num(row, "files_removed"))} />],
               ["Bytes saved", <MaintenanceMetricValue key="bytes-saved" tone="reclaim" value={formatBytes(num(row, "bytes_saved"))} />],
+              ["Total duration", formatSeconds(num(row, "duration_seconds"))],
               ["Efficiency", `${formatBytes(num(row, "bytes_reclaimed_per_second"))}/s`],
             ]}
             showEmpty
@@ -1200,14 +1223,17 @@ function maintenanceSourceParts(row: Record<string, unknown>) {
 function DiagnosticsDetailSections({
   row,
   timezoneName,
+  onOpenJob,
 }: {
   row: Record<string, unknown>;
   timezoneName?: string | null;
+  onOpenJob?: (row: Record<string, unknown>) => void;
 }) {
   const evidence = evidenceObject(row.evidence);
   const category = String(row.category ?? "diagnostics");
   const actionItems = diagnosticsInvestigationActions(row, evidence);
   const evidenceItems = diagnosticsEvidenceItems(category, row, evidence);
+  const linkedJob = diagnosticsLinkedJobRow(row, evidence);
   return (
     <>
       <section className="monitoring-detail-section monitoring-diagnostics-finding">
@@ -1235,6 +1261,8 @@ function DiagnosticsDetailSections({
           ))}
         </div>
       </section>
+
+      {linkedJob ? <DiagnosticsLinkedJobSection row={linkedJob} onOpenJob={onOpenJob} /> : null}
 
       {actionItems.length ? (
         <section className="monitoring-detail-section">
@@ -1515,6 +1543,53 @@ function VolumeRunFilesCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
+function PerformanceDetailSections({ row }: { row: Record<string, unknown> }) {
+  const candidateReason = firstValue(row, ["performance_candidate_reason", "candidate_reason"]);
+  return (
+    <section className="monitoring-detail-section monitoring-performance-evidence-section">
+      <h3>Performance evidence</h3>
+      <div className="monitoring-dataflow-detail-grid monitoring-performance-evidence-grid">
+        <GroupedDetailCard
+          title="Optimization signal"
+          rows={[
+            ["Primary reason", candidateReason],
+            ["Rule", row.performance_candidate_code],
+            ["Priority", row.performance_candidate_priority],
+          ]}
+          showEmpty
+        />
+        <GroupedDetailCard
+          title="Efficiency"
+          rows={[
+            ["Rows processed", formatNumber(num(row, "performance_rows_processed"))],
+            ["Rows / second", formatNumber(num(row, "performance_rows_per_second"))],
+            ["Overhead share", performanceRatioLabel(row.performance_overhead_ratio)],
+            ["Dominant share", performanceRatioLabel(row.performance_dominant_phase_ratio)],
+          ]}
+          showEmpty
+        />
+        <GroupedDetailCard
+          title="Phase cost"
+          rows={[
+            ["Bottleneck", row.performance_bottleneck_phase],
+            ["Source", formatSeconds(num(row, "source_duration_seconds"))],
+            ["Transform", formatSeconds(num(row, "transform_duration_seconds"))],
+            ["Destination", formatSeconds(num(row, "destination_duration_seconds"))],
+            ["Overhead", formatSeconds(num(row, "overhead_duration_seconds"))],
+          ]}
+          showEmpty
+        />
+      </div>
+    </section>
+  );
+}
+
+function performanceRatioLabel(value: unknown) {
+  if (!hasValue(value)) return "-";
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? formatPhasePercent(ratio * 100) : "-";
+}
+
 function FreshnessDetailSections({
   row,
   relatedDataflows,
@@ -1576,6 +1651,7 @@ function FreshnessDetailSections({
               ["Movement", row.movement_state],
               ["Adjustment", row.adjustment_state],
               ["Watermark time", row.watermark_time, "watermark_time"],
+              ["Latest successful", row.latest_success_watermark, "latest_success_watermark"],
               ["Columns", row.source_watermark_columns, "source_watermark_columns"],
               ["Before", row.source_watermark_before, "source_watermark_before"],
               ["Effective", row.source_watermark_effective, "source_watermark_effective"],
@@ -1609,6 +1685,7 @@ function FreshnessDetailSections({
               ["Group number", row.group_number],
               ["Execution order", row.execution_order],
               ["Processing mode", row.processing_mode],
+              ["Operation type", row.operation_type],
               ["Active", row.is_active],
               ["Configure", row.configure, "configure"],
             ]}
@@ -1631,6 +1708,7 @@ function FreshnessDetailSections({
               ["Path", row.source_path],
               ["Query", row.source_query, "source_query"],
               ["Python function", row.source_python_function],
+              ["Action", row.source_action],
               ["Watermark columns", row.source_watermark_columns, "source_watermark_columns"],
               ["Filter", row.source_filter_expression, "source_filter_expression"],
               ["Configure", row.source_configure, "source_configure"],
@@ -1793,6 +1871,7 @@ function FreshnessRunMix({ row }: { row: Record<string, unknown> }) {
 
 function FailureEvidenceSections({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
   const message = failureErrorMessage(row);
+  const diagnosticTags = failureDiagnosticTags(row.failure_tags);
   const hasFailureContext = [
     row.failure_phase,
     row.failure_category,
@@ -1814,8 +1893,23 @@ function FailureEvidenceSections({ row, timezoneName }: { row: Record<string, un
           />
         </div>
       ) : null}
+      {diagnosticTags.length ? (
+        <div className="monitoring-failure-diagnostic-signals" aria-label="Failure diagnostic signals">
+          <strong>Diagnostic signals</strong>
+          <div>
+            {diagnosticTags.map((tag) => <span key={tag}>{tag}</span>)}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+export function failureDiagnosticTags(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value.map((item) => String(item ?? "").trim()).filter(Boolean)
+  )).slice(0, 5);
 }
 
 function FreshnessRunTimeCell({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
@@ -2053,7 +2147,7 @@ function GroupedDetailCard({
         {visibleRows.map(([label, value, field]) => {
           const isBlock = isGroupedBlockValue(value, field);
           return (
-          <div key={label} className={isBlock ? "is-block-value" : undefined}>
+          <div key={label} className={[isBlock ? "is-block-value" : "", isErrorField(field ?? "") ? "is-error-value" : ""].filter(Boolean).join(" ") || undefined}>
             <dt>{label}</dt>
             <dd>{renderGroupedValue(value, timezoneName, field)}</dd>
           </div>
@@ -2069,7 +2163,9 @@ function renderGroupedValue(value: unknown, timezoneName?: string | null, field?
   if (!hasValue(value)) return "-";
   if (isSemanticValue(value)) return <SemanticValue value={value} />;
   if (typeof value === "string" && field && timezoneName && isTimestampFieldName(field)) {
-    return formatTimestampForDisplay(value, timezoneName);
+    return isRuntimeTimestampField(field)
+      ? formatRuntimeTimestampForDisplay(value, timezoneName)
+      : formatTimestampForDisplay(value, timezoneName);
   }
   if (field && SQL_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="sql" />;
   if (field && LIST_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="list" />;
@@ -2084,6 +2180,17 @@ function renderGroupedValue(value: unknown, timezoneName?: string | null, field?
   return value as ReactNode;
 }
 
+function isRuntimeTimestampField(field: string) {
+  return /^(source|transform|destination)_(start|end)_time$/u.test(field);
+}
+
+export function formatRuntimeTimestampForDisplay(value: unknown, timezoneName?: string | null) {
+  const rawValue = String(value ?? "").trim();
+  if (!rawValue) return "-";
+  const normalized = hasExplicitTimezone(rawValue) ? rawValue : `${rawValue}Z`;
+  return formatTimestampForDisplay(normalized, timezoneName);
+}
+
 function isGroupedBlockValue(value: unknown, field?: string) {
   if (!hasValue(value) || isValidElement(value) || isSemanticValue(value)) return false;
   if (field && (SQL_BLOCK_FIELDS.has(field) || LIST_BLOCK_FIELDS.has(field) || JSON_BLOCK_FIELDS.has(field))) return true;
@@ -2095,12 +2202,13 @@ function isSemanticValue(value: unknown): value is SemanticValueModel {
   return Boolean(value && typeof value === "object" && "kind" in value);
 }
 
-function semanticNumber(field: string | undefined, value: number): SemanticValueModel {
+export function semanticNumber(field: string | undefined, value: number): SemanticValueModel {
   const lowerField = String(field ?? "").toLowerCase();
   let intent: SemanticIntent = "neutral";
-  if (lowerField.includes("succeeded") || lowerField.includes("success")) intent = "success";
-  if (lowerField.includes("failed") || lowerField.includes("error")) intent = value > 0 ? "failed" : "neutral";
-  if (lowerField.includes("skipped")) intent = value > 0 ? "skipped" : "neutral";
+  const lifecycleStatus = lifecycleStatusFromField(lowerField);
+  if (lifecycleStatus) intent = semanticStatusIntent(lifecycleStatus);
+  if (lowerField.includes("success") && !lifecycleStatus) intent = "success";
+  if (lowerField.includes("error") && !lifecycleStatus) intent = value > 0 ? "failed" : "neutral";
   if (lowerField.includes("mismatch")) intent = value > 0 ? "failed" : "neutral";
   return { kind: "count", value, intent };
 }
@@ -2123,16 +2231,18 @@ function SemanticValue({ value }: { value: SemanticValueModel }) {
     const countIntent = value.mismatch > 0 ? "failed" : "neutral";
     return (
       <span className="monitoring-semantic-pair">
-        <span className={`monitoring-semantic-value is-${statusIntent}`}>{value.status}</span>
+        <span className={`monitoring-semantic-value is-${statusIntent}`} style={semanticIntentStyle(statusIntent)}>{value.status}</span>
         <span aria-hidden="true">·</span>
-        <span className={`monitoring-semantic-value is-${countIntent}`}>{display({ value: value.mismatch }, "value")}</span>
+        <span className={`monitoring-semantic-value is-${countIntent}`} style={semanticIntentStyle(countIntent)}>{display({ value: value.mismatch }, "value")}</span>
       </span>
     );
   }
   if (value.kind === "count") {
-    return <span className={`monitoring-semantic-value is-${value.intent ?? "neutral"}`}>{display({ value: value.value }, "value")}</span>;
+    const intent = value.intent ?? "neutral";
+    return <span className={`monitoring-semantic-value is-${intent}`} style={semanticIntentStyle(intent)}>{display({ value: value.value }, "value")}</span>;
   }
-  return <span className={`monitoring-semantic-value is-${semanticIntent(value)}`}>{value.value}</span>;
+  const intent = semanticIntent(value);
+  return <span className={`monitoring-semantic-value is-${intent}`} style={semanticIntentStyle(intent)}>{value.value}</span>;
 }
 
 function semanticIntent(value: SemanticValueModel) {
@@ -2142,7 +2252,19 @@ function semanticIntent(value: SemanticValueModel) {
   if (normalized === "succeeded") return "success";
   if (normalized === "failed") return "failed";
   if (normalized === "skipped") return "skipped";
+  if (normalized === "running") return "running";
+  if (normalized === "pending") return "pending";
   return "neutral";
+}
+
+function semanticStatusIntent(status: LifecycleStatus): SemanticIntent {
+  return status === "succeeded" ? "success" : status;
+}
+
+function semanticIntentStyle(intent: SemanticIntent): CSSProperties | undefined {
+  const status = intent === "success" ? "succeeded" : intent === "bad" ? "failed" : intent;
+  const presentation = lifecycleStatusPresentation(status);
+  return presentation ? { color: presentation.textColor } : undefined;
 }
 
 function CodeBlock({ value, kind }: { value: unknown; kind: "json" | "list" | "sql" }) {
@@ -2345,6 +2467,35 @@ function LinkedJobSection({
         </span>
         <StatusCell row={jobRow} />
         <span className="monitoring-linked-job-duration">{formatSeconds(num(jobRow, "duration_seconds"))}</span>
+        <ChevronRight size={16} aria-hidden="true" />
+      </button>
+    </section>
+  );
+}
+
+function DiagnosticsLinkedJobSection({
+  row,
+  onOpenJob,
+}: {
+  row: Record<string, unknown>;
+  onOpenJob?: (row: Record<string, unknown>) => void;
+}) {
+  const jobId = String(row.job_id ?? "");
+  if (!jobId) return null;
+  return (
+    <section className="monitoring-detail-section monitoring-linked-job-section">
+      <h3>Linked job</h3>
+      <button
+        className="monitoring-linked-job-row is-diagnostics-link"
+        type="button"
+        onClick={() => onOpenJob?.(row)}
+        disabled={!onOpenJob}
+      >
+        <BriefcaseBusiness size={15} aria-hidden="true" />
+        <span className="monitoring-linked-job-identity">
+          <strong>{jobId}</strong>
+          <small>Open canonical job run</small>
+        </span>
         <ChevronRight size={16} aria-hidden="true" />
       </button>
     </section>

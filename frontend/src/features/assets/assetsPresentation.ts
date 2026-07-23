@@ -58,7 +58,8 @@ export function referenceSearchValues(reference: AssetReferenceGroupItem): strin
     reference.display_name,
     reference.normalized_value,
     reference.reference_type,
-    reference.group_status,
+    reference.resolution.state,
+    reference.resolution.reason,
     ...reference.provenances,
     ...reference.consumer_assets.map((asset) => asset.friendly_name || asset.display_name),
     reference.resolved_asset?.friendly_name,
@@ -70,25 +71,14 @@ export function referenceSearchValues(reference: AssetReferenceGroupItem): strin
 }
 
 export function referenceResolutionPresentation(reference: AssetReferenceGroupItem): ReferenceResolutionPresentation {
-  if (reference.group_status === "mapping_target_missing") {
-    return { ...presentReferenceResolution("missing_target"), detail: "Mapping target unavailable" };
+  const presentation = presentReferenceResolution(reference.resolution);
+  if (reference.resolution.state === "manual" && reference.manual_mapping?.mapping_id) {
+    return { ...presentation, detail: `Mapping #${reference.manual_mapping.mapping_id}` };
   }
-  if (reference.group_status === "resolved_mixed" || reference.group_status === "partially_resolved") {
-    return {
-      ...presentReferenceResolution("review"),
-      detail: reference.group_status === "resolved_mixed" ? "Mixed resolution" : "Partially resolved",
-    };
+  if (reference.resolution.state === "automatic") {
+    return { ...presentation, detail: "Resolved target" };
   }
-  if (reference.group_status === "resolved_single") {
-    if (reference.manual_mapping?.mapping_id) {
-      return { ...presentReferenceResolution("manual"), detail: `Mapping #${reference.manual_mapping.mapping_id}` };
-    }
-    return { ...presentReferenceResolution("automatic"), detail: "Resolved target" };
-  }
-  return {
-    ...presentReferenceResolution("needs_mapping"),
-    detail: reference.group_status === "ambiguous" ? "Ambiguous" : "Unresolved",
-  };
+  return { ...presentation, detail: presentation.detail || "Needs mapping" };
 }
 
 export function attentionContextLine(item: AssetAttention): string {
@@ -166,7 +156,7 @@ function attentionDiagnosticOrigin(item: AssetAttention) {
 
 function attentionConditionLabel(item: AssetAttention) {
   const code = item.code.replace(/^reference_/, "").replace(/^dependency_/, "");
-  if (code === "mapping_target_missing") return "mapping target missing";
+  if (code === "target_missing") return "mapping target missing";
   return humanize(code);
 }
 

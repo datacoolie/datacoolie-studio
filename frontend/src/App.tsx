@@ -1,29 +1,38 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "./app/AppShell";
 import { ModuleView } from "./app/ModuleView";
 import { environmentDefaultModule, isModuleKeyEnabled, monitoringDefaultPage } from "./app/moduleRegistry";
 import { useStudioModules } from "./app/useStudioModules";
 import { useStudioRouter } from "./app/useStudioRouter";
 import { useStudioWorkspace } from "./app/useStudioWorkspace";
+import { useStudioDiagnostics } from "./features/settings/hooks/useStudioDiagnostics";
 import { useStudioSettings } from "./features/settings/hooks/useStudioSettings";
+import { environmentQueryKeys, useEnvironmentContextQuery } from "./features/environments/environmentQueries";
+import { sourceCheckIntervalMs } from "./app/environmentHeaderResource";
 
 export function App() {
   const router = useStudioRouter();
+  const queryClient = useQueryClient();
   const modules = useStudioModules();
-  const workspaceRefreshRef = useRef<(() => Promise<void>) | null>(null);
+  const diagnostics = useStudioDiagnostics(router.route.module === "settings");
   const settings = useStudioSettings({
     onSaved: () => {
-      const { environmentId, module } = router.route;
-      if (environmentId && (module === "monitoring" || module === "overview")) {
-        return workspaceRefreshRef.current?.();
-      }
-      return undefined;
+      const environmentId = router.route.environmentId;
+      if (!environmentId) return undefined;
+      return queryClient.invalidateQueries({ queryKey: ["environments", environmentId] });
     }
   });
+  const environmentContext = useEnvironmentContextQuery(
+    router.route.environmentId,
+    sourceCheckIntervalMs(settings.settings?.source_check_interval_seconds),
+    router.route.module,
+  );
   const workspace = useStudioWorkspace(router, {
-    sourceCheckIntervalSeconds: settings.settings?.source_check_interval_seconds
+    onEnvironmentChanged: async (environmentId) => {
+      await queryClient.invalidateQueries({ queryKey: environmentQueryKeys.context(environmentId) });
+    },
   });
-  workspaceRefreshRef.current = workspace.refreshCurrentEnvironment;
 
   // Redirect away from disabled capability modules reached directly via URL.
   useEffect(() => {
@@ -32,28 +41,42 @@ export function App() {
     router.setStudioRoute({ ...router.route, module: environmentDefaultModule, monitoringPage: monitoringDefaultPage }, true);
   }, [router, modules.loading, modules.enabledCapabilities]);
 
-  const error = workspace.error ?? settings.error ?? modules.error;
+  const error = workspace.error
+    ?? (environmentContext.data && router.route.projectId !== environmentContext.data.environment.project_id
+      ? "Environment does not belong to the project in this URL."
+      : null)
+    ?? (environmentContext.error instanceof Error ? environmentContext.error.message : null)
+    ?? settings.error
+    ?? (router.route.module === "settings" ? diagnostics.error : null)
+    ?? modules.error;
 
   return (
     <AppShell
       activeModule={router.route.module}
       activeScope={router.activeScope}
-      projects={workspace.projects}
-      environments={workspace.environments}
-      selectedProjectId={router.route.projectId}
-      selectedEnvironmentId={router.route.environmentId}
+      project={environmentContext.data?.project ?? workspace.selectedProject ?? workspace.selectedProjectSummary}
+      environment={environmentContext.data?.environment
+        ?? workspace.environments.find((item) => item.id === router.route.environmentId)
+        ?? null}
       sidebarCollapsed={router.sidebarCollapsed}
       enabledCapabilities={modules.enabledCapabilities}
-      metadataSourceCount={workspace.environmentFreshness?.metadata_source_count ?? 0}
-      logPathCount={workspace.environmentFreshness?.etl_log_path_count ?? 0}
-      freshness={workspace.environmentFreshness}
+      metadataSourceCount={environmentContext.data?.source_counts.metadata ?? 0}
+      logPathCount={environmentContext.data?.source_counts.logs ?? 0}
+      freshness={environmentContext.data?.freshness ?? null}
       error={error}
       onNavigate={router.navigate}
       onToggleSidebar={router.toggleSidebar}
       onProjectSelect={router.selectProject}
       onOpenProject={router.openProject}
     >
-      <ModuleView router={router} workspace={workspace} settings={settings} modules={modules} />
+      <ModuleView
+        router={router}
+        workspace={workspace}
+        settings={settings}
+        diagnostics={diagnostics}
+        modules={modules}
+        environmentContext={environmentContext.data}
+      />
     </AppShell>
   );
 }

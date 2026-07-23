@@ -3,7 +3,7 @@ import { modulePath, parseRoute } from "./routes";
 
 describe("studio routes", () => {
   it("parses assets pages from the URL", () => {
-    expect(parseRoute("/projects/1/envs/2/assets")).toMatchObject({
+    expect(parseRoute("/projects/1/environments/2/assets")).toMatchObject({
       projectId: 1,
       environmentId: 2,
       module: "assets",
@@ -11,7 +11,7 @@ describe("studio routes", () => {
   });
 
   it("parses monitoring subpages from the URL", () => {
-    expect(parseRoute("/projects/1/envs/2/monitoring/jobs")).toMatchObject({
+    expect(parseRoute("/projects/1/environments/2/monitoring/jobs")).toMatchObject({
       projectId: 1,
       environmentId: 2,
       module: "monitoring",
@@ -20,10 +20,17 @@ describe("studio routes", () => {
   });
 
   it("builds canonical monitoring subpage paths", () => {
-    expect(modulePath(1, 2, "monitoring", "failures")).toBe("/projects/1/envs/2/monitoring/failures");
+    expect(modulePath(1, 2, "monitoring", "failures")).toBe("/projects/1/environments/2/monitoring/failures");
   });
 
   it("builds canonical assets paths", () => {
-    expect(modulePath(1, 2, "assets")).toBe("/projects/1/envs/2/assets");
+    expect(modulePath(1, 2, "assets")).toBe("/projects/1/environments/2/assets");
+  });
+
+  it("does not support the retired short environment route", () => {
+    expect(parseRoute("/projects/1/envs/2/assets")).toMatchObject({
+      projectId: null,
+      environmentId: null,
+    });
   });
 });

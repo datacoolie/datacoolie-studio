@@ -1,7 +1,7 @@
 import type {
   Environment,
+  EnvironmentContext,
   EnvironmentOverview,
-  EnvironmentFreshness,
   JobRecord,
   AssetDetailResponse,
   AssetInventoryResponse,
@@ -13,25 +13,35 @@ import type {
   LineageResponse,
   MetadataBackup,
   MetadataEditorDocument,
+  MetadataEditorWorkspace,
   MetadataResponse,
   MonitoringFilterOptionsResponse,
   MonitoringRecord,
   MonitoringRecordsResponse,
-  MonitoringReport,
+  MonitoringPageResponse,
   ProjectReferenceMapping,
+  ProjectReferenceRegistryResponse,
   Project,
   ProjectSummary,
   SourceReadCheckResult,
   SourceDeleteImpact,
   SourceImportResponse,
+  LogSyncRequest,
   SourcePath,
   SourceSyncStatus,
+  StudioDiagnostics,
+  StudioPathInfo,
+  StudioCacheFeature,
+  StudioCacheMutation,
+  StudioCacheScope,
+  StudioCacheStatus,
   StudioSettings,
   ModuleInfo,
   SystemLogResponse,
   ReferenceType,
   TargetIdentifierKind,
 } from "./types";
+import { apiRequestError } from "../lib/errors";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const API_PREFIX = "/api/v1";
@@ -44,7 +54,7 @@ async function fetchRequest<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || `Request failed: ${response.status}`);
+    throw apiRequestError(detail, response.status);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -87,6 +97,28 @@ function environmentSourcePath(
 
 export const api = {
   getStudioSettings: () => request<StudioSettings>(`${API_PREFIX}/studio/settings`),
+  getStudioDiagnostics: () => request<StudioDiagnostics>(`${API_PREFIX}/studio/diagnostics`),
+  compactWorkspaceDatabase: () => request<StudioPathInfo>(`${API_PREFIX}/studio/workspace-database/compact`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  }),
+  getStudioCache: () => request<StudioCacheStatus>(`${API_PREFIX}/studio/cache`),
+  clearStudioCache: (payload: {
+    scope: StudioCacheScope;
+    environment_id?: number;
+    features?: StudioCacheFeature[];
+  }) => request<StudioCacheMutation>(`${API_PREFIX}/studio/cache/clear`, {
+    method: "POST",
+    body: JSON.stringify({ ...payload, confirm: true }),
+  }),
+  pruneStudioCache: () => request<StudioCacheMutation>(`${API_PREFIX}/studio/cache/prune`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  }),
+  compactStudioCache: () => request<StudioCacheMutation>(`${API_PREFIX}/studio/cache/compact`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  }),
   updateStudioSettings: (payload: { timezone?: string | null; source_check_interval_seconds?: number }) =>
     request<StudioSettings>(`${API_PREFIX}/studio/settings`, {
       method: "PATCH",
@@ -104,8 +136,8 @@ export const api = {
     request<Project>(`${API_PREFIX}/projects`, { method: "POST", body: JSON.stringify(payload) }),
   deleteProject: (projectId: number) =>
     request<void>(`${API_PREFIX}/projects/${projectId}`, { method: "DELETE" }),
-  listProjectReferenceMappings: (projectId: number) =>
-    request<ProjectReferenceMapping[]>(`${API_PREFIX}/projects/${projectId}/reference-mappings`),
+  getProjectReferenceRegistry: (projectId: number) =>
+    request<ProjectReferenceRegistryResponse>(`${API_PREFIX}/projects/${projectId}/reference-registry`),
   createProjectReferenceMapping: (
     projectId: number,
     payload: {
@@ -144,8 +176,8 @@ export const api = {
     request<Environment>(`${API_PREFIX}/projects/${projectId}/environments`, { method: "POST", body: JSON.stringify(payload) }),
   deleteEnvironment: (environmentId: number) =>
     request<void>(`${API_PREFIX}/environments/${environmentId}`, { method: "DELETE" }),
-  getEnvironmentFreshness: (environmentId: number) =>
-    request<EnvironmentFreshness>(`${API_PREFIX}/environments/${environmentId}/freshness`),
+  getEnvironmentContext: (environmentId: number) =>
+    request<EnvironmentContext>(`${API_PREFIX}/environments/${environmentId}/context`),
   listMetadataSources: (environmentId: number) =>
     request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/metadata-sources`),
   addMetadataSource: (environmentId: number, payload: { uri: string; label?: string; enabled?: boolean }) =>
@@ -233,9 +265,10 @@ export const api = {
     }),
   getLogSourceSyncStatus: (environmentId: number, pathId: number) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/sync-status`),
-  refreshLogSource: (environmentId: number, pathId: number) =>
+  refreshLogSource: (environmentId: number, pathId: number, payload: LogSyncRequest) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/refresh`, {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify(payload)
     }),
   listCodeArtifacts: (environmentId: number) =>
     request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/code-artifacts`),
@@ -278,15 +311,13 @@ export const api = {
       method: "POST"
     }),
   getMetadata: (environmentId: number) => request<MetadataResponse>(`${API_PREFIX}/environments/${environmentId}/metadata`),
-  getEnvironmentMetadataEditorDocument: (environmentId: number) =>
-    request<MetadataEditorDocument>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-document`),
+  getEnvironmentMetadataEditorWorkspace: (environmentId: number) =>
+    request<MetadataEditorWorkspace>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-workspace`),
   validateEnvironmentMetadataEditorDocument: (environmentId: number, payload: MetadataEditorDocument) =>
     request<{ status: string; summary: Record<string, unknown>; issues: MetadataEditorDocument["issues"] }>(
       `${API_PREFIX}/environments/${environmentId}/metadata-editor-document/validate`,
       { method: "POST", body: JSON.stringify(payload) }
     ),
-  getEnvironmentMetadataEditorDraft: (environmentId: number) =>
-    request<MetadataEditorDocument | null>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-document/draft`),
   saveEnvironmentMetadataEditorDraft: (environmentId: number, payload: MetadataEditorDocument) =>
     request<MetadataEditorDocument>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-document/draft`, {
       method: "PUT",
@@ -297,7 +328,7 @@ export const api = {
       method: "DELETE"
     }),
   saveEnvironmentMetadataEditorDocument: (environmentId: number, payload: MetadataEditorDocument) =>
-    request<MetadataEditorDocument>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-document`, {
+    request<MetadataEditorWorkspace>(`${API_PREFIX}/environments/${environmentId}/metadata-editor-document`, {
       method: "PUT",
       body: JSON.stringify({
         expected_revision: payload.source.revision,
@@ -314,7 +345,7 @@ export const api = {
   getMetadataBackupDocument: (backupId: number) =>
     request<MetadataEditorDocument>(`${API_PREFIX}/metadata-backups/${backupId}/editor-document`),
   restoreMetadataBackup: (backupId: number, expectedRevision: Record<string, unknown>) =>
-    request<MetadataEditorDocument>(`${API_PREFIX}/metadata-backups/${backupId}/restore`, {
+    request<MetadataEditorWorkspace>(`${API_PREFIX}/metadata-backups/${backupId}/restore`, {
       method: "POST",
       body: JSON.stringify({
         expected_revision: expectedRevision,
@@ -343,10 +374,8 @@ export const api = {
     request<ReferenceOccurrenceSourceResponse>(
       `${API_PREFIX}/environments/${environmentId}/reference-occurrences/${encodeURIComponent(occurrenceId)}/source`,
     ),
-  getEnvironmentOverviewReport: (environmentId: number) =>
-    request<MonitoringReport>(`${API_PREFIX}/environments/${environmentId}/monitoring/pages/environment-overview`),
   getMonitoringPage: (environmentId: number, page: string, params: Record<string, string | number | undefined> = {}) =>
-    request<MonitoringReport>(`${API_PREFIX}/environments/${environmentId}/monitoring/pages/${page}${queryString(params)}`),
+    request<MonitoringPageResponse>(`${API_PREFIX}/environments/${environmentId}/monitoring/pages/${page}${queryString(params)}`),
   getMonitoringPageEvidence: (environmentId: number, page: string, params: Record<string, string | number | undefined>) =>
     request<MonitoringRecordsResponse<MonitoringRecord>>(
       `${API_PREFIX}/environments/${environmentId}/monitoring/pages/${page}/evidence${queryString(params)}`

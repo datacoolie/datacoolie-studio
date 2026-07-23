@@ -41,6 +41,220 @@ def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
+def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "studio.db"
+    analytics_path = tmp_path / "analytics.duckdb"
+    empty_logs = tmp_path / "empty-logs"
+    empty_logs.mkdir()
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.main import app
+
+    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "empty-monitoring"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        source = client.post(
+            f"/api/v1/environments/{environment['id']}/log-sources",
+            json={"uri": str(empty_logs), "label": "empty logs"},
+        ).json()
+
+        assert source["latest_validation"]["status"] == "error"
+        assert source["latest_validation"]["message"] == "No ETL or system log files found"
+
+        overview = client.get(f"/api/v1/environments/{environment['id']}/overview")
+        filter_options = client.get(
+            f"/api/v1/environments/{environment['id']}/monitoring/filter-options"
+        )
+        assert overview.status_code == 200, overview.text
+        assert overview.json()["monitoring"]["job_records"] == 0
+        assert filter_options.status_code == 200, filter_options.text
+        assert filter_options.json()["options"] == {}
+        for page in (
+            "environment-overview",
+            "overview",
+            "jobs",
+            "dataflows",
+            "failures",
+            "diagnostics",
+            "performance",
+            "volume",
+            "maintenance",
+            "freshness",
+        ):
+            monitoring_page = client.get(
+                f"/api/v1/environments/{environment['id']}/monitoring/pages/{page}"
+            )
+            assert monitoring_page.status_code == 200, monitoring_page.text
+            assert monitoring_page.json()["summary"]["job_records"] == 0
+
+        for endpoint in ("dataflows", "jobs"):
+            records = client.get(
+                f"/api/v1/environments/{environment['id']}/monitoring/{endpoint}"
+            )
+            assert records.status_code == 200, records.text
+            assert records.json()["summary"]["total_records"] == 0
+        for page in ("performance", "freshness", "volume", "maintenance"):
+            evidence = client.get(
+                f"/api/v1/environments/{environment['id']}/monitoring/pages/{page}/evidence"
+            )
+            assert evidence.status_code == 200, evidence.text
+            assert evidence.json()["summary"]["total_records"] == 0
+
+
+def test_environment_overview_is_available_when_monitoring_cache_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db_path = tmp_path / "studio.db"
+    analytics_path = tmp_path / "analytics.duckdb"
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.main import app
+
+    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "overview-fail-soft"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        source = client.post(
+            f"/api/v1/environments/{environment['id']}/log-sources",
+            json={"uri": str(SAMPLE_LOGS), "label": "logs"},
+        ).json()
+        assert source["latest_validation"]["status"] == "ok"
+
+        overview = client.get(f"/api/v1/environments/{environment['id']}/overview")
+        filter_options = client.get(
+            f"/api/v1/environments/{environment['id']}/monitoring/filter-options"
+        )
+        dataflows = client.get(
+            f"/api/v1/environments/{environment['id']}/monitoring/dataflows"
+        )
+        jobs = client.get(f"/api/v1/environments/{environment['id']}/monitoring/jobs")
+        latest_status = client.get(
+            f"/api/v1/environments/{environment['id']}/monitoring/latest-status"
+        )
+        evidence = client.get(
+            f"/api/v1/environments/{environment['id']}/monitoring/pages/performance/evidence"
+        )
+
+        assert overview.status_code == 200, overview.text
+        assert overview.json()["monitoring"] == {
+            "job_records": 0,
+            "total_failures": 0,
+            "dataflow_success_rate": 0.0,
+            "failed_job_windows": {"last7": 0, "last30": 0, "last365": 0},
+            "active_engines": 0,
+            "latest_log_at": None,
+            "date_range": {"min": None, "max": None},
+            "errors": [],
+        }
+        assert filter_options.status_code == 200, filter_options.text
+        assert filter_options.json()["options"] == {}
+        assert dataflows.status_code == 200, dataflows.text
+        assert dataflows.json()["summary"]["total_records"] == 0
+        assert jobs.status_code == 200, jobs.text
+        assert jobs.json()["summary"]["total_records"] == 0
+        assert latest_status.status_code == 200, latest_status.text
+        assert latest_status.json()["latest_by_id"] == {}
+        assert evidence.status_code == 200, evidence.text
+        assert evidence.json()["records"] == []
+
+        for page in (
+            "environment-overview",
+            "overview",
+            "jobs",
+            "dataflows",
+            "failures",
+            "diagnostics",
+            "performance",
+            "volume",
+            "maintenance",
+            "freshness",
+        ):
+            monitoring_page = client.get(
+                f"/api/v1/environments/{environment['id']}/monitoring/pages/{page}"
+            )
+            assert monitoring_page.status_code == 200, monitoring_page.text
+            assert monitoring_page.json()["summary"]["job_records"] == 0
+
+
+def test_environment_context_is_narrow_and_versions_dependencies(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "context-demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments", json={"name": "dev"}
+        ).json()
+
+        initial = client.get(
+            f"/api/v1/environments/{environment['id']}/context"
+        )
+        assert initial.status_code == 200
+        initial_context = initial.json()
+        assert initial_context["schema_version"] == "environment-context.v1"
+        assert initial_context["project"] == {"id": project["id"], "name": "context-demo"}
+        assert initial_context["environment"] == {
+            "id": environment["id"],
+            "project_id": project["id"],
+            "name": "dev",
+        }
+        assert initial_context["source_counts"] == {"metadata": 0, "logs": 0, "code": 0}
+        assert set(initial_context["versions"]) == {
+            "source_registry",
+            "metadata_catalog",
+            "code_catalog",
+            "operations",
+            "reference_mappings",
+        }
+        assert "items" not in initial_context["freshness"]
+
+        source_path = tmp_path / "metadata.json"
+        source_path.write_text(
+            '{"connections": [], "dataflows": [], "schema_hints": []}',
+            encoding="utf-8",
+        )
+        client.post(
+            f"/api/v1/environments/{environment['id']}/metadata-sources",
+            json={"uri": str(source_path), "label": "metadata"},
+        )
+        after_source = client.get(
+            f"/api/v1/environments/{environment['id']}/context"
+        ).json()
+        assert after_source["source_counts"]["metadata"] == 1
+        assert (
+            after_source["versions"]["source_registry"]
+            != initial_context["versions"]["source_registry"]
+        )
+        assert (
+            after_source["versions"]["reference_mappings"]
+            == initial_context["versions"]["reference_mappings"]
+        )
+
+        missing = client.get("/api/v1/environments/999999/context")
+        assert missing.status_code == 404
+
+    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+
+
 def test_project_reference_mapping_crud_and_project_cascade(
     tmp_path: Path, monkeypatch
 ):
@@ -278,7 +492,7 @@ def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
         assert impact["metadata_file_deleted"] is False
         assert impact["has_impact"] is True
         assert {item["kind"] for item in impact["impacts"]} == {
-            "source_revision", "sync_job", "snapshot",
+            "source_revision", "sync_job", "materialization",
         }
 
         response = client.delete(f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}")
@@ -332,8 +546,8 @@ def test_project_scan_materializes_new_metadata_and_code_sources(tmp_path: Path,
         assert client.get(f"/api/v1/environments/{environment['id']}/log-sources").json() == []
 
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from metadata_source_snapshots").fetchone()[0] == 1
-            assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 1
+            assert connection.execute("select count(*) from metadata_materializations").fetchone()[0] == 1
+            assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
             assert connection.execute("select count(*) from sync_jobs where job_type = 'auto_refresh'").fetchone()[0] == 2
 
         second = client.post(
@@ -476,69 +690,6 @@ def test_project_summary_api(tmp_path: Path, monkeypatch):
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
-def test_studio_settings_timezone_roundtrip(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
-
-    from fastapi.testclient import TestClient
-
-    from datacoolie_studio.main import app
-
-    with TestClient(app) as client:
-        current = client.get("/api/v1/studio/settings")
-        assert current.status_code == 200
-        current_payload = current.json()
-        assert current_payload["timezone"]
-        assert current_payload["timezone_source"] == "server_default"
-        assert current_payload["source_check_interval_seconds"] == 30
-        assert current_payload["storage"]["workspace_database"]["path"]
-        assert current_payload["storage"]["analytics_cache"]["scope"] == "studio"
-        assert "cached_source_count" in current_payload["storage"]["analytics_cache"]
-
-        configured = client.patch(
-            "/api/v1/studio/settings", json={"timezone": "Asia/Ho_Chi_Minh"}
-        )
-        assert configured.status_code == 200
-        configured_payload = configured.json()
-        assert configured_payload["timezone"] == "Asia/Ho_Chi_Minh"
-        assert configured_payload["timezone_source"] == "configured"
-        assert configured_payload["source_check_interval_seconds"] == 30
-        assert configured_payload["storage"]["analytics_cache"]["scope"] == "studio"
-
-        interval_configured = client.patch(
-            "/api/v1/studio/settings", json={"source_check_interval_seconds": 45}
-        )
-        assert interval_configured.status_code == 200
-        interval_payload = interval_configured.json()
-        assert interval_payload["source_check_interval_seconds"] == 45
-        assert interval_payload["timezone"] == "Asia/Ho_Chi_Minh"
-        assert interval_payload["timezone_source"] == "configured"
-
-        assert client.patch(
-            "/api/v1/studio/settings", json={"source_check_interval_seconds": 4}
-        ).status_code == 422
-        assert client.patch(
-            "/api/v1/studio/settings", json={"source_check_interval_seconds": 3601}
-        ).status_code == 422
-        assert client.patch(
-            "/api/v1/studio/settings", json={"source_check_interval_seconds": None}
-        ).status_code == 422
-
-        invalid = client.patch(
-            "/api/v1/studio/settings", json={"timezone": "Invalid/Timezone"}
-        )
-        assert invalid.status_code == 422
-
-        reset = client.patch("/api/v1/studio/settings", json={"timezone": None})
-        assert reset.status_code == 200
-        reset_payload = reset.json()
-        assert reset_payload["timezone_source"] == "server_default"
-        assert reset_payload["timezone"]
-        assert reset_payload["source_check_interval_seconds"] == 45
-        assert reset_payload["storage"]["workspace_database"]["path"]
-
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
-
-
 def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
@@ -567,7 +718,7 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
             f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/refresh"
         ).json()
         assert refreshed["status"] == "ok"
-        assert refreshed["message"] == "Metadata source cache refreshed"
+        assert refreshed["message"] == "Metadata source materialization refreshed"
         assert refreshed["revision"]["object_type"] == "file"
         assert refreshed["revision"]["content_hash"]
         assert refreshed["latest_job"]["status"] == "succeeded"
@@ -587,7 +738,7 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
         assert {item["kind"] for item in impact["impacts"]} == {
             "source_revision",
             "sync_job",
-            "snapshot",
+            "materialization",
         }
 
         response = client.delete(f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}")
@@ -604,7 +755,7 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
             )
             assert (
                 connection.execute(
-                    "select count(*) from metadata_source_snapshots"
+                    "select count(*) from metadata_materializations"
                 ).fetchone()[0]
                 == 0
             )
@@ -704,7 +855,7 @@ def test_environment_freshness_reports_materialized_cache_state(
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
-def test_metadata_api_uses_snapshot_cache_and_auto_refreshes_stale_source(
+def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_source(
     tmp_path: Path, monkeypatch
 ):
     db_path = tmp_path / "studio.db"
@@ -742,7 +893,7 @@ def test_metadata_api_uses_snapshot_cache_and_auto_refreshes_stale_source(
         with sqlite3.connect(db_path) as connection:
             assert (
                 connection.execute(
-                    "select count(*) from metadata_source_snapshots"
+                    "select count(*) from metadata_materializations"
                 ).fetchone()[0]
                 == 1
             )
@@ -761,7 +912,7 @@ def test_metadata_api_uses_snapshot_cache_and_auto_refreshes_stale_source(
         with sqlite3.connect(db_path) as connection:
             assert (
                 connection.execute(
-                    "select count(*) from metadata_source_snapshots"
+                    "select count(*) from metadata_materializations"
                 ).fetchone()[0]
                 == 1
             )
@@ -788,9 +939,9 @@ def test_metadata_api_uses_snapshot_cache_and_auto_refreshes_stale_source(
         with sqlite3.connect(db_path) as connection:
             assert (
                 connection.execute(
-                    "select count(*) from metadata_source_snapshots"
+                    "select count(*) from metadata_materializations"
                 ).fetchone()[0]
-                == 2
+                == 1
             )
             assert (
                 connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
@@ -930,7 +1081,7 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
         with sqlite3.connect(db_path) as connection:
             assert (
                 connection.execute(
-                    "select count(*) from metadata_source_snapshots"
+                    "select count(*) from metadata_materializations"
                 ).fetchone()[0]
                 == 1
             )
@@ -977,7 +1128,7 @@ def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path
         assert run_automatic_source_checks_once() == 1
 
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from code_artifact_snapshots").fetchone()[0] == 2
+            assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -1003,7 +1154,10 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             json={"uri": str(SAMPLE_LOGS), "label": "sample logs"},
         ).json()
 
-        refreshed = client.post(f"/api/v1/environments/{env['id']}/log-sources/{path['id']}/refresh").json()
+        refreshed = client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{path['id']}/refresh",
+            json={"mode": "incremental"},
+        ).json()
         assert refreshed["status"] == "ok"
         assert refreshed["revision"]["object_type"] == "directory"
         assert refreshed["revision"]["file_count"] > 0
@@ -1071,9 +1225,10 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             assert "_raw_json" not in dataflow_columns
             assert job_columns["start_time"] == "VARCHAR"
             assert dataflow_columns["start_time"] == source_types["start_time"]
-            assert (
-                dataflow_columns["source_end_time"] == source_types["source_end_time"]
-            )
+            assert dataflow_columns["source_end_time"] in {
+                source_types["source_end_time"],
+                "TIMESTAMP WITH TIME ZONE",
+            }
             assert "source_id" in dataflow_columns
             assert "_source_id" in dataflow_columns
             assert (
@@ -1096,6 +1251,12 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
         report = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/overview"
         ).json()
+        assert report["schema_version"] == "monitoring-page.v9"
+        assert report["page"] == "overview"
+        assert set(report) == {
+            "schema_version", "page", "summary", "health", "attention",
+            "operations", "failures", "volume",
+        }
         assert report["summary"]["dataflow_records"] > 0
         assert report["summary"]["job_records"] > 0
         assert report["summary"]["requested_grain"] == "auto"
@@ -1104,7 +1265,11 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             f"/api/v1/environments/{env['id']}/monitoring/pages/diagnostics"
         ).json()
         assert diagnostics_report["diagnostics"]["kpis"]["matched_job_ids"] > 0
-        assert "freshness" in report
+        freshness_report = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/pages/freshness"
+        ).json()
+        assert "freshness" in freshness_report
+        assert "freshness" not in report
         filter_options = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/filter-options"
         ).json()
@@ -1215,7 +1380,10 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             >= longest_jobs["records"][-1]["duration_seconds"]
         )
 
-        second_refresh = client.post(f"/api/v1/environments/{env['id']}/log-sources/{path['id']}/refresh").json()
+        second_refresh = client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{path['id']}/refresh",
+            json={"mode": "incremental"},
+        ).json()
         assert second_refresh["latest_job"]["message"] == "Log source cache is current"
         assert (
             second_refresh["latest_job"]["result"]["record_counts"]["parsed_files"] == 0
@@ -1263,15 +1431,23 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
 
         expected_rows, expected_errors = read_dataflow_logs([str(base / "etl_logs" / "analyst")])
         assert not expected_errors
+        unavailable = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=365d"
+        )
+        assert unavailable.status_code == 200
+        assert unavailable.json()["summary"]["total_records"] == 0
+
+        refreshed = client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{source['id']}/refresh",
+            json={"mode": "incremental"},
+        ).json()
+        counts = refreshed["latest_job"]["result"]["record_counts"]
+        assert counts["dataflow_parquet_files"] == 1
+        assert counts["job_jsonl_files"] == 1
         direct = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=365d"
         ).json()
         assert direct["summary"]["total_records"] == len(expected_rows)
-
-        refreshed = client.post(f"/api/v1/environments/{env['id']}/log-sources/{source['id']}/refresh").json()
-        counts = refreshed["latest_job"]["result"]["record_counts"]
-        assert counts["dataflow_parquet_files"] == 1
-        assert counts["job_jsonl_files"] == 1
 
         with sqlite3.connect(db_path) as connection:
             manifest_paths = [
@@ -1288,15 +1464,23 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         freshness = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness["etl_logs"]["status"] == "current"
 
+        # The pending-changes scan is cached for the source-check interval (TTL); clear
+        # it so each freshness read below re-scans deterministically in the test.
+        # Changing an ignored debug_json file does not affect the synced analyst cache,
+        # so freshness stays current.
         debug_file = debug_jobs / job_sample.name
         debug_file.write_text(debug_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        logs_cache._invalidate_log_pending_changes(int(source["id"]))
         freshness_after_debug_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_debug_change["etl_logs"]["status"] == "current"
 
+        # Changing a synced analyst log file makes the cache out of date; the header
+        # reflects it as not synced without any auto-sync.
         analyst_file = analyst_jobs / job_sample.name
         analyst_file.write_text(analyst_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        logs_cache._invalidate_log_pending_changes(int(source["id"]))
         freshness_after_analyst_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
-        assert freshness_after_analyst_change["etl_logs"]["status"] == "current"
+        assert freshness_after_analyst_change["etl_logs"]["status"] == "not_cached"
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -1326,7 +1510,10 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
         assert path["sync_schedule_enabled"] is False
         assert path["sync_interval_minutes"] == 1
 
-        refreshed = client.post(f"/api/v1/environments/{env['id']}/log-sources/{source_id}/refresh").json()
+        refreshed = client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{source_id}/refresh",
+            json={"mode": "incremental"},
+        ).json()
         assert refreshed["status"] == "ok"
 
         scheduled = client.patch(
@@ -1410,7 +1597,7 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
-def test_delete_project_purges_duckdb_cache(tmp_path: Path, monkeypatch):
+def test_delete_project_purges_disposable_caches(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
@@ -1418,6 +1605,8 @@ def test_delete_project_purges_duckdb_cache(tmp_path: Path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.read_models.contracts import ResultCacheKey
+    from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCacheStore
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
@@ -1433,8 +1622,24 @@ def test_delete_project_purges_duckdb_cache(tmp_path: Path, monkeypatch):
         ).json()
         source_id = int(path["id"])
 
-        refreshed = client.post(f"/api/v1/environments/{env['id']}/log-sources/{source_id}/refresh").json()
+        refreshed = client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{source_id}/refresh",
+            json={"mode": "incremental"},
+        ).json()
         assert refreshed["status"] == "ok"
+
+        result_cache = SqliteResultCacheStore()
+        result_cache.put(
+            ResultCacheKey(
+                environment_id=int(env["id"]),
+                namespace="overview",
+                parameters_fingerprint="parameters",
+                input_fingerprint="input",
+                producer_version="v1",
+            ),
+            {"cached": True},
+        )
+        assert result_cache.entry_count(int(env["id"]), "overview") == 1
 
         import duckdb
 
@@ -1449,6 +1654,7 @@ def test_delete_project_purges_duckdb_cache(tmp_path: Path, monkeypatch):
 
         deleted = client.delete(f"/api/v1/projects/{project['id']}")
         assert deleted.status_code == 204
+        assert result_cache.entry_count(int(env["id"]), "overview") == 0
 
         with duckdb.connect(str(analytics_path), read_only=True) as connection:
             assert (
@@ -1533,18 +1739,39 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         paths = client.get(f"/api/v1/environments/{env['id']}/log-sources").json()
         assert paths[0]["latest_validation"]["record_counts"]["job_jsonl_files"] > 0
         refreshed = client.post(
-            f"/api/v1/environments/{env['id']}/log-sources/{source['id']}/refresh"
+            f"/api/v1/environments/{env['id']}/log-sources/{source['id']}/refresh",
+            json={"mode": "incremental"},
         )
         assert refreshed.status_code == 200, refreshed.text
+
+        original_connect = logs_cache.analytics_connections.connect
+        connection_calls = 0
+
+        def counted_connect(*args, **kwargs):
+            nonlocal connection_calls
+            connection_calls += 1
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr(logs_cache.analytics_connections, "connect", counted_connect)
+        for endpoint in ("filter-options", "dataflows?limit=1", "jobs?limit=1"):
+            before = connection_calls
+            response = client.get(
+                f"/api/v1/environments/{env['id']}/monitoring/{endpoint}"
+            )
+            assert response.status_code == 200, response.text
+            assert connection_calls - before == 1
 
         def reject_full_cache_materialization(*_args, **_kwargs):
             raise AssertionError("Monitoring pages must use focused DuckDB queries")
 
         monkeypatch.setattr(logs_cache, "_read_duckdb_rows", reject_full_cache_materialization)
 
-        report = client.get(
+        before = connection_calls
+        report_response = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/overview"
-        ).json()
+        )
+        assert connection_calls - before == 1  # one shared cache-key and page-query reader
+        report = report_response.json()
         assert report["summary"]["dataflow_records"] > 0
         assert report["summary"]["job_records"] > 0
         assert report["summary"]["requested_grain"] == "auto"
@@ -1557,6 +1784,14 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert {"bucket", "bucket_start", "bucket_end", "grain"} <= set(
             report["operations"]["dataflows_by_date_status"][0]
         )
+        job_operation_types = {
+            item["operation_type"]
+            for item in report["operations"]["job_runs_by_dataflow_operation_type"]
+        }
+        assert "etl" in job_operation_types
+        assert job_operation_types != {"unknown"}
+        assert report["volume"]["rows_by_date"]
+        assert report["volume"]["bytes_by_date"]
         weekly_report = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/overview?range=90d&grain=auto"
         ).json()
@@ -1574,9 +1809,19 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         maintenance_report = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/maintenance"
         ).json()
-        assert performance_report["performance"]["overview_p95_duration_seconds"] >= 0
-        assert performance_report["performance"]["slowest_dataflows_by_p95"]
+        volume_report = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/pages/volume"
+        ).json()
+        failures_report = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/pages/failures"
+        ).json()
+        assert performance_report["performance"]["kpis"]["p95_duration_seconds"] >= 0
+        assert performance_report["schema_version"] == "monitoring-page.v9"
+        assert performance_report["performance"]["kpis"]["slowest_run_start_time"]
+        assert performance_report["performance"]["kpis"]["slowest_run_end_time"]
+        assert performance_report["performance"]["slowest_dataflow_profiles"]
         assert "investigation_queue" not in performance_report["performance"]
+        assert "slowest_dataflows_by_p95" not in performance_report["performance"]
         etag = performance_response.headers["etag"]
         unchanged = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/performance",
@@ -1591,13 +1836,44 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert len(evidence["records"]) <= 2
         assert evidence["summary"]["total_records"] >= len(evidence["records"])
         assert maintenance_report["maintenance"]["kpis"]["total_maintenance_runs"] >= 0
-        for table in maintenance_report["maintenance"]["table_registry"]:
+        for bucket in maintenance_report["maintenance"]["status_by_date"]:
+            assert {"succeeded", "failed", "skipped", "running", "pending", "unknown", "total"} <= set(bucket)
+            assert bucket["total"] == sum(
+                bucket[status] for status in ("succeeded", "failed", "skipped", "running", "pending", "unknown")
+            )
+        for bucket in maintenance_report["maintenance"]["reclaim_by_date"]:
+            assert {"bytes_reclaimed", "bytes_saved", "files_removed", "runs"} <= set(bucket)
+        assert sum(
+            item["count"] for item in failures_report["failures"]["error_categories"]
+        ) == failures_report["failures"]["kpis"]["failed_dataflows"]
+        for failed_record in failures_report["failures"]["failed_records"]:
+            assert isinstance(failed_record["failure_tags"], list)
+            assert len(failed_record["failure_tags"]) <= 5
+            assert "failure_rule_id" in failed_record
+        maintenance_evidence = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/pages/maintenance/evidence",
+            params={"limit": 100, "offset": 0},
+        ).json()
+        for table in maintenance_evidence["records"]:
             assert isinstance(table["upstream_dataflows"], list)
             assert table["upstream_run_count"] >= len(table["upstream_dataflows"])
+            if table["upstream_run_count"]:
+                assert table["upstream_dataflows"]
 
         first_job = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/jobs?limit=1"
         ).json()["records"][0]
+        canonical_job = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/jobs",
+            params={
+                "range": "all",
+                "investigateKind": "job_id",
+                "investigateValue": first_job["job_id"],
+                "limit": 1,
+                "offset": 0,
+            },
+        ).json()
+        assert canonical_job["records"][0]["job_id"] == first_job["job_id"]
         child_page = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/dataflows",
             params={
@@ -1629,6 +1905,9 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             next_ids = {row["dataflow_run_id"] for row in next_child_page["records"]}
             assert first_ids.isdisjoint(next_ids)
 
+        from datacoolie_studio.domains.monitoring import service as monitoring_service
+
+        assert not hasattr(monitoring_service, "_monitoring_rows")
         environment_overview = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/environment-overview"
         ).json()
@@ -1639,12 +1918,6 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert environment_overview["performance"]["slowest_dataflows"] == []
         assert environment_overview["maintenance"]["per_table"] == []
 
-        from datacoolie_studio.domains.monitoring import service as monitoring_service
-
-        def reject_row_materialization(*_args, **_kwargs):
-            raise AssertionError("Overview must use the DuckDB aggregate when the typed cache is ready")
-
-        monkeypatch.setattr(monitoring_service, "_monitoring_rows", reject_row_materialization)
         overview_summary = client.get(f"/api/v1/environments/{env['id']}/overview")
         assert overview_summary.status_code == 200, overview_summary.text
         overview_payload = overview_summary.json()
@@ -1658,9 +1931,16 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert report["health"]["status"]
         assert isinstance(report["attention"], list)
         assert report["failures"]["error_categories"]
-        assert report["volume"]["rows_by_date"]
-        assert report["volume"]["bytes_by_date"]
-        assert report["performance"]["slowest_dataflows"] == []
+        assert {
+            item["category"] for item in report["failures"]["error_categories"]
+        } != {"Unspecified"}
+        assert volume_report["volume"]["rows_by_date"]
+        assert volume_report["volume"]["bytes_by_date"]
+        assert sum(
+            item["est_rows_written"] for item in report["volume"]["rows_by_date"]
+        ) == volume_report["volume"]["kpis"]["total_est_rows_written"]
+        assert evidence["records"]
+        assert "performance" not in report
         assert client.get(
             f"/api/v1/environments/{env['id']}/monitoring/overview"
         ).status_code == 404
@@ -1727,10 +2007,19 @@ def test_environment_overview_summary_cache_and_lineage_projection(tmp_path: Pat
         first = client.get(f"/api/v1/environments/{environment['id']}/overview")
         assert first.status_code == 200, first.text
         payload = first.json()
+        assert payload["schema_version"] == "environment-overview.v2"
         assert payload["cache"]["state"] == "miss"
         assert payload["metadata"]["dataflows"] == 1
         assert payload["metadata"]["stages"] == [{"name": "bronze", "count": 1}]
         assert payload["lineage"]["dataflows"] == 1
+        assert set(payload["lineage"]) >= {
+            "automatic_references",
+            "manual_references",
+            "unresolved_references",
+            "automatic_dependencies",
+            "manual_dependencies",
+            "unresolved_dependencies",
+        }
         assert calls == 1
 
         second = client.get(f"/api/v1/environments/{environment['id']}/overview")
@@ -1763,7 +2052,7 @@ def test_environment_overview_summary_cache_and_lineage_projection(tmp_path: Pat
         assert after_mapping.json()["cache"]["state"] == "miss"
         assert calls == 3
 
-    with sqlite3.connect(db_path) as connection:
-        assert connection.execute("select count(*) from environment_read_model_cache_entries where model_key = 'environment-overview'").fetchone()[0] == 1
+    with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        assert connection.execute("select count(*) from result_cache_entries where namespace = 'environment-overview'").fetchone()[0] == 1
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)

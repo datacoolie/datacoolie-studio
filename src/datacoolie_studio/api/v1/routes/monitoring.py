@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import MonitoringReportResponse
+from datacoolie_studio.api.v1.schemas import MonitoringPageResponse
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.domains.monitoring.service import (
     dataflow_logs,
@@ -21,14 +21,18 @@ from datacoolie_studio.domains.monitoring.page_service import (
     monitoring_page_etag,
     public_monitoring_page,
 )
-from datacoolie_studio.domains.logs.cache import system_log_records
+from datacoolie_studio.domains.logs.cache import analytics_reader, system_log_records
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace
 
 router = APIRouter(tags=["monitoring"])
 
 
-@router.get("/environments/{environment_id}/monitoring/pages/{page}", response_model=MonitoringReportResponse)
+@router.get(
+    "/environments/{environment_id}/monitoring/pages/{page}",
+    response_model=MonitoringPageResponse,
+    response_model_exclude_none=True,
+)
 def get_monitoring_page(
     environment_id: int,
     page: Literal["environment-overview", "overview", "jobs", "dataflows", "failures", "diagnostics", "performance", "volume", "maintenance", "freshness"],
@@ -72,37 +76,40 @@ def get_monitoring_page(
         investigateKind,
         investigateValue,
     )
-    cache_key = monitoring_page_cache_key(
-        session,
-        environment_id=environment_id,
-        paths=paths,
-        page=page,
-        filters=filters,
-        timezone_label=timezone_context["timezone"],
-    )
-    etag = monitoring_page_etag(cache_key)
-    cache_headers = {"ETag": etag, "Cache-Control": "private, must-revalidate"}
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=cache_headers)
-    response.headers.update(cache_headers)
-    payload = monitoring_page(
-        paths,
-        page=page,
-        filters=filters,
-        session=session,
-        timezone_info=timezone_context["timezone_info"],
-        timezone_label=timezone_context["timezone"],
-        timezone_source=timezone_context["timezone_source"],
-        environment_id=environment_id,
-        cache_key=cache_key,
-    )
+    with analytics_reader(paths) as analytics_context:
+        cache_key = monitoring_page_cache_key(
+            session,
+            environment_id=environment_id,
+            paths=paths,
+            page=page,
+            filters=filters,
+            timezone_label=timezone_context["timezone"],
+            input_fingerprint=analytics_context[2] if analytics_context is not None else None,
+        )
+        etag = monitoring_page_etag(cache_key)
+        cache_headers = {"ETag": etag, "Cache-Control": "private, must-revalidate"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=cache_headers)
+        response.headers.update(cache_headers)
+        payload = monitoring_page(
+            paths,
+            page=page,
+            filters=filters,
+            session=session,
+            timezone_info=timezone_context["timezone_info"],
+            timezone_label=timezone_context["timezone"],
+            timezone_source=timezone_context["timezone_source"],
+            environment_id=environment_id,
+            cache_key=cache_key,
+            analytics_context=analytics_context,
+        )
     return public_monitoring_page(page, payload)
 
 
 @router.get("/environments/{environment_id}/monitoring/pages/{page}/evidence")
 def get_monitoring_page_evidence(
     environment_id: int,
-    page: Literal["performance"],
+    page: Literal["performance", "freshness", "volume", "maintenance"],
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     sortBy: str = "performance_candidate_priority",

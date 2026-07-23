@@ -1,18 +1,16 @@
 import { ChevronRight } from "lucide-react";
-import type { Environment, EnvironmentFreshness, Project } from "../shared/api/types";
+import type { EnvironmentContext } from "../shared/api/types";
 import { RelativeTime } from "../shared/components/RelativeTime";
 import type { ModuleKey, ModuleScope } from "./moduleRegistry";
 
 interface ContextBarProps {
   activeModule: ModuleKey;
   scope: ModuleScope;
-  projects: Project[];
-  environments: Environment[];
-  selectedProjectId: number | null;
-  selectedEnvironmentId: number | null;
+  project: { id: number; name: string } | null;
+  environment: { id: number; name: string } | null;
   metadataSourceCount: number;
   logPathCount: number;
-  freshness: EnvironmentFreshness | null;
+  freshness: EnvironmentContext["freshness"] | null;
   onProjectSelect: (projectId: number | null) => void;
   onOpenProject: (projectId: number) => void;
 }
@@ -20,20 +18,15 @@ interface ContextBarProps {
 export function ContextBar({
   activeModule,
   scope,
-  projects,
-  environments,
-  selectedProjectId,
-  selectedEnvironmentId,
+  project,
+  environment,
   metadataSourceCount,
   logPathCount,
   freshness,
   onProjectSelect,
   onOpenProject
 }: ContextBarProps) {
-  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
-  const selectedEnvironment = environments.find((environment) => environment.id === selectedEnvironmentId) ?? null;
-
-  if (scope === "global" && !selectedProjectId) {
+  if (scope === "global" && !project) {
     return (
       <header className="context-bar context-bar-global">
         <div>
@@ -48,16 +41,16 @@ export function ContextBar({
     <header className="context-bar">
       <nav className="context-trail" aria-label="Current location">
         <button className="context-trail-link" type="button" onClick={() => onProjectSelect(null)}>Projects</button>
-        {selectedProject ? (
+        {project ? (
           <>
             <ChevronRight className="context-trail-separator" size={14} aria-hidden="true" />
-            <button className="context-trail-project" type="button" onClick={() => onOpenProject(selectedProject.id)}>{selectedProject.name}</button>
+            <button className="context-trail-project" type="button" onClick={() => onOpenProject(project.id)}>{project.name}</button>
           </>
         ) : null}
-        {selectedEnvironment ? (
+        {environment ? (
           <>
             <ChevronRight className="context-trail-separator" size={14} aria-hidden="true" />
-            <span className="context-trail-current" aria-current="page">{selectedEnvironment.name}</span>
+            <span className="context-trail-current" aria-current="page">{environment.name}</span>
           </>
         ) : null}
         {scope === "environment" ? <span className="context-trail-module">{activeModule}</span> : null}
@@ -136,7 +129,7 @@ function freshnessLabel(status: string) {
 function freshnessDescription(label: string, status: string) {
   return {
     current: `${label} source and Studio cache are aligned.`,
-    not_cached: `${label} source is configured, but Studio has not cached it yet.`,
+    not_cached: `${label} source has changes that are not synced into Studio yet.`,
     missing: `${label} source cannot be found at its configured path.`,
     sync_failed: `${label} source could not be synchronized into Studio.`,
     unknown: `${label} cache state is not available.`

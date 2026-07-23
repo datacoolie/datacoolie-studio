@@ -39,7 +39,7 @@ def test_lineage_stitches_across_metadata_files(tmp_path: Path):
 
     labels = {node["label"] for node in lineage["assets"]}
     assert {"./data/A", "./data/B", "./data/C"} <= labels
-    assert lineage["schema_version"] == "lineage.v2"
+    assert lineage["schema_version"] == "lineage.v3"
     assert lineage["summary"]["assets"] == 3
     assert lineage["summary"]["dataflows"] == 2
     assert lineage["summary"]["stitched_assets"] == 1
@@ -383,9 +383,9 @@ def test_sql_discovered_input_resolves_to_existing_metadata_asset():
     lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=5)
 
     assert lineage["summary"]["dependencies"] == 1
-    assert lineage["summary"]["resolved_dependencies"] == 1
+    assert lineage["summary"]["automatic_dependencies"] == 1
     dependency = lineage["dependencies"][0]
-    assert dependency["resolution_status"] == "resolved_auto"
+    assert dependency["resolution"]["state"] == "automatic"
     assert dependency["observations"][0]["value"] == "raw.orders"
     query_asset = next(asset for asset in lineage["assets"] if asset["asset_type"] == "sql_query")
     raw_orders = next(
@@ -396,8 +396,8 @@ def test_sql_discovered_input_resolves_to_existing_metadata_asset():
     assert dependency["resolved_asset_id"] == raw_orders["id"]
     occurrence = next(item for item in lineage["reference_occurrences"] if item["consumer_asset_id"] == query_asset["id"])
     reference = next(item for item in lineage["references"] if item["id"] == occurrence["reference_id"])
-    assert occurrence["resolution_status"] == "resolved_auto"
-    assert reference["group_status"] == "resolved_single"
+    assert occurrence["resolution"]["state"] == "automatic"
+    assert reference["resolution"]["state"] == "automatic"
     assert reference["resolved_asset_id"] == raw_orders["id"]
     assert dependency["reference_id"] == reference["id"]
     assert dependency["reference_occurrence_id"] == occurrence["id"]
@@ -504,7 +504,7 @@ def test_sql_fan_in_is_dependencies_not_process_nodes():
 
     assert build_mart["source_asset_id"] == query_asset["id"]
     assert len(inputs) == 2
-    assert {dependency["resolution_status"] for dependency in inputs} == {"resolved_auto"}
+    assert {dependency["resolution"]["state"] for dependency in inputs} == {"automatic"}
     assert all(dependency["resolved_asset_id"] for dependency in inputs)
 
 
@@ -546,7 +546,7 @@ def test_sql_input_with_new_exact_identity_remains_reference():
     assert lineage["summary"]["unresolved_dependencies"] == 1
     assert dependency["reference_id"] == reference["id"]
     assert dependency["resolved_asset_id"] is None
-    assert reference["group_status"] == "unresolved"
+    assert reference["resolution"] == {"state": "unresolved", "reason": "no_match"}
     assert reference["resolved_asset_id"] is None
     assert all(asset["id"] != reference["id"] for asset in lineage["assets"])
     assert all(
@@ -594,8 +594,8 @@ def test_ambiguous_sql_input_remains_reference_outside_asset_registry():
 
     reference = lineage["references"][0]
     dependency = lineage["dependencies"][0]
-    assert lineage["summary"]["ambiguous_dependencies"] == 1
-    assert reference["group_status"] == "ambiguous"
+    assert lineage["summary"]["unresolved_dependencies"] == 1
+    assert reference["resolution"] == {"state": "unresolved", "reason": "multiple_matches"}
     assert len(reference["candidate_asset_ids"]) >= 2
     assert dependency["reference_id"] == reference["id"]
     assert dependency["resolved_asset_id"] is None
@@ -619,7 +619,7 @@ def test_partial_schema_table_reference_resolves_only_when_unique():
     reference = lineage["references"][0]
     occurrence = lineage["reference_occurrences"][0]
     assert occurrence["raw_value"] == "silver.customer"
-    assert reference["group_status"] == "resolved_single"
+    assert reference["resolution"]["state"] == "automatic"
     assert dependency["resolved_asset_id"] == customer["id"]
 
 
@@ -695,7 +695,7 @@ def test_schema_table_reference_resolves_to_path_backed_table_asset():
     assert {"physical_path", "logical_table"}.issubset(identifier_kinds)
     assert occurrence["raw_value"] == "silver.saleslt_salesorderheader"
     assert reference["entity_type"] == "reference"
-    assert reference["group_status"] == "resolved_single"
+    assert reference["resolution"]["state"] == "automatic"
     assert dependency["resolution_method"] == "unique_table_suffix"
     assert dependency["resolved_asset_id"] == table_asset["id"]
 
@@ -714,7 +714,7 @@ def test_partial_schema_table_reference_uses_connection_when_multiple_assets_mat
     occurrence = lineage["reference_occurrences"][0]
     assert occurrence["raw_value"] == "silver.customer"
     expected = next(asset for asset in lineage["assets"] if asset.get("database") == "lh1" and asset.get("schema_name") == "silver")
-    assert reference["group_status"] == "resolved_single"
+    assert reference["resolution"]["state"] == "automatic"
     assert dependency["resolved_asset_id"] == expected["id"]
     assert dependency["resolution_method"] == "connection_table_suffix"
 
@@ -736,7 +736,7 @@ def test_project_mapping_can_replace_successful_automatic_resolution():
 
     expected = next(asset for asset in lineage["assets"] if asset.get("database") == "lh2" and asset.get("schema_name") == "silver")
     dependency = next(item for item in lineage["dependencies"] if item["reference_id"])
-    assert dependency["resolution_status"] == "resolved_manual"
+    assert dependency["resolution"]["state"] == "manual"
     assert dependency["resolved_asset_id"] == expected["id"]
     observation = next(item for item in lineage["references"][0]["observations"] if item.get("mapping_id") == 303)
     assert observation["automatic_suggestion"]["method"] == "connection_table_suffix"
@@ -765,25 +765,25 @@ def test_manual_reference_mapping_resolves_ambiguous_reference():
     )
     dependency = next(item for item in lineage["dependencies"] if item["target_asset_id"] == query_asset["id"])
 
-    assert dependency["resolution_status"] == "resolved_manual"
+    assert dependency["resolution"]["state"] == "manual"
     assert dependency["resolution_method"] == "manual_mapping"
     assert dependency["reference_id"] is not None
     assert dependency["resolved_asset_id"] == sales_orders["id"]
     assert dependency["consumer_asset_id"] == query_asset["id"]
-    assert lineage["summary"]["resolved_manual_dependencies"] == 1
-    assert lineage["summary"]["ambiguous_dependencies"] == 0
+    assert lineage["summary"]["manual_dependencies"] == 1
+    assert lineage["summary"]["unresolved_dependencies"] == 0
     assert len(lineage["references"]) == 1
     reference = lineage["references"][0]
     occurrence = lineage["reference_occurrences"][0]
-    assert reference["group_status"] == "resolved_single"
-    assert occurrence["resolution_status"] == "resolved_manual"
+    assert reference["resolution"]["state"] == "manual"
+    assert occurrence["resolution"]["state"] == "manual"
     assert occurrence["target_asset_id"] == query_asset["id"]
     assert occurrence["consumer_asset_id"] == query_asset["id"]
     assert reference["resolved_asset_id"] == sales_orders["id"]
     assert sales_orders["id"] in reference["candidate_asset_ids"]
 
 
-def test_manual_reference_mapping_target_missing_keeps_reference():
+def test_manual_reference_target_missing_keeps_reference():
     document = normalize_metadata_document(1, "metadata.json", _ambiguous_orders_metadata())
 
     lineage = build_lineage(
@@ -802,13 +802,13 @@ def test_manual_reference_mapping_target_missing_keeps_reference():
     reference = lineage["references"][0]
     dependency = lineage["dependencies"][0]
 
-    assert reference["group_status"] == "mapping_target_missing"
-    assert dependency["resolution_status"] == "mapping_target_missing"
-    assert dependency["resolution_method"] == "manual_mapping_target_missing"
+    assert reference["resolution"] == {"state": "unresolved", "reason": "target_missing"}
+    assert dependency["resolution"] == {"state": "unresolved", "reason": "target_missing"}
+    assert dependency["resolution_method"] == "manual_target_missing"
     assert dependency["reference_id"] == reference["id"]
     assert dependency["resolved_asset_id"] is None
     assert any(obs.get("mapping_status") == "target_missing" for obs in reference["observations"])
-    assert lineage["summary"]["mapping_target_missing_dependencies"] == 1
+    assert lineage["summary"]["unresolved_dependencies"] == 1
 
 
 def test_duplicate_dataflow_id_with_different_endpoints_is_diagnostic():

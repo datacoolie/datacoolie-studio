@@ -2,30 +2,49 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+import time
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from threading import Lock
+from typing import Any, Iterator
 
 import duckdb
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.core.config import analytics_database_path
-from datacoolie_studio.core.time import utc_datetime_sort_key
+from datacoolie_studio.core.time import parse_utc_datetime, utc_datetime_sort_key
 from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
+from datacoolie_studio.domains.logs.connections import analytics_connections
+from datacoolie_studio.domains.logs.discovery import (
+    DiscoveredLogFile,
+    LogStreamCheckpoint,
+    LogSyncMode,
+    LogSyncSpec,
+    deduplicate_candidates,
+    discover_partition_files,
+    discover_partitions,
+    plan_incremental_candidates,
+    plan_incremental_partitions,
+    plan_lookback_candidates,
+    plan_lookback_partitions,
+)
+from datacoolie_studio.domains.logs.partition import ParsedPartition, PartitionGranularity
 from datacoolie_studio.domains.logs.reader import (
-    discover_dataflow_parquet_files,
-    discover_job_jsonl_files,
     discover_system_jsonl_files,
     parse_system_log_file_metadata,
     read_system_log_file,
-    read_dataflow_logs,
-    read_job_logs,
 )
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
+from datacoolie_studio.domains.monitoring.serving_facts import (
+    monitoring_serving_schema_is_ready,
+    rebuild_monitoring_serving_facts,
+    validate_monitoring_serving_facts,
+)
 from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, require_local_path
+from datacoolie_studio.domains.storage.adapters import FileRevision, LocalStorageAdapter
 from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 
@@ -39,12 +58,52 @@ STUDIO_CACHE_COLUMNS = {
     "_source_mtime_ns": "BIGINT",
     "_ingested_at": "TIMESTAMPTZ",
 }
+GENERATED_CACHE_COLUMNS = {"__event_time", "__run_date"}
 
 DATAFLOW_TABLE = "etl_dataflow_runs"
 JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
+CACHE_SOURCES_TABLE = "etl_cache_sources"
+ANALYTICS_META_TABLE = "etl_analytics_meta"
+INGEST_CHECKPOINT_TABLE = "log_ingest_checkpoint"
+INGEST_MANIFEST_TABLE = "log_ingest_file_manifest"
+ANALYTICS_SCHEMA_VERSION = 5
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
+
+
+_analytics_schema_rebuild_lock = Lock()
+
+# Cache of "log source has files not yet synced" results, keyed by source id, so the
+# filesystem scan runs at most once per TTL (the source-check interval) instead of on
+# every freshness/context read. Invalidated on sync and cache purge.
+_pending_changes_lock = Lock()
+_pending_changes_cache: dict[int, tuple[float, bool]] = {}
+
+
+class AnalyticsRebuildRequired(RuntimeError):
+    code = "analytics_rebuild_required"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_ids: list[int] | None = None,
+        missing_source_ids: list[int] | None = None,
+        reason: str = "not_ready",
+    ) -> None:
+        super().__init__(message)
+        self.source_ids = source_ids or []
+        self.missing_source_ids = missing_source_ids or []
+        self.reason = reason
+
+
+class LogSchemaIncompatibleError(RuntimeError):
+    code = "schema_incompatible"
+
+
+class LogFileChangedDuringSyncError(RuntimeError):
+    code = "file_changed_during_sync"
 
 DATAFLOW_SORT_COLUMNS = {
     "end_time": "TRY_CAST(COALESCE(d.end_time, d.start_time) AS TIMESTAMPTZ)",
@@ -73,7 +132,7 @@ DATAFLOW_SORT_COLUMNS = {
 }
 
 JOB_SORT_COLUMNS = {
-    "end_time": "TRY_CAST(COALESCE(j.end_time, j.start_time) AS TIMESTAMPTZ)",
+    "end_time": "j.__event_time",
     "start_time": "TRY_CAST(j.start_time AS TIMESTAMPTZ)",
     "duration_seconds": "j.duration_seconds",
     "status": "j.status",
@@ -234,6 +293,8 @@ JOB_COLUMN_TYPES = {
     "total_bytes_added": "BIGINT",
     "total_bytes_removed": "BIGINT",
     "operation_types": "VARCHAR",
+    "__event_time": "TIMESTAMPTZ",
+    "__run_date": "DATE",
 }
 
 
@@ -245,6 +306,10 @@ def analytics_cache_stats() -> dict[str, Any]:
         "exists": exists,
         "size_bytes": path.stat().st_size if exists else None,
         "scope": "studio",
+        "schema_version": None,
+        "generation": None,
+        "build_state": "rebuild_required",
+        "published_at": None,
         "dataflow_row_count": 0,
         "job_row_count": 0,
         "filter_value_count": 0,
@@ -253,47 +318,138 @@ def analytics_cache_stats() -> dict[str, Any]:
     if not exists:
         return stats
     _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
+    conn = _connect_analytics(path, read_only=True)
     try:
+        meta = _analytics_meta(conn)
+        if meta is not None:
+            stats.update(meta)
         stats["dataflow_row_count"] = _table_row_count(conn, DATAFLOW_TABLE)
         stats["job_row_count"] = _table_row_count(conn, JOB_TABLE)
         stats["filter_value_count"] = _table_row_count(conn, FILTER_VALUES_TABLE)
-        source_ids = set()
-        source_ids.update(_table_source_ids(conn, DATAFLOW_TABLE))
-        source_ids.update(_table_source_ids(conn, JOB_TABLE))
-        source_ids.update(_table_source_ids(conn, FILTER_VALUES_TABLE))
-        stats["cached_source_ids"] = sorted(source_ids)
+        stats["cached_source_ids"] = sorted(_cache_source_ids(conn))
     finally:
         conn.close()
     return stats
 
 
-def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
-    """Describe exactly the files that the log cache is allowed to ingest."""
-    base_revision = sync.stat_source(source, include_content_hash=False)
-    if not base_revision.get("exists") or base_revision.get("object_type") == "provider_not_enabled":
-        return base_revision
+def analytics_materialization_token(paths: list[EnvironmentSource]) -> str:
+    """Return the O(1) published token used by Monitoring result-cache keys.
 
-    paths = resolve_log_source_paths(source)
+    Source manifests remain the sync change-detection authority. Request paths
+    use this published token and never scan every manifest row.
+    """
+    source_ids = _analytics_source_ids(paths)
+    if not source_ids:
+        return f"analytics-v{ANALYTICS_SCHEMA_VERSION}:empty"
+
+    path = analytics_database_path()
+    if not path.exists():
+        return _unavailable_analytics_token(source_ids, "missing_database")
     try:
-        etl_path = require_local_path(paths.etl_logs_uri or source.uri)
-        system_path = require_local_path(paths.system_logs_uri) if paths.system_logs_uri else None
-    except StorageProviderNotEnabled:
-        return base_revision
+        conn = _connect_analytics(path, read_only=True)
+    except duckdb.Error:
+        return _unavailable_analytics_token(source_ids, "database_unavailable")
+    try:
+        try:
+            return _analytics_materialization_token_from_connection(conn, source_ids)
+        except AnalyticsRebuildRequired as exc:
+            return _unavailable_analytics_token(source_ids, exc.reason)
+    finally:
+        conn.close()
 
-    file_uris = {
-        *discover_dataflow_parquet_files(etl_path.as_posix()),
-        *discover_job_jsonl_files(etl_path.as_posix()),
-        *discover_system_jsonl_files(system_path.as_posix() if system_path else None),
-    }
-    stats = [Path(file_uri).stat() for file_uri in file_uris]
-    fallback_mtime = etl_path.stat().st_mtime_ns if etl_path.exists() else base_revision.get("max_mtime_ns")
+
+@contextmanager
+def analytics_reader(
+    paths: list[EnvironmentSource],
+) -> Iterator[tuple[Any, list[int], str]]:
+    """Open one validated, progress-silent reader for a Monitoring request."""
+    source_ids = _analytics_source_ids(paths)
+    if not source_ids:
+        yield None, [], f"analytics-v{ANALYTICS_SCHEMA_VERSION}:empty"
+        return
+    path = analytics_database_path()
+    if not path.exists():
+        yield None, [], _unavailable_analytics_token(source_ids, "missing_database")
+        return
+    try:
+        conn = _connect_analytics(path, read_only=True)
+    except duckdb.Error:
+        yield None, [], _unavailable_analytics_token(source_ids, "database_unavailable")
+        return
+    try:
+        try:
+            token = _analytics_materialization_token_from_connection(conn, source_ids)
+        except AnalyticsRebuildRequired as exc:
+            yield None, [], _unavailable_analytics_token(source_ids, exc.reason)
+        else:
+            yield conn, source_ids, token
+    finally:
+        conn.close()
+
+
+def clear_analytics_cache() -> dict[str, int]:
+    """Delete only the rebuildable DuckDB analytics cache files."""
+    path = analytics_database_path()
+    candidate_path = _analytics_candidate_path(path)
+    if not path.exists() and not candidate_path.exists():
+        return {
+            "deleted_files": 0,
+            "deleted_file_bytes": 0,
+            "deleted_rows": 0,
+        }
+    stats = analytics_cache_stats()
+    deleted_rows = sum(
+        int(stats.get(key, 0))
+        for key in ("dataflow_row_count", "job_row_count", "filter_value_count")
+    )
+    with _analytics_schema_rebuild_lock:
+        with analytics_connections.exclusive_maintenance():
+            candidates = [
+                path,
+                Path(f"{path}.wal"),
+                candidate_path,
+                Path(f"{candidate_path}.wal"),
+            ]
+            deleted_files = 0
+            deleted_file_bytes = 0
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                deleted_file_bytes += candidate.stat().st_size
+                candidate.unlink()
+                deleted_files += 1
     return {
-        **base_revision,
-        "object_type": "directory",
-        "file_count": len(stats),
-        "total_size": sum(item.st_size for item in stats),
-        "max_mtime_ns": max((item.st_mtime_ns for item in stats), default=fallback_mtime),
+        "deleted_files": deleted_files,
+        "deleted_file_bytes": deleted_file_bytes,
+        "deleted_rows": deleted_rows,
+    }
+
+
+def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
+    """Return a shallow source revision without walking the log tree."""
+    try:
+        path = require_local_path(source.uri)
+    except StorageProviderNotEnabled as exc:
+        return {
+            "provider": exc.provider,
+            "uri": source.uri,
+            "path": source.uri,
+            "exists": False,
+            "source_kind": source.source_kind,
+            "object_type": "provider_not_enabled",
+        }
+    exists = path.exists()
+    state = path.stat() if exists else None
+    return {
+        "provider": "local",
+        "uri": source.uri,
+        "path": str(path),
+        "exists": exists,
+        "source_kind": source.source_kind,
+        "object_type": "directory" if exists and path.is_dir() else "file" if exists else "missing",
+        "file_count": None,
+        "total_size": state.st_size if state and path.is_file() else None,
+        "max_mtime_ns": state.st_mtime_ns if state else None,
     }
 
 
@@ -308,7 +464,7 @@ def cached_source_stats(source_id: int) -> dict[str, int]:
     if not path.exists():
         return stats
     _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
+    conn = _connect_analytics(path, read_only=True)
     try:
         stats["dataflow_row_count"] = _table_source_row_count(conn, DATAFLOW_TABLE, source_id)
         stats["job_row_count"] = _table_source_row_count(conn, JOB_TABLE, source_id)
@@ -322,15 +478,20 @@ def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     unique_ids = sorted({int(source_id) for source_id in source_ids if int(source_id) > 0})
     if not unique_ids:
         return {"dataflow_rows_deleted": 0, "job_rows_deleted": 0, "filter_values_deleted": 0}
+    for source_id in unique_ids:
+        _invalidate_log_pending_changes(source_id)
     path = analytics_database_path()
     if not path.exists():
         return {"dataflow_rows_deleted": 0, "job_rows_deleted": 0, "filter_values_deleted": 0}
     _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path))
+    conn = _connect_analytics(path)
     try:
         dataflow_rows = _delete_rows_by_source_ids(conn, DATAFLOW_TABLE, unique_ids)
         job_rows = _delete_rows_by_source_ids(conn, JOB_TABLE, unique_ids)
         filter_rows = _delete_rows_by_source_ids(conn, FILTER_VALUES_TABLE, unique_ids)
+        _delete_rows_by_source_ids(conn, CACHE_SOURCES_TABLE, unique_ids, source_column="source_id")
+        _delete_rows_by_source_ids(conn, INGEST_MANIFEST_TABLE, unique_ids, source_column="source_id")
+        _delete_rows_by_source_ids(conn, INGEST_CHECKPOINT_TABLE, unique_ids, source_column="source_id")
     finally:
         conn.close()
     return {
@@ -340,18 +501,177 @@ def purge_cached_source_ids(source_ids: list[int]) -> dict[str, int]:
     }
 
 
+def _log_stream_root(etl_path: Path, stream_name: str) -> str:
+    if etl_path.name == stream_name:
+        return etl_path.as_posix()
+    return (etl_path / stream_name).as_posix()
+
+
+def _checkpoint_from_state(state: dict[str, Any] | None) -> LogStreamCheckpoint | None:
+    if not state:
+        return None
+    boundary = state.get("boundary_last_modified")
+    if not isinstance(boundary, datetime):
+        boundary = parse_utc_datetime(boundary)
+    if boundary is None:
+        return None
+    partition_value = state.get("partition_value")
+    if isinstance(partition_value, datetime):
+        partition_value = partition_value.date()
+    elif not isinstance(partition_value, date):
+        try:
+            partition_value = date.fromisoformat(str(partition_value))
+        except ValueError:
+            return None
+    return LogStreamCheckpoint(
+        partition_value=partition_value,
+        boundary_last_modified=boundary,
+        partition_format=str(state.get("partition_format") or "%Y-%m-%d"),
+    )
+
+
+def _plan_stream_sync(
+    adapter: LocalStorageAdapter,
+    root_uri: str,
+    *,
+    suffix: str,
+    checkpoint: LogStreamCheckpoint | None,
+    spec: LogSyncSpec,
+    manifest: dict[str, FileRevision],
+) -> tuple[list[DiscoveredLogFile], list[DiscoveredLogFile], int]:
+    expected_format = checkpoint.partition_format if checkpoint else None
+    partitions = discover_partitions(adapter, root_uri, expected_format=expected_format)
+    if partitions:
+        incremental_partitions = plan_incremental_partitions(partitions, checkpoint)
+        incremental_files = discover_partition_files(adapter, incremental_partitions, suffix=suffix)
+    else:
+        incremental_partitions = []
+        incremental_files = _unpartitioned_log_files(adapter, root_uri, suffix)
+    incremental = plan_incremental_candidates(incremental_files, checkpoint)
+    lookback: list[DiscoveredLogFile] = []
+    lookback_partition_count = 0
+    if spec.mode is LogSyncMode.INCREMENTAL_WITH_LOOKBACK and spec.lookback is not None:
+        if partitions:
+            lookback_partitions = plan_lookback_partitions(partitions, spec.lookback)
+            lookback_partition_count = len(lookback_partitions)
+            lookback_files = discover_partition_files(adapter, lookback_partitions, suffix=suffix)
+        else:
+            lookback_files = _unpartitioned_log_files(adapter, root_uri, suffix)
+        lookback = plan_lookback_candidates(lookback_files, spec.lookback, manifest)
+    return incremental, deduplicate_candidates(lookback, incremental), len(incremental_partitions) + lookback_partition_count
+
+
+def _unpartitioned_log_files(
+    adapter: LocalStorageAdapter,
+    root_uri: str,
+    suffix: str,
+) -> list[DiscoveredLogFile]:
+    files: list[DiscoveredLogFile] = []
+    for file_uri in adapter.list_files(root_uri, suffix):
+        revision = adapter.stat(file_uri)
+        partition_value = revision.last_modified.date()
+        files.append(
+            DiscoveredLogFile(
+                partition=ParsedPartition(
+                    partition_value=partition_value,
+                    raw_partition_path=partition_value.isoformat(),
+                    partition_granularity=PartitionGranularity.DAY,
+                    partition_format="%Y-%m-%d",
+                ),
+                revision=revision,
+            )
+        )
+    return files
+
+
+def _revision_json(revision: FileRevision) -> str:
+    provider_revision = revision.provider_revision
+    mtime_ns = (
+        int(provider_revision)
+        if provider_revision and provider_revision.isdigit()
+        else int(revision.last_modified.timestamp() * 1_000_000_000)
+    )
+    return json.dumps(
+        {
+            "size": revision.size,
+            "mtime_ns": mtime_ns,
+            "last_modified": revision.last_modified.isoformat(),
+            "provider_revision": provider_revision,
+        },
+        sort_keys=True,
+    )
+
+
+def _file_revision_from_json(file_uri: str, revision_json: str) -> FileRevision | None:
+    try:
+        payload = json.loads(revision_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    last_modified = parse_utc_datetime(payload.get("last_modified"))
+    if last_modified is None and payload.get("mtime_ns") is not None:
+        try:
+            last_modified = datetime.fromtimestamp(int(payload["mtime_ns"]) / 1_000_000_000, tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+    if last_modified is None:
+        return None
+    return FileRevision(
+        canonical_uri=file_uri,
+        size=int(payload.get("size") or 0),
+        last_modified=last_modified,
+        provider_revision=str(payload.get("provider_revision") or payload.get("mtime_ns") or "") or None,
+    )
+
+
+def _ingest_file_state(candidate: DiscoveredLogFile, file_kind: str) -> dict[str, Any]:
+    return {
+        "file_uri": candidate.canonical_uri,
+        "file_kind": file_kind,
+        "partition_value": candidate.partition.partition_value,
+        "partition_format": candidate.partition.partition_format,
+        "revision_json": _revision_json(candidate.revision),
+        "job_id": None,
+        "log_timestamp": None,
+        "run_date": candidate.partition.partition_value,
+    }
+
+
+def _checkpoint_update(
+    file_kind: str,
+    incremental_candidates: list[DiscoveredLogFile],
+    previous: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not incremental_candidates:
+        return None
+    latest_partition = max(
+        incremental_candidates,
+        key=lambda item: (item.partition.partition_value, item.canonical_uri),
+    ).partition
+    boundary = max(item.revision.last_modified for item in incremental_candidates)
+    previous_boundary = _checkpoint_from_state(previous)
+    if previous_boundary is not None:
+        boundary = max(boundary, previous_boundary.boundary_last_modified)
+    return {
+        "file_kind": file_kind,
+        "partition_format": latest_partition.partition_format,
+        "partition_value": latest_partition.partition_value,
+        "boundary_last_modified": boundary,
+    }
+
+
 def refresh_log_source_cache(
     session: Session,
     source: EnvironmentSource,
     *,
     job_type: str = "force_refresh",
+    sync_spec: LogSyncSpec | None = None,
 ) -> dict[str, Any]:
     if source.source_kind != "logs":
         raise ValueError("Source is not a log source")
 
     job = sync.begin_sync_job(session, source, job_type)
     checked_at = utc_now()
-    revision = sync.stat_source(source)
+    revision = log_source_revision(source)
     error = _revision_error(source, revision)
     if error:
         sync.record_source_revision(session, source=source, status="error", revision=None, error=error, checked_at=checked_at)
@@ -363,9 +683,15 @@ def refresh_log_source_cache(
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
             completed_at=checked_at,
         )
-        source_validation.validate_log_source(session, source)
+        source_validation.record_source_validation(
+            session,
+            source,
+            source_validation.source_validation_error(source, error["message"]),
+            checked_at=checked_at,
+        )
         return sync.source_sync_status(session, source, job)
 
+    spec = sync_spec or LogSyncSpec()
     log_paths = resolve_log_source_paths(source)
     try:
         etl_path = require_local_path(log_paths.etl_logs_uri or source.uri)
@@ -381,82 +707,300 @@ def refresh_log_source_cache(
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
             completed_at=checked_at,
         )
-        source_validation.validate_log_source(session, source)
+        source_validation.record_source_validation(
+            session,
+            source,
+            source_validation.source_validation_error(
+                source,
+                error["message"],
+                provider=exc.provider,
+            ),
+            checked_at=checked_at,
+        )
         return sync.source_sync_status(session, source, job)
-    dataflow_files = discover_dataflow_parquet_files(etl_path.as_posix())
-    job_files = discover_job_jsonl_files(etl_path.as_posix())
+    adapter = LocalStorageAdapter()
+    checkpoints, ingest_manifest_json = _read_ingest_state(source.id)
+    ingest_manifest = {
+        file_uri: parsed_revision
+        for file_uri, revision_json in ingest_manifest_json.items()
+        if (parsed_revision := _file_revision_from_json(file_uri, revision_json)) is not None
+    }
+    dataflow_incremental, dataflow_candidates, dataflow_partition_count = _plan_stream_sync(
+        adapter,
+        _log_stream_root(etl_path, "dataflow_run_log"),
+        suffix=".parquet",
+        checkpoint=_checkpoint_from_state(checkpoints.get("dataflow_parquet")),
+        spec=spec,
+        manifest=ingest_manifest,
+    )
+    job_incremental, job_candidates, job_partition_count = _plan_stream_sync(
+        adapter,
+        _log_stream_root(etl_path, "job_run_log"),
+        suffix=".jsonl",
+        checkpoint=_checkpoint_from_state(checkpoints.get("job_jsonl")),
+        spec=spec,
+        manifest=ingest_manifest,
+    )
     system_files = discover_system_jsonl_files(system_path.as_posix() if system_path else None)
     existing = _existing_manifest(session, source.id)
-    current_files = {
-        file_uri: _manifest_file_state(file_uri, "dataflow_parquet")
-        for file_uri in dataflow_files
-    }
-    current_files.update({file_uri: _manifest_file_state(file_uri, "job_jsonl") for file_uri in job_files})
-    current_files.update({file_uri: _manifest_file_state(file_uri, "system_jsonl") for file_uri in system_files})
-    changed_files = [
-        file_state
-        for file_uri, file_state in current_files.items()
-        if existing.get(file_uri) != file_state["revision_json"]
+    cache_has_source = _analytics_cache_has_source(source.id)
+    analytic_candidates = [
+        *((candidate, "dataflow_parquet") for candidate in dataflow_candidates),
+        *((candidate, "job_jsonl") for candidate in job_candidates),
     ]
-    removed_files = sorted(set(existing) - set(current_files))
+    changed_files = [_ingest_file_state(candidate, file_kind) for candidate, file_kind in analytic_candidates]
+    system_states = [_manifest_file_state(file_uri, "system_jsonl") for file_uri in system_files]
+    revision = _revision_with_known_files(
+        revision,
+        {
+            **existing,
+            **ingest_manifest_json,
+            **{
+                str(state["file_uri"]): str(state["revision_json"])
+                for state in [*changed_files, *system_states]
+            },
+        },
+    )
+    changed_system_files = [
+        state for state in system_states if existing.get(str(state["file_uri"])) != state["revision_json"]
+    ]
 
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     parsed_dataflow_files: list[tuple[str, str, str]] = []
     parsed_job_rows: list[tuple[str, str, str, dict[str, Any]]] = []
     file_row_counts: dict[str, int] = {}
     for file_state in changed_files:
         file_uri = str(file_state["file_uri"])
         file_kind = str(file_state["file_kind"])
+        revision_json = str(file_state["revision_json"])
         if file_kind == "dataflow_parquet":
-            parsed_dataflow_files.append((file_uri, file_kind, _file_revision_json(file_uri)))
+            parsed_dataflow_files.append((file_uri, file_kind, revision_json))
             read_errors = []
         elif file_kind == "job_jsonl":
             rows, read_errors = _read_job_file(file_uri)
-            parsed_job_rows.extend((file_uri, file_kind, _file_revision_json(file_uri), row) for row in rows)
+            parsed_job_rows.extend((file_uri, file_kind, revision_json, row) for row in rows)
             file_row_counts[file_uri] = len(rows)
-        else:
-            file_row_counts[file_uri] = _count_jsonl_lines(file_uri)
-            read_errors = []
+            file_state["row_count"] = len(rows)
         errors.extend(read_errors)
+    for file_state in changed_system_files:
+        file_row_counts[str(file_state["file_uri"])] = _count_jsonl_lines(str(file_state["file_uri"]))
 
+    checkpoint_updates = [
+        update
+        for update in (
+            _checkpoint_update("dataflow_parquet", dataflow_incremental, checkpoints.get("dataflow_parquet")),
+            _checkpoint_update("job_jsonl", job_incremental, checkpoints.get("job_jsonl")),
+        )
+        if update is not None
+    ]
+    needs_publish = not cache_has_source or bool(changed_files)
     changed_file_uris = [str(file_state["file_uri"]) for file_state in changed_files]
-    upsert_result = _upsert_duckdb_rows(source.id, parsed_dataflow_files, parsed_job_rows, removed_files, changed_file_uris)
+    if errors:
+        upsert_result = {
+            "parsed_dataflow_records": 0,
+            "file_row_counts": {},
+            "errors": [],
+            "published": False,
+        }
+    elif needs_publish:
+        upsert_result = _upsert_duckdb_rows(
+            source.id,
+            parsed_dataflow_files,
+            parsed_job_rows,
+            [],
+            changed_file_uris,
+            ingest_files=changed_files,
+            checkpoints=checkpoint_updates,
+        )
+    else:
+        upsert_result = {
+            "parsed_dataflow_records": 0,
+            "file_row_counts": {},
+            "errors": [],
+            "published": True,
+        }
     file_row_counts.update(upsert_result["file_row_counts"])
     errors.extend(upsert_result["errors"])
-    _upsert_manifest(session, source.id, changed_files, removed_files, file_row_counts, checked_at)
-    if changed_files or removed_files:
+    published = bool(upsert_result["published"])
+    if published and (changed_files or changed_system_files):
+        _upsert_manifest(
+            session,
+            source.id,
+            [*changed_files, *changed_system_files],
+            [],
+            file_row_counts,
+            checked_at,
+        )
+    if published and needs_publish:
         invalidate_environment_derived_caches(session, source.environment_id, structural=False)
 
-    status = "warning" if errors else "ok"
-    message = "Log source cache refreshed" if changed_files or removed_files else "Log source cache is current"
+    status = "error" if errors else "ok"
+    message = "Log source cache refreshed" if changed_files or changed_system_files else "Log source cache is current"
     if errors:
-        message = "Log source cache refreshed with read warnings"
-    sync.record_source_revision(session, source=source, status=status, revision=revision, error=None, checked_at=checked_at)
+        message = "Log source analytics were not published; the previous cache was preserved"
+    error = errors[0] if errors else None
+    sync.record_source_revision(
+        session,
+        source=source,
+        status=status,
+        revision=revision,
+        error=error,
+        checked_at=checked_at,
+    )
     sync.finish_sync_job(
         session,
         job,
-        status="succeeded",
+        status="failed" if errors else "succeeded",
         message=message,
         result={
             "status": status,
             "message": message,
             "revision": revision,
-            "error": None,
+            "error": error,
             "record_counts": {
                 "parsed_dataflow_records": upsert_result["parsed_dataflow_records"],
                 "parsed_job_records": len(parsed_job_rows),
-                "dataflow_parquet_files": len(dataflow_files),
-                "job_jsonl_files": len(job_files),
+                "dataflow_parquet_files": len(dataflow_candidates),
+                "job_jsonl_files": len(job_candidates),
                 "system_jsonl_files": len(system_files),
                 "parsed_files": len(changed_files),
-                "removed_files": len(removed_files),
+                "replaced_files": sum(
+                    1 for state in changed_files if str(state["file_uri"]) in ingest_manifest_json
+                ),
+                "new_files": sum(
+                    1 for state in changed_files if str(state["file_uri"]) not in ingest_manifest_json
+                ),
+                "removed_files": 0,
+                "scanned_partitions": dataflow_partition_count + job_partition_count,
             },
+            "sync_mode": spec.mode.value,
             "errors": errors,
         },
         completed_at=checked_at,
     )
-    source_validation.validate_log_source(session, source)
+    _invalidate_log_pending_changes(source.id)
+    validation_counts = {
+        "dataflow_parquet_files": len(dataflow_candidates),
+        "job_jsonl_files": len(job_candidates),
+        "system_jsonl_files": len(system_files),
+    }
+    validation_result = (
+        {
+            **source_validation.source_validation_error(source, message),
+            "errors": errors,
+        }
+        if errors
+        else {
+            "source_id": source.id,
+            "source_kind": "logs",
+            "status": "ok",
+            "message": "Log source is readable",
+            "detected_provider": "local",
+            "detected_format": "logs",
+            "record_counts": validation_counts,
+            "records_scanned": sum(validation_counts.values()),
+            "errors": [],
+        }
+    )
+    source_validation.record_source_validation(
+        session,
+        source,
+        validation_result,
+        checked_at=checked_at,
+    )
     return sync.source_sync_status(session, source, job)
+
+
+def log_source_has_pending_changes(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    ttl_seconds: float = 0.0,
+) -> bool:
+    """Return True when a cached Log source has files that differ from the last sync.
+
+    Read-only: it discovers the log files the sync would pick up (the same discovery,
+    so ``debug_json`` and other ignored files are excluded) and compares them to the
+    stored manifest, without ingesting anything or touching the cache. Sources that
+    have never been synced (no manifest) return False; their empty-cache state is
+    already reported as ``not_cached`` by freshness.
+
+    When ``ttl_seconds`` is positive the result is cached for that long so the
+    filesystem scan is not repeated on every freshness/context read.
+    """
+    if source.source_kind != "logs":
+        return False
+    if ttl_seconds > 0:
+        now = time.monotonic()
+        with _pending_changes_lock:
+            entry = _pending_changes_cache.get(source.id)
+            if entry is not None and entry[0] > now:
+                return entry[1]
+    result = _compute_log_source_pending_changes(session, source)
+    if ttl_seconds > 0:
+        with _pending_changes_lock:
+            _pending_changes_cache[source.id] = (time.monotonic() + ttl_seconds, result)
+    return result
+
+
+def _compute_log_source_pending_changes(session: Session, source: EnvironmentSource) -> bool:
+    try:
+        log_paths = resolve_log_source_paths(source)
+        etl_path = require_local_path(log_paths.etl_logs_uri or source.uri)
+        system_path = require_local_path(log_paths.system_logs_uri) if log_paths.system_logs_uri else None
+    except StorageProviderNotEnabled:
+        return False
+    try:
+        checkpoints, ingest_manifest_json = _read_ingest_state(source.id)
+        if not checkpoints:
+            return False
+        ingest_manifest = {
+            file_uri: parsed_revision
+            for file_uri, revision_json in ingest_manifest_json.items()
+            if (parsed_revision := _file_revision_from_json(file_uri, revision_json)) is not None
+        }
+        adapter = LocalStorageAdapter()
+        for stream_name, suffix, file_kind in (
+            ("dataflow_run_log", ".parquet", "dataflow_parquet"),
+            ("job_run_log", ".jsonl", "job_jsonl"),
+        ):
+            _, candidates, _ = _plan_stream_sync(
+                adapter,
+                _log_stream_root(etl_path, stream_name),
+                suffix=suffix,
+                checkpoint=_checkpoint_from_state(checkpoints.get(file_kind)),
+                spec=LogSyncSpec(),
+                manifest=ingest_manifest,
+            )
+            if candidates:
+                return True
+        system_manifest = {
+            row.file_uri: row.revision_json
+            for row in session.scalars(
+                select(LogFileManifest).where(
+                    LogFileManifest.source_id == source.id,
+                    LogFileManifest.file_kind == "system_jsonl",
+                )
+            )
+        }
+        system_files = discover_system_jsonl_files(system_path.as_posix() if system_path else None)
+        current_system = {
+            file_uri: _file_revision_json(file_uri)
+            for file_uri in system_files
+        }
+    except OSError:
+        return False
+    if set(system_manifest) != set(current_system):
+        return bool(system_manifest or current_system)
+    return any(
+        not _revision_equivalent(system_manifest.get(file_uri), revision_json)
+        for file_uri, revision_json in current_system.items()
+    )
+
+
+def _invalidate_log_pending_changes(source_id: int) -> None:
+    with _pending_changes_lock:
+        _pending_changes_cache.pop(source_id, None)
 
 
 def cached_monitoring_rows(
@@ -466,35 +1010,19 @@ def cached_monitoring_rows(
     dataflow_columns: tuple[str, ...] | None = None,
     job_columns: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]] | None:
-    enabled = [path for path in paths if path.enabled]
-    if not enabled:
-        return [], [], []
-    cached_ids = {
-        int(row)
-        for row in session.scalars(
-            select(LogFileManifest.source_id).where(
-                LogFileManifest.source_id.in_([path.id for path in enabled]),
-                LogFileManifest.file_kind.in_(["dataflow_parquet", "job_jsonl"]),
-            )
-        ).all()
-    }
+    context = _cached_source_context(session, paths)
+    if context is None:  # Defensive compatibility; readiness now raises instead.
+        raise _rebuild_required(paths, reason="not_ready")
+    cached_ids, errors = context
     if not cached_ids:
-        return None
-
-    missing = [path for path in enabled if path.id not in cached_ids]
+        return [], [], errors
     rows, jobs = _read_duckdb_rows(
         sorted(cached_ids),
         dataflow_columns=dataflow_columns,
         job_columns=job_columns,
     )
-    if cached_ids and not rows and not jobs:
-        return None
     job_by_id = {job.get("job_id"): job for job in jobs if job.get("job_id")}
     enriched = [_enrich_dataflow(row, job_by_id.get(row.get("job_id"))) for row in rows]
-    errors = [
-        {"uri": path.uri, "message": "ETL log path has no cache yet; run Sync now"}
-        for path in missing
-    ]
     return enriched, jobs, errors
 
 
@@ -509,38 +1037,26 @@ def cached_monitoring_summary(
 ) -> tuple[dict[str, Any], list[dict[str, str]]] | None:
     """Aggregate the fixed Environment Overview Monitoring read model in DuckDB.
 
-    A ``None`` result deliberately means that the typed cache cannot answer.
-    Callers must then retain the existing source-reader fallback rather than
-    silently reporting an empty Monitoring state.
+    A missing or incomplete analytics materialization raises a typed rebuild
+    requirement. Request paths never fall back to parsing raw log files.
     """
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return {
-            "dataflow_records": 0,
-            "job_records": 0,
-            "dataflow_succeeded": 0,
-            "dataflow_failed": 0,
-            "total_failures": 0,
-            "active_engines": 0,
-            "failed_last7": 0,
-            "failed_last30": 0,
-            "failed_last365": 0,
-            "latest_log_at": None,
-            "date_min": None,
-            "date_max": None,
-        }, errors
-
-    path = analytics_database_path()
-    if not path.exists():
-        return None
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, DATAFLOW_TABLE) or not _table_exists(conn, JOB_TABLE):
-            return None
+    del session
+    with analytics_reader(paths) as (conn, source_ids, _generation):
+        if conn is None or not source_ids:
+            return {
+                "dataflow_records": 0,
+                "job_records": 0,
+                "dataflow_succeeded": 0,
+                "dataflow_failed": 0,
+                "total_failures": 0,
+                "active_engines": 0,
+                "failed_last7": 0,
+                "failed_last30": 0,
+                "failed_last365": 0,
+                "latest_log_at": None,
+                "date_min": None,
+                "date_max": None,
+            }, []
         if timezone_name:
             local_date_sql = "CAST(timezone(?, event_time) AS DATE)"
             local_date_param: str | int = timezone_name
@@ -565,16 +1081,10 @@ def cached_monitoring_summary(
               SELECT
                 status,
                 engine_name,
-                COALESCE(
-                  TRY_CAST(end_time AS TIMESTAMPTZ),
-                  TRY_CAST(start_time AS TIMESTAMPTZ)
-                ) AS event_time
+                __event_time AS event_time
               FROM {JOB_TABLE}
               WHERE _source_id IN ({placeholders})
-                AND COALESCE(
-                  TRY_CAST(end_time AS TIMESTAMPTZ),
-                  TRY_CAST(start_time AS TIMESTAMPTZ)
-                ) >= ?
+                AND __event_time >= ?
             ),
             jobs_with_dates AS (
               SELECT *, {local_date_sql} AS local_date
@@ -615,15 +1125,11 @@ def cached_monitoring_summary(
         )
         row = result.fetchone()
         columns = [description[0] for description in result.description]
-    finally:
-        conn.close()
 
     if row is None:
-        return None
+        raise _rebuild_required(paths, reason="query_failed")
     summary = dict(zip(columns, row))
-    if not summary["dataflow_records"] and not summary["job_records"]:
-        return None
-    return summary, errors
+    return summary, []
 
 
 def cached_dataflow_logs(
@@ -643,22 +1149,10 @@ def query_cached_latest_dataflow_runs(
     paths: list[EnvironmentSource],
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]] | None:
     """Return one narrow latest row per stable Dataflow identity from DuckDB."""
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return [], [], errors
-    path = analytics_database_path()
-    if not path.exists():
-        return None
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, DATAFLOW_TABLE):
-            return None
-        if not _table_has_source_rows(conn, DATAFLOW_TABLE, source_ids):
-            return None
+    del session
+    with analytics_reader(paths) as (conn, source_ids, _generation):
+        if conn is None or not source_ids:
+            return [], [], []
         placeholders = ", ".join("?" for _ in source_ids)
         result = conn.execute(
             f"""
@@ -714,9 +1208,7 @@ def query_cached_latest_dataflow_runs(
             """,
             source_ids,
         ).fetchall()
-    finally:
-        conn.close()
-    return rows, [str(row[0]) for row in ambiguous_rows], errors
+    return rows, [str(row[0]) for row in ambiguous_rows], []
 
 
 def cached_job_logs(
@@ -743,7 +1235,7 @@ def system_log_records(
     limit: int = 500,
     offset: int = 0,
 ) -> dict[str, Any]:
-    enabled_ids = [path.id for path in paths if path.enabled]
+    enabled_ids = _analytics_source_ids(paths)
     if not enabled_ids or not job_id:
         return {"records": [], "total": 0, "files": [], "errors": []}
     files = list(
@@ -805,22 +1297,10 @@ def query_cached_dataflow_logs(
     sort_by: str = "start_time",
     sort_dir: str = "desc",
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, str]]] | None:
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return [], 0, errors
-    path = analytics_database_path()
-    if not path.exists():
-        return [], 0, errors
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, DATAFLOW_TABLE):
-            return None
-        if not _table_has_source_rows(conn, DATAFLOW_TABLE, source_ids):
-            return None
+    del session
+    with analytics_reader(paths) as (conn, source_ids, _generation):
+        if conn is None or not source_ids:
+            return [], 0, []
         source_placeholders = ", ".join("?" for _ in source_ids)
         where_sql, params = _monitoring_filter_sql(filters, "d", "j")
         job_lookup_sql = (
@@ -846,7 +1326,6 @@ def query_cached_dataflow_logs(
         )
         query_params = [*source_ids, *source_ids, *params]
         order_sql = _monitoring_order_sql(sort_by, sort_dir, DATAFLOW_SORT_COLUMNS, default_alias="d")
-        total = int(conn.execute(f"SELECT count(*) {from_sql}", query_params).fetchone()[0])
         result = conn.execute(
             f"""
             SELECT
@@ -855,7 +1334,8 @@ def query_cached_dataflow_logs(
               COALESCE(j.metadata_provider_name, 'unknown') AS metadata_provider_name,
               COALESCE(j.platform_name, 'unknown') AS platform_name,
               j.status AS job_status,
-              j.duration_seconds AS job_duration_seconds
+              j.duration_seconds AS job_duration_seconds,
+              COUNT(*) OVER() AS __total_records
             {from_sql}
             ORDER BY {order_sql}
             LIMIT ? OFFSET ?
@@ -863,9 +1343,10 @@ def query_cached_dataflow_logs(
             [*query_params, limit, offset],
         )
         rows = _result_rows(result)
-    finally:
-        conn.close()
-    return rows, total, errors
+        total = _window_total(rows)
+        if not rows and offset:
+            total = int(conn.execute(f"SELECT count(*) {from_sql}", query_params).fetchone()[0])
+    return rows, total, []
 
 
 def query_cached_job_logs(
@@ -877,22 +1358,10 @@ def query_cached_job_logs(
     sort_by: str = "start_time",
     sort_dir: str = "desc",
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, str]]] | None:
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return [], 0, errors
-    path = analytics_database_path()
-    if not path.exists():
-        return [], 0, errors
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, JOB_TABLE):
-            return None
-        if not _table_has_source_rows(conn, JOB_TABLE, source_ids):
-            return None
+    del session
+    with analytics_reader(paths) as (conn, source_ids, _generation):
+        if conn is None or not source_ids:
+            return [], 0, []
         job_select_sql = _select_alias_columns("j", _table_columns(conn, JOB_TABLE))
         source_placeholders = ", ".join("?" for _ in source_ids)
         where_sql, params = _monitoring_filter_sql(filters, "j", "j", include_dataflow_filters=False)
@@ -930,7 +1399,6 @@ def query_cached_job_logs(
             JOB_SORT_COLUMNS,
             default_alias="j",
         )
-        total = int(conn.execute(f"SELECT count(*) {from_sql}", query_params).fetchone()[0])
         result = conn.execute(
             f"""
             SELECT
@@ -945,7 +1413,8 @@ def query_cached_job_logs(
               COALESCE(c.child_total_rows_read, 0) AS child_total_rows_read,
               COALESCE(c.child_total_rows_written, 0) AS child_total_rows_written,
               COALESCE(c.child_total_bytes_added, 0) AS child_total_bytes_added,
-              COALESCE(c.child_total_bytes_removed, 0) AS child_total_bytes_removed
+              COALESCE(c.child_total_bytes_removed, 0) AS child_total_bytes_removed,
+              COUNT(*) OVER() AS __total_records
             {from_sql}
             ORDER BY {order_sql}
             LIMIT ? OFFSET ?
@@ -953,9 +1422,10 @@ def query_cached_job_logs(
             [*query_params, limit, offset],
         )
         rows = _result_rows(result)
-    finally:
-        conn.close()
-    return rows, total, errors
+        total = _window_total(rows)
+        if not rows and offset:
+            total = int(conn.execute(f"SELECT count(*) {from_sql}", query_params).fetchone()[0])
+    return rows, total, []
 
 
 def query_cached_monitoring_rows(
@@ -965,6 +1435,7 @@ def query_cached_monitoring_rows(
     *,
     dataflow_columns: tuple[str, ...] | None = None,
     job_columns: tuple[str, ...] | None = None,
+    analytics_context: tuple[Any, list[int], str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]] | None:
     """Read only filtered Monitoring rows from the typed DuckDB cache.
 
@@ -972,23 +1443,11 @@ def query_cached_monitoring_rows(
     column projection execute in DuckDB so Python never receives rows outside
     the active report scope.
     """
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return [], [], errors
-    path = analytics_database_path()
-    if not path.exists():
-        return None
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, DATAFLOW_TABLE) or not _table_exists(conn, JOB_TABLE):
-            return None
-        if not _table_has_source_rows(conn, DATAFLOW_TABLE, source_ids) and not _table_has_source_rows(conn, JOB_TABLE, source_ids):
-            return None
-
+    del session
+    reader_context = nullcontext(analytics_context) if analytics_context is not None else analytics_reader(paths)
+    with reader_context as (conn, source_ids, _generation):
+        if conn is None or not source_ids:
+            return [], [], []
         source_placeholders = ", ".join("?" for _ in source_ids)
         job_lookup_sql = (
             f"""
@@ -1042,59 +1501,12 @@ def query_cached_monitoring_rows(
             SELECT {job_select_sql}
             FROM {JOB_TABLE} j
             WHERE j._source_id IN ({source_placeholders}){job_where_sql}
-            ORDER BY TRY_CAST(COALESCE(j.end_time, j.start_time) AS TIMESTAMPTZ) DESC NULLS LAST
+            ORDER BY j.__event_time DESC NULLS LAST
             """,
             [*source_ids, *job_filter_params],
         )
         jobs = _result_rows(job_result)
-    finally:
-        conn.close()
-    return dataflows, jobs, errors
-
-
-def query_cached_filter_values(
-    session: Session,
-    paths: list[EnvironmentSource],
-) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, str]]] | None:
-    context = _cached_source_context(session, paths)
-    if context is None:
-        return None
-    source_ids, errors = context
-    if not source_ids:
-        return {}, errors
-    path = analytics_database_path()
-    if not path.exists():
-        return {}, errors
-    _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
-    try:
-        if not _table_exists(conn, FILTER_VALUES_TABLE):
-            return {}, errors
-        if not _table_has_source_rows(conn, FILTER_VALUES_TABLE, source_ids):
-            return None
-        placeholders = ", ".join("?" for _ in source_ids)
-        result = conn.execute(
-            f"""
-            SELECT field, value, SUM(record_count) AS record_count
-            FROM {FILTER_VALUES_TABLE}
-            WHERE _source_id IN ({placeholders})
-            GROUP BY field, value
-            ORDER BY field, value
-            """,
-            source_ids,
-        )
-        values: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in _result_rows(result):
-            values[str(row["field"])].append({
-                "value": row["value"],
-                "label": row["value"],
-                "count": row["record_count"],
-            })
-        if "connection" not in values and _table_exists(conn, DATAFLOW_TABLE):
-            values["connection"] = _query_connection_filter_values(conn, source_ids)
-    finally:
-        conn.close()
-    return values, errors
+    return dataflows, jobs, []
 
 
 def _upsert_duckdb_rows(
@@ -1103,38 +1515,174 @@ def _upsert_duckdb_rows(
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
+    *,
+    ingest_files: list[dict[str, Any]] | None = None,
+    checkpoints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     path = analytics_database_path()
+    if _analytics_schema_rebuild_required(path):
+        with _analytics_schema_rebuild_lock:
+            if _analytics_schema_rebuild_required(path):
+                candidate_path = _analytics_candidate_path(path)
+                _discard_analytics_candidate(candidate_path)
+                result = _write_duckdb_rows(
+                    candidate_path,
+                    source_id,
+                    dataflow_files,
+                    job_rows,
+                    removed_files,
+                    changed_files,
+                    ingest_files=ingest_files,
+                    checkpoints=checkpoints,
+                )
+                if result["published"]:
+                    try:
+                        _validate_analytics_candidate(candidate_path, source_id)
+                        _swap_analytics_candidate(candidate_path, path)
+                    except Exception as exc:
+                        result["errors"].append(
+                            {
+                                "uri": str(candidate_path),
+                                "message": str(exc),
+                                "code": getattr(exc, "code", "publish_failed"),
+                            }
+                        )
+                        result["published"] = False
+                return result
+    return _write_duckdb_rows(
+        path,
+        source_id,
+        dataflow_files,
+        job_rows,
+        removed_files,
+        changed_files,
+        ingest_files=ingest_files,
+        checkpoints=checkpoints,
+    )
+
+
+def _write_duckdb_rows(
+    path: Path,
+    source_id: int,
+    dataflow_files: list[tuple[str, str, str]],
+    job_rows: list[tuple[str, str, str, dict[str, Any]]],
+    removed_files: list[str],
+    changed_files: list[str],
+    *,
+    ingest_files: list[dict[str, Any]] | None = None,
+    checkpoints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     parsed_dataflow_records = 0
     file_row_counts: dict[str, int] = {}
     errors: list[dict[str, str]] = []
-    conn = duckdb.connect(database=str(path))
+    conn = _connect_analytics(path)
     try:
         _ensure_duckdb_tables(conn)
-        stale_files = [*removed_files, *changed_files]
-        for file_uri in stale_files:
-            if _table_exists(conn, DATAFLOW_TABLE):
-                conn.execute(f"DELETE FROM {DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
-            if _table_exists(conn, JOB_TABLE):
-                conn.execute(f"DELETE FROM {JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
-        for file_uri, file_kind, revision_json in dataflow_files:
-            try:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            _preflight_dataflow_schemas(conn, [file_uri for file_uri, _, _ in dataflow_files])
+            stale_files = [*removed_files, *changed_files]
+            for file_uri in stale_files:
+                if _table_exists(conn, DATAFLOW_TABLE):
+                    conn.execute(f"DELETE FROM {DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
+                if _table_exists(conn, JOB_TABLE):
+                    conn.execute(f"DELETE FROM {JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
+            for file_uri, file_kind, revision_json in dataflow_files:
                 row_count = _insert_dataflow_file(conn, source_id, file_uri, file_kind, revision_json)
                 parsed_dataflow_records += row_count
                 file_row_counts[file_uri] = row_count
-            except Exception as exc:
-                errors.append({"uri": file_uri, "message": str(exc)})
-        if job_rows:
-            _insert_typed_rows(conn, JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
-        _refresh_filter_values(conn, source_id)
+            if job_rows:
+                _insert_typed_rows(conn, JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
+            _assert_ingest_files_stable(ingest_files or [])
+            _upsert_ingest_control_rows(
+                conn,
+                source_id,
+                ingest_files or [],
+                checkpoints or [],
+                file_row_counts,
+            )
+            _refresh_filter_values(conn, source_id)
+            _mark_cache_source(conn, source_id)
+            _publish_analytics_generation(conn)
+            conn.execute("COMMIT")
+        except Exception as exc:
+            conn.execute("ROLLBACK")
+            errors.append(
+                {
+                    "uri": str(path),
+                    "message": str(exc),
+                    "code": getattr(exc, "code", "publish_failed"),
+                }
+            )
+            parsed_dataflow_records = 0
+            file_row_counts.clear()
     finally:
         conn.close()
     return {
         "parsed_dataflow_records": parsed_dataflow_records,
         "file_row_counts": file_row_counts,
         "errors": errors,
+        "published": not errors,
     }
+
+
+def _upsert_ingest_control_rows(
+    conn,
+    source_id: int,
+    files: list[dict[str, Any]],
+    checkpoints: list[dict[str, Any]],
+    file_row_counts: dict[str, int],
+) -> None:
+    _ensure_ingest_control_tables(conn)
+    ingested_at = utc_now().isoformat()
+    for item in files:
+        file_uri = str(item["file_uri"])
+        file_kind = str(item["file_kind"])
+        conn.execute(
+            f"DELETE FROM {INGEST_MANIFEST_TABLE} WHERE source_id = ? AND log_kind = ? AND file_uri = ?",
+            [source_id, file_kind, file_uri],
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {INGEST_MANIFEST_TABLE} (
+              source_id, log_kind, file_uri, partition_value, partition_format,
+              revision_json, row_count, ingested_at
+            ) VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?::TIMESTAMPTZ)
+            """,
+            [
+                source_id,
+                file_kind,
+                file_uri,
+                str(item["partition_value"]),
+                str(item["partition_format"]),
+                str(item["revision_json"]),
+                int(file_row_counts.get(file_uri, item.get("row_count") or 0)),
+                ingested_at,
+            ],
+        )
+    for checkpoint in checkpoints:
+        file_kind = str(checkpoint["file_kind"])
+        conn.execute(
+            f"DELETE FROM {INGEST_CHECKPOINT_TABLE} WHERE source_id = ? AND log_kind = ?",
+            [source_id, file_kind],
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {INGEST_CHECKPOINT_TABLE} (
+              source_id, log_kind, partition_format, partition_value,
+              boundary_last_modified, updated_at
+            ) VALUES (?, ?, ?, ?::DATE, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ)
+            """,
+            [
+                source_id,
+                file_kind,
+                str(checkpoint["partition_format"]),
+                str(checkpoint["partition_value"]),
+                str(checkpoint["boundary_last_modified"]),
+                ingested_at,
+            ],
+        )
 
 
 def _read_duckdb_rows(
@@ -1147,7 +1695,7 @@ def _read_duckdb_rows(
     if not path.exists():
         return [], []
     _ensure_duckdb_cache_ready(path)
-    conn = duckdb.connect(database=str(path), read_only=True)
+    conn = _connect_analytics(path, read_only=True)
     try:
         placeholders = ", ".join("?" for _ in source_ids)
         dataflows = _select_typed_rows(
@@ -1175,26 +1723,29 @@ def _cached_source_context(
     session: Session,
     paths: list[EnvironmentSource],
 ) -> tuple[list[int], list[dict[str, str]]] | None:
-    enabled = [path for path in paths if path.enabled]
-    if not enabled:
+    token = analytics_materialization_token(paths)
+    if ":unavailable:" in token:
         return [], []
-    cached_ids = {
-        int(row)
-        for row in session.scalars(
-            select(LogFileManifest.source_id).where(
-                LogFileManifest.source_id.in_([path.id for path in enabled]),
-                LogFileManifest.file_kind.in_(["dataflow_parquet", "job_jsonl"]),
-            )
-        ).all()
-    }
-    if not cached_ids:
-        return None
-    missing = [path for path in enabled if path.id not in cached_ids]
-    errors = [
-        {"uri": path.uri, "message": "ETL log path has no cache yet; run Sync now"}
-        for path in missing
-    ]
-    return sorted(cached_ids), errors
+    return _analytics_source_ids(paths), []
+
+
+def monitoring_filter_sql(
+    filters: dict[str, str],
+    row_alias: str,
+    job_alias: str,
+    *,
+    include_dataflow_filters: bool = True,
+    dataflow_table: str = DATAFLOW_TABLE,
+    dataflow_event_time_column: str | None = None,
+) -> tuple[str, list[Any]]:
+    return _monitoring_filter_sql(
+        filters,
+        row_alias,
+        job_alias,
+        include_dataflow_filters=include_dataflow_filters,
+        dataflow_table=dataflow_table,
+        dataflow_event_time_column=dataflow_event_time_column,
+    )
 
 
 def _monitoring_filter_sql(
@@ -1202,12 +1753,22 @@ def _monitoring_filter_sql(
     row_alias: str,
     job_alias: str,
     include_dataflow_filters: bool = True,
+    dataflow_table: str = DATAFLOW_TABLE,
+    dataflow_event_time_column: str | None = None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
 
     range_value = filters.get("range")
-    timestamp_expression = f"TRY_CAST(COALESCE({row_alias}.end_time, {row_alias}.start_time) AS TIMESTAMPTZ)"
+    if dataflow_event_time_column not in {None, "event_time"}:
+        raise ValueError("Unsupported Monitoring event-time column")
+    timestamp_expression = f"{row_alias}.__event_time"
+    if include_dataflow_filters:
+        timestamp_expression = (
+            f"{row_alias}.{dataflow_event_time_column}"
+            if dataflow_event_time_column
+            else f"TRY_CAST(COALESCE({row_alias}.end_time, {row_alias}.start_time) AS TIMESTAMPTZ)"
+        )
     if range_value in {"24h", "3d", "7d", "30d", "90d"}:
         days = {"24h": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}[range_value]
         clauses.append(f"{timestamp_expression} >= ?")
@@ -1252,7 +1813,12 @@ def _monitoring_filter_sql(
                 clauses.append(f"{expression} IN ({placeholders})")
                 params.extend(values)
 
-    connection_sql, connection_params = _monitoring_connection_sql(filters, row_alias, include_dataflow_filters)
+    connection_sql, connection_params = _monitoring_connection_sql(
+        filters,
+        row_alias,
+        include_dataflow_filters,
+        dataflow_table,
+    )
     if connection_sql:
         clauses.append(connection_sql)
         params.extend(connection_params)
@@ -1293,7 +1859,12 @@ def _monitoring_filter_sql(
         clauses.append("(" + " OR ".join(f"LOWER(COALESCE(({column})::VARCHAR, '')) LIKE ?" for column in search_columns) + ")")
         params.extend([f"%{search}%"] * len(search_columns))
 
-    investigation_sql, investigation_params = _monitoring_investigation_sql(filters, row_alias, include_dataflow_filters)
+    investigation_sql, investigation_params = _monitoring_investigation_sql(
+        filters,
+        row_alias,
+        include_dataflow_filters,
+        dataflow_table,
+    )
     if investigation_sql:
         clauses.append(investigation_sql)
         params.extend(investigation_params)
@@ -1305,6 +1876,7 @@ def _monitoring_investigation_sql(
     filters: dict[str, str],
     row_alias: str,
     include_dataflow_filters: bool,
+    dataflow_table: str,
 ) -> tuple[str, list[Any]]:
     kind = (filters.get("investigateKind") or "").strip()
     value = (filters.get("investigateValue") or "").strip()
@@ -1320,7 +1892,7 @@ def _monitoring_investigation_sql(
         return "", []
     return (
         f"{row_alias}.job_id IN ("
-        f"SELECT DISTINCT d2.job_id FROM {DATAFLOW_TABLE} d2 "
+        f"SELECT DISTINCT d2.job_id FROM {dataflow_table} d2 "
         f"WHERE d2.job_id IS NOT NULL AND d2._source_id = {row_alias}._source_id AND {dataflow_predicate}"
         f")",
         params,
@@ -1363,6 +1935,7 @@ def _monitoring_connection_sql(
     filters: dict[str, str],
     row_alias: str,
     include_dataflow_filters: bool,
+    dataflow_table: str = DATAFLOW_TABLE,
 ) -> tuple[str, list[Any]]:
     values = _split_filter_values(filters.get("connection"))
     if not values:
@@ -1376,7 +1949,7 @@ def _monitoring_connection_sql(
         )
     return (
         f"{row_alias}.job_id IN ("
-        f"SELECT DISTINCT dc.job_id FROM {DATAFLOW_TABLE} dc "
+        f"SELECT DISTINCT dc.job_id FROM {dataflow_table} dc "
         f"WHERE dc.job_id IS NOT NULL AND dc._source_id = {row_alias}._source_id "
         f"AND (COALESCE(dc.source_name, 'unknown') IN ({placeholders}) "
         f"OR COALESCE(dc.destination_name, 'unknown') IN ({placeholders}))"
@@ -1389,40 +1962,6 @@ def _split_filter_values(value: str | None) -> list[str]:
     if not value or value == "all":
         return []
     return [item.strip() for item in value.split("|") if item.strip()]
-
-
-def _query_connection_filter_values(conn, source_ids: list[int]) -> list[dict[str, Any]]:
-    if not source_ids:
-        return []
-    placeholders = ", ".join("?" for _ in source_ids)
-    result = conn.execute(
-        f"""
-        SELECT connection_name AS value, COUNT(*) AS record_count
-        FROM (
-          SELECT DISTINCT _source_id, _file_uri, dataflow_run_id, job_id, connection_name
-          FROM (
-            SELECT _source_id, _file_uri, dataflow_run_id, job_id, TRIM(CAST(source_name AS VARCHAR)) AS connection_name
-            FROM {DATAFLOW_TABLE}
-            WHERE _source_id IN ({placeholders})
-              AND source_name IS NOT NULL
-              AND TRIM(CAST(source_name AS VARCHAR)) <> ''
-            UNION ALL
-            SELECT _source_id, _file_uri, dataflow_run_id, job_id, TRIM(CAST(destination_name AS VARCHAR)) AS connection_name
-            FROM {DATAFLOW_TABLE}
-            WHERE _source_id IN ({placeholders})
-              AND destination_name IS NOT NULL
-              AND TRIM(CAST(destination_name AS VARCHAR)) <> ''
-          ) raw_connection_names
-        ) connection_names
-        GROUP BY connection_name
-        ORDER BY connection_name
-        """,
-        [*source_ids, *source_ids],
-    )
-    return [
-        {"value": row["value"], "label": row["value"], "count": row["record_count"]}
-        for row in _result_rows(result)
-    ]
 
 
 def _monitoring_order_sql(
@@ -1468,6 +2007,13 @@ def _result_rows(result) -> list[dict[str, Any]]:
         }
         for values in result.fetchall()
     ]
+
+
+def _window_total(rows: list[dict[str, Any]]) -> int:
+    total = int(rows[0].get("__total_records") or 0) if rows else 0
+    for row in rows:
+        row.pop("__total_records", None)
+    return total
 
 
 def _select_alias_columns(alias: str, columns: list[str], exclude: set[str] | None = None) -> str:
@@ -1544,6 +2090,57 @@ def _file_revision_json(file_uri: str) -> str:
     return json.dumps({"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, sort_keys=True)
 
 
+def _assert_ingest_files_stable(files: list[dict[str, Any]]) -> None:
+    """Abort the transaction when bytes changed after candidate discovery."""
+    for file_state in files:
+        file_uri = str(file_state["file_uri"])
+        expected = str(file_state["revision_json"])
+        try:
+            actual = _file_revision_json(file_uri)
+        except OSError as exc:
+            raise LogFileChangedDuringSyncError(
+                f"Log file became unavailable during sync: {file_uri}"
+            ) from exc
+        if not _revision_equivalent(expected, actual):
+            raise LogFileChangedDuringSyncError(
+                f"Log file changed during sync and was not published: {file_uri}"
+            )
+
+
+def _revision_equivalent(left_json: str | None, right_json: str | None) -> bool:
+    if left_json is None or right_json is None:
+        return left_json == right_json
+    try:
+        left = json.loads(left_json)
+        right = json.loads(right_json)
+    except (TypeError, json.JSONDecodeError):
+        return left_json == right_json
+    return left.get("size") == right.get("size") and left.get("mtime_ns") == right.get("mtime_ns")
+
+
+def _revision_with_known_files(
+    base_revision: dict[str, Any],
+    file_revisions: dict[str, str],
+) -> dict[str, Any]:
+    """Enrich the shallow root revision from bounded discovery and persisted manifests."""
+    total_size = 0
+    max_mtime_ns = base_revision.get("max_mtime_ns")
+    for revision_json in file_revisions.values():
+        try:
+            payload = json.loads(revision_json)
+            total_size += int(payload.get("size") or 0)
+            mtime_ns = int(payload.get("mtime_ns") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        max_mtime_ns = mtime_ns if max_mtime_ns is None else max(int(max_mtime_ns), mtime_ns)
+    return {
+        **base_revision,
+        "file_count": len(file_revisions),
+        "total_size": total_size,
+        "max_mtime_ns": max_mtime_ns,
+    }
+
+
 def _read_dataflow_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     conn = duckdb.connect(database=":memory:")
     try:
@@ -1569,9 +2166,15 @@ def _read_job_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[str, 
                 try:
                     rows.append(_json_ready(json.loads(line)))
                 except json.JSONDecodeError as exc:
-                    errors.append({"uri": file_uri, "message": f"Invalid JSONL at line {line_number}: {exc}"})
+                    errors.append(
+                        {
+                            "uri": file_uri,
+                            "message": f"Invalid JSONL at line {line_number}: {exc}",
+                            "code": "invalid_jsonl",
+                        }
+                    )
     except OSError as exc:
-        errors.append({"uri": file_uri, "message": str(exc)})
+        errors.append({"uri": file_uri, "message": str(exc), "code": "file_read_failed"})
     return rows, errors
 
 
@@ -1595,45 +2198,123 @@ def _json_ready(row: dict[str, Any]) -> dict[str, Any]:
 
 def _ensure_duckdb_tables(conn) -> None:
     recreated = [
-        _ensure_dataflow_cache_table(conn) if _table_exists(conn, DATAFLOW_TABLE) else False,
+        _ensure_dataflow_cache_table(conn),
         _ensure_typed_table(conn, JOB_TABLE, JOB_COLUMN_TYPES),
     ]
     _drop_empty_generated_job_columns(conn)
     if any(recreated) and _table_exists(conn, FILTER_VALUES_TABLE):
         conn.execute(f"DROP TABLE {FILTER_VALUES_TABLE}")
     _ensure_filter_values_table(conn)
+    _ensure_cache_sources_table(conn)
+    _ensure_ingest_control_tables(conn)
+    _ensure_analytics_meta_table(conn)
     _migrate_legacy_cache(conn)
 
 
 def _ensure_duckdb_cache_ready(path: Path) -> None:
-    if _typed_cache_is_ready(path):
-        return
+    """Leave incompatible cache files untouched until a candidate rebuild swaps them."""
+    del path
+
+
+def _analytics_schema_rebuild_required(path: Path) -> bool:
+    return path.exists() and not _typed_cache_is_ready(path)
+
+
+def _analytics_candidate_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.candidate{path.suffix}")
+
+
+def _discard_analytics_candidate(candidate_path: Path) -> None:
+    for candidate in (candidate_path, Path(f"{candidate_path}.wal")):
+        if candidate.exists():
+            candidate.unlink()
+
+
+def _validate_analytics_candidate(candidate_path: Path, source_id: int) -> None:
+    if not _typed_cache_is_ready(candidate_path):
+        raise RuntimeError("Analytics rebuild candidate did not create the current typed schema")
+    conn = _connect_analytics(candidate_path, read_only=True)
     try:
-        conn = duckdb.connect(database=str(path))
-    except duckdb.Error:
-        return
-    try:
-        _ensure_duckdb_tables(conn)
+        _analytics_materialization_token_from_connection(conn, [source_id])
     finally:
         conn.close()
 
 
+def _swap_analytics_candidate(candidate_path: Path, live_path: Path) -> None:
+    """Replace an incompatible analytics DB only after candidate validation and reader drain."""
+    if not candidate_path.exists():
+        raise RuntimeError("Analytics rebuild candidate is missing")
+    with analytics_connections.exclusive_maintenance():
+        candidate_path.replace(live_path)
+        live_wal = Path(f"{live_path}.wal")
+        candidate_wal = Path(f"{candidate_path}.wal")
+        if candidate_wal.exists():
+            candidate_wal.replace(live_wal)
+        elif live_wal.exists():
+            live_wal.unlink()
+
+
+def _connect_analytics(path: Path, *, read_only: bool = False):
+    return analytics_connections.connect(path, read_only=read_only)
+
+
+def _analytics_materialization_token_from_connection(conn, enabled_source_ids: list[int]) -> str:
+    if not _typed_cache_schema_is_ready(conn):
+        raise AnalyticsRebuildRequired(
+            "Monitoring analytics use an incompatible schema; rebuild the Log sources",
+            source_ids=enabled_source_ids,
+            missing_source_ids=enabled_source_ids,
+            reason="schema_mismatch",
+        )
+    meta = _analytics_meta(conn)
+    cached_source_ids = _cache_source_ids(conn)
+    source_generations = _cache_source_generations(conn)
+    missing_source_ids = sorted(set(enabled_source_ids) - cached_source_ids)
+    if (
+        meta is None
+        or meta["schema_version"] != ANALYTICS_SCHEMA_VERSION
+        or meta["build_state"] != "ready"
+        or missing_source_ids
+    ):
+        raise AnalyticsRebuildRequired(
+            "Monitoring analytics are incomplete; sync the Log sources to rebuild them",
+            source_ids=enabled_source_ids,
+            missing_source_ids=missing_source_ids or enabled_source_ids,
+            reason="incomplete_sources" if missing_source_ids else "not_ready",
+        )
+    return (
+        f"analytics-v{ANALYTICS_SCHEMA_VERSION}:"
+        + ",".join(
+            f"{source_id}:{int(source_generations.get(source_id, 0))}"
+            for source_id in enabled_source_ids
+        )
+    )
+
+
+def _typed_cache_schema_is_ready(conn) -> bool:
+    return (
+        _table_exists(conn, DATAFLOW_TABLE)
+        and _table_exists(conn, JOB_TABLE)
+        and _table_exists(conn, FILTER_VALUES_TABLE)
+        and _table_exists(conn, CACHE_SOURCES_TABLE)
+        and _table_exists(conn, ANALYTICS_META_TABLE)
+        and "generation" in _table_columns(conn, CACHE_SOURCES_TABLE)
+        and _typed_table_schema_is_current(conn, DATAFLOW_TABLE, DATAFLOW_COLUMN_TYPES)
+        and _typed_table_schema_is_current(conn, JOB_TABLE, JOB_COLUMN_TYPES)
+        and monitoring_serving_schema_is_ready(conn)
+        and not _has_empty_generated_job_columns(conn)
+        and not _table_exists(conn, LEGACY_DATAFLOW_TABLE)
+        and not _table_exists(conn, LEGACY_JOB_TABLE)
+    )
+
+
 def _typed_cache_is_ready(path: Path) -> bool:
     try:
-        conn = duckdb.connect(database=str(path), read_only=True)
+        conn = _connect_analytics(path, read_only=True)
     except duckdb.Error:
         return False
     try:
-        return (
-            _table_exists(conn, DATAFLOW_TABLE)
-            and _table_exists(conn, JOB_TABLE)
-            and _table_exists(conn, FILTER_VALUES_TABLE)
-            and _typed_table_schema_is_current(conn, DATAFLOW_TABLE, DATAFLOW_COLUMN_TYPES)
-            and _typed_table_schema_is_current(conn, JOB_TABLE, JOB_COLUMN_TYPES)
-            and not _has_empty_generated_job_columns(conn)
-            and not _table_exists(conn, LEGACY_DATAFLOW_TABLE)
-            and not _table_exists(conn, LEGACY_JOB_TABLE)
-        )
+        return _typed_cache_schema_is_ready(conn)
     finally:
         conn.close()
 
@@ -1650,6 +2331,250 @@ def _ensure_filter_values_table(conn) -> None:
         )
         """
     )
+
+
+def _ensure_cache_sources_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CACHE_SOURCES_TABLE} (
+          source_id BIGINT PRIMARY KEY,
+          refreshed_at TIMESTAMPTZ,
+          generation BIGINT NOT NULL DEFAULT 0
+        )
+        """
+    )
+    if "generation" not in _table_columns(conn, CACHE_SOURCES_TABLE):
+        conn.execute(
+            f"ALTER TABLE {CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
+        )
+
+
+def _ensure_ingest_control_tables(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {INGEST_CHECKPOINT_TABLE} (
+          source_id BIGINT NOT NULL,
+          log_kind VARCHAR NOT NULL,
+          partition_format VARCHAR NOT NULL,
+          partition_value DATE NOT NULL,
+          boundary_last_modified TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (source_id, log_kind)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {INGEST_MANIFEST_TABLE} (
+          source_id BIGINT NOT NULL,
+          log_kind VARCHAR NOT NULL,
+          file_uri VARCHAR NOT NULL,
+          partition_value DATE NOT NULL,
+          partition_format VARCHAR NOT NULL,
+          revision_json VARCHAR NOT NULL,
+          row_count BIGINT NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (source_id, log_kind, file_uri)
+        )
+        """
+    )
+
+
+def _ensure_analytics_meta_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ANALYTICS_META_TABLE} (
+          singleton_id INTEGER PRIMARY KEY,
+          schema_version INTEGER NOT NULL,
+          generation BIGINT NOT NULL,
+          build_state VARCHAR NOT NULL,
+          published_at TIMESTAMPTZ
+        )
+        """
+    )
+    if conn.execute(f"SELECT COUNT(*) FROM {ANALYTICS_META_TABLE}").fetchone()[0] == 0:
+        conn.execute(
+            f"""
+            INSERT INTO {ANALYTICS_META_TABLE}
+              (singleton_id, schema_version, generation, build_state, published_at)
+            VALUES (1, ?, 0, 'rebuild_required', NULL)
+            """,
+            [ANALYTICS_SCHEMA_VERSION],
+        )
+
+
+def _publish_analytics_generation(conn) -> None:
+    rebuild_monitoring_serving_facts(
+        conn,
+        dataflow_table=DATAFLOW_TABLE,
+        job_table=JOB_TABLE,
+        dataflow_column_types=_cache_table_column_types(DATAFLOW_COLUMN_TYPES),
+        job_column_types=_cache_table_column_types(JOB_COLUMN_TYPES),
+    )
+    validate_monitoring_serving_facts(
+        conn,
+        dataflow_table=DATAFLOW_TABLE,
+        job_table=JOB_TABLE,
+    )
+    _ensure_analytics_meta_table(conn)
+    conn.execute(
+        f"""
+        UPDATE {ANALYTICS_META_TABLE}
+        SET schema_version = ?,
+            generation = generation + 1,
+            build_state = 'ready',
+            published_at = ?::TIMESTAMPTZ
+        WHERE singleton_id = 1
+        """,
+        [ANALYTICS_SCHEMA_VERSION, utc_now().isoformat()],
+    )
+
+
+def _analytics_meta(conn) -> dict[str, Any] | None:
+    if not _table_exists(conn, ANALYTICS_META_TABLE):
+        return None
+    row = conn.execute(
+        f"""
+        SELECT schema_version, generation, build_state, published_at
+        FROM {ANALYTICS_META_TABLE}
+        WHERE singleton_id = 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "schema_version": int(row[0]),
+        "generation": int(row[1]),
+        "build_state": str(row[2]),
+        "published_at": row[3].isoformat() if row[3] is not None else None,
+    }
+
+
+def _rebuild_required(paths: list[EnvironmentSource], *, reason: str) -> AnalyticsRebuildRequired:
+    source_ids = _analytics_source_ids(paths)
+    return AnalyticsRebuildRequired(
+        "Monitoring analytics are unavailable; sync the Log sources to rebuild them",
+        source_ids=source_ids,
+        missing_source_ids=source_ids,
+        reason=reason,
+    )
+
+
+def _analytics_source_ids(paths: list[EnvironmentSource]) -> list[int]:
+    return sorted(
+        path.id
+        for path in paths
+        if path.enabled and not source_validation.is_validated_empty_log_source(path)
+    )
+
+
+def _unavailable_analytics_token(source_ids: list[int], reason: str) -> str:
+    source_key = ",".join(str(source_id) for source_id in source_ids)
+    return f"analytics-v{ANALYTICS_SCHEMA_VERSION}:unavailable:{reason}:{source_key}"
+
+
+def _mark_cache_source(conn, source_id: int) -> None:
+    _ensure_cache_sources_table(conn)
+    current = conn.execute(
+        f"SELECT generation FROM {CACHE_SOURCES_TABLE} WHERE source_id = ?",
+        [source_id],
+    ).fetchone()
+    generation = int(current[0] or 0) + 1 if current is not None else 1
+    conn.execute(f"DELETE FROM {CACHE_SOURCES_TABLE} WHERE source_id = ?", [source_id])
+    conn.execute(
+        f"INSERT INTO {CACHE_SOURCES_TABLE} (source_id, refreshed_at, generation) VALUES (?, ?::TIMESTAMPTZ, ?)",
+        [source_id, utc_now().isoformat(), generation],
+    )
+
+
+def _cache_source_ids(conn) -> set[int]:
+    if not _table_exists(conn, CACHE_SOURCES_TABLE):
+        return set()
+    return {int(row[0]) for row in conn.execute(f"SELECT source_id FROM {CACHE_SOURCES_TABLE}").fetchall()}
+
+
+def _cache_source_generations(conn) -> dict[int, int]:
+    if not _table_exists(conn, CACHE_SOURCES_TABLE):
+        return {}
+    return {
+        int(source_id): int(generation or 0)
+        for source_id, generation in conn.execute(
+            f"SELECT source_id, generation FROM {CACHE_SOURCES_TABLE}"
+        ).fetchall()
+    }
+
+
+def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
+    if not source_ids:
+        return set()
+    path = analytics_database_path()
+    if not path.exists() or not _typed_cache_is_ready(path):
+        return set()
+    conn = _connect_analytics(path, read_only=True)
+    try:
+        placeholders = ", ".join("?" for _ in source_ids)
+        return {
+            int(row[0])
+            for row in conn.execute(
+                f"SELECT source_id FROM {CACHE_SOURCES_TABLE} WHERE source_id IN ({placeholders})",
+                source_ids,
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _analytics_cache_has_source(source_id: int) -> bool:
+    path = analytics_database_path()
+    if not path.exists() or not _typed_cache_is_ready(path):
+        return False
+    conn = _connect_analytics(path, read_only=True)
+    try:
+        meta = _analytics_meta(conn)
+        return bool(
+            meta
+            and meta["schema_version"] == ANALYTICS_SCHEMA_VERSION
+            and meta["build_state"] == "ready"
+            and source_id in _cache_source_ids(conn)
+        )
+    finally:
+        conn.close()
+
+
+def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    path = analytics_database_path()
+    if not path.exists() or not _typed_cache_is_ready(path):
+        return {}, {}
+    conn = _connect_analytics(path, read_only=True)
+    try:
+        if not _table_exists(conn, INGEST_CHECKPOINT_TABLE) or not _table_exists(conn, INGEST_MANIFEST_TABLE):
+            return {}, {}
+        checkpoints = {
+            str(file_kind): {
+                "file_kind": str(file_kind),
+                "partition_format": str(partition_format),
+                "partition_value": partition_value,
+                "boundary_last_modified": boundary_last_modified,
+            }
+            for file_kind, partition_format, partition_value, boundary_last_modified in conn.execute(
+                f"""
+                SELECT log_kind, partition_format, partition_value, boundary_last_modified
+                FROM {INGEST_CHECKPOINT_TABLE}
+                WHERE source_id = ?
+                """,
+                [source_id],
+            ).fetchall()
+        }
+        manifests = {
+            str(file_uri): str(revision_json)
+            for file_uri, revision_json in conn.execute(
+                f"SELECT file_uri, revision_json FROM {INGEST_MANIFEST_TABLE} WHERE source_id = ?",
+                [source_id],
+            ).fetchall()
+        }
+        return checkpoints, manifests
+    finally:
+        conn.close()
 
 
 def _refresh_filter_values(conn, source_id: int) -> None:
@@ -1814,7 +2739,15 @@ def _insert_typed_rows(
 ) -> None:
     _ensure_source_columns(conn, table_name, rows, column_types)
     columns = _table_columns(conn, table_name)
-    insert_columns = [column for column in columns if column in STUDIO_CACHE_COLUMNS or any(column in row for _, _, _, row in rows)]
+    insert_columns = [
+        column
+        for column in columns
+        if (
+            column in STUDIO_CACHE_COLUMNS
+            or column in GENERATED_CACHE_COLUMNS
+            or any(column in row for _, _, _, row in rows)
+        )
+    ]
     placeholders = ", ".join("?" for _ in insert_columns)
     column_sql = ", ".join(_quote_identifier(column) for column in insert_columns)
     values = [
@@ -1895,9 +2828,9 @@ def _ensure_dataflow_cache_table(conn) -> bool:
     columns = _table_columns(conn, DATAFLOW_TABLE)
     if columns and ("_source_id" not in columns or _has_legacy_raw_json_column(columns)):
         conn.execute(f"DROP TABLE {DATAFLOW_TABLE}")
-        return True
+        columns = []
     if not columns:
-        return False
+        return _ensure_typed_table(conn, DATAFLOW_TABLE, {})
     existing = set(columns)
     _ensure_columns(conn, DATAFLOW_TABLE, STUDIO_CACHE_COLUMNS, existing)
     _ensure_column_order(conn, DATAFLOW_TABLE, _actual_source_column_types(conn, DATAFLOW_TABLE))
@@ -1915,12 +2848,28 @@ def _ensure_source_columns(
     column_types: dict[str, str],
 ) -> None:
     existing = set(_table_columns(conn, table_name))
-    discovered: dict[str, str] = {}
+    actual_types = _table_column_types(conn, table_name)
+    inferred: dict[str, set[str]] = {}
     for _, _, _, row in rows:
         for column, value in row.items():
-            if column in existing or column in STUDIO_CACHE_COLUMNS:
+            if value is None or column in STUDIO_CACHE_COLUMNS:
                 continue
-            discovered[column] = column_types.get(column) or _infer_duckdb_type(value)
+            expected = column_types.get(column) or _infer_duckdb_type(value)
+            if column in existing:
+                actual = actual_types.get(column)
+                if actual and not _duckdb_type_matches(actual, expected):
+                    raise LogSchemaIncompatibleError(
+                        f"Column {column!r} changed datatype from {actual} to {expected}"
+                    )
+                continue
+            inferred.setdefault(column, set()).add(expected)
+    conflicts = {column: types for column, types in inferred.items() if len(types) > 1}
+    if conflicts:
+        column, types = sorted(conflicts.items())[0]
+        raise LogSchemaIncompatibleError(
+            f"New column {column!r} has conflicting datatypes: {', '.join(sorted(types))}"
+        )
+    discovered = {column: next(iter(types)) for column, types in inferred.items()}
     if discovered:
         _ensure_columns(conn, table_name, discovered, existing)
         _ensure_column_order(conn, table_name, {**column_types, **discovered})
@@ -1941,6 +2890,13 @@ def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
         conn.execute(f"CREATE TABLE {DATAFLOW_TABLE} ({', '.join(definitions)})")
         return
     existing = set(_table_columns(conn, DATAFLOW_TABLE))
+    actual_types = _table_column_types(conn, DATAFLOW_TABLE)
+    for column, source_type in parquet_column_types.items():
+        actual_type = actual_types.get(column)
+        if actual_type and not _source_type_fits_target(actual_type, source_type):
+            raise LogSchemaIncompatibleError(
+                f"Column {column!r} changed datatype from {actual_type} to {source_type} in {file_uri}"
+            )
     discovered = {
         column: data_type
         for column, data_type in parquet_column_types.items()
@@ -1948,7 +2904,55 @@ def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
     }
     if discovered:
         _ensure_columns(conn, DATAFLOW_TABLE, discovered, existing)
-    _ensure_column_order(conn, DATAFLOW_TABLE, parquet_column_types)
+        _ensure_column_order(conn, DATAFLOW_TABLE, parquet_column_types)
+
+
+def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
+    if not file_uris:
+        return
+    candidate_types: dict[str, str] = {}
+    for file_uri in file_uris:
+        for column, source_type in _describe_parquet_columns(conn, file_uri):
+            if column in STUDIO_CACHE_COLUMNS:
+                continue
+            previous = candidate_types.get(column)
+            candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
+    existing = set(_table_columns(conn, DATAFLOW_TABLE))
+    actual_types = _table_column_types(conn, DATAFLOW_TABLE)
+    for column, source_type in candidate_types.items():
+        actual_type = actual_types.get(column)
+        if actual_type and not _source_type_fits_target(actual_type, source_type):
+            raise LogSchemaIncompatibleError(
+                f"Column {column!r} changed datatype from {actual_type} to {source_type}"
+            )
+    discovered = {column: data_type for column, data_type in candidate_types.items() if column not in existing}
+    if discovered:
+        _ensure_columns(conn, DATAFLOW_TABLE, discovered, existing)
+    _ensure_column_order(conn, DATAFLOW_TABLE, candidate_types)
+
+
+def _common_source_type(column: str, left: str, right: str) -> str:
+    left_type = left.upper()
+    right_type = right.upper()
+    if left_type == right_type:
+        return left
+    if {left_type, right_type} <= {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"}:
+        return "DOUBLE" if "DOUBLE" in {left_type, right_type} or "FLOAT" in {left_type, right_type} else "BIGINT"
+    if left_type.startswith("TIMESTAMP") and right_type.startswith("TIMESTAMP"):
+        return "TIMESTAMPTZ"
+    raise LogSchemaIncompatibleError(
+        f"Column {column!r} has incompatible source datatypes {left} and {right}"
+    )
+
+
+def _source_type_fits_target(target_type: str, source_type: str) -> bool:
+    target = target_type.upper()
+    source = source_type.upper()
+    if _duckdb_type_matches(target, source):
+        return True
+    if target == "DOUBLE" and source in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT"}:
+        return True
+    return target in {"TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"} and source.startswith("TIMESTAMP")
 
 
 def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
@@ -2082,6 +3086,7 @@ def _typed_table_schema_is_current(conn, table_name: str, column_types: dict[str
     return (
         bool(columns)
         and "_source_id" in columns
+        and set(column_types).issubset(columns)
         and not _has_legacy_raw_json_column(columns)
         and not _has_incompatible_column_types(conn, table_name, column_types)
         and not _has_column_order_mismatch(conn, table_name, column_types)
@@ -2157,20 +3162,30 @@ def _table_has_source_rows(conn, table_name: str, source_ids: list[int]) -> bool
     return int(count or 0) > 0
 
 
-def _delete_rows_by_source_ids(conn, table_name: str, source_ids: list[int]) -> int:
+def _delete_rows_by_source_ids(
+    conn,
+    table_name: str,
+    source_ids: list[int],
+    *,
+    source_column: str = "_source_id",
+) -> int:
     if not source_ids or not _table_exists(conn, table_name):
         return 0
-    if "_source_id" not in _table_columns(conn, table_name):
+    if source_column not in _table_columns(conn, table_name):
         return 0
+    quoted_source_column = _quote_identifier(source_column)
     placeholders = ", ".join("?" for _ in source_ids)
     row_count = int(
         conn.execute(
-            f"SELECT count(*) FROM {table_name} WHERE _source_id IN ({placeholders})",
+            f"SELECT count(*) FROM {table_name} WHERE {quoted_source_column} IN ({placeholders})",
             source_ids,
         ).fetchone()[0]
     )
     if row_count:
-        conn.execute(f"DELETE FROM {table_name} WHERE _source_id IN ({placeholders})", source_ids)
+        conn.execute(
+            f"DELETE FROM {table_name} WHERE {quoted_source_column} IN ({placeholders})",
+            source_ids,
+        )
     return row_count
 
 
@@ -2197,6 +3212,14 @@ def _cache_value(
         return _revision_value(revision_json, "mtime_ns")
     if column == "_ingested_at":
         return utc_now().isoformat()
+    if column == "__event_time":
+        return (
+            parse_utc_datetime(row.get(column))
+            or parse_utc_datetime(row.get("end_time"))
+            or parse_utc_datetime(row.get("start_time"))
+        )
+    if column == "__run_date":
+        return row.get(column) or _file_date(file_uri, row)
     return _typed_value(row.get(column), data_type)
 
 

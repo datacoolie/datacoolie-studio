@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
-import type { TableSort } from "../MonitoringCharts";
+import type { TableColumn, TableSort } from "../MonitoringCharts";
 import type { MonitoringFilters } from "../monitoringFilters";
 import {
   CompactValue,
@@ -34,6 +35,7 @@ import {
   formatPercent,
   formatSeconds,
   formatSecondsSingleDecimal,
+  runtimePhaseContributionTooltip,
   fillMissingTrendDates,
   horizontalBarDataZoom,
   monitoringTimezone,
@@ -71,7 +73,7 @@ export function PerformancePage({
   onInspect
 }: {
   report: MonitoringReport;
-  rows?: MonitoringRecord[];
+  rows: MonitoringRecord[];
   totalRows: number;
   loading: boolean;
   sort: TableSort;
@@ -93,8 +95,11 @@ export function PerformancePage({
     p99_duration_seconds: Number(kpis.p99_duration_seconds ?? 0),
     max_duration_seconds: Number(kpis.max_duration_seconds ?? 0)
   };
-  const investigationRows = rows ?? report.performance.investigation_queue ?? report.performance.slowest_dataflows ?? [];
-  const workloadEfficiencyRows = report.performance.workload_efficiency_points ?? [];
+  const investigationRows = rows;
+  const workloadEfficiencyRows = useMemo(
+    () => (report.performance.workload_efficiency_points ?? []).map(normalizeEfficiencyPoint),
+    [report.performance.workload_efficiency_points]
+  );
   const [efficiencyScope, setEfficiencyScope] = useState<PerformanceEfficiencyScope>(() => defaultPerformanceEfficiencyScope(workloadEfficiencyRows));
   const scopedEfficiencyRows = useMemo(
     () => filterPerformanceEfficiencyRows(workloadEfficiencyRows, efficiencyScope),
@@ -103,7 +108,7 @@ export function PerformancePage({
   const [efficiencyScale, setEfficiencyScale] = useState<EfficiencyScaleMode>(() => defaultEfficiencyScale(scopedEfficiencyRows, efficiencyScope));
   useEffect(() => {
     setEfficiencyScope(defaultPerformanceEfficiencyScope(workloadEfficiencyRows));
-  }, [report, workloadEfficiencyRows]);
+  }, [workloadEfficiencyRows]);
 
   useEffect(() => {
     setEfficiencyScale(defaultEfficiencyScale(scopedEfficiencyRows, efficiencyScope));
@@ -144,11 +149,7 @@ export function PerformancePage({
         <HealthStripCard
           label="Slowest run"
           value={formatSecondsSingleDecimal(Number(kpis.slowest_run_duration_seconds ?? 0))}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label={String(kpis.slowest_run_dataflow_name ?? "-")} value={String(kpis.slowest_run_stage ?? "-")} tone="blue" labelFirst />
-            </span>
-          }
+          detail={<SlowestRunDetail kpis={kpis} timezoneName={timezoneName} />}
           intent={slowestRunIntent(Number(kpis.slowest_run_duration_seconds ?? 0), Number(kpis.p95_duration_seconds ?? 0))}
           accent="intent"
           title="Max duration_seconds in the current filters."
@@ -203,14 +204,14 @@ export function PerformancePage({
             titleTooltip="Box plot of dataflow durations grouped by stage. Sorts by P95 duration and shows IQR outliers."
           >
             <DurationDistributionBoxPlot
-              rows={report.performance.duration_distribution_by_stage ?? report.performance.duration_by_stage ?? []}
+              rows={report.performance.duration_distribution_by_stage ?? []}
               labelKey="stage"
               emptyText="No stage duration evidence in current filters."
             />
           </ReportPanel>
           <ReportPanel
             title="Phase cost by stage"
-            titleTooltip="Runtime contribution grouped by operation type and stage. Overhead is orchestration time outside source, transform, and destination."
+            titleTooltip={runtimePhaseContributionTooltip("operation type and stage")}
             headerAction={<RuntimePhaseLegend />}
           >
             <RuntimePhaseContribution
@@ -222,7 +223,6 @@ export function PerformancePage({
           </ReportPanel>
           <ReportPanel
             title="Performance trend"
-            subtitle="P50 / P95 duration and optimization candidates"
             className="monitoring-performance-trend-panel"
             titleTooltip="Executable dataflow duration and unique optimization candidates over the selected time range. Empty buckets remain visible."
             headerAction={<PerformanceTrendLegend />}
@@ -262,7 +262,7 @@ export function PerformancePage({
             titleTooltip="Groups runs by dataflow_id and ranks by P95 duration. Color indicates the dominant runtime bottleneck phase."
           >
             <ReportChart
-              option={slowestDataflowProfilesOption(report.performance.slowest_dataflow_profiles ?? report.performance.slowest_dataflows_by_p95 ?? [])}
+              option={slowestDataflowProfilesOption(report.performance.slowest_dataflow_profiles ?? [])}
               height="100%"
               wheelDataZoomStep={1}
             />
@@ -278,6 +278,7 @@ export function PerformancePage({
 
         <ReportPanel
           title="Performance investigation queue"
+          subtitle="optimization candidates first, then slowest runs"
           className="monitoring-performance-runs-panel"
           titleTooltip="Prioritized dataflow runs sorted by optimization candidate priority, duration, and latest time."
           headerAction={
@@ -364,14 +365,15 @@ function EfficiencyScopeToggle({
 }
 
 function RuntimeContextProfileTable({ rows }: { rows: Array<Record<string, string | number | null>> }) {
+  const columns = useMemo(() => [
+    { key: "engine_name", label: "Runtime context", sortable: true, width: 132, maxWidth: 190, fillPriority: "normal" as const, render: (row: Record<string, string | number | null>) => <RuntimeContextCell row={row} /> },
+    { key: "run_count", label: "Runs / health", sortable: true, width: 116, maxWidth: 150, fillPriority: "normal" as const, render: (row: Record<string, string | number | null>) => <RuntimeHealthCell row={row} /> },
+    { key: "p50_duration_seconds", label: "Performance", sortable: true, width: 188, maxWidth: 340, fillPriority: "normal" as const, render: (row: Record<string, string | number | null>) => <RuntimePerformanceCell row={row} /> }
+  ], []);
   return (
     <DataTable<Record<string, string | number | null>>
       rows={rows}
-      columns={[
-        { key: "context", label: "Context", sortable: true, autoFit: true, minWidth: 116, maxWidth: 176, render: (row) => <RuntimeContextCell value={row.context} /> },
-        { key: "runs", label: "Runs / health", sortable: true, autoFit: true, minWidth: 88, maxWidth: 112, render: (row) => <RuntimeHealthCell row={row} /> },
-        { key: "p50_duration_seconds", label: "Performance", sortable: true, minWidth: 156, fillPriority: "last", render: (row) => <RuntimePerformanceCell row={row} /> }
-      ]}
+      columns={columns}
       maxRows={rows.length}
       className="performance-runtime-context-table"
       fixedLayout
@@ -379,21 +381,28 @@ function RuntimeContextProfileTable({ rows }: { rows: Array<Record<string, strin
   );
 }
 
-function RuntimeContextCell({ value }: { value: unknown }) {
-  const parts = String(value ?? "unknown").split(" · ").map((part) => part.trim()).filter(Boolean);
-  const primary = parts.slice(0, 2).join(" · ") || "unknown";
-  const secondary = parts.slice(2).join(" · ");
-  const title = parts.join(" · ") || "unknown";
+function RuntimeContextCell({ row }: { row: Record<string, string | number | null> }) {
+  const engine = String(row.engine_name ?? "unknown");
+  const provider = String(row.metadata_provider_name ?? "unknown");
+  const platform = String(row.platform_name ?? "unknown");
+  const primary = `${compactRuntimeContextValue(engine, "engine")} · ${compactRuntimeContextValue(provider, "provider")}`;
+  const secondary = compactRuntimeContextValue(platform, "platform");
+  const title = `${engine} · ${provider} · ${platform}`;
   return (
     <span className="runtime-context-cell" title={title}>
       <strong>{primary}</strong>
-      {secondary ? <small>{secondary}</small> : null}
+      <small>{secondary}</small>
     </span>
   );
 }
 
+function compactRuntimeContextValue(value: string, suffix: "engine" | "provider" | "platform") {
+  const compact = value.replace(new RegExp(`\\s*${suffix}$`, "i"), "").trim();
+  return compact || value;
+}
+
 function RuntimePerformanceCell({ row }: { row: Record<string, string | number | null> }) {
-  const candidateCount = num(row, "slow_candidate_count");
+  const candidateCount = num(row, "candidate_count");
   return (
     <span className="runtime-context-performance-cell">
       <span>
@@ -418,7 +427,7 @@ function RuntimeHealthCell({ row }: { row: Record<string, string | number | null
   const successTone = successRate >= 95 ? "good" : successRate >= 90 ? "warning" : "bad";
   return (
     <span className="runtime-context-metric-pair">
-      <strong>{formatNumber(num(row, "runs"))}</strong>
+      <strong>{formatNumber(num(row, "run_count"))}</strong>
       <small>
         <span className={`runtime-context-success-${successTone}`}>{formatPercent(successRate)}</span>
         <em>·</em>
@@ -427,6 +436,75 @@ function RuntimeHealthCell({ row }: { row: Record<string, string | number | null
         </span>
       </small>
     </span>
+  );
+}
+
+function SlowestRunDetail({ kpis, timezoneName }: { kpis: Record<string, unknown>; timezoneName: string }) {
+  const name = String(kpis.slowest_run_dataflow_name ?? kpis.slowest_run_dataflow_id ?? "-");
+  const stage = String(kpis.slowest_run_stage ?? "-");
+  const operation = String(kpis.slowest_run_operation_type ?? "-");
+  const [tooltipPosition, setTooltipPosition] = useState<{ top: number; left: number; above: boolean } | null>(null);
+  const showTooltip = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = 300;
+    const above = window.innerHeight - rect.bottom < 190 && rect.top > 190;
+    setTooltipPosition({
+      top: above ? rect.top - 8 : rect.bottom + 8,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - tooltipWidth - 8)),
+      above
+    });
+  };
+  return (
+    <>
+      <span
+        className="performance-slowest-run-detail"
+        tabIndex={0}
+        aria-describedby={tooltipPosition ? "performance-slowest-run-tooltip" : undefined}
+        onMouseEnter={(event) => showTooltip(event.currentTarget)}
+        onMouseLeave={() => setTooltipPosition(null)}
+        onFocus={(event) => showTooltip(event.currentTarget)}
+        onBlur={() => setTooltipPosition(null)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setTooltipPosition(null);
+        }}
+      >
+        <small>
+          <span>{name}</span>
+          <em>·</em>
+          <span className="performance-slowest-run-stage">{stage}</span>
+          {operation !== "-" ? <><em>·</em><span>{operation}</span></> : null}
+        </small>
+      </span>
+      {tooltipPosition ? createPortal(
+        <div
+          id="performance-slowest-run-tooltip"
+          className="performance-slowest-run-tooltip"
+          role="tooltip"
+          style={{
+            top: tooltipPosition.top,
+            left: tooltipPosition.left,
+            transform: tooltipPosition.above ? "translateY(-100%)" : undefined
+          }}
+        >
+          <TooltipRow label="Dataflow" value={name} />
+          <TooltipRow label="Start" value={<TableDateTimeValue value={kpis.slowest_run_start_time} timezoneName={timezoneName} />} />
+          <TooltipRow label="End" value={<TableDateTimeValue value={kpis.slowest_run_end_time} timezoneName={timezoneName} />} />
+          <TooltipRow label="Stage" value={stage} valueClassName="performance-slowest-run-stage" />
+          <TooltipRow label="Operation" value={operation} />
+          <TooltipRow label="Status" value={String(kpis.slowest_run_status ?? "-")} />
+        </div>,
+        document.body
+      ) : null}
+    </>
+  );
+}
+
+function TooltipRow({ label, value, valueClassName }: { label: string; value: ReactNode; valueClassName?: string }) {
+  return (
+    <div className="performance-slowest-run-tooltip-row">
+      <span>{label}</span>
+      <strong className={valueClassName}>{value}</strong>
+    </div>
   );
 }
 
@@ -443,22 +521,23 @@ function PerformanceInvestigationTable({
   onInspect?: (row: MonitoringRecord) => void;
   timezoneName?: string | null;
 }) {
+  const columns = useMemo<TableColumn<MonitoringRecord>[]>(() => [
+    { key: "job_id", label: "Job", sortable: true, autoFit: true, minWidth: 96, maxWidth: 112, render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
+    { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 144, fillPriority: "last", render: (row) => <DataflowNameCell row={row} /> },
+    { key: "context", label: "Context", sortable: true, sortKey: "stage", autoFit: true, minWidth: 108, maxWidth: 132, render: (row) => <DataflowContextCell row={row} /> },
+    { key: "phase", label: "Bottleneck", sortable: true, sortKey: "performance_bottleneck_phase", autoFit: true, minWidth: 116, maxWidth: 140, render: (row) => <DataflowPhaseCell row={row} /> },
+    { key: "volume", label: "Workload", autoFit: true, minWidth: 104, maxWidth: 124, render: (row) => <DataflowVolumeCell row={row} /> },
+    { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 96, render: (row) => formatSeconds(num(row, "duration_seconds")) },
+    { key: "start_time", label: "Start", sortable: true, autoFit: true, minWidth: 132, maxWidth: 178, render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} /> },
+    { key: "end_time", label: "End", sortable: true, autoFit: true, minWidth: 132, maxWidth: 178, render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} /> },
+    { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 84, maxWidth: 100, render: (row) => <StatusCell row={row} /> },
+    { key: "performance_candidate_reason", label: "Primary reason", minWidth: 108, fillPriority: "last", render: (row) => <PerformanceReasonCell row={row} /> },
+    { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", render: (row) => <IssuePreview row={row} /> }
+  ], [timezoneName]);
   return (
     <DataTable<MonitoringRecord>
       rows={rows}
-      columns={[
-        { key: "job_id", label: "Job", sortable: true, autoFit: true, minWidth: 96, maxWidth: 112, render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
-        { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 144, fillPriority: "last", render: (row) => <DataflowNameCell row={row} /> },
-        { key: "context", label: "Context", sortable: true, sortKey: "stage", autoFit: true, minWidth: 108, maxWidth: 132, render: (row) => <DataflowContextCell row={row} /> },
-        { key: "phase", label: "Bottleneck", sortable: true, sortKey: "performance_bottleneck_phase", autoFit: true, minWidth: 116, maxWidth: 140, render: (row) => <DataflowPhaseCell row={row} /> },
-        { key: "volume", label: "Workload", autoFit: true, minWidth: 104, maxWidth: 124, render: (row) => <DataflowVolumeCell row={row} /> },
-        { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 96, render: (row) => formatSeconds(num(row, "duration_seconds")) },
-        { key: "start_time", label: "Start", sortable: true, autoFit: true, minWidth: 132, maxWidth: 178, render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} /> },
-        { key: "end_time", label: "End", sortable: true, autoFit: true, minWidth: 132, maxWidth: 178, render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} /> },
-        { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 84, maxWidth: 100, render: (row) => <StatusCell row={row} /> },
-        { key: "performance_candidate_reason", label: "Primary reason", minWidth: 108, fillPriority: "last", render: (row) => <PerformanceReasonCell row={row} /> },
-        { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", render: (row) => <IssuePreview row={row} /> }
-      ]}
+      columns={columns}
       maxRows={rows.length}
       sort={sort}
       onSort={onSort}
@@ -585,6 +664,21 @@ function performanceTrendOption(
 export const performancePageTestUtils = {
   performanceTrendOption
 };
+
+function normalizeEfficiencyPoint(
+  point: Record<string, string | number | null> | Array<string | number | null>
+): Record<string, string | number | null> {
+  if (!Array.isArray(point)) return point;
+  const keys = [
+    "dataflow_run_id", "dataflow_name", "stage", "operation_type",
+    "duration_seconds", "rows_processed", "maintenance_bytes_processed",
+    "maintenance_files_processed", "rows_read_per_second",
+    "destination_bytes_added", "destination_bytes_removed",
+    "performance_bottleneck_phase", "performance_candidate_reason",
+    "performance_candidate_priority",
+  ];
+  return Object.fromEntries(keys.map((key, index) => [key, point[index] ?? null]));
+}
 
 function workloadEfficiencyOption(
   rows: Array<Record<string, string | number | null>>,
@@ -831,7 +925,9 @@ function phaseShareSummary(kpis: Record<string, unknown>) {
 function phaseCostRows(rows: Array<Record<string, string | number>>) {
   return rows.map((row) => ({
     ...row,
-    context: abbreviateOperationContext(String(row.context ?? row.group ?? "unknown"))
+    context: Number(row.is_total ?? 0) === 1
+      ? "Total"
+      : abbreviateOperationContext(String(row.context ?? row.group ?? "unknown"))
   }));
 }
 

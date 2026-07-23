@@ -31,7 +31,24 @@ datacoolie-studio --database-url "postgresql+psycopg://user:password@host:5432/d
 `DATACOOLIE_STUDIO_DATABASE_URL` has priority over `DATACOOLIE_STUDIO_DB`.
 SQLite is the simplest default for a single local user. Use Postgres when
 multiple users or a hosted Studio instance need the same projects,
-environments, source settings, drafts, sync jobs, and cache metadata.
+environments, source settings, drafts, sync jobs, and current source
+materializations.
+
+Derived result cache entries are stored separately from the workspace database.
+The default local cache is:
+
+```powershell
+~\.datacoolie\datacoolie-studio\cache\read-models.sqlite3
+```
+
+Override it with a SQLite URL when needed:
+
+```powershell
+$env:DATACOOLIE_STUDIO_RESULT_CACHE_URL = "sqlite:///D:/studio-cache/read-models.sqlite3"
+```
+
+Redis URLs are not accepted yet. The cache contract is backend-independent,
+but the shipped backend remains SQLite.
 
 Local Studio state is organized under:
 
@@ -40,6 +57,8 @@ Local Studio state is organized under:
   db\
   backups\
   cache\
+    read-models.sqlite3
+    analytics.duckdb
   logs\
 ```
 
@@ -109,13 +128,22 @@ Monitoring reads local DataCoolie `etl_logs` from both:
 - `job_run_log` JSONL
 
 Sources can be refreshed manually from the Sources page. Metadata refresh
-updates the metadata snapshot cache used by Metadata and Lineage. ETL log
+replaces the current last-known-good materialization used by Metadata and
+Lineage. ETL log
 refresh builds a file manifest and loads parsed log rows into the DuckDB
 analytics cache under `~\.datacoolie\datacoolie-studio\cache`. Scheduled
 refresh can be configured per source; scheduled runs use the same sync job
 path as manual refresh. Code artifact refresh builds a safe module index.
-Unchanged lineage requests use a SQLite graph snapshot instead of reopening
+Unchanged lineage requests use the disposable result cache instead of reopening
 and reparsing code artifacts.
+
+Settings shows workspace, result-cache, and analytics-cache storage separately.
+Disposable result and analytics caches can be cleared, pruned, or compacted
+without deleting Metadata/Code materializations, drafts, backups, settings, or
+sync history. A file-backed SQLite workspace database can be compacted from its
+own Maintenance control without clearing core data; this control is hidden for
+other database backends. Completed sync history retains the union of the latest
+30 days and latest 100 jobs per source; running jobs are never pruned.
 
 The Monitoring tab has six pages:
 

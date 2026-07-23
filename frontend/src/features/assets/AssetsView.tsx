@@ -1,8 +1,7 @@
 import { Boxes, FilterX, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
-import { api } from "../../shared/api/client";
-import type { AssetDetailResponse, AssetInventoryItem, AssetInventoryResponse, AssetReferenceDetailResponse, AssetReferenceGroupItem, AssetReferenceListResponse, MetadataEditorDocument, ProjectReferenceMapping } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetInventoryResponse, AssetReferenceGroupItem, MetadataEditorDocument } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
@@ -23,11 +22,12 @@ import { MetadataSourceSaveConfirmationDialog } from "../metadata-explorer/Metad
 import { metadataQueryForAsset, presentAsset, presentReference, referenceConsumerTypeSummary, referenceContextLine, referenceProvenanceDescription, referenceProvenanceLabel, referenceProvenanceTone, referenceResolutionPresentation } from "./assetsPresentation";
 import { AssetsDrawer } from "./AssetsDrawer";
 import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
+import { ReferenceMappingClearAction } from "../reference-mappings/ReferenceMappingClearAction";
 import { ReferenceDrawer } from "./ReferenceDrawer";
+import { useAssetsResources } from "./assetsQueries";
 
 interface AssetsViewProps {
   environmentId: number;
-  assets: AssetInventoryResponse | null;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
   onEnsureMetadataEditor: () => Promise<void>;
@@ -35,17 +35,14 @@ interface AssetsViewProps {
   onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  loading: boolean;
   routeSearch?: string;
   onFocusInLineage: (assetId: string) => void;
   onFocusDataflowInLineage: (target: LineageDataflowFocusTarget) => void;
   onOpenMetadata: (target: MetadataNavigationTarget) => void;
-  projectMappings: ProjectReferenceMapping[];
   mappingBusy?: boolean;
   onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
   onUpdateReferenceMapping: (mappingId: number, payload: ReferenceMappingPayload) => Promise<unknown>;
   onDeleteReferenceMapping: (mappingId: number) => Promise<unknown>;
-  onRefreshReferenceMappings: () => Promise<void>;
 }
 
 type AssetsTab = "inventory" | "references";
@@ -64,7 +61,7 @@ interface AssetFilters {
 interface ReferenceFilters {
   referenceType: string;
   provenance: string;
-  groupStatus: string;
+  resolutionState: string;
   attentionState: string;
 }
 
@@ -80,7 +77,7 @@ const EMPTY_ASSET_FILTERS: AssetFilters = {
 const EMPTY_REFERENCE_FILTERS: ReferenceFilters = {
   referenceType: "",
   provenance: "",
-  groupStatus: "",
+  resolutionState: "",
   attentionState: "",
 };
 
@@ -93,7 +90,7 @@ const ASSETS_DRAWER_SEARCH_KEYS = [
 ] as const;
 
 const ASSETS_DRAWER_HISTORY_KEY = "datacoolieAssetsDrawer";
-const NEEDS_MAPPING_FILTER = "__needs_mapping";
+const NEEDS_MAPPING_FILTER = "unresolved";
 
 type AssetsDrawerHistoryState =
   | { kind: "asset"; assetTrail: string[]; depth: number }
@@ -192,7 +189,6 @@ function textOrNull(value: unknown) {
 
 export function AssetsView({
   environmentId,
-  assets,
   metadataEditorDocument,
   metadataEditorDraft,
   onEnsureMetadataEditor,
@@ -200,17 +196,14 @@ export function AssetsView({
   onValidateMetadata,
   onSaveMetadataDraft,
   onSaveMetadata,
-  loading,
   routeSearch,
   onFocusInLineage,
   onFocusDataflowInLineage,
   onOpenMetadata,
-  projectMappings,
   mappingBusy,
   onCreateReferenceMapping,
   onUpdateReferenceMapping,
   onDeleteReferenceMapping,
-  onRefreshReferenceMappings,
 }: AssetsViewProps) {
   const [activeTab, setActiveTab] = useState<AssetsTab>("inventory");
   const [assetQuery, setAssetQuery] = useState("");
@@ -222,19 +215,41 @@ export function AssetsView({
   const [selectedAssetTrail, setSelectedAssetTrail] = useState<string[]>([]);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [referenceDrawerMode, setReferenceDrawerMode] = useState<"details" | "mapping">("details");
+  const [clearReferenceId, setClearReferenceId] = useState<string | null>(null);
+  const [referenceActionError, setReferenceActionError] = useState<{ referenceId: string; message: string } | null>(null);
   const [selectedDataflow, setSelectedDataflow] = useState<MetadataDataflowSelection | null>(null);
   const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
-  const [assetDetail, setAssetDetail] = useState<AssetDetailResponse | null>(null);
-  const [assetDetailLoading, setAssetDetailLoading] = useState(false);
-  const [assetDetailError, setAssetDetailError] = useState<string | null>(null);
-  const [assetPage, setAssetPage] = useState<AssetInventoryResponse | null>(assets);
-  const [assetPageLoading, setAssetPageLoading] = useState(false);
-  const [assetPageError, setAssetPageError] = useState<string | null>(null);
-  const [referencePage, setReferencePage] = useState<AssetReferenceListResponse | null>(null);
-  const [referenceDetail, setReferenceDetail] = useState<AssetReferenceDetailResponse | null>(null);
-  const [referenceLoading, setReferenceLoading] = useState(false);
-  const [referenceError, setReferenceError] = useState<string | null>(null);
   const selectedAssetId = selectedAssetTrail.length ? selectedAssetTrail[selectedAssetTrail.length - 1] : null;
+  const debouncedAssetQuery = useDebouncedValue(assetQuery, 200);
+  const debouncedReferenceQuery = useDebouncedValue(referenceQuery, 200);
+  const inventoryParameters = useMemo(() => ({
+    q: debouncedAssetQuery.trim() || undefined,
+    connection: assetFilters.connection || undefined,
+    format: assetFilters.format || undefined,
+    asset_type: assetFilters.assetType || undefined,
+    role: assetFilters.role || undefined,
+    attention_state: assetFilters.attentionState || undefined,
+    scope: assetFilters.scope || undefined,
+    sort_by: assetSort.sortBy === "display_name" ? undefined : assetSort.sortBy,
+    sort_dir: assetSort.sortDir === "asc" ? undefined : assetSort.sortDir,
+  }), [assetFilters, assetSort, debouncedAssetQuery]);
+  const referenceParameters = useMemo(() => ({
+    q: debouncedReferenceQuery.trim() || undefined,
+    reference_type: referenceFilters.referenceType || undefined,
+    provenance: referenceFilters.provenance || undefined,
+    resolution_state: referenceFilters.resolutionState || undefined,
+    attention_state: referenceFilters.attentionState || undefined,
+    sort_by: referenceSort.sortBy === "display_name" ? undefined : referenceSort.sortBy,
+    sort_dir: referenceSort.sortDir === "asc" ? undefined : referenceSort.sortDir,
+  }), [debouncedReferenceQuery, referenceFilters, referenceSort]);
+  const resources = useAssetsResources({
+    environmentId,
+    activeTab,
+    inventoryParameters,
+    referenceParameters,
+    selectedAssetId,
+    selectedReferenceId,
+  });
 
   useEffect(() => {
     const historyDrawer = assetsDrawerHistoryFromState(window.history.state);
@@ -285,6 +300,11 @@ export function AssetsView({
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  const assets = resources.baseInventory;
+  const assetPage = resources.inventoryPage;
+  const referencePage = resources.referencesPage;
+  const assetDetail = resources.assetDetail;
+  const referenceDetail = resources.referenceDetail;
   const inventory = assetPage?.items ?? assets?.items ?? [];
   const references = referencePage?.items ?? [];
   const referenceOccurrences = referenceDetail?.occurrences ?? [];
@@ -309,15 +329,11 @@ export function AssetsView({
   const selectedDataflowEditable = isEditableMetadataDataflowRecord(activeMetadataDocument, selectedDataflowRecord);
   const sourceSaveConfirmation = pendingMetadataSave ? metadataSaveConfirmation(metadataEditorDocument, pendingMetadataSave) : null;
   const searchMappingTargets = useCallback(async (query: string, connectionName: string) => (
-    await api.getAssets(environmentId, {
+    await resources.searchAssets({
       q: query.trim() || undefined,
       connection: connectionName || undefined,
     })
-  ).items, [environmentId]);
-
-  useEffect(() => {
-    setAssetPage(assets);
-  }, [environmentId, assets?.catalog_version]);
+  ).items, [resources.searchAssets]);
 
   useEffect(() => {
     if (!selectedDataflow || activeMetadataDocument) return;
@@ -380,11 +396,11 @@ export function AssetsView({
   const attentionMappingLabels = useMemo(() => {
     const labels: Record<string, string> = {};
     for (const reference of references) {
-      const label = referenceMappingActionLabel(referenceMappingAction(reference, projectMappings));
+      const label = referenceMappingActionLabel(referenceMappingAction(reference));
       if (label) labels[reference.id] = label;
     }
     return labels;
-  }, [projectMappings, references]);
+  }, [references]);
 
   const filterOptions = useMemo(() => ({
     assets: {
@@ -397,7 +413,7 @@ export function AssetsView({
     references: {
       referenceTypes: sortTextOptions(referencePage?.filter_options.reference_types ?? []),
       provenances: sortTextOptions(referencePage?.filter_options.provenances ?? []),
-      groupStatuses: sortTextOptions(referencePage?.filter_options.group_statuses ?? []),
+      resolutionStates: sortTextOptions(referencePage?.filter_options.resolution_states ?? []),
       attentionStates: sortTextOptions(referencePage?.filter_options.attention_states ?? []),
     },
   }), [assets, referencePage]);
@@ -495,7 +511,7 @@ export function AssetsView({
       render: (reference) => <ReferenceCell reference={reference} />,
     },
     {
-      key: "group_status",
+      key: "resolution_state",
       label: "Resolution",
       sortable: true,
       width: 140,
@@ -526,162 +542,50 @@ export function AssetsView({
     {
       key: "action",
       label: "Action",
-      width: 124,
+      width: 184,
       render: (reference) => {
-        const action = referenceMappingAction(reference, projectMappings);
+        const action = referenceMappingAction(reference);
         const label = referenceMappingActionLabel(action);
         if (!label) return <span className="assets-empty-inline">-</span>;
+        const isManualMapping = Boolean(reference.manual_mapping?.mapping_id);
+        const showClearError = referenceActionError?.referenceId === reference.id ? referenceActionError.message : null;
         return (
-          <button
-            className="text-action compact assets-reference-action-button"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              openReferenceMapping(reference);
-            }}
-          >
-            {label}
-          </button>
+          <div className="assets-reference-actions" onClick={(event) => event.stopPropagation()}>
+            <button
+              className={`text-action compact assets-reference-action-button ${action === "edit" ? "reference-mapping-action-edit" : "reference-mapping-action-map"}`}
+              type="button"
+              disabled={mappingBusy}
+              onClick={(event) => {
+                event.stopPropagation();
+                openReferenceMapping(reference);
+              }}
+            >
+              {label}
+            </button>
+            {isManualMapping ? (
+              <ReferenceMappingClearAction
+                confirming={clearReferenceId === reference.id}
+                disabled={Boolean(mappingBusy)}
+                onClear={() => void clearReferenceMapping(reference)}
+                onDismiss={() => setClearReferenceId(null)}
+              />
+            ) : null}
+            {showClearError ? <small className="reference-mapping-action-error" role="alert">{showClearError}</small> : null}
+          </div>
         );
       },
     },
-  ], [projectMappings]);
+  ], [clearReferenceId, mappingBusy, referenceActionError]);
 
-  useEffect(() => {
-    if (!selectedAssetId) {
-      setAssetDetail(null);
-      setAssetDetailLoading(false);
-      setAssetDetailError(null);
-      return;
-    }
-    let cancelled = false;
-    setAssetDetailLoading(true);
-    setAssetDetailError(null);
-    setAssetDetail(null);
-    void api.getAsset(environmentId, selectedAssetId)
-      .then((payload) => {
-        if (cancelled) return;
-        setAssetDetail(payload);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setAssetDetail(null);
-        setAssetDetailError(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setAssetDetailLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, selectedAssetId]);
-
-  useEffect(() => {
-    if (activeTab !== "inventory") return;
-    const isDefaultRequest = !assetQuery.trim()
-      && Object.values(assetFilters).every((value) => !value)
-      && assetSort.sortBy === "display_name"
-      && assetSort.sortDir === "asc";
-    if (isDefaultRequest) {
-      setAssetPage(assets);
-      setAssetPageError(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setAssetPageLoading(true);
-      setAssetPageError(null);
-      void api.getAssets(environmentId, {
-        q: assetQuery.trim() || undefined,
-        connection: assetFilters.connection || undefined,
-        format: assetFilters.format || undefined,
-        asset_type: assetFilters.assetType || undefined,
-        role: assetFilters.role || undefined,
-        attention_state: assetFilters.attentionState || undefined,
-        scope: assetFilters.scope || undefined,
-        sort_by: assetSort.sortBy,
-        sort_dir: assetSort.sortDir,
-      })
-        .then((payload) => {
-          if (!cancelled) setAssetPage(payload);
-        })
-        .catch((error) => {
-          if (!cancelled) setAssetPageError(toErrorMessage(error));
-        })
-        .finally(() => {
-          if (!cancelled) setAssetPageLoading(false);
-        });
-    }, 200);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [activeTab, environmentId, assets, assetQuery, assetFilters, assetSort]);
-
-  useEffect(() => {
-    if (activeTab !== "references") return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setReferenceLoading(true);
-      setReferenceError(null);
-      void api.getAssetReferences(environmentId, {
-        q: referenceQuery.trim() || undefined,
-        reference_type: referenceFilters.referenceType || undefined,
-        provenance: referenceFilters.provenance || undefined,
-        group_status: referenceFilters.groupStatus || undefined,
-        attention_state: referenceFilters.attentionState || undefined,
-        sort_by: referenceSort.sortBy,
-        sort_dir: referenceSort.sortDir,
-      })
-        .then((payload) => {
-          if (!cancelled) setReferencePage(payload);
-        })
-        .catch((error) => {
-          if (!cancelled) setReferenceError(toErrorMessage(error));
-        })
-        .finally(() => {
-          if (!cancelled) setReferenceLoading(false);
-        });
-    }, 200);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [activeTab, environmentId, assets?.catalog_version, referenceQuery, referenceFilters, referenceSort]);
-
-  useEffect(() => {
-    if (!selectedReferenceId || referenceDrawerMode !== "mapping") return;
-    void onRefreshReferenceMappings();
-    // Mapping data is action-driven. Callback identity must not retrigger it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environmentId, selectedReferenceId, referenceDrawerMode]);
-
-  useEffect(() => {
-    if (!selectedReferenceId) {
-      setReferenceDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setReferenceLoading(true);
-    setReferenceError(null);
-    void api.getAssetReference(environmentId, selectedReferenceId)
-      .then((payload) => {
-        if (!cancelled) setReferenceDetail(payload);
-      })
-      .catch((error) => {
-        if (!cancelled) setReferenceError(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!cancelled) setReferenceLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [environmentId, selectedReferenceId, assets?.catalog_version]);
-
-  if (!assets && !loading) {
-    return <EmptyState icon={<Boxes size={24} />} title="Add metadata source to view assets" />;
+  if (!assets && resources.inventoryError) {
+    return (
+      <EmptyState
+        icon={<Boxes size={24} />}
+        title="Unable to load assets"
+        detail={toErrorMessage(resources.inventoryError)}
+        action={<button type="button" onClick={() => void resources.retryInventory()}>Retry</button>}
+      />
+    );
   }
   if (!assets) {
     return <EmptyState icon={<Boxes size={24} />} title="Loading assets" />;
@@ -698,32 +602,28 @@ export function AssetsView({
   }
 
   async function refreshAfterReferenceMapping() {
-    const [nextAssets, nextReferences, nextReferenceDetail] = await Promise.all([
-      api.getAssets(environmentId, {
-        q: assetQuery.trim() || undefined,
-        connection: assetFilters.connection || undefined,
-        format: assetFilters.format || undefined,
-        asset_type: assetFilters.assetType || undefined,
-        role: assetFilters.role || undefined,
-        attention_state: assetFilters.attentionState || undefined,
-        scope: assetFilters.scope || undefined,
-        sort_by: assetSort.sortBy,
-        sort_dir: assetSort.sortDir,
-      }),
-      api.getAssetReferences(environmentId, {
-        q: referenceQuery.trim() || undefined,
-        reference_type: referenceFilters.referenceType || undefined,
-        provenance: referenceFilters.provenance || undefined,
-        group_status: referenceFilters.groupStatus || undefined,
-        attention_state: referenceFilters.attentionState || undefined,
-        sort_by: referenceSort.sortBy,
-        sort_dir: referenceSort.sortDir,
-      }),
-      selectedReferenceId ? api.getAssetReference(environmentId, selectedReferenceId) : Promise.resolve(null),
-    ]);
-    setAssetPage(nextAssets);
-    setReferencePage(nextReferences);
-    if (nextReferenceDetail) setReferenceDetail(nextReferenceDetail);
+    await resources.refreshAfterMapping();
+  }
+
+  async function clearReferenceMapping(reference: AssetReferenceGroupItem) {
+    const mappingId = reference.manual_mapping?.mapping_id;
+    if (!mappingId) return;
+    if (clearReferenceId !== reference.id) {
+      setClearReferenceId(reference.id);
+      setReferenceActionError(null);
+      return;
+    }
+    setReferenceActionError(null);
+    try {
+      await onDeleteReferenceMapping(mappingId);
+      await refreshAfterReferenceMapping();
+      setClearReferenceId(null);
+    } catch (error) {
+      setReferenceActionError({
+        referenceId: reference.id,
+        message: toErrorMessage(error) || "Mapping could not be cleared.",
+      });
+    }
   }
 
   function showAllAssets() {
@@ -741,7 +641,7 @@ export function AssetsView({
   function showReferencesNeedingMapping() {
     setActiveTab("references");
     setReferenceQuery("");
-    setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, groupStatus: NEEDS_MAPPING_FILTER });
+    setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, resolutionState: NEEDS_MAPPING_FILTER });
   }
 
   function showAttentionItems() {
@@ -839,7 +739,7 @@ export function AssetsView({
 
   function openReferenceMappingFromAsset(referenceId: string) {
     const reference = referenceById.get(referenceId);
-    if (!reference || !referenceMappingActionLabel(referenceMappingAction(reference, projectMappings))) return;
+    if (!reference || !referenceMappingActionLabel(referenceMappingAction(reference))) return;
     const currentDepth = assetsDrawerHistoryFromState(window.history.state)?.depth ?? Math.max(1, selectedAssetTrail.length);
     setActiveTab("references");
     setSelectedAssetTrail([]);
@@ -916,7 +816,7 @@ export function AssetsView({
             <div className="assets-metric-strip" aria-label="Asset inventory metrics">
               <MetricChip label="Assets" value={assetMetrics.assets} active={activeTab === "inventory"} onClick={showAllAssets} />
               <MetricChip label="References" value={assetMetrics.references} active={activeTab === "references"} onClick={() => setActiveTab("references")} />
-              <MetricChip label="Needs mapping" value={assetMetrics.referencesNeedingMapping} active={activeTab === "references" && referenceFilters.groupStatus === NEEDS_MAPPING_FILTER} tone={assetMetrics.referencesNeedingMapping > 0 ? "warning" : "neutral"} onClick={showReferencesNeedingMapping} />
+              <MetricChip label="Needs mapping" value={assetMetrics.referencesNeedingMapping} active={activeTab === "references" && referenceFilters.resolutionState === NEEDS_MAPPING_FILTER} tone={assetMetrics.referencesNeedingMapping > 0 ? "warning" : "neutral"} onClick={showReferencesNeedingMapping} />
               <MetricChip label="Attention" value={activeTab === "references" ? assetMetrics.referenceAttention : assetMetrics.assetAttention} active={(activeTab === "inventory" && assetFilters.attentionState === "with_attention") || (activeTab === "references" && referenceFilters.attentionState === "with_attention")} tone={(activeTab === "references" ? assetMetrics.referenceAttention : assetMetrics.assetAttention) > 0 ? "warning" : "neutral"} onClick={showAttentionItems} />
               <MetricChip label="Visible" tone="view" value={activeTab === "inventory" ? filteredAssets.length : filteredReferences.length} />
             </div>
@@ -976,8 +876,8 @@ export function AssetsView({
             ) : (
               <div className="table-empty">No assets match the current filters.</div>
             )}
-            {assetPageError ? <div className="table-empty">{assetPageError}</div> : null}
-            {assetPageLoading ? <div className="assets-page-status">Updating assets...</div> : null}
+            {resources.inventoryError ? <div className="table-empty">{toErrorMessage(resources.inventoryError)}</div> : null}
+            {resources.inventoryLoading ? <div className="assets-page-status">Updating assets...</div> : null}
           </>
         ) : (
           <>
@@ -995,10 +895,9 @@ export function AssetsView({
                   <option value="">All sources</option>
                   {filterOptions.references.provenances.map((value) => <option key={value} value={value}>{compactHumanize(value)}</option>)}
                 </select>
-                <select value={referenceFilters.groupStatus} onChange={(event) => setReferenceFilters((current) => ({ ...current, groupStatus: event.target.value }))}>
+                <select value={referenceFilters.resolutionState} onChange={(event) => setReferenceFilters((current) => ({ ...current, resolutionState: event.target.value }))}>
                   <option value="">All resolutions</option>
-                  <option value={NEEDS_MAPPING_FILTER}>Needs mapping</option>
-                  {filterOptions.references.groupStatuses.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
+                  {filterOptions.references.resolutionStates.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
                 </select>
                 <select value={referenceFilters.attentionState} onChange={(event) => setReferenceFilters((current) => ({ ...current, attentionState: event.target.value }))}>
                   <option value="">All attention states</option>
@@ -1024,8 +923,8 @@ export function AssetsView({
             ) : (
               <div className="table-empty">No references match the current filters.</div>
             )}
-            {referenceError ? <div className="table-empty">{referenceError}</div> : null}
-            {referenceLoading ? <div className="assets-page-status">Updating references...</div> : null}
+            {resources.referencesError ? <div className="table-empty">{toErrorMessage(resources.referencesError)}</div> : null}
+            {resources.referencesLoading ? <div className="assets-page-status">Updating references...</div> : null}
           </>
         )}
       </section>
@@ -1034,8 +933,8 @@ export function AssetsView({
         <AssetsDrawer
           asset={drawerAsset}
           detail={assetDetail}
-          loading={assetDetailLoading}
-          error={assetDetailError}
+          loading={resources.assetDetailLoading}
+          error={resources.assetDetailError ? toErrorMessage(resources.assetDetailError) : null}
           canGoBack={Boolean((assetsDrawerHistoryFromState(window.history.state)?.depth ?? 0) > 1)}
           onBack={backFromRelatedAssetDrawer}
           onClose={closeAssetDrawer}
@@ -1046,7 +945,7 @@ export function AssetsView({
           onSelectRelatedAsset={openRelatedAssetDrawer}
           onFocusInLineage={onFocusInLineage}
           onOpenMetadata={onOpenMetadata}
-          onLoadDefinition={async () => (await api.getAssetSource(environmentId, selectedAssetId)).definition}
+          onLoadDefinition={async () => (await resources.loadAssetSource(selectedAssetId)).definition}
           onNavigateAway={clearDrawerSelection}
         />
       ) : null}
@@ -1090,7 +989,6 @@ export function AssetsView({
           occurrences={referenceOccurrences.filter((item) => item.reference_id === selectedReference.id)}
           mappingMode={referenceDrawerMode === "mapping"}
           assets={inventory}
-          mappings={projectMappings}
           mappingBusy={mappingBusy}
           canGoBack={Boolean(assetsDrawerHistoryFromState(window.history.state)?.depth && (assetsDrawerHistoryFromState(window.history.state)?.depth ?? 0) > 1)}
           onBack={() => window.history.back()}
@@ -1103,7 +1001,7 @@ export function AssetsView({
           onDeleteReferenceMapping={onDeleteReferenceMapping}
           onRefreshReferenceMappings={refreshAfterReferenceMapping}
           onSearchMappingTargets={searchMappingTargets}
-          onLoadOccurrenceSource={api.getReferenceOccurrenceSource}
+          onLoadOccurrenceSource={(_, occurrenceId) => resources.loadOccurrenceSource(occurrenceId)}
           onNavigateAway={clearDrawerSelection}
         />
       ) : null}
@@ -1244,7 +1142,7 @@ function ReferenceResolutionCell({ reference }: { reference: AssetReferenceGroup
   return (
     <span className="assets-lineage-cell">
       <span className={`assets-status-chip status-${presentation.state}`}>{presentation.label}</span>
-      <small>{presentation.detail}{referenceNeedsMapping(reference.group_status) ? affected : ""}</small>
+      <small>{presentation.detail}{referenceNeedsMapping(reference) ? affected : ""}</small>
     </span>
   );
 }
@@ -1363,15 +1261,15 @@ function calculateAssetMetrics(assets: AssetInventoryItem[], references: AssetRe
   return {
     assets: summary?.assets ?? assets.length,
     references: summary?.references ?? references.length,
-    referencesNeedingMapping: summary?.references_needing_mapping
-      ?? references.filter((item) => referenceNeedsMapping(item.group_status)).length,
+    referencesNeedingMapping: summary?.unresolved_references
+      ?? references.filter(referenceNeedsMapping).length,
     assetAttention: summary?.asset_attention ?? assets.filter((asset) => asset.attention_count > 0).length,
     referenceAttention: references.filter((reference) => reference.attention_count > 0).length,
   };
 }
 
-function referenceNeedsMapping(status: string) {
-  return ["ambiguous", "unresolved", "mapping_target_missing", "resolved_mixed", "partially_resolved"].includes(status);
+function referenceNeedsMapping(reference: AssetReferenceGroupItem) {
+  return reference.resolution.state === "unresolved";
 }
 
 function assetFriendlyAlias(asset: AssetInventoryItem, fallback: string) {
@@ -1567,4 +1465,13 @@ function stringRecordValue(value: unknown, key: string) {
   if (!value || typeof value !== "object") return null;
   const field = (value as Record<string, unknown>)[key];
   return typeof field === "string" && field.trim() ? field.trim() : null;
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
 }

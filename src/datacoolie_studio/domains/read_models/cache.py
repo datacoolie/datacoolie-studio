@@ -13,10 +13,6 @@ from datacoolie_studio.db.models import Environment
 from datacoolie_studio.domains.read_models.contracts import CachedResult, ResultCacheKey
 from datacoolie_studio.domains.read_models.coordinator import default_result_build_coordinator
 from datacoolie_studio.domains.read_models.provider import result_cache_provider
-from datacoolie_studio.domains.read_models.studio_db import (
-    clear_memory_cache,
-    memory_cache_stats,
-)
 
 
 CachedReadModel = CachedResult
@@ -40,7 +36,7 @@ def cached_read_model(
     input_fingerprint: str,
     producer_version: str,
 ) -> CachedReadModel | None:
-    return result_cache_provider(session).store.get(
+    return result_cache_provider().store.get(
         _key(
             environment_id,
             model_key,
@@ -60,8 +56,9 @@ def replace_read_model(
     input_fingerprint: str,
     producer_version: str,
     payload: dict[str, Any],
+    expected_generation: str | None = None,
 ) -> CachedReadModel:
-    return result_cache_provider(session).store.put(
+    return result_cache_provider().store.put(
         _key(
             environment_id,
             model_key,
@@ -70,6 +67,26 @@ def replace_read_model(
             producer_version,
         ),
         payload,
+        expected_generation=expected_generation,
+    )
+
+
+def read_model_generation(
+    *,
+    environment_id: int,
+    model_key: str,
+    parameters_fingerprint: str,
+    input_fingerprint: str,
+    producer_version: str,
+) -> str:
+    return result_cache_provider().store.generation(
+        _key(
+            environment_id,
+            model_key,
+            parameters_fingerprint,
+            input_fingerprint,
+            producer_version,
+        )
     )
 
 
@@ -79,7 +96,7 @@ def invalidate_environment_read_models(
     *,
     model_keys: set[str] | None = None,
 ) -> None:
-    result_cache_provider(session).store.invalidate(environment_id, model_keys)
+    result_cache_provider().store.invalidate(environment_id, model_keys)
 
 
 def invalidate_project_read_models(
@@ -91,7 +108,7 @@ def invalidate_project_read_models(
     environment_ids = list(
         session.scalars(select(Environment.id).where(Environment.project_id == project_id))
     )
-    store = result_cache_provider(session).store
+    store = result_cache_provider().store
     for environment_id in environment_ids:
         store.invalidate(int(environment_id), model_keys)
 

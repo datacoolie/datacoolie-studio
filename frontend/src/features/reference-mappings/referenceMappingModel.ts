@@ -28,28 +28,20 @@ export interface ReferenceMappingTargetIdentifier {
   display: string;
 }
 
-export type ReferenceMappingAction = "map" | "resolve" | "repair" | "edit" | "complete" | null;
+export type ReferenceMappingAction = "map" | "edit";
 
 export function referenceMappingAction(
   reference: AssetReferenceGroupItem,
-  mappings: ProjectReferenceMapping[],
+  mappings: ProjectReferenceMapping[] = [],
 ): ReferenceMappingAction {
-  if (reference.group_status === "mapping_target_missing") return "repair";
   if (findReferenceMapping(reference, mappings) || reference.manual_mapping?.mapping_id) return "edit";
-  if (reference.group_status === "unresolved") return "map";
-  if (reference.group_status === "ambiguous") return "resolve";
-  if (reference.group_status === "partially_resolved") return "complete";
-  if (reference.group_status === "resolved_mixed" || reference.group_status === "resolved_single") return "edit";
-  return null;
+  return "map";
 }
 
 export function referenceMappingActionLabel(action: ReferenceMappingAction) {
   if (action === "map") return "Map";
-  if (action === "resolve") return "Resolve";
-  if (action === "repair") return "Repair";
   if (action === "edit") return "Edit";
-  if (action === "complete") return "Complete";
-  return null;
+  return "Map";
 }
 
 export function findReferenceMapping(
@@ -141,7 +133,13 @@ export function mappingTargetForAssetId(assetId: string | null | undefined, targ
   return targets.find((target) => target.assetId === assetId) ?? null;
 }
 
-export function mappingTargetForMapping(mapping: ProjectReferenceMapping | null, targets: ReferenceMappingTarget[]) {
+export function mappingTargetForMapping(
+  mapping: Pick<ProjectReferenceMapping, "target_identifier_kind" | "target_normalized_value"> | {
+    target_identifier_kind?: string | null;
+    target_normalized_value?: string | null;
+  } | null,
+  targets: ReferenceMappingTarget[],
+) {
   if (!mapping) return null;
   return targets.find((target) => (
     target.kind === mapping.target_identifier_kind
@@ -170,9 +168,7 @@ export function referenceMappingTargetIdentifier(asset: AssetInventoryItem): Ref
       display: stringField(preferred, "display_value") || value,
     };
   }
-  if (asset.path) return { kind: "physical_path" as const, value: asset.path, display: asset.path };
-  const logical = [asset.catalog, asset.database, asset.schema_name, asset.table].filter(Boolean).join(".");
-  return logical ? { kind: "logical_table" as const, value: logical, display: logical } : null;
+  return null;
 }
 
 function mappingTargetContext(asset: AssetInventoryItem, canonicalDisplay: string, displayName: string) {

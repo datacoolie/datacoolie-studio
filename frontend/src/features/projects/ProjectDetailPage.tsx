@@ -1,21 +1,25 @@
 import { CheckCircle2, CircleAlert, Database, FolderOpen, GitBranch, Layers3, LayoutDashboard, MoreHorizontal, Settings2, Trash2 } from "lucide-react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
-import type { Environment, ProjectReferenceMapping, ProjectSummary } from "../../shared/api/types";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import type { ProjectSummary } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { ProjectSectionKey } from "../../app/moduleRegistry";
 import { projectReadinessSummary } from "../../shared/environmentReadiness";
 import { EnvironmentsPage } from "../environments/EnvironmentsPage";
 import { ProjectOverviewPage } from "../project-overview/ProjectOverviewPage";
-import { ProjectReferenceMappingsPage } from "./ProjectReferenceMappingsPage";
+import type { ProjectReferenceMappingsPageProps } from "./ProjectReferenceMappingsPage";
+import { useProjectReferenceRegistry } from "./useProjectReferenceRegistry";
+import "./project-detail.css";
+
+const ProjectReferenceMappingsPage = lazy(() =>
+  import("./ProjectReferenceMappingsPage").then((module) => ({ default: module.ProjectReferenceMappingsPage }))
+);
 
 interface ProjectDetailPageProps {
   project: ProjectSummary | null;
   projectId: number | null;
   projectName: string | null;
   section: ProjectSectionKey;
-  environments: Environment[];
-  mappings: ProjectReferenceMapping[];
   busy: boolean;
   routeSearch?: string;
   onDeleteProject: (projectId: number) => Promise<void>;
@@ -25,13 +29,10 @@ interface ProjectDetailPageProps {
   onCreateEnvironment: (name: string) => Promise<number>;
   onDeleteEnvironment: (environmentId: number) => Promise<void>;
   onQuickCreateEnvironment: (projectId: number, name: string) => Promise<void>;
-  onReloadMappings: () => Promise<void>;
   onCreateMapping: ProjectReferenceMappingsPageProps["onCreate"];
   onUpdateMapping: ProjectReferenceMappingsPageProps["onUpdate"];
   onDeleteMapping: ProjectReferenceMappingsPageProps["onDelete"];
 }
-
-type ProjectReferenceMappingsPageProps = Parameters<typeof ProjectReferenceMappingsPage>[0];
 
 const projectSections: ProjectSectionKey[] = ["overview", "environments", "reference-mappings"];
 
@@ -48,8 +49,6 @@ export function ProjectDetailPage({
   projectId,
   projectName,
   section,
-  environments,
-  mappings,
   busy,
   routeSearch,
   onDeleteProject,
@@ -59,7 +58,6 @@ export function ProjectDetailPage({
   onCreateEnvironment,
   onDeleteEnvironment,
   onQuickCreateEnvironment,
-  onReloadMappings,
   onCreateMapping,
   onUpdateMapping,
   onDeleteMapping,
@@ -67,7 +65,7 @@ export function ProjectDetailPage({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
-
+  const referenceRegistry = useProjectReferenceRegistry(projectId, section === "reference-mappings");
   useEffect(() => {
     if (!actionsOpen) return;
 
@@ -98,9 +96,13 @@ export function ProjectDetailPage({
   const currentProjectId = project.id;
 
   async function handleDeleteProject() {
-    await onDeleteProject(currentProjectId);
-    setConfirmDelete(false);
-    setActionsOpen(false);
+    try {
+      await onDeleteProject(currentProjectId);
+      setConfirmDelete(false);
+      setActionsOpen(false);
+    } catch {
+      // The workspace renders the mutation error and the confirmation stays open.
+    }
   }
 
   const readiness = projectReadinessSummary(project.environments);
@@ -178,7 +180,6 @@ export function ProjectDetailPage({
           <ProjectOverviewPage
             project={project}
             busy={busy}
-            mappingCount={mappings.length}
             onOpenEnvironment={onOpenEnvironment}
             onOpenEnvironments={(id) => {
               if (id === project.id) onSectionChange("environments");
@@ -205,18 +206,22 @@ export function ProjectDetailPage({
 
       <ProjectSectionPanel section="reference-mappings" active={section === "reference-mappings"}>
         {section === "reference-mappings" ? (
-          <ProjectReferenceMappingsPage
-            projectId={projectId}
-            projectName={projectName}
-            environments={environments}
-            mappings={mappings}
-            busy={busy}
-            routeSearch={routeSearch}
-            onReload={onReloadMappings}
-            onCreate={onCreateMapping}
-            onUpdate={onUpdateMapping}
-            onDelete={onDeleteMapping}
-          />
+          <Suspense fallback={<EmptyState title="Loading reference mappings…" />}>
+            <ProjectReferenceMappingsPage
+              projectId={projectId}
+              projectName={projectName}
+              registryResponse={referenceRegistry.data}
+              loadFailures={referenceRegistry.data?.failures ?? []}
+              loading={referenceRegistry.loading}
+              loadError={referenceRegistry.error}
+              busy={busy}
+              routeSearch={routeSearch}
+              onReload={referenceRegistry.reload}
+              onCreate={onCreateMapping}
+              onUpdate={onUpdateMapping}
+              onDelete={onDeleteMapping}
+            />
+          </Suspense>
         ) : null}
       </ProjectSectionPanel>
     </div>

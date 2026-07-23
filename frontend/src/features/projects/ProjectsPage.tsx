@@ -3,10 +3,16 @@ import { FormEvent, useMemo, useState } from "react";
 import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
 import { orderedEnvironmentNamesWithMissing } from "../../shared/environmentOrder";
 import { environmentReadiness, environmentReadinessLabel } from "../../shared/environmentReadiness";
+import { environmentsByName, filterAndSortProjects, projectReadiness, workspaceTotals } from "./projectsDirectoryModel";
+import "./projects.css";
 
 interface ProjectsPageProps {
   projects: ProjectSummary[];
+  loading: boolean;
+  loaded: boolean;
+  loadError: string | null;
   busy: boolean;
+  onRetry: () => Promise<void>;
   onCreateProject: (name: string) => Promise<void>;
   onOpenEnvironment: (projectId: number, environmentId: number) => void;
   onOpenProject: (projectId: number) => void;
@@ -15,7 +21,11 @@ interface ProjectsPageProps {
 
 export function ProjectsPage({
   projects,
+  loading,
+  loaded,
+  loadError,
   busy,
+  onRetry,
   onCreateProject,
   onOpenEnvironment,
   onOpenProject,
@@ -24,20 +34,17 @@ export function ProjectsPage({
   const [projectName, setProjectName] = useState("");
   const [query, setQuery] = useState("");
   const totals = useMemo(() => workspaceTotals(projects), [projects]);
-  const sortedProjects = useMemo(
-    () => [...projects].sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" })),
-    [projects]
-  );
-  const filteredProjects = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return needle ? sortedProjects.filter((project) => projectSearchText(project).includes(needle)) : sortedProjects;
-  }, [query, sortedProjects]);
+  const filteredProjects = useMemo(() => filterAndSortProjects(projects, query), [projects, query]);
 
   async function submitProject(event: FormEvent) {
     event.preventDefault();
     if (!projectName.trim()) return;
-    await onCreateProject(projectName.trim());
-    setProjectName("");
+    try {
+      await onCreateProject(projectName.trim());
+      setProjectName("");
+    } catch {
+      // The workspace owns the visible error; retaining the draft is intentional.
+    }
   }
 
   const summary = query.trim()
@@ -46,7 +53,7 @@ export function ProjectsPage({
 
   return (
     <div className="view-stack projects-directory">
-      <section className="table-panel projects-panel projects-directory-panel" aria-labelledby="projects-heading">
+      <section className="table-panel projects-directory-panel" aria-labelledby="projects-heading">
         <div className="panel-toolbar projects-directory-toolbar">
           <div className="projects-directory-heading">
             <h2 id="projects-heading">Projects</h2>
@@ -80,7 +87,7 @@ export function ProjectsPage({
         </div>
 
         <div className="project-directory-list">
-          {filteredProjects.map((project) => (
+          {loaded ? filteredProjects.map((project) => (
             <ProjectDirectoryRow
               key={project.id}
               project={project}
@@ -89,9 +96,12 @@ export function ProjectsPage({
               onOpenProject={onOpenProject}
               onQuickCreateEnvironment={onQuickCreateEnvironment}
             />
-          ))}
-          {!projects.length ? <EmptyProjectsState /> : null}
-          {projects.length && !filteredProjects.length ? <NoSearchMatchesState /> : null}
+          )) : null}
+          {loading && !loaded ? <DirectoryMessage title="Loading projects…" detail="Reading the workspace directory." /> : null}
+          {loadError && !loaded ? <DirectoryMessage title="Unable to load projects" detail={loadError} actionLabel="Retry" onAction={onRetry} /> : null}
+          {loadError && loaded ? <DirectoryMessage title="Project refresh failed" detail="Showing the last loaded directory." actionLabel="Retry" onAction={onRetry} /> : null}
+          {loaded && !projects.length ? <EmptyProjectsState /> : null}
+          {loaded && projects.length > 0 && !filteredProjects.length ? <NoSearchMatchesState /> : null}
         </div>
       </section>
     </div>
@@ -113,6 +123,7 @@ function ProjectDirectoryRow({
 }) {
   const readiness = projectReadiness(project);
   const codeArtifactCount = project.environments.reduce((total, environment) => total + environment.code_artifact_count, 0);
+  const environmentByName = environmentsByName(project.environments);
 
   return (
     <article className="project-directory-row">
@@ -134,7 +145,7 @@ function ProjectDirectoryRow({
         <span className="project-directory-label">Environments</span>
         <div className="project-environment-chip-list">
           {orderedEnvironmentNamesWithMissing(project.environments).map((name) => {
-            const environment = project.environments.find((item) => item.name === name);
+            const environment = environmentByName.get(name);
             return environment ? (
               <EnvironmentChip
                 key={environment.id}
@@ -210,34 +221,25 @@ function NoSearchMatchesState() {
   );
 }
 
-function workspaceTotals(projects: ProjectSummary[]) {
-  return projects.reduce((totals, project) => ({
-    projects: totals.projects + 1,
-    environments: totals.environments + project.environment_count,
-    metadataSources: totals.metadataSources + project.metadata_source_count,
-  }), { projects: 0, environments: 0, metadataSources: 0 });
-}
-
-function projectSearchText(project: ProjectSummary) {
-  return [
-    project.name,
-    project.description,
-    ...project.environments.map((environment) => environment.name),
-  ]
-    .filter((value) => value !== null && value !== undefined)
-    .join(" ")
-    .toLowerCase();
-}
-
-function projectReadiness(project: ProjectSummary) {
-  const statuses = project.environments.map(environmentReadiness);
-  const ready = statuses.filter((status) => status === "ready").length;
-  const needsMetadata = statuses.length - ready;
-  if (!statuses.length) return { tone: "empty", label: "No environments" };
-  if (ready === statuses.length) return { tone: "ready", label: "All ready" };
-  if (ready) return { tone: "needs-metadata", label: `${ready}/${statuses.length} ready` };
-  return {
-    tone: "needs-metadata",
-    label: `${needsMetadata} ${needsMetadata === 1 ? "environment needs" : "environments need"} metadata`
-  };
+function DirectoryMessage({
+  title,
+  detail,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  detail: string;
+  actionLabel?: string;
+  onAction?: () => Promise<void>;
+}) {
+  return (
+    <div className="project-directory-empty" role={actionLabel ? "alert" : "status"}>
+      <Layers3 size={20} />
+      <div>
+        <strong>{title}</strong>
+        <span>{detail}</span>
+        {actionLabel && onAction ? <button type="button" onClick={() => void onAction()}>{actionLabel}</button> : null}
+      </div>
+    </div>
+  );
 }

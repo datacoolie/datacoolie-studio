@@ -4,5 +4,14 @@ interface StatusPillProps {
 
 export function StatusPill({ status }: StatusPillProps) {
   const normalized = (status || "unknown").toLowerCase();
-  return <span className={`status-pill status-${normalized}`}>{status || "unknown"}</span>;
+  const presentation = lifecycleStatusPresentation(normalized);
+  return (
+    <span
+      className={`status-pill status-${normalized}`}
+      style={presentation ? { color: presentation.textColor, backgroundColor: presentation.pillBackground } : undefined}
+    >
+      {status || "unknown"}
+    </span>
+  );
 }
+import { lifecycleStatusPresentation } from "../statusPresentation";

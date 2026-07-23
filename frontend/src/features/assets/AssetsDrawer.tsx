@@ -715,7 +715,7 @@ function AssetRelationshipViaRow({
         <strong>{humanize(via.provenance)} · {humanize(via.dependencyKind)}</strong>
         <span className="assets-lineage-via-meta">
           <small>{humanize(via.resolutionMethod)}</small>
-          <span className={`lineage-node-badge ${via.resolutionStatus}`}>{humanize(via.resolutionStatus)}</span>
+          <span className={`lineage-node-badge ${via.resolutionState}`}>{humanize(via.resolutionState)}</span>
         </span>
       </span>
       {interactive ? <ChevronRight size={13} /> : null}
@@ -749,7 +749,7 @@ function DependsOnList({
       {items.map((item, index) => {
         const rowTitle = dependsOnTitle(item);
         const rowSubtitle = dependsOnSubtitle(item);
-        const rowMeta = <ReferenceMeta kind={item.kind} provenance={item.provenance} status={item.resolution_status} />;
+        const rowMeta = <ReferenceMeta kind={item.kind} provenance={item.provenance} status={item.resolution.state} />;
         const rowKey = item.id || `depends-on-${index}`;
         const referenceId = item.reference_id || item.source_reference?.id || null;
         const resolvedAssetId = item.resolved_asset?.id;
@@ -850,7 +850,7 @@ function UsedByList({
                 </span>
               </span>
               <span className="assets-neighbor-meta">
-                <ReferenceMeta kind={item.kind} provenance={item.provenance} status={item.resolution_status} />
+                <ReferenceMeta kind={item.kind} provenance={item.provenance} status={item.resolution.state} />
               </span>
             </button>
           </li>

@@ -9,6 +9,7 @@ from datacoolie_studio.api.v1.schemas import (
     AssetReferenceDetailResponse,
     AssetReferenceListResponse,
     AssetSourceResponse,
+    ProjectReferenceRegistryResponse,
     ReferenceOccurrenceSourceResponse,
 )
 from datacoolie_studio.db.session import get_session
@@ -20,11 +21,20 @@ from datacoolie_studio.domains.assets.service import (
     list_environment_asset_references,
     list_environment_assets,
     ASSETS_PROJECTOR_VERSION,
+    list_project_reference_registry,
 )
 from datacoolie_studio.domains.lineage.service import lineage_input_fingerprint
 from datacoolie_studio.domains.read_models.cache import fingerprint
 
 router = APIRouter(tags=["assets"])
+
+
+@router.get("/projects/{project_id}/reference-registry", response_model=ProjectReferenceRegistryResponse)
+def get_project_reference_registry(project_id: int, session: Session = Depends(get_session)):
+    try:
+        return list_project_reference_registry(session, project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/assets", response_model=AssetInventoryResponse)
@@ -72,15 +82,15 @@ def get_asset_references(
     q: str | None = None,
     reference_type: str | None = None,
     provenance: str | None = None,
-    group_status: str | None = None,
+    resolution_state: str | None = Query(None, pattern="^(automatic|manual|unresolved)$"),
     attention_state: str | None = Query(None, pattern="^(with_attention|clean)$"),
-    sort_by: str = Query("display_name", pattern="^(display_name|reference_type|group_status|dependency_count|attention_count)$"),
+    sort_by: str = Query("display_name", pattern="^(display_name|reference_type|resolution_state|dependency_count|attention_count)$"),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     session: Session = Depends(get_session),
 ):
     parameters = {
         "q": q, "reference_type": reference_type,
-        "provenance": provenance, "group_status": group_status, "attention_state": attention_state,
+        "provenance": provenance, "resolution_state": resolution_state, "attention_state": attention_state,
         "sort_by": sort_by, "sort_dir": sort_dir,
     }
     etag, input_fingerprint = _assets_etag(session, environment_id, "references", parameters)
@@ -88,7 +98,7 @@ def get_asset_references(
         return Response(status_code=304, headers=_cache_headers(etag))
     payload = list_environment_asset_references(
         session, environment_id, query=q,
-        reference_type=reference_type, provenance=provenance, group_status=group_status,
+        reference_type=reference_type, provenance=provenance, resolution_state=resolution_state,
         attention_state=attention_state, sort_by=sort_by, sort_dir=sort_dir,
         input_fingerprint=input_fingerprint,
     )

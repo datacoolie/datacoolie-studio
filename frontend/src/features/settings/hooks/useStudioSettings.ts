@@ -5,15 +5,16 @@ import { toErrorMessage } from "../../../shared/lib/errors";
 
 export interface StudioSettingsState {
   settings: StudioSettings | null;
-  busy: boolean;
+  loading: boolean;
+  saving: boolean;
   error: string | null;
   reload: () => Promise<void>;
-  saveSettings: (changes: StudioSettingsChanges) => Promise<void>;
+  saveSettings: (changes: StudioSettingsChanges) => Promise<StudioSettings>;
 }
 
 export interface StudioSettingsChanges {
-  timezone: string | null;
-  source_check_interval_seconds: number;
+  timezone?: string | null;
+  source_check_interval_seconds?: number;
 }
 
 /**
@@ -22,36 +23,43 @@ export interface StudioSettingsChanges {
  */
 export function useStudioSettings(options?: { onSaved?: () => void | Promise<void> }): StudioSettingsState {
   const [settings, setSettings] = useState<StudioSettings | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const onSaved = options?.onSaved;
 
   const reload = useCallback(async () => {
+    setLoading(true);
     setError(null);
     try {
       setSettings(await api.getStudioSettings());
     } catch (err) {
       setError(toErrorMessage(err));
+      throw err;
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void reload();
+    void reload().catch(() => undefined);
   }, [reload]);
 
   const saveSettings = useCallback(async (changes: StudioSettingsChanges) => {
-    setBusy(true);
+    setSaving(true);
     setError(null);
     try {
       const updated = await api.updateStudioSettings(changes);
       setSettings(updated);
       if (onSaved) await onSaved();
+      return updated;
     } catch (err) {
       setError(toErrorMessage(err));
+      throw err;
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   }, [onSaved]);
 
-  return { settings, busy, error, reload, saveSettings };
+  return { settings, loading, saving, error, reload, saveSettings };
 }

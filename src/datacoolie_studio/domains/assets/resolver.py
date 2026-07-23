@@ -14,12 +14,18 @@ from datacoolie_studio.domains.assets.reference_identity import (
     build_reference_context_scope,
     build_reference_signature,
 )
+from datacoolie_studio.domains.assets.reference_resolution import (
+    AUTOMATIC_RESOLUTION,
+    MANUAL_RESOLUTION,
+    ReferenceResolution,
+    unresolved_resolution,
+)
 from datacoolie_studio.domains.assets.registry import AssetRegistry
 
 
 @dataclass(slots=True)
 class Resolution:
-    status: str
+    resolution: ReferenceResolution
     asset_id: str | None
     method: str
     candidates: list[str]
@@ -31,7 +37,7 @@ class Resolution:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": self.status,
+            "resolution": self.resolution.to_dict(),
             "asset_id": self.asset_id,
             "method": self.method,
             "candidates": self.candidates,
@@ -53,13 +59,13 @@ class AssetResolver:
         context_scope = build_reference_context_scope(evidence, context)
 
         def result(
-            status: str,
+            resolution: ReferenceResolution,
             asset_id: str | None,
             method: str,
             candidates: list[str],
         ) -> Resolution:
             return Resolution(
-                status,
+                resolution,
                 asset_id,
                 method,
                 candidates,
@@ -89,7 +95,7 @@ class AssetResolver:
             return
         self.registry.add_observation(resolution.asset_id, {
             "source_type": resolution.evidence.provenance,
-            "resolution_status": "resolved_auto",
+            "resolution": AUTOMATIC_RESOLUTION.to_dict(),
             "resolution_method": resolution.method,
             "evidence": resolution.evidence.to_dict(),
         })
@@ -101,7 +107,7 @@ class AssetResolver:
         if identifier is not None:
             asset_id = self.registry.resolve_identifier(identifier["kind"], identifier["normalized_value"])
             if asset_id:
-                return result("resolved_auto", asset_id, "exact_identifier", [asset_id])
+                return result(AUTOMATIC_RESOLUTION, asset_id, "exact_identifier", [asset_id])
 
         if evidence.kind == "table" and evidence.table:
             suffix = ".".join(
@@ -111,19 +117,19 @@ class AssetResolver:
             )
             candidates = self.registry.find_logical_table_suffix(suffix or evidence.table)
             if len(candidates) == 1:
-                return result("resolved_auto", candidates[0], "unique_table_suffix", candidates)
+                return result(AUTOMATIC_RESOLUTION, candidates[0], "unique_table_suffix", candidates)
             scoped_candidates = self.registry.find_logical_table_suffix(
                 suffix or evidence.table,
                 namespace=context_scope.value if context_scope else None,
             )
             if len(scoped_candidates) == 1:
-                return result("resolved_auto", scoped_candidates[0], "connection_table_suffix", scoped_candidates)
+                return result(AUTOMATIC_RESOLUTION, scoped_candidates[0], "connection_table_suffix", scoped_candidates)
             if len(scoped_candidates) > 1:
-                return result("ambiguous", None, "multiple_connection_table_matches", scoped_candidates)
+                return result(unresolved_resolution("multiple_matches"), None, "multiple_connection_table_matches", scoped_candidates)
             if len(candidates) > 1:
-                return result("ambiguous", None, "multiple_table_suffix_matches", candidates)
+                return result(unresolved_resolution("multiple_matches"), None, "multiple_table_suffix_matches", candidates)
 
-        return result("unresolved", None, "no_declared_asset_match", [])
+        return result(unresolved_resolution("no_match"), None, "no_declared_asset_match", [])
 
     def _apply_mapping(self, resolution: Resolution, mapping: dict[str, Any]) -> Resolution:
         signature = resolution.reference_signature
@@ -134,7 +140,7 @@ class AssetResolver:
         if target_asset_id:
             mapping_observation = {
                 "source_type": "manual_mapping",
-                "resolution_status": "resolved_manual",
+                "resolution": MANUAL_RESOLUTION.to_dict(),
                 "resolution_method": "manual_mapping",
                 "mapping_status": "applied",
                 "mapping_id": mapping.get("id"),
@@ -143,7 +149,7 @@ class AssetResolver:
                 "target_identifier_kind": mapping.get("target_identifier_kind"),
                 "target_normalized_value": mapping.get("target_normalized_value"),
                 "automatic_suggestion": {
-                    "status": resolution.status,
+                    "resolution": resolution.resolution.to_dict(),
                     "asset_id": resolution.asset_id,
                     "method": resolution.method,
                     "candidates": resolution.candidates,
@@ -151,7 +157,7 @@ class AssetResolver:
             }
             self.registry.add_observation(target_asset_id, mapping_observation)
             return Resolution(
-                "resolved_manual",
+                MANUAL_RESOLUTION,
                 target_asset_id,
                 "manual_mapping",
                 [target_asset_id],
@@ -162,9 +168,9 @@ class AssetResolver:
                 context_scope_source=resolution.context_scope_source,
             )
         return Resolution(
-            "mapping_target_missing",
+            unresolved_resolution("target_missing"),
             None,
-            "manual_mapping_target_missing",
+            "manual_target_missing",
             resolution.candidates,
             resolution.evidence,
             resolution.reference_signature,

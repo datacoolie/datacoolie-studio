@@ -7,6 +7,7 @@ from datacoolie_studio.api.v1.schemas import (
     MetadataBackupResponse,
     MetadataBackupRestoreRequest,
     MetadataEditorDocumentResponse,
+    MetadataEditorWorkspaceResponse,
     MetadataEditorSaveRequest,
     MetadataEditorValidationRequest,
     MetadataEditorValidationResponse,
@@ -20,7 +21,6 @@ from datacoolie_studio.domains.metadata.editor import (
     delete_environment_backups,
     delete_environment_editor_draft,
     list_environment_backups,
-    load_environment_editor_draft,
     load_backup_editor_document,
     save_environment_editor_document,
     save_environment_editor_draft,
@@ -29,8 +29,8 @@ from datacoolie_studio.domains.metadata.editor import (
 )
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.service import (
-    ensure_metadata_snapshot,
-    load_environment_editor_document,
+    ensure_metadata_materialization,
+    load_environment_editor_workspace,
     load_environment_metadata,
 )
 from datacoolie_studio.domains.workspace import service as workspace
@@ -45,11 +45,11 @@ def get_metadata(environment_id: int, session: Session = Depends(get_session)):
     return _public_metadata(load_environment_metadata(session, sources))
 
 
-@router.get("/environments/{environment_id}/metadata-editor-document", response_model=MetadataEditorDocumentResponse)
-def get_environment_metadata_editor_document(environment_id: int, session: Session = Depends(get_session)):
+@router.get("/environments/{environment_id}/metadata-editor-workspace", response_model=MetadataEditorWorkspaceResponse)
+def get_environment_metadata_editor_workspace(environment_id: int, session: Session = Depends(get_session)):
     sources = workspace.list_metadata_sources(session, environment_id)
     try:
-        return load_environment_editor_document(session, sources)
+        return load_environment_editor_workspace(session, environment_id, sources)
     except MetadataReadError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -58,12 +58,6 @@ def get_environment_metadata_editor_document(environment_id: int, session: Sessi
 def validate_environment_metadata_editor_document(environment_id: int, payload: MetadataEditorValidationRequest, session: Session = Depends(get_session)):
     workspace.list_metadata_sources(session, environment_id)
     return validate_editor_document(payload.model_dump())
-
-
-@router.get("/environments/{environment_id}/metadata-editor-document/draft", response_model=MetadataEditorDocumentResponse | None)
-def get_environment_metadata_editor_draft(environment_id: int, session: Session = Depends(get_session)):
-    workspace.list_metadata_sources(session, environment_id)
-    return load_environment_editor_draft(session, environment_id)
 
 
 @router.put("/environments/{environment_id}/metadata-editor-document/draft", response_model=MetadataEditorDocumentResponse)
@@ -90,7 +84,7 @@ def discard_environment_metadata_editor_draft(environment_id: int, session: Sess
     return Response(status_code=204)
 
 
-@router.put("/environments/{environment_id}/metadata-editor-document", response_model=MetadataEditorDocumentResponse)
+@router.put("/environments/{environment_id}/metadata-editor-document", response_model=MetadataEditorWorkspaceResponse)
 def put_environment_metadata_editor_document(environment_id: int, payload: MetadataEditorSaveRequest, session: Session = Depends(get_session)):
     sources = workspace.list_metadata_sources(session, environment_id)
     try:
@@ -102,7 +96,13 @@ def put_environment_metadata_editor_document(environment_id: int, payload: Metad
             payload.expected_revision,
             payload.confirm_overwrite,
         )
-        return saved
+        current_sources = workspace.list_metadata_sources(session, environment_id)
+        return load_environment_editor_workspace(
+            session,
+            environment_id,
+            current_sources,
+            document=saved,
+        )
     except MetadataConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MetadataValidationError as exc:
@@ -132,13 +132,15 @@ def get_metadata_backup_editor_document(backup_id: int, session: Session = Depen
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/metadata-backups/{backup_id}/restore", response_model=MetadataEditorDocumentResponse)
+@router.post("/metadata-backups/{backup_id}/restore", response_model=MetadataEditorWorkspaceResponse)
 def restore_metadata_backup(backup_id: int, payload: MetadataBackupRestoreRequest, session: Session = Depends(get_session)):
     try:
         restored = restore_backup(session, backup_id, payload.expected_revision, payload.confirm_restore)
         source = _metadata_source(session, restored["source"]["source_id"])
-        ensure_metadata_snapshot(session, source, force=True)
-        return restored
+        ensure_metadata_materialization(session, source, force=True)
+        delete_environment_editor_draft(session, source.environment_id)
+        sources = workspace.list_metadata_sources(session, source.environment_id)
+        return load_environment_editor_workspace(session, source.environment_id, sources)
     except MetadataConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MetadataValidationError as exc:

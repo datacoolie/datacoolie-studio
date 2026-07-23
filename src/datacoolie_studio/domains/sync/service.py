@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import EnvironmentSource, SourceRevision, SyncJob, utc_now
@@ -17,6 +17,12 @@ from datacoolie_studio.domains.storage.uri import parse_storage_uri
 
 _refresh_locks_guard = threading.Lock()
 _refresh_locks: dict[int, threading.Lock] = {}
+_retention_diagnostics_lock = threading.Lock()
+_last_retention_diagnostics: dict[str, Any] | None = None
+logger = logging.getLogger(__name__)
+
+SYNC_JOB_RETENTION_DAYS = 30
+SYNC_JOB_RETENTION_MINIMUM = 100
 
 
 @contextmanager
@@ -76,7 +82,86 @@ def begin_sync_job(session: Session, source: EnvironmentSource, job_type: str) -
     session.add(job)
     session.commit()
     session.refresh(job)
+    try:
+        diagnostics = prune_terminal_sync_jobs(session, job.source_id)
+    except Exception as exc:
+        session.rollback()
+        diagnostics = {
+            "source_id": job.source_id,
+            "status": "error",
+            "message": str(exc),
+            "checked_at": utc_now().isoformat(),
+        }
+        logger.exception("SyncJob retention failed for source %s", job.source_id)
+    _record_retention_diagnostics(diagnostics)
     return job
+
+
+def prune_terminal_sync_jobs(
+    session: Session,
+    source_id: int,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Retain the union of the latest 30 days and latest 100 terminal jobs."""
+    checked_at = now or utc_now()
+    cutoff = checked_at - timedelta(days=SYNC_JOB_RETENTION_DAYS)
+    latest_ids = list(
+        session.scalars(
+            select(SyncJob.id)
+            .where(
+                SyncJob.source_id == source_id,
+                SyncJob.status != "running",
+                SyncJob.completed_at.is_not(None),
+            )
+            .order_by(
+                SyncJob.completed_at.desc(),
+                SyncJob.started_at.desc(),
+                SyncJob.id.desc(),
+            )
+            .limit(SYNC_JOB_RETENTION_MINIMUM)
+        )
+    )
+    delete_statement = delete(SyncJob).where(
+        SyncJob.source_id == source_id,
+        SyncJob.status != "running",
+        SyncJob.completed_at.is_not(None),
+        SyncJob.completed_at < cutoff,
+    )
+    if latest_ids:
+        delete_statement = delete_statement.where(SyncJob.id.not_in(latest_ids))
+    result = session.execute(delete_statement)
+    malformed = int(
+        session.scalar(
+            select(func.count(SyncJob.id)).where(
+                SyncJob.source_id == source_id,
+                SyncJob.status != "running",
+                SyncJob.completed_at.is_(None),
+            )
+        )
+        or 0
+    )
+    session.commit()
+    return {
+        "source_id": source_id,
+        "status": "ok",
+        "deleted_jobs": int(result.rowcount or 0),
+        "malformed_terminal_jobs": malformed,
+        "cutoff": cutoff.isoformat(),
+        "minimum_history": SYNC_JOB_RETENTION_MINIMUM,
+        "checked_at": checked_at.isoformat(),
+    }
+
+
+def sync_job_retention_diagnostics() -> dict[str, Any] | None:
+    with _retention_diagnostics_lock:
+        return dict(_last_retention_diagnostics) if _last_retention_diagnostics else None
+
+
+def _record_retention_diagnostics(diagnostics: dict[str, Any]) -> None:
+    global _last_retention_diagnostics
+    with _retention_diagnostics_lock:
+        _last_retention_diagnostics = dict(diagnostics)
 
 
 def finish_sync_job(

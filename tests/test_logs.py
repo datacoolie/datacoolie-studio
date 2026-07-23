@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 from zoneinfo import ZoneInfo
 
+from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.core.time import parse_utc_datetime
+from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.logs import cache as logs_cache
 from datacoolie_studio.domains.logs.reader import (
     discover_dataflow_parquet_files,
@@ -27,6 +30,7 @@ from datacoolie_studio.domains.monitoring.service import (
     _filter_log_rows,
     _freshness_page,
     _health_page,
+    _is_lakehouse_destination,
     _job_key,
     _job_shape_label,
     _job_runs_by_dataflow_operation_type,
@@ -36,6 +40,7 @@ from datacoolie_studio.domains.monitoring.service import (
     _operations_page,
     _performance_page,
     _phase_duration,
+    _phase_duration_summary,
     _status_by_date,
     _time_value,
     _trend_context,
@@ -44,7 +49,7 @@ from datacoolie_studio.domains.monitoring.service import (
     dataflow_logs,
     job_logs,
 )
-from datacoolie_studio.domains.monitoring.page_service import monitoring_page
+from datacoolie_studio.domains.monitoring.page_service import monitoring_page, public_monitoring_page
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -158,14 +163,16 @@ def test_system_log_scope_defaults_to_job_only_and_can_include_dataflows(tmp_pat
     assert [row["msg"] for row in dataflow_rows] == ["child"]
 
 
-def test_monitoring_performance_page_uses_dataflow_logs():
-    performance = monitoring_page([PathRecord(str(SAMPLE_LOGS))], page="performance")
+def test_monitoring_performance_page_uses_dataflow_logs(tmp_path: Path, monkeypatch):
+    paths = _published_monitoring_paths(tmp_path, monkeypatch)
+    performance = monitoring_page(paths, page="performance")
     assert performance["summary"]["dataflow_records"] > 0
-    assert performance["performance"]["duration_by_stage"]
+    assert performance["performance"]["duration_distribution_by_stage"]
 
 
-def test_monitoring_overview_page_has_bounded_read_model():
-    report = monitoring_page([PathRecord(str(SAMPLE_LOGS))], page="overview")
+def test_monitoring_overview_page_has_bounded_read_model(tmp_path: Path, monkeypatch):
+    paths = _published_monitoring_paths(tmp_path, monkeypatch)
+    report = monitoring_page(paths, page="overview")
     assert report["summary"]["dataflow_records"] > 0
     assert report["summary"]["job_records"] > 0
     assert report["summary"]["requested_grain"] == "auto"
@@ -189,6 +196,45 @@ def test_monitoring_overview_page_has_bounded_read_model():
     assert report["attention"]
     assert report["reconciliation"] == {}
     assert "job_success_rate" in report["metric_definitions"]
+
+
+def test_public_monitoring_pages_project_only_consumed_sections(tmp_path: Path, monkeypatch):
+    paths = _published_monitoring_paths(tmp_path, monkeypatch)
+    report = monitoring_page(paths, page="overview")
+    allowed = {
+        "overview": {"health", "attention", "operations", "failures", "volume"},
+        "jobs": {"operations", "reconciliation"},
+        "dataflows": {"operations", "volume"},
+        "failures": {"operations", "failures"},
+        "freshness": {"freshness"},
+        "performance": {"performance"},
+        "volume": {"volume"},
+        "maintenance": {"maintenance"},
+        "diagnostics": {"coverage", "reconciliation", "diagnostics"},
+    }
+
+    for page, sections in allowed.items():
+        projected = public_monitoring_page(page, report)
+        assert projected["schema_version"] == "monitoring-page.v9"
+        assert projected["page"] == page
+        assert set(projected) == {"schema_version", "page", "summary", *sections}
+        assert "metric_definitions" not in projected
+
+    performance = public_monitoring_page("performance", report)
+    assert "investigation_queue" not in performance["performance"]
+
+
+def _published_monitoring_paths(tmp_path: Path, monkeypatch) -> list[EnvironmentSource]:
+    analytics_path = tmp_path / "monitoring.duckdb"
+    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    build_analytics_fixture(analytics_path, source_ids=[1], dataflow_rows=50)
+    return [EnvironmentSource(
+        id=1,
+        environment_id=1,
+        source_kind="logs",
+        uri="benchmark://monitoring-tests/1",
+        enabled=True,
+    )]
 
 
 def test_diagnostics_treats_conditional_evidence_as_informational():
@@ -440,6 +486,7 @@ def test_monitoring_job_and_dataflow_logs_include_investigation_fields():
         "dataflow_run_id": "run-1",
         "dataflow_name": "read_orders",
         "status": "failed",
+        "source_status": "failed",
         "source_error_message": "Path does not exist: /landing/orders",
     })
     assert failed_dataflow["failure_kind"] == "dataflow"
@@ -462,10 +509,86 @@ def test_dataflow_phase_health_includes_overhead_and_preserves_failed_phase_prec
 
     failed_source = _enrich_dataflow_run_for_investigation({
         **overhead_dominant,
+        "status": "failed",
         "source_status": "failed",
         "source_error_message": "Source read failed",
     })
     assert failed_source["phase_health"] == "source_failed"
+
+
+def test_phase_duration_summary_uses_completed_statuses_and_exact_total_metrics():
+    rows = [
+        {
+            "status": "succeeded",
+            "operation_type": "etl",
+            "duration_seconds": 100,
+            "source_duration_seconds": 20,
+            "transform_duration_seconds": 30,
+            "destination_duration_seconds": 40,
+            "source_status": "succeeded",
+            "transform_status": "succeeded",
+            "destination_status": "succeeded",
+        },
+        {
+            "status": "failed",
+            "operation_type": "etl",
+            "duration_seconds": 50,
+            "source_duration_seconds": 10,
+            "transform_duration_seconds": 10,
+            "destination_duration_seconds": 10,
+            "source_status": "failed",
+        },
+        {
+            "status": "failed",
+            "operation_type": "etl",
+            "duration_seconds": 20,
+            "source_duration_seconds": 5,
+            "transform_duration_seconds": 5,
+            "destination_duration_seconds": 5,
+        },
+        {
+            "status": "skipped",
+            "operation_type": "etl",
+            "duration_seconds": 30,
+            "source_duration_seconds": 10,
+            "transform_duration_seconds": 10,
+            "destination_duration_seconds": 0,
+        },
+        {
+            "status": "succeeded",
+            "operation_type": "etl",
+            "source_status": "succeeded",
+        },
+        {
+            "status": "pending",
+            "operation_type": "etl",
+            "duration_seconds": 200,
+            "source_duration_seconds": 100,
+            "transform_duration_seconds": 50,
+            "destination_duration_seconds": 25,
+        },
+        {
+            "status": "running",
+            "operation_type": "etl",
+            "duration_seconds": 200,
+            "source_duration_seconds": 100,
+            "transform_duration_seconds": 50,
+            "destination_duration_seconds": 25,
+        },
+    ]
+
+    summary = _phase_duration_summary(rows, "operation_type", _dataflow_operation_type)
+
+    assert [row["operation_type"] for row in summary] == ["Total", "etl"]
+    total = summary[0]
+    assert total["is_total"] == 1
+    assert total["source_duration_seconds"] == 45
+    assert total["source_run_count"] == 4
+    assert total["source_avg_duration_seconds"] == 11.25
+    assert total["source_p95_duration_seconds"] == 20
+    assert total["source_failed"] == 1
+    assert total["overhead_duration_seconds"] == 45
+    assert total["overhead_failed"] == 1
 
 
 def test_attention_queue_includes_freshness_signals_and_existing_tabs():
@@ -776,6 +899,7 @@ def test_operations_page_exposes_job_page_visual_metrics():
         {
             "job_id": "j1",
             "stages": '["bronze", "silver"]',
+            "operation_types": '["etl", "load"]',
             "status": "succeeded",
             "duration_seconds": 10,
             "end_time": "2026-06-10T00:00:00+00:00",
@@ -787,6 +911,7 @@ def test_operations_page_exposes_job_page_visual_metrics():
         {
             "job_id": "j2",
             "stages": '["bronze", "silver"]',
+            "operation_types": '["etl", "load"]',
             "status": "failed",
             "duration_seconds": 20,
             "end_time": "2026-06-11T00:00:00+00:00",
@@ -799,6 +924,7 @@ def test_operations_page_exposes_job_page_visual_metrics():
         {
             "job_id": "j3",
             "stages": '["maintenance"]',
+            "operation_types": "maintenance",
             "status": "skipped",
             "duration_seconds": 5,
             "end_time": "2026-06-12T00:00:00+00:00",
@@ -836,10 +962,10 @@ def test_operations_page_exposes_job_page_visual_metrics():
 
     duration_by_operation = {
         row["operation_type"]: row
-        for row in operations["dataflow_duration_by_operation_type"]
+        for row in operations["job_duration_by_operation_types"]
     }
-    assert duration_by_operation["etl"]["count"] == 2
-    assert duration_by_operation["etl"]["p50_duration_seconds"] == 10
+    assert duration_by_operation["etl, load"]["count"] == 2
+    assert duration_by_operation["etl, load"]["p50_duration_seconds"] == 10
     assert duration_by_operation["maintenance"]["skipped"] == 1
 
     fanout = operations["job_child_fanout_distribution"]
@@ -924,7 +1050,7 @@ def test_monitoring_dimension_fallbacks_use_unknown():
     assert by_operation["etl"]["count"] == 1
 
 
-def test_phase_duration_uses_raw_overhead_without_recomputing_fallback():
+def test_phase_duration_derives_overhead_from_total_runtime():
     row = {
         "duration_seconds": 10,
         "source_duration_seconds": 2,
@@ -933,9 +1059,9 @@ def test_phase_duration_uses_raw_overhead_without_recomputing_fallback():
         "overhead_duration_seconds": 7,
     }
 
-    assert _phase_duration(row, "overhead", "overhead_duration_seconds") == 7
-    assert _phase_duration({**row, "overhead_duration_seconds": -3}, "overhead", "overhead_duration_seconds") == 0
-    assert _phase_duration({**row, "overhead_duration_seconds": None}, "overhead", "overhead_duration_seconds") is None
+    assert _phase_duration(row, "overhead", "overhead_duration_seconds") == 1
+    assert _phase_duration({**row, "overhead_duration_seconds": -3}, "overhead", "overhead_duration_seconds") == 1
+    assert _phase_duration({**row, "duration_seconds": None}, "overhead", "overhead_duration_seconds") is None
 
 
 def test_status_by_date_returns_none_rate_when_no_executable_runs():
@@ -1021,8 +1147,8 @@ def test_error_category_rules_prefer_clear_patterns_and_fallback_to_other():
     assert _error_category("OAuth2 token request failed: [Errno 111] Connection refused") == "Connectivity"
     assert _error_category("authentication failed: invalid token") == "Authentication"
     assert _error_category("table or view `orders` does not exist") == "Missing object"
-    assert _error_category("DELTA_FAILED_TO_MERGE_FIELDS: Failed to merge fields 'a' and 'a'") == "Schema"
-    assert _error_category("replay assertion validation failed") == "Validation"
+    assert _error_category("DELTA_FAILED_TO_MERGE_FIELDS: Failed to merge fields 'a' and 'a'") == "Schema / format"
+    assert _error_category("replay assertion validation failed") == "Data quality"
     assert _error_category("api_auth__oauth2; api_page__next_link; replay__orders;") == "Other"
     assert _error_category("none") == "Unspecified"
 
@@ -1034,6 +1160,7 @@ def test_failures_page_groups_by_signature_phase_and_endpoint():
             "dataflow_id": "df-1",
             "dataflow_name": "read_orders",
             "status": "failed",
+            "source_status": "failed",
             "stage": "bronze",
             "source_name": "api",
             "destination_name": "lake",
@@ -1045,6 +1172,7 @@ def test_failures_page_groups_by_signature_phase_and_endpoint():
             "dataflow_id": "df-1",
             "dataflow_name": "read_orders",
             "status": "failed",
+            "source_status": "failed",
             "stage": "bronze",
             "source_name": "api",
             "destination_name": "lake",
@@ -1056,6 +1184,7 @@ def test_failures_page_groups_by_signature_phase_and_endpoint():
             "dataflow_id": "df-2",
             "dataflow_name": "write_customers",
             "status": "failed",
+            "destination_status": "failed",
             "stage": "silver",
             "source_name": "db",
             "destination_name": "lake",
@@ -1106,10 +1235,10 @@ def test_failures_page_groups_by_signature_phase_and_endpoint():
     assert failures["kpis"]["top_cause_runs"] == 2
     assert failures["kpis"]["top_cause_share"] == 66.67
     assert failures["latest_queue"][0]["failure_phase"] == "destination"
-    assert failures["latest_queue"][0]["failure_category"] == "Schema"
+    assert failures["latest_queue"][0]["failure_category"] == "Schema / format"
     category_matrix = {row["category"]: row for row in failures["failure_category_phase_matrix"]}
     assert category_matrix["Missing object"]["source"] == 2
-    assert category_matrix["Schema"]["destination"] == 1
+    assert category_matrix["Schema / format"]["destination"] == 1
     stage_matrix = {row["name"]: row for row in failures["failed_by_stage"]}
     assert stage_matrix["bronze"]["count"] == 2
     assert stage_matrix["bronze"]["source"] == 2
@@ -1161,32 +1290,33 @@ def test_failure_phase_uses_overhead_when_only_dataflow_error_exists():
     assert failures["latest_queue"][0]["failure_phase"] == "overhead"
     assert failures["latest_queue"][0]["failure_message"] == "Scheduler timeout while dispatching task"
     category_matrix = {row["category"]: row for row in failures["failure_category_phase_matrix"]}
-    assert category_matrix["Connectivity"]["overhead"] == 1
+    assert category_matrix["Timeout / throttling"]["overhead"] == 1
     assert failures["kpis"]["top_cause_share"] == 100
 
 
-def test_failure_phase_infers_phase_from_top_level_error_message():
+def test_failure_phase_does_not_infer_phase_from_top_level_error_message():
     examples = [
-        ("Failed to read source: table orders was not found", "source"),
-        ("Transformer pipeline failed: invalid expression", "transform"),
-        ("Failed to write destination: permission denied", "destination"),
-        ("A generic dataflow failure without phase evidence", "unknown"),
+        "Failed to read source: table orders was not found",
+        "Transformer pipeline failed: invalid expression",
+        "Failed to write destination: permission denied",
+        "A generic dataflow failure without phase evidence",
     ]
 
-    for message, expected_phase in examples:
+    for index, message in enumerate(examples):
         enriched = _enrich_dataflow_run_for_investigation({
-            "dataflow_run_id": f"run-{expected_phase}",
+            "dataflow_run_id": f"run-{index}",
             "status": "failed",
             "error_message": message,
         })
-        assert enriched["failure_phase"] == expected_phase
+        assert enriched["failure_phase"] == "overhead"
         assert enriched["failure_message"] == message
 
 
-def test_failure_phase_prefers_specific_error_and_failed_status_over_message_inference():
+def test_failure_phase_prefers_failed_status_and_its_specific_error():
     specific_error = _enrich_dataflow_run_for_investigation({
         "dataflow_run_id": "run-specific",
         "status": "failed",
+        "source_status": "failed",
         "source_error_message": "Source path was not found",
         "error_message": "Failed to write destination: permission denied",
     })
@@ -1242,6 +1372,24 @@ def test_volume_page_exposes_workload_kpis_for_overview():
     assert registry_row["volume_rows_read"] == 12
     assert registry_row["volume_est_rows_written"] == 12
     assert registry_row["volume_net_bytes"] == 230
+
+
+def test_lakehouse_destination_uses_explicit_metadata_before_path_fallback():
+    assert not _is_lakehouse_destination({
+        "destination_connection_type": "file",
+        "destination_format": "parquet",
+        "destination_path": "./output/parquet/orders_read_delta",
+    })
+    assert _is_lakehouse_destination({
+        "destination_connection_type": "lakehouse",
+        "destination_format": "delta",
+        "destination_path": "./output/orders",
+    })
+    assert _is_lakehouse_destination({
+        "destination_connection_type": "unknown",
+        "destination_format": None,
+        "destination_path": "./output/delta/orders",
+    })
 
 
 def test_volume_registry_aggregates_by_dataflow_and_preserves_candidate_evidence():
@@ -1579,55 +1727,107 @@ def test_parse_utc_datetime_normalizes_offsets_and_naive_values():
     assert parse_utc_datetime("2026-06-13T07:00:00").isoformat() == "2026-06-13T07:00:00+00:00"
 
 
-def test_legacy_duckdb_cache_migrates_to_typed_tables(tmp_path: Path, monkeypatch):
+def test_legacy_duckdb_cache_is_replaced_by_typed_candidate_after_reader_drain(tmp_path: Path, monkeypatch):
     import duckdb
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
-    dataflow_row = {
-        "job_id": "job-1",
-        "dataflow_id": "df-1",
-        "dataflow_name": "orders",
-        "operation_type": "etl",
-        "stage": "silver",
-        "status": "succeeded",
-        "end_time": "2026-06-13T00:00:00+00:00",
-        "source_connection_type": "local",
-        "destination_connection_type": "delta",
-        "destination_load_type": "merge",
-    }
-    job_row = {
-        "job_id": "job-1",
-        "status": "succeeded",
-        "engine_name": "polars",
-        "metadata_provider_name": "file",
-        "end_time": "2026-06-13T00:01:00+00:00",
-    }
     with duckdb.connect(str(analytics_path)) as connection:
         connection.execute("CREATE TABLE etl_dataflow_run_cache (source_id INTEGER, file_uri VARCHAR, row_json VARCHAR)")
         connection.execute("CREATE TABLE etl_job_run_cache (source_id INTEGER, file_uri VARCHAR, row_json VARCHAR)")
-        connection.execute(
-            "INSERT INTO etl_dataflow_run_cache VALUES (?, ?, ?)",
-            [1, "dataflow.parquet", json.dumps(dataflow_row)],
-        )
-        connection.execute(
-            "INSERT INTO etl_job_run_cache VALUES (?, ?, ?)",
-            [1, "job.jsonl", json.dumps(job_row)],
-        )
 
     dataflows, jobs = logs_cache._read_duckdb_rows([1])
+    assert dataflows == []
+    assert jobs == []
 
-    assert dataflows[0]["dataflow_name"] == "orders"
-    assert jobs[0]["engine_name"] == "polars"
+    reader = logs_cache.analytics_connections.connect(analytics_path, read_only=True)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                logs_cache._upsert_duckdb_rows,
+                1,
+                [],
+                [
+                    (
+                        "job.jsonl",
+                        "job_jsonl",
+                        "{}",
+                        {
+                            "job_id": "job-1",
+                            "status": "succeeded",
+                            "engine_name": "polars",
+                            "end_time": "2026-06-13T00:01:00+00:00",
+                        },
+                    )
+                ],
+                [],
+                ["job.jsonl"],
+            )
+            assert wait([future], timeout=0.2).not_done
+            reader.close()
+            assert future.result(timeout=5)["published"] is True
+    finally:
+        reader.close()
+
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         tables = {row[0] for row in connection.execute("show tables").fetchall()}
         assert {"etl_dataflow_runs", "etl_job_runs", "etl_monitoring_filter_values"} <= tables
+        assert "etl_dataflow_run_cache" not in tables
+        assert "etl_job_run_cache" not in tables
         assert len(connection.execute("PRAGMA table_info('etl_dataflow_runs')").fetchall()) > 3
-        assert connection.execute("select count(*) from etl_dataflow_runs").fetchone()[0] == 1
+        assert connection.execute("select count(*) from etl_dataflow_runs").fetchone()[0] == 0
         assert connection.execute("select count(*) from etl_job_runs").fetchone()[0] == 1
-        assert connection.execute(
-            "select count(*) from etl_monitoring_filter_values where field = 'operation_type' and value = 'etl'"
-        ).fetchone()[0] == 1
+
+
+def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, monkeypatch):
+    import duckdb
+
+    analytics_path = tmp_path / "analytics.duckdb"
+    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    first = logs_cache._upsert_duckdb_rows(
+        7,
+        [],
+        [
+            (
+                "job.jsonl",
+                "job_jsonl",
+                "{}",
+                {"job_id": "job-1", "status": "succeeded", "end_time": "2026-07-01T00:00:00Z"},
+            )
+        ],
+        [],
+        ["job.jsonl"],
+    )
+    assert first["published"] is True
+
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        before = connection.execute(
+            "select m.generation, s.generation, (select count(*) from etl_job_runs) "
+            "from etl_analytics_meta m cross join etl_cache_sources s "
+            "where m.singleton_id = 1 and s.source_id = 7"
+        ).fetchone()
+
+    def fail_insert(*_args, **_kwargs):
+        raise RuntimeError("invalid parquet")
+
+    monkeypatch.setattr(logs_cache, "_insert_dataflow_file", fail_insert)
+    failed = logs_cache._upsert_duckdb_rows(
+        7,
+        [("bad.parquet", "dataflow_parquet", "{}")],
+        [],
+        [],
+        ["bad.parquet"],
+    )
+    assert failed["published"] is False
+    assert failed["errors"]
+
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        after = connection.execute(
+            "select m.generation, s.generation, (select count(*) from etl_job_runs) "
+            "from etl_analytics_meta m cross join etl_cache_sources s "
+            "where m.singleton_id = 1 and s.source_id = 7"
+        ).fetchone()
+    assert after == before
 
 
 def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path: Path, monkeypatch):
@@ -1635,9 +1835,9 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
-    monkeypatch.setattr(logs_cache, "_cached_source_context", lambda *_args: ([7], []))
 
     with duckdb.connect(str(analytics_path)) as connection:
+        logs_cache._ensure_duckdb_tables(connection)
         logs_cache._ensure_typed_table(
             connection,
             logs_cache.DATAFLOW_TABLE,
@@ -1672,14 +1872,18 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
             ],
             logs_cache.JOB_COLUMN_TYPES,
         )
+        logs_cache._mark_cache_source(connection, 7)
+        logs_cache._publish_analytics_generation(connection)
 
     def reject_row_materialization(*_args, **_kwargs):
         raise AssertionError("Overview aggregate must not materialize cached Monitoring rows")
 
     monkeypatch.setattr(logs_cache, "_read_duckdb_rows", reject_row_materialization)
+    source = PathRecord(str(tmp_path))
+    source.id = 7
     cached = logs_cache.cached_monitoring_summary(
         object(),
-        [],
+        [source],
         cutoff=datetime(2026, 6, 10, 3, 0, tzinfo=timezone.utc),
         timezone_name="Asia/Saigon",
         utc_offset_seconds=None,
@@ -1708,7 +1912,6 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
-    monkeypatch.setattr(logs_cache, "_cached_source_context", lambda *_args: ([7], []))
     recent_rows = [
         (
             f"recent-{index}.parquet",
@@ -1725,6 +1928,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
         for index in range(1001)
     ]
     with duckdb.connect(str(analytics_path)) as connection:
+        logs_cache._ensure_duckdb_tables(connection)
         logs_cache._ensure_typed_table(
             connection,
             logs_cache.DATAFLOW_TABLE,
@@ -1751,8 +1955,12 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
             ],
             logs_cache.DATAFLOW_COLUMN_TYPES,
         )
+        logs_cache._mark_cache_source(connection, 7)
+        logs_cache._publish_analytics_generation(connection)
 
-    result = logs_cache.query_cached_latest_dataflow_runs(object(), [])
+    source = PathRecord(str(tmp_path))
+    source.id = 7
+    result = logs_cache.query_cached_latest_dataflow_runs(object(), [source])
 
     assert result is not None
     rows, ambiguous_names, errors = result
@@ -1760,6 +1968,21 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
     assert ambiguous_names == []
     assert {row["dataflow_id"] for row in rows} == {"recent", "old"}
     assert next(row for row in rows if row["dataflow_id"] == "recent")["dataflow_run_id"] == "run-1000"
+
+
+def test_legacy_dataflow_cache_table_is_recreated_in_one_schema_pass(tmp_path: Path):
+    import duckdb
+
+    analytics_path = tmp_path / "analytics.duckdb"
+    with duckdb.connect(str(analytics_path)) as connection:
+        connection.execute(
+            f"CREATE TABLE {logs_cache.DATAFLOW_TABLE} (_raw_json VARCHAR)"
+        )
+        logs_cache._ensure_duckdb_tables(connection)
+        columns = logs_cache._table_columns(connection, logs_cache.DATAFLOW_TABLE)
+
+    assert "_raw_json" not in columns
+    assert "_source_id" in columns
 
 
 def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path: Path, monkeypatch):

@@ -180,12 +180,12 @@ export function ProjectReferenceMappingDrawer({ row, onClose, onMapInTable, mapI
           </section>
         ) : null}
 
-        {row.state === "review" || row.state === "automatic" ? (
+        {row.state === "unresolved" || row.state === "automatic" ? (
           <section className="project-mapping-readonly" aria-label="Resolution note">
             <AlertTriangle size={16} aria-hidden="true" />
             <div>
-              <strong>{row.state === "review" ? "Occurrences currently resolve differently." : "Automatic resolution is active."}</strong>
-              <p>A project mapping replaces the automatic target for every occurrence of this canonical reference.</p>
+              <strong>{row.state === "unresolved" ? "This reference needs mapping." : "Automatic resolution is active."}</strong>
+              <p>{row.state === "unresolved" ? "Select one canonical asset to resolve this reference." : "A project mapping replaces the automatic target for every occurrence of this canonical reference."}</p>
             </div>
           </section>
         ) : null}
@@ -205,7 +205,7 @@ export function ProjectReferenceMappingDrawer({ row, onClose, onMapInTable, mapI
                       <small>{environment.observedTargetIds.map((targetId) => row.observedTargets.find((item) => item.target.id === targetId)?.target.displayName).filter(Boolean).join(", ")}</small>
                     ) : null}
                   </div>
-                  <span>{projectEnvironmentResolutionLabel(environment, row.mapping)}</span>
+                  <span>{projectEnvironmentResolutionLabel(environment)}</span>
                 </li>
               ))}
             </ul>

@@ -23,7 +23,7 @@ export const LineageAssetNode = memo(function LineageAssetNode({
       {data.referenceStatus ? <span className={`lineage-node-badge is-reference-status ${data.referenceStatus}`}>{data.referenceStatus.replace(/_/g, " ")}</span> : null}
       {data.issueCount ? <span className="lineage-issue-count" title={`${data.issueCount} input reference${data.issueCount === 1 ? "" : "s"} requiring attention`}>{data.issueCount}</span> : null}
       {data.assetType ? (
-        <span className="lineage-node-type-icon" title={data.assetType.replace(/_/g, " ")}>
+        <span className={`lineage-node-type-icon asset-tone-${assetTypeTone(data.assetType)}`} title={data.assetType.replace(/_/g, " ")}>
           <Icon icon={assetTypeIconId(data.assetType)} width={12} height={12} />
         </span>
       ) : null}

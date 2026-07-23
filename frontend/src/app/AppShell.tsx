@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Environment, EnvironmentFreshness, Project } from "../shared/api/types";
+import type { EnvironmentContext } from "../shared/api/types";
 import { useDrawerEscape } from "../shared/hooks/useDrawerEscape";
 import { ContextBar } from "./ContextBar";
 import { SidebarNav } from "./SidebarNav";
@@ -8,15 +8,13 @@ import type { CapabilityKey, ModuleKey, ModuleScope } from "./moduleRegistry";
 interface AppShellProps {
   activeModule: ModuleKey;
   activeScope: ModuleScope;
-  projects: Project[];
-  environments: Environment[];
-  selectedProjectId: number | null;
-  selectedEnvironmentId: number | null;
+  project: { id: number; name: string } | null;
+  environment: { id: number; name: string } | null;
   sidebarCollapsed: boolean;
   enabledCapabilities: ReadonlySet<CapabilityKey>;
   metadataSourceCount: number;
   logPathCount: number;
-  freshness: EnvironmentFreshness | null;
+  freshness: EnvironmentContext["freshness"] | null;
   error: string | null;
   children: ReactNode;
   onNavigate: (module: ModuleKey) => void;
@@ -28,10 +26,8 @@ interface AppShellProps {
 export function AppShell({
   activeModule,
   activeScope,
-  projects,
-  environments,
-  selectedProjectId,
-  selectedEnvironmentId,
+  project,
+  environment,
   sidebarCollapsed,
   enabledCapabilities,
   metadataSourceCount,
@@ -59,8 +55,8 @@ export function AppShell({
     <div className={shellClassName}>
       <SidebarNav
         activeModule={activeModule}
-        hasProject={Boolean(selectedProjectId)}
-        hasEnvironment={Boolean(selectedEnvironmentId)}
+        hasProject={Boolean(project)}
+        hasEnvironment={Boolean(environment)}
         collapsed={sidebarCollapsed}
         enabledCapabilities={enabledCapabilities}
         onToggleCollapsed={onToggleSidebar}
@@ -71,10 +67,8 @@ export function AppShell({
         <ContextBar
           activeModule={activeModule}
           scope={activeScope}
-          projects={projects}
-          environments={environments}
-          selectedProjectId={selectedProjectId}
-          selectedEnvironmentId={selectedEnvironmentId}
+          project={project}
+          environment={environment}
           metadataSourceCount={metadataSourceCount}
           logPathCount={logPathCount}
           freshness={freshness}

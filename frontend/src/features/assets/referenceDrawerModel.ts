@@ -16,7 +16,7 @@ export function referenceResolutionStory(
     || reference.resolved_asset_id
     || "one canonical asset";
 
-  if (reference.group_status === "resolved_single") {
+  if (reference.resolution.state !== "unresolved") {
     return {
       tone: "resolved",
       title: `All occurrences resolve to ${targetName}.`,
@@ -25,7 +25,7 @@ export function referenceResolutionStory(
         : "The resolver found one unique canonical target.",
     };
   }
-  if (reference.group_status === "ambiguous") {
+  if (reference.resolution.reason === "multiple_matches") {
     const candidateCount = reference.candidate_asset_ids.length;
     return {
       tone: "warning",
@@ -33,7 +33,7 @@ export function referenceResolutionStory(
       detail: "The resolver cannot select one unique target.",
     };
   }
-  if (reference.group_status === "mapping_target_missing") {
+  if (reference.resolution.reason === "target_missing") {
     const missingTarget = reference.manual_mapping?.target_normalized_value;
     return {
       tone: "attention",
@@ -43,15 +43,15 @@ export function referenceResolutionStory(
         : "The project mapping target is unavailable in this environment.",
     };
   }
-  if (reference.group_status === "partially_resolved") {
-    const resolvedCount = occurrences.filter((item) => item.resolution_status === "resolved_auto" || item.resolution_status === "resolved_manual").length;
+  if (reference.resolution.reason === "incomplete") {
+    const resolvedCount = occurrences.filter((item) => item.resolution.state !== "unresolved").length;
     return {
       tone: "warning",
       title: `${resolvedCount} of ${occurrenceCount} occurrences resolve successfully.`,
       detail: "A project mapping can set one target for every occurrence of this reference.",
     };
   }
-  if (reference.group_status === "resolved_mixed") {
+  if (reference.resolution.reason === "conflicting_targets") {
     return {
       tone: "review",
       title: `Occurrences resolve to ${plural(reference.resolved_asset_ids.length, "different asset")}.`,
@@ -71,7 +71,7 @@ export function referenceOccurrenceCount(
   reference: AssetReferenceGroupItem,
   occurrences: AssetReferenceOccurrenceItem[],
 ) {
-  return occurrences.length || reference.occurrence_ids.length || reference.dependency_count;
+  return occurrences.length || reference.occurrence_count || reference.occurrence_ids.length || reference.dependency_count;
 }
 
 export interface ReferenceUsageGroup {
@@ -115,7 +115,7 @@ export function occurrenceLocationLabel(occurrence: AssetReferenceOccurrenceItem
 }
 
 export function occurrenceResolutionMethod(occurrence: AssetReferenceOccurrenceItem) {
-  return humanize(occurrence.resolution_method) || humanize(occurrence.resolution_status) || "unknown result";
+  return humanize(occurrence.resolution_method) || humanize(occurrence.resolution.state) || "unknown result";
 }
 
 export function occurrenceScopeLabel(occurrence: AssetReferenceOccurrenceItem) {

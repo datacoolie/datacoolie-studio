@@ -1,6 +1,6 @@
 import { Activity, Check, ChevronDown, FilterX, GitBranch, LocateFixed, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { AssetInventoryItem, LatestStatusResponse, LineageDataflow, LineageResponse, MetadataEditorDocument, ProjectReferenceMapping } from "../../shared/api/types";
+import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument } from "../../shared/api/types";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { lineageDataflowFocusFromSearch, type LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
@@ -27,13 +27,14 @@ import {
 } from "./model/graphIndex";
 import { presentLineageAsset } from "./model/presentation";
 import { isLineageAsset, type LineageFilters, type LineageFocus, type LineageSearchResult, type LineageSelection, type TraceDirection } from "./model/types";
+import { toggleFilterValue } from "./model/filterSelection";
 import type { ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
+import { useLineageLatestStatus } from "./lineageQueries";
 
 interface LineageViewProps {
   environmentId: number;
-  lineage: LineageResponse | null;
-  latestStatus: LatestStatusResponse | null;
-  onEnsureLatestRuns: () => Promise<void>;
+  lineage: LineageResponse;
+  onRefreshLineage: () => Promise<unknown>;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
   onEnsureMetadataEditor: () => Promise<void>;
@@ -41,20 +42,17 @@ interface LineageViewProps {
   onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  loading: boolean;
   routeSearch?: string;
   onOpenMetadata: (target: MetadataNavigationTarget) => void;
-  projectMappings: ProjectReferenceMapping[];
   onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
   onUpdateReferenceMapping: (mappingId: number, payload: ReferenceMappingPayload) => Promise<unknown>;
   onDeleteReferenceMapping: (mappingId: number) => Promise<unknown>;
-  onRefreshReferenceMappings: () => Promise<void>;
 }
 
 const EMPTY_FILTERS: LineageFilters = { connections: [], stages: [], formats: [], resolutions: [] };
 const LINEAGE_DATAFLOW_HISTORY_KEY = "datacoolieLineageDataflowDrawer";
 
-export function LineageView({ environmentId, lineage, latestStatus, onEnsureLatestRuns, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, loading, routeSearch, onOpenMetadata, projectMappings, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping, onRefreshReferenceMappings }: LineageViewProps) {
+export function LineageView({ environmentId, lineage, onRefreshLineage, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, routeSearch, onOpenMetadata, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping }: LineageViewProps) {
   const [query, setQuery] = useState("");
   const [focuses, setFocuses] = useState<LineageFocus[]>([]);
   const [direction, setDirection] = useState<TraceDirection>("both");
@@ -65,11 +63,13 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
   const [selection, setSelection] = useState<LineageSelection>(null);
   const [selectedMetadataDataflow, setSelectedMetadataDataflow] = useState<MetadataDataflowSelection | null>(null);
   const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
+  const latestStatusQuery = useLineageLatestStatus(environmentId, statusOverlay || selection?.kind === "dataflow");
+  const latestStatus = latestStatusQuery.data ?? null;
   const index = useMemo(() => createLineageGraphIndex(lineage), [lineage]);
   const activeMetadataDocument = metadataEditorDraft ?? metadataEditorDocument;
   const metadataDataflowRecords = useMemo(
-    () => buildMetadataDataflowRecords(activeMetadataDocument),
-    [activeMetadataDocument],
+    () => selectedMetadataDataflow ? buildMetadataDataflowRecords(activeMetadataDocument) : [],
+    [activeMetadataDocument, selectedMetadataDataflow],
   );
   const metadataDataflowIds = useMemo(
     () => new Set(index.dataflows.map((dataflow) => dataflow.id)),
@@ -103,7 +103,7 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
     || filters.resolutions.length > 0;
   const activeFilterCount = filters.connections.length + filters.stages.length + filters.formats.length + filters.resolutions.length;
   const visibleAssetCount = visible.entities.filter(isLineageAsset).length;
-  const visibleUnresolvedCount = visible.dependencies.filter((dependency) => dependency.resolution_status === "unresolved").length;
+  const visibleUnresolvedCount = visible.dependencies.filter((dependency) => dependency.resolution.state === "unresolved").length;
   const unresolvedCount = focuses.length || filtersActive || showReferences
     ? visibleUnresolvedCount
     : lineage?.summary.unresolved_dependencies ?? 0;
@@ -176,11 +176,8 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
     setSelection({ kind: "asset", id: focusAsset });
   }, [routeSearch, index]);
 
-  if (!lineage && !loading) {
-    return <EmptyState icon={<GitBranch size={24} />} title="Add metadata source to view lineage" />;
-  }
-  if (!lineage?.assets.length) {
-    return <EmptyState icon={<GitBranch size={24} />} title={loading ? "Loading lineage" : "No lineage assets"} />;
+  if (!lineage.assets.length) {
+    return <EmptyState icon={<GitBranch size={24} />} title="No lineage assets" />;
   }
 
   function focusSearchResult(result: LineageSearchResult) {
@@ -193,7 +190,6 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
   }
 
   function openMetadataDataflow(dataflow: LineageDataflow) {
-    void onEnsureLatestRuns();
     const nextSelection = dataflowSelection(dataflow);
     const historyState = window.history.state && typeof window.history.state === "object"
       ? { ...(window.history.state as Record<string, unknown>) }
@@ -361,7 +357,6 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
             <input type="checkbox" checked={statusOverlay} onChange={(event) => {
               const enabled = event.target.checked;
               setStatusOverlay(enabled);
-              if (enabled) void onEnsureLatestRuns();
             }} />
             <span>Color by latest known run</span>
           </label>
@@ -378,7 +373,7 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
             <span className={`lineage-result-stat${unresolvedCount ? " is-attention" : ""}`}>· {unresolvedCount} unresolved</span>
             {focuses.length ? <span className="lineage-result-context">· {direction} trace</span> : null}
           </div>
-          <span>{lineage.diagnostics.length ? `${lineage.diagnostics.length} diagnostics` : "Resolved lineage graph"}</span>
+          <span>{lineage.summary.diagnostics ? `${lineage.summary.diagnostics} diagnostics` : "Resolved lineage graph"}</span>
         </div>
         <div className={`lineage-canvas${selection ? " has-details" : ""}`}>
           <LineageCanvas
@@ -399,12 +394,11 @@ export function LineageView({ environmentId, lineage, latestStatus, onEnsureLate
             latestStatus={latestStatus}
             metadataDataflowIds={metadataDataflowIds}
             mappingAssets={lineage.assets as unknown as AssetInventoryItem[]}
-            mappings={projectMappings}
             mappingBusy={busy}
             onCreateReferenceMapping={onCreateReferenceMapping}
             onUpdateReferenceMapping={onUpdateReferenceMapping}
             onDeleteReferenceMapping={onDeleteReferenceMapping}
-            onRefreshReferenceMappings={onRefreshReferenceMappings}
+            onRefreshReferenceMappings={async () => { await onRefreshLineage(); }}
             suspended={Boolean(selectedMetadataDataflowRecord)}
             onOpenDataflowDetails={openMetadataDataflow}
             onClose={() => setSelection(null)}
@@ -494,17 +488,7 @@ function FilterMultiSelect({ label, values, options, emptyLabel, open, onOpenCha
   }
 
   function selectValue(option: string, event: MouseEvent<HTMLButtonElement>) {
-    if (event.ctrlKey || event.metaKey) {
-      onChange(selected.has(option)
-        ? values.filter((value) => value !== option)
-        : [...values, option]);
-      return;
-    }
-    if (allSelected && selected.has(option)) {
-      onChange(values.filter((value) => value !== option));
-      return;
-    }
-    onChange([option]);
+    onChange(toggleFilterValue(values, option, event.ctrlKey || event.metaKey));
   }
 
   return (

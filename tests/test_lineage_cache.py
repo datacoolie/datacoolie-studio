@@ -78,14 +78,23 @@ def read_orders(engine, source):
 
         first_response = client.get(f"/api/v1/environments/{environment['id']}/lineage")
         first = first_response.json()
-        assert first["summary"]["resolved_dependencies"] == 1
+        assert first["schema_version"] == "lineage.v4"
+        assert "reference_occurrences" not in first
+        assert "diagnostics" not in first
+        assert all("observations" not in item and "identifiers" not in item and "query" not in item for item in first["assets"])
+        assert all("mapping_target" in item for item in first["assets"])
+        assert all("observations" not in item and "occurrence_ids" not in item for item in first["references"])
+        assert all("observations" not in item for item in first["dependencies"])
+        assert sum(item["occurrence_count"] for item in first["references"]) == first["summary"]["dependencies"]
+        assert first["summary"]["automatic_dependencies"] == 1
         assert first_response.headers["etag"]
+        assert "lineage-v4-compact" in first_response.headers["etag"]
         assert client.get(
             f"/api/v1/environments/{environment['id']}/lineage",
             headers={"If-None-Match": first_response.headers["etag"]},
         ).status_code == 304
-        with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from environment_read_model_cache_entries where model_key = 'lineage.graph'").fetchone()[0] == 1
+        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+            assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
         def fail_if_analyzed(*_args, **_kwargs):
             raise AssertionError("unchanged lineage should use the cached graph")
@@ -95,8 +104,8 @@ def read_orders(engine, source):
         assert second == first
 
         client.delete(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}")
-        with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from environment_read_model_cache_entries where model_key = 'lineage.graph'").fetchone()[0] == 0
+        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+            assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 0
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -153,9 +162,10 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         client.post(f"/api/v1/environments/{environment['id']}/metadata-sources/1/refresh")
 
         first = client.get(f"/api/v1/environments/{environment['id']}/lineage").json()
-        assert first["summary"]["ambiguous_dependencies"] == 1
-        with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from environment_read_model_cache_entries where model_key = 'lineage.graph'").fetchone()[0] == 1
+        assert first["summary"]["unresolved_dependencies"] == 1
+        assert first["references"][0]["resolution"]["reason"] == "multiple_matches"
+        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+            assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
         mapping = client.post(
             f"/api/v1/projects/{project['id']}/reference-mappings",
@@ -169,8 +179,16 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         assert mapping.status_code == 200
 
         second = client.get(f"/api/v1/environments/{environment['id']}/lineage").json()
-        assert second["summary"]["resolved_manual_dependencies"] == 1
-        with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from environment_read_model_cache_entries where model_key = 'lineage.graph'").fetchone()[0] == 1
+        assert second["summary"]["manual_dependencies"] == 1
+        mapped_reference = next(item for item in second["references"] if item["manual_mapping"])
+        assert mapped_reference["manual_mapping"]["mapping_id"] == mapping.json()["id"]
+        reference_detail = client.get(
+            f"/api/v1/environments/{environment['id']}/asset-references/{mapped_reference['id']}"
+        )
+        assert reference_detail.status_code == 200
+        assert reference_detail.json()["reference"]["id"] == mapped_reference["id"]
+        assert reference_detail.json()["occurrences"]
+        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+            assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)

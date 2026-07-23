@@ -1,17 +1,18 @@
 import { lazy, Suspense } from "react";
 import { MasterDataPage } from "../features/master-data/MasterDataPage";
-import { OverviewPage } from "../features/overview/OverviewPage";
-import { ProjectDetailPage } from "../features/projects/ProjectDetailPage";
-import { ProjectsPage } from "../features/projects/ProjectsPage";
-import { SettingsPage } from "../features/settings/SettingsPage";
 import { SourcesPage } from "../features/sources/SourcesPage";
+import { useEnvironmentOverviewQuery } from "../features/environments/environmentQueries";
+import { useLineageGraph } from "../features/lineage/lineageQueries";
+import { MonitoringRoute } from "../features/monitoring/MonitoringRoute";
 import { lineageDataflowFocusSearch } from "../shared/lineageNavigation";
+import type { StudioDiagnosticsState } from "../features/settings/hooks/useStudioDiagnostics";
 import type { StudioSettingsState } from "../features/settings/hooks/useStudioSettings";
 import { EmptyState } from "../shared/components/EmptyState";
 import { monitoringDefaultPage } from "./moduleRegistry";
 import type { StudioModulesState } from "./useStudioModules";
 import type { StudioRouter } from "./useStudioRouter";
 import type { StudioWorkspace } from "./useStudioWorkspace";
+import type { EnvironmentContext } from "../shared/api/types";
 
 // Heavy, graph/chart-heavy pages are code-split so the initial bundle stays small.
 const MetadataExplorer = lazy(() =>
@@ -20,18 +21,29 @@ const MetadataExplorer = lazy(() =>
 const LineageView = lazy(() =>
   import("../features/lineage/LineageView").then((module) => ({ default: module.LineageView }))
 );
-const MonitoringView = lazy(() =>
-  import("../features/monitoring/MonitoringView").then((module) => ({ default: module.MonitoringView }))
-);
 const AssetsView = lazy(() =>
   import("../features/assets/AssetsView").then((module) => ({ default: module.AssetsView }))
+);
+const SettingsPage = lazy(() =>
+  import("../features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
+);
+const ProjectsPage = lazy(() =>
+  import("../features/projects/ProjectsPage").then((module) => ({ default: module.ProjectsPage }))
+);
+const OverviewPage = lazy(() =>
+  import("../features/overview/OverviewPage").then((module) => ({ default: module.OverviewPage }))
+);
+const ProjectDetailPage = lazy(() =>
+  import("../features/projects/ProjectDetailPage").then((module) => ({ default: module.ProjectDetailPage }))
 );
 
 interface ModuleViewProps {
   router: StudioRouter;
   workspace: StudioWorkspace;
   settings: StudioSettingsState;
+  diagnostics: StudioDiagnosticsState;
   modules: StudioModulesState;
+  environmentContext?: EnvironmentContext | null;
 }
 
 /** Resolves the active route module to its feature page. */
@@ -43,20 +55,30 @@ export function ModuleView(props: ModuleViewProps) {
   );
 }
 
-function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps) {
+function ResolveModule({ router, workspace, settings, diagnostics, modules, environmentContext }: ModuleViewProps) {
   const { route } = router;
 
   switch (route.module) {
     case "projects":
       if (route.projectId) {
+        if (workspace.projectSummariesLoading && !workspace.selectedProjectSummary) {
+          return <EmptyState title="Loading project…" />;
+        }
+        if (workspace.projectSummariesError && !workspace.selectedProjectSummary) {
+          return (
+            <EmptyState
+              title="Unable to load project"
+              detail={workspace.projectSummariesError}
+              action={<button type="button" onClick={() => void workspace.reloadProjectSummaries()}>Retry</button>}
+            />
+          );
+        }
         return (
           <ProjectDetailPage
             project={workspace.selectedProjectSummary}
             projectId={route.projectId}
             projectName={workspace.selectedProject?.name ?? workspace.selectedProjectSummary?.name ?? null}
             section={route.projectSection ?? "overview"}
-            environments={workspace.environments}
-            mappings={workspace.projectReferenceMappings}
             busy={workspace.busy}
             routeSearch={route.search}
             onDeleteProject={workspace.deleteProject}
@@ -69,7 +91,6 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
               const envId = await workspace.createEnvironment(name, projectId);
               if (envId) router.openEnvironmentSources(projectId, envId);
             }}
-            onReloadMappings={workspace.reloadProjectReferenceMappings}
             onCreateMapping={workspace.createProjectReferenceMapping}
             onUpdateMapping={workspace.updateProjectReferenceMapping}
             onDeleteMapping={workspace.deleteProjectReferenceMapping}
@@ -79,7 +100,11 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
       return (
         <ProjectsPage
           projects={workspace.projectSummaries}
+          loading={workspace.projectSummariesLoading}
+          loaded={workspace.projectSummariesLoaded}
+          loadError={workspace.projectSummariesError}
           busy={workspace.busy}
+          onRetry={workspace.reloadProjectSummaries}
           onCreateProject={workspace.createProject}
           onOpenEnvironment={router.openProjectEnvironment}
           onOpenProject={router.openProject}
@@ -93,8 +118,12 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
       return (
         <SettingsPage
           settings={settings.settings}
-          busy={settings.busy}
+          settingsLoading={settings.loading}
+          saving={settings.saving}
           onSaveSettings={settings.saveSettings}
+          diagnostics={diagnostics.diagnostics}
+          diagnosticsLoading={diagnostics.loading}
+          onReloadDiagnostics={diagnostics.reload}
           modules={modules.modules}
           modulesBusyKey={modules.busyKey}
           onToggleModule={modules.setEnabled}
@@ -107,16 +136,18 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
   if (!route.environmentId) {
     return <EmptyState title="Select an environment" />;
   }
+  if (environmentContext && route.projectId !== environmentContext.environment.project_id) {
+    return (
+      <EmptyState
+        title="Environment route mismatch"
+        detail="This environment does not belong to the project in the current URL."
+      />
+    );
+  }
 
   switch (route.module) {
     case "overview":
-      return (
-        <OverviewPage
-          overview={workspace.overview}
-          loading={workspace.loading}
-          onNavigate={router.navigate}
-        />
-      );
+      return <EnvironmentOverviewRoute environmentId={route.environmentId} onNavigate={router.navigate} />;
     case "sources":
       return (
         <SourcesPage
@@ -142,6 +173,7 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
     case "metadata":
       return (
         <MetadataExplorer
+          key={route.environmentId}
           editorDocument={workspace.metadataEditorDocument}
           serverDraft={workspace.metadataEditorDraft}
           routeSearch={route.search}
@@ -164,8 +196,8 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
     case "assets":
       return (
         <AssetsView
+          key={route.environmentId}
           environmentId={route.environmentId}
-          assets={workspace.assets}
           metadataEditorDocument={workspace.metadataEditorDocument}
           metadataEditorDraft={workspace.metadataEditorDraft}
           onEnsureMetadataEditor={workspace.ensureMetadataEditorContext}
@@ -173,7 +205,6 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
           onValidateMetadata={workspace.validateMetadataEditorDocument}
           onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
           onSaveMetadata={workspace.saveMetadataEditorDocument}
-          loading={workspace.loading}
           routeSearch={route.search}
           onFocusInLineage={(assetId) => {
             router.navigate("lineage", `focusAsset=${encodeURIComponent(assetId)}`);
@@ -182,52 +213,87 @@ function ResolveModule({ router, workspace, settings, modules }: ModuleViewProps
           onOpenMetadata={(target) => {
             router.navigateMetadata(target);
           }}
-          projectMappings={workspace.projectReferenceMappings}
           mappingBusy={workspace.busy}
           onCreateReferenceMapping={workspace.createProjectReferenceMapping}
           onUpdateReferenceMapping={workspace.updateProjectReferenceMapping}
           onDeleteReferenceMapping={workspace.deleteProjectReferenceMapping}
-          onRefreshReferenceMappings={workspace.reloadProjectReferenceMappings}
         />
       );
     case "lineage":
       return (
-        <LineageView
+        <EnvironmentLineageRoute
           environmentId={route.environmentId}
-          lineage={workspace.lineage}
-          latestStatus={workspace.latestStatus}
-          onEnsureLatestRuns={workspace.ensureLatestRuns}
-          metadataEditorDocument={workspace.metadataEditorDocument}
-          metadataEditorDraft={workspace.metadataEditorDraft}
-          onEnsureMetadataEditor={workspace.ensureMetadataEditorContext}
-          busy={workspace.busy}
-          onValidateMetadata={workspace.validateMetadataEditorDocument}
-          onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
-          onSaveMetadata={workspace.saveMetadataEditorDocument}
-          loading={workspace.loading}
+          workspace={workspace}
           routeSearch={route.search}
-          onOpenMetadata={(target) => router.navigateMetadata(target)}
-          projectMappings={workspace.projectReferenceMappings}
-          onCreateReferenceMapping={workspace.createProjectReferenceMapping}
-          onUpdateReferenceMapping={workspace.updateProjectReferenceMapping}
-          onDeleteReferenceMapping={workspace.deleteProjectReferenceMapping}
-          onRefreshReferenceMappings={workspace.refreshCurrentEnvironment}
+          onOpenMetadata={router.navigateMetadata}
         />
       );
     case "master-data":
       return <MasterDataPage />;
     case "monitoring":
       return (
-        <MonitoringView
+        <MonitoringRoute
           environmentId={route.environmentId}
-          sourceCacheVersion={workspace.environmentFreshness?.source_cache_version}
-          report={workspace.monitoringReport}
-          loading={workspace.loading}
           activePage={route.monitoringPage ?? monitoringDefaultPage}
           onPageChange={router.navigateMonitoringPage}
+          onOpenSources={() => router.navigate("sources")}
         />
       );
     default:
       return <EmptyState title="Unknown module" />;
   }
+}
+
+function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, onOpenMetadata }: {
+  environmentId: number;
+  workspace: StudioWorkspace;
+  routeSearch?: string;
+  onOpenMetadata: StudioRouter["navigateMetadata"];
+}) {
+  const graph = useLineageGraph(environmentId);
+  if (graph.isError && !graph.data) {
+    return <EmptyState title="Unable to load lineage" detail={graph.error instanceof Error ? graph.error.message : "Lineage request failed"} action={<button type="button" onClick={() => void graph.refetch()}>Retry</button>} />;
+  }
+  if (!graph.data) return <EmptyState title="Loading lineage…" />;
+  return (
+    <LineageView
+      key={environmentId}
+      environmentId={environmentId}
+      lineage={graph.data}
+      onRefreshLineage={graph.refetch}
+      metadataEditorDocument={workspace.metadataEditorDocument}
+      metadataEditorDraft={workspace.metadataEditorDraft}
+      onEnsureMetadataEditor={workspace.ensureMetadataEditorContext}
+      busy={workspace.busy}
+      onValidateMetadata={workspace.validateMetadataEditorDocument}
+      onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
+      onSaveMetadata={workspace.saveMetadataEditorDocument}
+      routeSearch={routeSearch}
+      onOpenMetadata={onOpenMetadata}
+      onCreateReferenceMapping={workspace.createProjectReferenceMapping}
+      onUpdateReferenceMapping={workspace.updateProjectReferenceMapping}
+      onDeleteReferenceMapping={workspace.deleteProjectReferenceMapping}
+    />
+  );
+}
+
+function EnvironmentOverviewRoute({
+  environmentId,
+  onNavigate,
+}: {
+  environmentId: number;
+  onNavigate: StudioRouter["navigate"];
+}) {
+  const overview = useEnvironmentOverviewQuery(environmentId);
+  if (overview.isError && !overview.data) {
+    return (
+      <EmptyState
+        title="Unable to load overview"
+        detail={overview.error instanceof Error ? overview.error.message : "Overview request failed"}
+        action={<button type="button" onClick={() => void overview.refetch()}>Retry</button>}
+      />
+    );
+  }
+  if (!overview.data) return <EmptyState title="Loading overview…" />;
+  return <OverviewPage overview={overview.data} onNavigate={onNavigate} />;
 }
