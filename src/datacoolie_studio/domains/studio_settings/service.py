@@ -13,7 +13,7 @@ from datacoolie_studio.core.config import analytics_database_path, database_url
 from datacoolie_studio.db.session import get_engine
 from datacoolie_studio.db.models import StudioSetting
 from datacoolie_studio.db.models import EnvironmentSource
-from datacoolie_studio.domains.logs import cache as logs_cache
+from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 
 STUDIO_TIMEZONE_KEY = "studio.timezone"
 SOURCE_CHECK_INTERVAL_KEY = "studio.source_check_interval_seconds"
@@ -185,7 +185,7 @@ def _server_timezone_info() -> tuple[tzinfo, str]:
 
 def _studio_storage_context(session: Session) -> dict[str, Any]:
     analytics_path = analytics_database_path()
-    analytics_stats = logs_cache.analytics_cache_stats()
+    analytics_stats = analytics_maintenance.cache_stats()
     cached_source_ids = {int(source_id) for source_id in analytics_stats.get("cached_source_ids", [])}
     active_etl_source_ids = {
         int(source_id)

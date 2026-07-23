@@ -118,10 +118,16 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
 
     from fastapi.testclient import TestClient
 
+    from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
     from datacoolie_studio.domains.logs import cache as logs_cache
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_maintenance,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "analytics-rebuild"}).json()
         environment = client.post(
@@ -278,9 +284,15 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
 
     from datacoolie_studio.db.models import EnvironmentSource
+    from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
     from datacoolie_studio.domains.logs import cache as logs_cache
 
     monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_maintenance,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
     published = logs_cache._upsert_duckdb_rows(7, [], [], [], [])
     assert published["published"] is True
     source = EnvironmentSource(
@@ -301,7 +313,7 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
 
     def clear_cache() -> dict[str, int]:
         clear_started.set()
-        return logs_cache.clear_analytics_cache()
+        return analytics_maintenance.clear_cache()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         reader = executor.submit(hold_reader)
@@ -318,14 +330,18 @@ def test_analytics_clear_waits_for_active_reader(tmp_path: Path, monkeypatch):
 
 
 def test_analytics_clear_removes_orphan_rebuild_candidate(tmp_path: Path, monkeypatch):
-    from datacoolie_studio.domains.logs import cache as logs_cache
+    from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 
     analytics_path = tmp_path / "analytics.duckdb"
     candidate_path = tmp_path / "analytics.candidate.duckdb"
     candidate_path.write_bytes(b"orphaned candidate")
-    monkeypatch.setattr(logs_cache, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(
+        analytics_maintenance,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
 
-    result = logs_cache.clear_analytics_cache()
+    result = analytics_maintenance.clear_cache()
 
     assert result["deleted_files"] == 1
     assert result["deleted_file_bytes"] == len(b"orphaned candidate")

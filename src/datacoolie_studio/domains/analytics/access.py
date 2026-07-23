@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 
 import duckdb
 
 from datacoolie_studio.domains.analytics import schema
 from datacoolie_studio.domains.analytics.connections import analytics_connections
+
+
+analytics_maintenance_lock = Lock()
 
 
 def connect(path: Path, *, read_only: bool = False):

@@ -47,8 +47,6 @@ from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 
 
-_analytics_schema_rebuild_lock = Lock()
-
 # Cache of "log source has files not yet synced" results, keyed by source id, so the
 # filesystem scan runs at most once per TTL (the source-check interval) instead of on
 # every freshness/context read. Invalidated on sync and cache purge.
@@ -138,40 +136,6 @@ FILTER_VALUE_SOURCES = {
     "destination_operation_type": (analytics_schema.DATAFLOW_TABLE, "destination_operation_type"),
 }
 
-def analytics_cache_stats() -> dict[str, Any]:
-    path = analytics_database_path()
-    exists = path.exists()
-    stats: dict[str, Any] = {
-        "path": str(path),
-        "exists": exists,
-        "size_bytes": path.stat().st_size if exists else None,
-        "scope": "studio",
-        "schema_version": None,
-        "generation": None,
-        "build_state": "rebuild_required",
-        "published_at": None,
-        "dataflow_row_count": 0,
-        "job_row_count": 0,
-        "filter_value_count": 0,
-        "cached_source_ids": [],
-    }
-    if not exists:
-        return stats
-    _ensure_duckdb_cache_ready(path)
-    conn = analytics_access.connect(path, read_only=True)
-    try:
-        meta = analytics_store.analytics_meta(conn)
-        if meta is not None:
-            stats.update(meta)
-        stats["dataflow_row_count"] = _table_row_count(conn, analytics_schema.DATAFLOW_TABLE)
-        stats["job_row_count"] = _table_row_count(conn, analytics_schema.JOB_TABLE)
-        stats["filter_value_count"] = _table_row_count(conn, analytics_schema.FILTER_VALUES_TABLE)
-        stats["cached_source_ids"] = sorted(analytics_store.cache_source_ids(conn))
-    finally:
-        conn.close()
-    return stats
-
-
 def analytics_materialization_token(paths: list[EnvironmentSource]) -> str:
     """Return the O(1) published token used by Monitoring result-cache keys.
 
@@ -225,44 +189,6 @@ def analytics_reader(
             yield conn, source_ids, token
     finally:
         conn.close()
-
-
-def clear_analytics_cache() -> dict[str, int]:
-    """Delete only the rebuildable DuckDB analytics cache files."""
-    path = analytics_database_path()
-    candidate_path = analytics_access.candidate_path(path)
-    if not path.exists() and not candidate_path.exists():
-        return {
-            "deleted_files": 0,
-            "deleted_file_bytes": 0,
-            "deleted_rows": 0,
-        }
-    stats = analytics_cache_stats()
-    deleted_rows = sum(
-        int(stats.get(key, 0))
-        for key in ("dataflow_row_count", "job_row_count", "filter_value_count")
-    )
-    with _analytics_schema_rebuild_lock:
-        with analytics_connections.exclusive_maintenance():
-            candidates = [
-                path,
-                Path(f"{path}.wal"),
-                candidate_path,
-                Path(f"{candidate_path}.wal"),
-            ]
-            deleted_files = 0
-            deleted_file_bytes = 0
-            for candidate in candidates:
-                if not candidate.exists():
-                    continue
-                deleted_file_bytes += candidate.stat().st_size
-                candidate.unlink()
-                deleted_files += 1
-    return {
-        "deleted_files": deleted_files,
-        "deleted_file_bytes": deleted_file_bytes,
-        "deleted_rows": deleted_rows,
-    }
 
 
 def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
@@ -1361,7 +1287,7 @@ def _upsert_duckdb_rows(
 ) -> dict[str, Any]:
     path = analytics_database_path()
     if analytics_access.schema_rebuild_required(path):
-        with _analytics_schema_rebuild_lock:
+        with analytics_access.analytics_maintenance_lock:
             if analytics_access.schema_rebuild_required(path):
                 candidate_path = analytics_access.candidate_path(path)
                 analytics_access.discard_candidate(candidate_path)

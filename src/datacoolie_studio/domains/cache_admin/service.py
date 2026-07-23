@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import Environment, EnvironmentSource
+from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 from datacoolie_studio.domains.logs import cache as logs_cache
 from datacoolie_studio.domains.read_models.keys import (
     ASSETS_CATALOG,
@@ -27,7 +28,7 @@ ANALYTICS_DEPENDENT_NAMESPACES = {"monitoring.page.any", LINEAGE_LATEST_RUNS, OV
 
 
 def cache_status(session: Session) -> dict[str, Any]:
-    analytics = logs_cache.analytics_cache_stats()
+    analytics = analytics_maintenance.cache_stats()
     return {
         "result_cache": SqliteResultCacheStore().stats(),
         "analytics_cache": {
@@ -89,7 +90,7 @@ def compact_cache() -> dict[str, Any]:
 
 def _clear_analytics(session: Session, environment_id: int | None) -> dict[str, int]:
     if environment_id is None:
-        return logs_cache.clear_analytics_cache()
+        return analytics_maintenance.clear_cache()
     source_ids = list(
         session.scalars(
             select(EnvironmentSource.id).where(

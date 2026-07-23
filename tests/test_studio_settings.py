@@ -33,7 +33,11 @@ def test_studio_settings_and_diagnostics_have_separate_read_costs(tmp_path: Path
         analytics_calls += 1
         return _empty_analytics_stats()
 
-    monkeypatch.setattr(settings_service.logs_cache, "analytics_cache_stats", analytics_stats)
+    monkeypatch.setattr(
+        settings_service.analytics_maintenance,
+        "cache_stats",
+        analytics_stats,
+    )
 
     with TestClient(app) as client:
         current = client.get("/api/v1/studio/settings")
