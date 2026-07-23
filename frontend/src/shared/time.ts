@@ -67,7 +67,17 @@ export function formatTimestampForDisplay(value: unknown, timezoneName?: string 
 
   const timestamp = Date.parse(rawValue);
   if (!Number.isFinite(timestamp)) return tidyTimestamp(rawValue);
-  return formatTimestampInTimezone(timestamp, timezoneName || "UTC");
+  return formatTimestampInTimezone(timestamp, resolveIntlTimezone(timezoneName));
+}
+
+export function resolveIntlTimezone(timezoneName?: string | null) {
+  const candidate = timezoneName?.trim() || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
+    return candidate;
+  } catch {
+    return "UTC";
+  }
 }
 
 export function elapsedWholeDays(value?: string | null, now = Date.now()) {

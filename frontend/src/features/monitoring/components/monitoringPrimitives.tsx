@@ -17,11 +17,11 @@ import {
   num
 } from "../MonitoringCharts";
 import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart";
-import { formatTimestampForDisplay } from "../../../shared/time";
+import { formatTimestampForDisplay, resolveIntlTimezone } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
 import { formatConfigValue, isMeaningfulConfigValue } from "../pages/JobsPageSupport";
-export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
+export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, resolveIntlTimezone, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
 export type { JobRecord, MonitoringRecord, MonitoringReport, CSSProperties, ReactPointerEvent, ReactNode, MonitoringFilters, MonitoringTabKey, TableSort };
 
 
@@ -938,7 +938,7 @@ export function normalizeToDateKey(value: string, timezoneName: string) {
 export function timezoneDateKey(timestamp: number, timezoneName: string): string {
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezoneName,
+      timeZone: resolveIntlTimezone(timezoneName),
       year: "numeric",
       month: "2-digit",
       day: "2-digit"
@@ -955,7 +955,7 @@ export function timezoneDateKey(timestamp: number, timezoneName: string): string
 export function timezoneHourKey(timestamp: number, timezoneName: string): string {
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezoneName,
+      timeZone: resolveIntlTimezone(timezoneName),
       year: "numeric",
       month: "2-digit",
       day: "2-digit",

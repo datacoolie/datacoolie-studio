@@ -14,7 +14,6 @@ export default defineConfig({
               name: "vendor-echarts",
               test: /node_modules[\\/](echarts|zrender)[\\/]/,
               entriesAware: true,
-              maxSize: 400 * 1024,
             },
           ],
         },

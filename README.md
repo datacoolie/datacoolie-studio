@@ -145,14 +145,17 @@ own Maintenance control without clearing core data; this control is hidden for
 other database backends. Completed sync history retains the union of the latest
 30 days and latest 100 jobs per source; running jobs are never pruned.
 
-The Monitoring tab has six pages:
+The Monitoring tab has nine pages:
 
-- Health
+- Overview
+- Jobs
+- Dataflows
 - Failures
+- Freshness
 - Performance
-- Engine
 - Volume
 - Maintenance
+- Diagnostics
 
 ## Development
 
@@ -199,14 +202,18 @@ cd frontend
 npm run build
 ```
 
-Tests:
+Use the repository verification entrypoint for the backend regression suite,
+deterministic OpenAPI contract, generated TypeScript contract, frontend tests
+and production build, and the high-severity dependency audit:
 
 ```powershell
-pytest
-cd frontend
-npm run build
-npm audit
+.\scripts\verify.ps1
+.\scripts\verify.ps1 -Mode Full
 ```
+
+`Fast` is the default and runs the architecture, packaged-static/security, and
+OpenAPI backend regression tests. `Full` runs the complete backend suite; both
+modes run all frontend checks.
 
 ## DataCoolie Usecase-Sim Fixtures
 
