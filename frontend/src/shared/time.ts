@@ -76,7 +76,13 @@ export function resolveIntlTimezone(timezoneName?: string | null) {
     new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
     return candidate;
   } catch {
-    return "UTC";
+    const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: browserTimezone }).format();
+      return browserTimezone;
+    } catch {
+      return "UTC";
+    }
   }
 }
 

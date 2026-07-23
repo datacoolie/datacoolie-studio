@@ -7,7 +7,10 @@ describe("timezone display", () => {
   });
 
   it("falls back safely when the server exposes a Windows timezone label", () => {
-    expect(resolveIntlTimezone("SE Asia Standard Time")).toBe("UTC");
+    const fallback = resolveIntlTimezone("SE Asia Standard Time");
+    expect(() =>
+      new Intl.DateTimeFormat("en-US", { timeZone: fallback }).format()
+    ).not.toThrow();
     expect(() =>
       formatTimestampForDisplay("2026-07-23T06:00:00Z", "SE Asia Standard Time")
     ).not.toThrow();
