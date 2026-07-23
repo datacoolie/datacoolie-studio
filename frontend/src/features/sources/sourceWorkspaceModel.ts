@@ -1,5 +1,20 @@
-import type { SourceDeleteImpact, SourceDeleteImpactItem, SourcePath, SourceSyncStatus } from "../../shared/api/types";
+import type { SourceDeleteImpact, SourceDeleteImpactItem, SourcePath, SourceSyncStatus } from "../../shared/api/domainTypes";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
+
+export type SourceBatchAction = "validate" | "sync" | "delete";
+
+export type SourceBatchEntry = {
+  kind: SourceKind;
+  id: number;
+};
+
+export type SourceBatchResult = {
+  total: number;
+  succeeded: number;
+  warnings: number;
+  failed: number;
+  errors: string[];
+};
 
 export type SourceWorkspaceEntry = {
   source: SourcePath;

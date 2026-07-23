@@ -1,6 +1,6 @@
 import { AlertTriangle, Settings, Trash2 } from "lucide-react";
 import { useCallback, useState } from "react";
-import type { ModuleInfo, StudioDiagnostics, StudioSettings } from "../../shared/api/types";
+import type { ModuleInfo, StudioDiagnostics, StudioSettings } from "../../shared/api/domainTypes";
 import { Tag } from "../../shared/components/Tag";
 import { Toggle } from "../../shared/components/Toggle";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";

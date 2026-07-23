@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../shared/api/client";
-import type { JobRecord, MonitoringPageResponse, MonitoringRecordsResponse, MonitoringRecord, SystemLogResponse } from "../../shared/api/types";
+import type { JobRecord, MonitoringPageResponse, MonitoringRecordsResponse, MonitoringRecord, SystemLogResponse } from "../../shared/api/domainTypes";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";
 import {

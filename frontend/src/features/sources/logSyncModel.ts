@@ -1,4 +1,4 @@
-import type { LogSyncRequest } from "../../shared/api/types";
+import type { LogSyncRequest } from "../../shared/api/domainTypes";
 
 export type LogSyncDraft = {
   mode: LogSyncRequest["mode"];

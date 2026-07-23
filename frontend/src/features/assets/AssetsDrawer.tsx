@@ -31,7 +31,7 @@ import type {
   AssetFlow,
   AssetInventoryItem,
   AssetUsedByItem,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";

@@ -1,5 +1,4 @@
-import { describe, expect, it } from "vitest";
-import { healthCardAccentClass, runtimePhaseContributionTooltip } from "./monitoringShared";
+import { describe, expect, it } from "vitest";import { healthCardAccentClass, runtimePhaseContributionTooltip } from "./components/monitoringPrimitives";
 
 describe("Monitoring KPI accent contract", () => {
   it("keeps neutral cards structurally accented", () => {

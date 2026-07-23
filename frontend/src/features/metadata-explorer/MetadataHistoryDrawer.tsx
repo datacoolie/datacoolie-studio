@@ -1,6 +1,6 @@
 import { FileClock, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { MetadataBackup, MetadataEditorDocument } from "../../shared/api/types";
+import type { MetadataBackup, MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatCellValue } from "./metadataSheetOperations";
 import type { SheetKey } from "./metadataSheetTypes";

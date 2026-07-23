@@ -4,7 +4,7 @@ import { ChevronDown, FilterX, Search } from "lucide-react";
 import type { MouseEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api/client";
-import type { JobRecord, MonitoringFilterOptionsResponse, MonitoringRecord } from "../../shared/api/types";
+import type { JobRecord, MonitoringFilterOptionsResponse, MonitoringRecord } from "../../shared/api/domainTypes";
 import type { FilterOption, MonitoringFilters } from "./monitoringFilters";
 import { DEFAULT_MONITORING_FILTERS, hasActiveFilters } from "./monitoringFilters";
 

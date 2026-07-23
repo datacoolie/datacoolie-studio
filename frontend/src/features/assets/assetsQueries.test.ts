@@ -7,7 +7,7 @@ import type {
   AssetReferenceDetailResponse,
   AssetReferenceListResponse,
   AssetSourceResponse,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import {
   assetDetailOptions,
   assetInventoryOptions,

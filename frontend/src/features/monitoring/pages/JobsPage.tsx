@@ -1,33 +1,6 @@
-import type { JobRecord, MonitoringReport } from "../../../shared/api/types";
-import type { MonitoringFilters } from "../monitoringFilters";
-import {
-  ChildFanoutDistributionPanel,
-  DetailMetric,
-  DurationHeadline,
-  HealthStripCard,
-  LifecycleStatusValues,
-  JobDurationByOperationBoxPlot,
-  JobRunsTable,
-  JobStageHealthPanel,
-  JobWorkloadEfficiencyScatter,
-  ReportChart,
-  ReportPanel,
-  StatusHealthLegend,
-  StatusTrendLegend,
-  type TableSort,
-  TablePager,
-  WindowPairDetail,
-  WorkloadEfficiencyLegend,
-  durationIntent,
-  durationPercentilesDetail,
-  durationStatsTitle,
-  formatNumber,
-  formatPercent,
-  formatTimestampForDisplay,
-  jobStatusTrendOption,
-  monitoringTimezone,
-  successRateIntent
-} from "../monitoringShared";
+import type { JobRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import type { MonitoringFilters } from "../monitoringFilters";import { ChildFanoutDistributionPanel, JobDurationByOperationBoxPlot, JobRunsTable, JobStageHealthPanel, JobWorkloadEfficiencyScatter, WorkloadEfficiencyLegend } from "./JobsPageSupport";
+import { DetailMetric, DurationHeadline, HealthStripCard, LifecycleStatusValues, ReportChart, ReportPanel, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, durationIntent, durationPercentilesDetail, durationStatsTitle, formatNumber, formatPercent, formatTimestampForDisplay, jobStatusTrendOption, monitoringTimezone, successRateIntent } from "../components/monitoringPrimitives";
 
 export function JobsPage({
   report,

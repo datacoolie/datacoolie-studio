@@ -1,4 +1,4 @@
-import type { Environment, Project, ProjectEnvironmentSummary, ProjectSummary } from "../shared/api/types";
+import type { Environment, Project, ProjectEnvironmentSummary, ProjectSummary } from "../shared/api/domainTypes";
 
 export function addProjectSummary(items: ProjectSummary[], project: Project) {
   return [...items, {

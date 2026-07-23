@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
+import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/domainTypes";
 import { environmentsByName, filterAndSortProjects, projectReadiness, workspaceTotals } from "./projectsDirectoryModel";
 
 const timestamp = "2026-07-18T00:00:00Z";

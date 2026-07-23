@@ -288,7 +288,6 @@ def _asset_identity(endpoint: dict[str, Any]) -> tuple[str, str, str]:
     table = endpoint.get("table")
     catalog = endpoint.get("catalog")
     database = endpoint.get("database")
-    schema = endpoint.get("schema_name")
     if table and (catalog or database):
         identifier = next(
             item for item in build_asset_identifiers(endpoint)

@@ -1,4 +1,4 @@
-import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
+import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/domainTypes";
 import { environmentReadiness } from "../../shared/environmentReadiness";
 
 export function workspaceTotals(projects: ProjectSummary[]) {

@@ -1,5 +1,5 @@
 import { ArrowUpRight, CheckCircle2, Code2, Database, FolderOpen, GitBranch, Plus, Settings2 } from "lucide-react";
-import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
+import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { orderedEnvironmentNamesWithMissing } from "../../shared/environmentOrder";
 import {

@@ -24,30 +24,22 @@ import type {
   SourceSyncStatus,
   ReferenceType,
   TargetIdentifierKind
-} from "../shared/api/types";
+} from "../shared/api/domainTypes";
 import { toErrorMessage } from "../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../shared/lib/sources";
 import { projectRouteResources } from "./projectRouteResources";
-import { addEnvironmentToProject, addProjectSummary, changeProjectReferenceMappingCount, removeEnvironmentFromProject } from "./projectSummaryMutations";
 import { ResourceCache } from "../shared/data/resourceCache";
 import { fetchEnvironmentSources } from "./environmentSourcesResource";
 import { environmentQueryKeys } from "../features/environments/environmentQueries";
+import { createEnvironmentMutations } from "../features/environments/environmentMutations";
 import { useEnvironmentMetadataEditor } from "../features/metadata-explorer/metadataEditorQueries";
-
-export type SourceBatchAction = "validate" | "sync" | "delete";
-
-export type SourceBatchEntry = {
-  kind: SourceKind;
-  id: number;
-};
-
-export type SourceBatchResult = {
-  total: number;
-  succeeded: number;
-  warnings: number;
-  failed: number;
-  errors: string[];
-};
+import { createProjectMutations } from "../features/projects/projectMutations";
+import type {
+  SourceBatchAction,
+  SourceBatchEntry,
+  SourceBatchResult,
+} from "../features/sources/sourceWorkspaceModel";
+import { createEnvironmentSourceMutations } from "../features/sources/sourceMutations";
 
 export interface StudioWorkspace {
   projects: Project[];
@@ -393,440 +385,56 @@ export function useStudioWorkspace(
     await refreshEnvironment(environmentId, module, { forceHeader: true, forceModule: true });
   }
 
-  async function createProject(name: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      const project = await api.createProject({ name });
-      setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name)));
-      updateProjectSummaries((current) => addProjectSummary(current, project));
-      setStudioRoute({ projectId: project.id, environmentId: null, module: "projects", projectSection: projectDefaultSection });
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
+  const {
+    createProject,
+    deleteProject,
+    createProjectReferenceMapping,
+    updateProjectReferenceMapping,
+    deleteProjectReferenceMapping,
+  } = createProjectMutations({
+    projectId: route.projectId,
+    environmentId: route.environmentId,
+    setStudioRoute,
+    setProjects,
+    setEnvironments,
+    setBusy,
+    setError,
+    updateProjectSummaries,
+    clearEnvironmentSources,
+    onEnvironmentChanged: options?.onEnvironmentChanged,
+  });
 
-  async function deleteProject(projectId: number) {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteProject(projectId);
-      if (route.projectId === projectId) {
-        setStudioRoute({ projectId: null, environmentId: null, module: "projects" });
-      }
-      setProjects((current) => current.filter((project) => project.id !== projectId));
-      updateProjectSummaries((current) => current.filter((project) => project.id !== projectId));
-      setEnvironments([]);
-      clearEnvironmentSources();
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
+  const { createEnvironment, deleteEnvironment } = createEnvironmentMutations({
+    projectId: route.projectId,
+    queryClient,
+    setEnvironments,
+    setBusy,
+    setError,
+    updateProjectSummaries,
+  });
 
-  async function createProjectReferenceMapping(payload: {
-    reference_type: ReferenceType;
-    reference_value: string;
-    target_identifier_kind: TargetIdentifierKind;
-    target_value: string;
-    target_display_value?: string | null;
-    note?: string | null;
-  }) {
-    if (!route.projectId) throw new Error("Select a project before creating a mapping.");
-    const projectId = route.projectId;
-    setBusy(true);
-    setError(null);
-    try {
-      const mapping = await api.createProjectReferenceMapping(projectId, payload);
-      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
-      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, 1));
-      return mapping;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function updateProjectReferenceMapping(
-    mappingId: number,
-    payload: {
-      reference_type?: ReferenceType;
-      reference_value?: string | null;
-      target_identifier_kind?: TargetIdentifierKind;
-      target_value?: string | null;
-      target_display_value?: string | null;
-      note?: string | null;
-    }
-  ) {
-    if (!route.projectId) throw new Error("Select a project before updating a mapping.");
-    const projectId = route.projectId;
-    setBusy(true);
-    setError(null);
-    try {
-      const mapping = await api.updateProjectReferenceMapping(projectId, mappingId, payload);
-      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
-      return mapping;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteProjectReferenceMapping(mappingId: number) {
-    if (!route.projectId) throw new Error("Select a project before removing a mapping.");
-    const projectId = route.projectId;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteProjectReferenceMapping(projectId, mappingId);
-      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
-      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, -1));
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createEnvironment(name: string, projectIdOverride?: number): Promise<number> {
-    const pid = projectIdOverride ?? route.projectId;
-    if (!pid) return 0;
-    setBusy(true);
-    setError(null);
-    try {
-      const environment = await api.createEnvironment(pid, { name });
-      updateProjectSummaries((current) => addEnvironmentToProject(current, pid, environment));
-      setEnvironments((current) => [...current.filter((item) => item.id !== environment.id), environment]
-        .sort((left, right) => left.name.localeCompare(right.name)));
-      return environment.id;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      return 0;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteEnvironment(environmentId: number) {
-    const pid = route.projectId;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteEnvironment(environmentId);
-      queryClient.removeQueries({ queryKey: ["environments", environmentId] });
-      updateProjectSummaries((current) => removeEnvironmentFromProject(current, pid, environmentId));
-      setEnvironments((current) => current.filter((environment) => environment.id !== environmentId));
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addMetadataSource(uri: string, label?: string) {
-    if (!route.environmentId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.addMetadataSource(route.environmentId, { uri, label, enabled: true });
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(route.environmentId);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function importMetadataSources(uri: string, label?: string): Promise<SourceImportResponse | null> {
-    if (!route.environmentId) return null;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api.importMetadataSources(route.environmentId, { uri, label, enabled: true });
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
-      return result;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function importDatacoolieProjectSources(payload: {
-    project_uri: string;
-    metadata_subpath?: string;
-    code_subpath?: string;
-    metadata_uri?: string | null;
-    code_uri?: string | null;
-    include_metadata?: boolean;
-    include_code?: boolean;
-  }): Promise<SourceImportResponse | null> {
-    if (!route.environmentId) return null;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api.importDatacoolieProjectSources(route.environmentId, { ...payload, enabled: true });
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
-      return result;
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addLogPath(uri: string, label?: string, sourceConfig?: Record<string, unknown>) {
-    if (!route.environmentId) throw new Error("Select an environment before adding a log source");
-    setBusy(true);
-    setError(null);
-    try {
-      await api.addLogSource(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(route.environmentId);
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addCodeArtifact(uri: string, label?: string, sourceConfig?: Record<string, unknown>) {
-    if (!route.environmentId) throw new Error("Select an environment before adding source code");
-    setBusy(true);
-    setError(null);
-    try {
-      await api.addCodeArtifact(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(route.environmentId);
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function updateSource(
-    kind: SourceKind,
-    id: number,
-    payload: {
-      uri?: string;
-      label?: string | null;
-      enabled?: boolean;
-      source_config?: Record<string, unknown>;
-      sync_schedule_enabled?: boolean;
-      sync_interval_minutes?: number | null;
-    }
-  ) {
-    const environmentId = route.environmentId;
-    if (!environmentId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (kind === "metadata") {
-        await api.updateMetadataSource(environmentId, id, payload);
-      } else if (kind === "logs") {
-        await api.updateLogSource(environmentId, id, payload);
-      } else {
-        await api.updateCodeArtifact(environmentId, id, payload);
-      }
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteSource(kind: SourceKind, id: number) {
-    const environmentId = route.environmentId;
-    if (!environmentId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (kind === "metadata") {
-        await api.deleteMetadataSource(environmentId, id);
-      } else if (kind === "logs") {
-        await api.deleteLogSource(environmentId, id);
-      } else {
-        await api.deleteCodeArtifact(environmentId, id);
-      }
-      invalidateProjectSummaries();
-      await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function validateSource(kind: SourceKind, id: number): Promise<SourceReadCheckResult> {
-    const environmentId = route.environmentId;
-    if (!environmentId) {
-      const message = "Select an environment before validating a source";
-      setError(message);
-      return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const result =
-        kind === "metadata"
-          ? await api.validateMetadataSource(environmentId, id)
-          : kind === "logs"
-            ? await api.validateLogSource(environmentId, id)
-            : await api.validateCodeArtifact(environmentId, id);
-      await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
-      return result;
-    } catch (err) {
-      const message = toErrorMessage(err);
-      setError(message);
-      return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function syncSource(kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest): Promise<SourceSyncStatus> {
-    const environmentId = route.environmentId;
-    if (!environmentId) {
-      const message = "Select an environment before syncing a source";
-      setError(message);
-      return {
-        source_id: id,
-        source_kind: kind,
-        status: "error",
-        message,
-        error: { message },
-        checked_at: new Date().toISOString(),
-        latest_job: null
-      };
-    }
-    setError(null);
-    try {
-      const result =
-        kind === "metadata"
-          ? await api.refreshMetadataSource(environmentId, id)
-          : kind === "logs"
-            ? await api.refreshLogSource(environmentId, id, logSyncRequest ?? { mode: "incremental" })
-            : await api.refreshCodeArtifact(environmentId, id);
-      if (activeEnvironmentIdRef.current === environmentId) {
-        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
-        await refreshEnvironment(environmentId, route.module, { forceHeader: true, forceModule: true });
-      }
-      return result;
-    } catch (err) {
-      const message = toErrorMessage(err);
-      if (activeEnvironmentIdRef.current === environmentId) setError(message);
-      const result: SourceSyncStatus = {
-        source_id: id,
-        source_kind: kind,
-        status: "error",
-        message,
-        error: { message },
-        checked_at: new Date().toISOString(),
-        latest_job: null
-      };
-      if (activeEnvironmentIdRef.current === environmentId) {
-        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
-      }
-      return result;
-    }
-  }
-
-  async function runSourceBatch(action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest): Promise<SourceBatchResult> {
-    const uniqueEntries = Array.from(
-      new Map(entries.map((entry) => [`${entry.kind}:${entry.id}`, entry])).values()
-    );
-    const result: SourceBatchResult = {
-      total: uniqueEntries.length,
-      succeeded: 0,
-      warnings: 0,
-      failed: 0,
-      errors: []
-    };
-    const environmentId = route.environmentId;
-    if (!environmentId) {
-      const message = "Select an environment before running a source action";
-      setError(message);
-      return { ...result, failed: result.total, errors: result.total ? [message] : [] };
-    }
-    if (!uniqueEntries.length) return result;
-
-    setBusy(true);
-    setError(null);
-    try {
-      for (const entry of uniqueEntries) {
-        try {
-          if (action === "delete") {
-            if (entry.kind === "metadata") await api.deleteMetadataSource(environmentId, entry.id);
-            else if (entry.kind === "logs") await api.deleteLogSource(environmentId, entry.id);
-            else await api.deleteCodeArtifact(environmentId, entry.id);
-            result.succeeded += 1;
-            continue;
-          }
-
-          const operationResult = action === "validate"
-            ? entry.kind === "metadata"
-              ? await api.validateMetadataSource(environmentId, entry.id)
-              : entry.kind === "logs"
-                ? await api.validateLogSource(environmentId, entry.id)
-                : await api.validateCodeArtifact(environmentId, entry.id)
-            : entry.kind === "metadata"
-              ? await api.refreshMetadataSource(environmentId, entry.id)
-              : entry.kind === "logs"
-                ? await api.refreshLogSource(environmentId, entry.id, logSyncRequest ?? { mode: "incremental" })
-                : await api.refreshCodeArtifact(environmentId, entry.id);
-
-          if (operationResult.status === "error") {
-            result.failed += 1;
-            result.errors.push(`${entry.kind} source #${entry.id}: ${operationResult.message}`);
-          } else if (operationResult.status === "warning" || operationResult.status === "running" || operationResult.status === "unknown") {
-            result.warnings += 1;
-          } else {
-            result.succeeded += 1;
-          }
-        } catch (err) {
-          result.failed += 1;
-          result.errors.push(`${entry.kind} source #${entry.id}: ${toErrorMessage(err)}`);
-        }
-      }
-
-      if (action === "delete") invalidateProjectSummaries();
-      await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
-    } finally {
-      setBusy(false);
-    }
-
-    if (result.failed) setError(`${result.failed} source ${result.failed === 1 ? "action" : "actions"} failed`);
-    return result;
-  }
-
-  async function getSourceDeleteImpact(kind: SourceKind, id: number): Promise<SourceDeleteImpact> {
-    const environmentId = route.environmentId;
-    if (!environmentId) throw new Error("Select an environment before viewing source delete impact");
-    if (kind === "metadata") return api.getMetadataSourceDeleteImpact(environmentId, id);
-    if (kind === "logs") return api.getLogSourceDeleteImpact(environmentId, id);
-    return api.getCodeArtifactDeleteImpact(environmentId, id);
-  }
+  const {
+    addMetadataSource,
+    importMetadataSources,
+    importDatacoolieProjectSources,
+    addLogPath,
+    addCodeArtifact,
+    updateSource,
+    deleteSource,
+    validateSource,
+    syncSource,
+    runSourceBatch,
+    getSourceDeleteImpact,
+  } = createEnvironmentSourceMutations({
+    environmentId: route.environmentId,
+    module: route.module,
+    activeEnvironmentIdRef,
+    setBusy,
+    setError,
+    setSourceSyncStatuses,
+    invalidateProjectSummaries,
+    refreshEnvironment,
+  });
 
   const routeResources = projectRouteResources(route);
 

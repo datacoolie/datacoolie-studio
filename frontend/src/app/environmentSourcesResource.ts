@@ -1,5 +1,5 @@
 import { api } from "../shared/api/client";
-import type { SourcePath } from "../shared/api/types";
+import type { SourcePath } from "../shared/api/domainTypes";
 
 /** Source lists are owned by the Sources module, not the shared Environment header. */
 export interface EnvironmentSourcesData {

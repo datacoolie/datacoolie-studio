@@ -1,4 +1,4 @@
-import type { AssetAttention, AssetInventoryItem, AssetReferenceGroupItem, LineageAsset } from "../../shared/api/types";
+import type { AssetAttention, AssetInventoryItem, AssetReferenceGroupItem, LineageAsset } from "../../shared/api/domainTypes";
 import { presentReferenceResolution, type ReferenceResolutionPresentation as SharedReferenceResolutionPresentation } from "../../shared/referenceResolutionPresentation";
 import type { AssetIconKind } from "../lineage/model/presentation";
 import { assetIconKind, lineageNodeSearchValues, presentLineageAsset, referenceTypeAssetType } from "../lineage/model/presentation";

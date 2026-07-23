@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import MonitoringPageResponse
+from datacoolie_studio.api.v1.contracts.monitoring import MonitoringPageResponse
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.domains.monitoring.service import (
     dataflow_logs,
@@ -33,6 +33,7 @@ router = APIRouter(tags=["monitoring"])
     "/environments/{environment_id}/monitoring/pages/{page}",
     response_model=MonitoringPageResponse,
     response_model_exclude_none=True,
+    response_model_exclude_unset=True,
 )
 def get_monitoring_page(
     environment_id: int,

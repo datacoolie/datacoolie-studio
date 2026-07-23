@@ -5,7 +5,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import (
+from datacoolie_studio.api.v1.contracts.sources import (
     CodeArtifactRead,
     LogSourceRead,
     LogSyncRequest,

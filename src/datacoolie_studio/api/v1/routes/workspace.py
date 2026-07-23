@@ -3,24 +3,26 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import (
+from datacoolie_studio.api.v1.contracts.sources import (
     CodeArtifactRead,
     DatacoolieProjectSourceImportRequest,
-    EnvironmentCreate,
     EnvironmentContextResponse,
     EnvironmentFreshnessResponse,
-    EnvironmentRead,
     LogSourceRead,
     MetadataSourceImportRequest,
     MetadataSourceRead,
+    SourceCreate,
+    SourceImportResponse,
+)
+from datacoolie_studio.api.v1.contracts.workspace import (
+    EnvironmentCreate,
+    EnvironmentRead,
     ProjectReferenceMappingCreate,
     ProjectReferenceMappingRead,
     ProjectReferenceMappingUpdate,
     ProjectCreate,
     ProjectRead,
     ProjectSummaryResponse,
-    SourceCreate,
-    SourceImportResponse,
     StudioDiagnosticsResponse,
     StudioCacheClearRequest,
     StudioCacheMaintenanceRequest,

@@ -1,4 +1,4 @@
-import type { MetadataEditorDocument } from "../../shared/api/types";
+import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
 
 export type MetadataDraftState = {
   hasLocalChanges: boolean;

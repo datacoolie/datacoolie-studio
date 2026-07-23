@@ -4,7 +4,7 @@ import "./metadata-explorer.css";
 import { DynamicDataSheetGrid, type Column, type DataSheetGridRef } from "react-datasheet-grid";
 import { Database } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import type { MetadataBackup, MetadataEditorDocument, MetadataEditorIssue } from "../../shared/api/types";
+import type { MetadataBackup, MetadataEditorDocument, MetadataEditorIssue } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";

@@ -4,7 +4,7 @@ import type {
   LineageDependency,
   LineageReference,
   LineageResponse
-} from "../../../shared/api/types";
+} from "../../../shared/api/domainTypes";
 import { lineageNodeSearchValues, presentLineageAsset } from "./presentation";
 import type {
   LineageEntity,

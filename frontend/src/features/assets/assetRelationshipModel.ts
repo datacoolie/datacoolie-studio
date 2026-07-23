@@ -4,7 +4,7 @@ import type {
   AssetDetailResponse,
   AssetFlow,
   AssetUsedByItem,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 
 export type AssetRelationshipDirection = "upstream" | "downstream";
 

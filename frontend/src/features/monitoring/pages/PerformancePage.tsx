@@ -1,49 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EChartsOption } from "echarts";
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { TableColumn, TableSort } from "../MonitoringCharts";
-import type { MonitoringFilters } from "../monitoringFilters";
-import {
-  CompactValue,
-  CopyableText,
-  DataTable,
-  DataflowContextCell,
-  DataflowNameCell,
-  DataflowPhaseCell,
-  DataflowVolumeCell,
-  DetailMetric,
-  DurationDistributionBoxPlot,
-  DurationHeadline,
-  HealthStripCard,
-  IssuePreview,
-  ReportChart,
-  ReportPanel,
-  RuntimePhaseLegend,
-  RuntimePhaseContribution,
-  StatusCell,
-  TableDateTimeValue,
-  TablePager,
-  bottomAnchoredValueXAxis,
-  compactRunId,
-  durationIntent,
-  durationPercentilesDetail,
-  formatBytes,
-  formatCompact,
-  formatNumber,
-  formatPhasePercent,
-  formatPercent,
-  formatSeconds,
-  formatSecondsSingleDecimal,
-  runtimePhaseContributionTooltip,
-  fillMissingTrendDates,
-  horizontalBarDataZoom,
-  monitoringTimezone,
-  monitoringPhaseColors,
-  num,
-  reportChartPalette,
-  reportChartGrid
-} from "../monitoringShared";
+import type { MonitoringFilters } from "../monitoringFilters";import { CompactValue, CopyableText, DataTable, DataflowContextCell, DataflowNameCell, DataflowPhaseCell, DataflowVolumeCell, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, IssuePreview, ReportChart, ReportPanel, RuntimePhaseLegend, RuntimePhaseContribution, StatusCell, TableDateTimeValue, TablePager, bottomAnchoredValueXAxis, compactRunId, durationIntent, durationPercentilesDetail, formatBytes, formatCompact, formatNumber, formatPhasePercent, formatPercent, formatSeconds, formatSecondsSingleDecimal, runtimePhaseContributionTooltip, fillMissingTrendDates, horizontalBarDataZoom, monitoringTimezone, monitoringPhaseColors, num, reportChartPalette, reportChartGrid } from "../components/monitoringPrimitives";
 import { baseChartOption } from "../ReportChart";
 import {
   defaultPerformanceEfficiencyScope,

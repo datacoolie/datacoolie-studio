@@ -1,15 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MONITORING_FILTERS, type MonitoringFilters } from "./monitoringFilters";
-import {
-  childFanoutDistributionOption,
-  dataflowNameStatusHealthOption,
-  dataflowStatusTrendOption,
-  failureTrendOption,
-  jobStageHealthOption,
-  jobStatusTrendOption,
-  jobWorkloadEfficiencyOption,
-  workloadVolumeTrendOption,
-} from "./monitoringShared";
+import { DEFAULT_MONITORING_FILTERS, type MonitoringFilters } from "./monitoringFilters";import { childFanoutDistributionOption, dataflowNameStatusHealthOption, dataflowStatusTrendOption, failureTrendOption, jobStageHealthOption, jobStatusTrendOption, jobWorkloadEfficiencyOption, workloadVolumeTrendOption } from "./components/monitoringPrimitives";
 
 function expectBottomAnchored(option: unknown) {
   const grid = (option as { grid?: { bottom?: number; containLabel?: boolean } } | null)?.grid;

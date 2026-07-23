@@ -18,8 +18,12 @@ import {
   XCircle
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { SourceBatchAction, SourceBatchEntry, SourceBatchResult } from "../../app/useStudioWorkspace";
-import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/types";
+import type {
+  SourceBatchAction,
+  SourceBatchEntry,
+  SourceBatchResult,
+} from "./sourceWorkspaceModel";
+import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/domainTypes";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
 import { OperationNotification, type OperationNotice } from "../../shared/components/OperationNotification";
 import { toErrorMessage } from "../../shared/lib/errors";

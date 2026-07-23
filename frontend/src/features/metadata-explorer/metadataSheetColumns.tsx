@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { checkboxColumn, createTextColumn, keyColumn, type CellComponent, type Column } from "react-datasheet-grid";
-import type { MetadataEditorIssue } from "../../shared/api/types";
+import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
 import { MetadataStructuredCell } from "./MetadataStructuredCell";
 import { formatCellValue, parseCellText, structuredCellKind, type MetadataSourceOption } from "./metadataSheetOperations";
 import type { SheetRow } from "./metadataSheetTypes";

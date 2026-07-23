@@ -1,0 +1,1 @@
+"""Router-aligned API contracts."""

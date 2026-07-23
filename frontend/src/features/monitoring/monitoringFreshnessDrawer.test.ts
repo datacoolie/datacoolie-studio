@@ -4,8 +4,7 @@ import {
   freshnessEndpointLabel,
   freshnessRunTimeLines,
   isFreshnessWatermarkConfigured,
-} from "./MonitoringDetailDrawer";
-import { formatPhasePercent, monitoringEndpointPresentation } from "./monitoringShared";
+} from "./MonitoringDetailDrawer";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPrimitives";
 
 describe("Freshness registry drawer semantics", () => {
   it("formats runtime phase contribution with one decimal place", () => {

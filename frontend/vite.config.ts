@@ -5,7 +5,21 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: "../src/datacoolie_studio/static",
-    emptyOutDir: true
+    emptyOutDir: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "vendor-echarts",
+              test: /node_modules[\\/](echarts|zrender)[\\/]/,
+              entriesAware: true,
+              maxSize: 400 * 1024,
+            },
+          ],
+        },
+      },
+    },
   },
   server: {
     proxy: {

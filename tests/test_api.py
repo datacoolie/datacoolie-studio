@@ -6,6 +6,9 @@ import json
 import shutil
 from pathlib import Path
 
+from datacoolie_studio.domains.analytics import access as analytics_access
+from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
+
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_LOGS = ROOT / "datacoolie" / "usecase-sim" / "logs" / "etl_logs" / "analyst"
 SAMPLE_METADATA = (
@@ -54,6 +57,8 @@ def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeyp
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "empty-monitoring"}).json()
         environment = client.post(
@@ -122,6 +127,8 @@ def test_environment_overview_is_available_when_monitoring_cache_is_missing(
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "overview-fail-soft"}).json()
         environment = client.post(
@@ -652,9 +659,9 @@ def test_source_detail_routes_require_matching_environment_scope(tmp_path: Path,
             path.startswith(("/api/v1/metadata-sources/", "/api/v1/log-sources/", "/api/v1/code-artifacts/"))
             for path in paths
         )
-        assert f"/api/v1/environments/{{environment_id}}/metadata-sources/{{source_id}}" in paths
-        assert f"/api/v1/environments/{{environment_id}}/log-sources/{{source_id}}" in paths
-        assert f"/api/v1/environments/{{environment_id}}/code-artifacts/{{source_id}}" in paths
+        assert "/api/v1/environments/{environment_id}/metadata-sources/{source_id}" in paths
+        assert "/api/v1/environments/{environment_id}/log-sources/{source_id}" in paths
+        assert "/api/v1/environments/{environment_id}/code-artifacts/{source_id}" in paths
 
     monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
 
@@ -1143,6 +1150,8 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
 
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1418,6 +1427,8 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1496,6 +1507,8 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1610,6 +1623,8 @@ def test_delete_project_purges_disposable_caches(tmp_path: Path, monkeypatch):
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -1721,6 +1736,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
     from datacoolie_studio.main import app
 
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
     monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:

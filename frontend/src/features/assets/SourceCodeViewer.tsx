@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight, Copy, Maximize2, Minimize2, WrapText } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { ReferenceSourceMatch } from "../../shared/api/types";
+import type { ReferenceSourceMatch } from "../../shared/api/domainTypes";
 import { highlightedSourceCode, sourceCodeLanguage } from "./sourceCode";
 
 interface SourceCodeViewerProps {

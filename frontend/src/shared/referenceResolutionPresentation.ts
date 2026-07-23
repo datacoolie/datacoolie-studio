@@ -1,4 +1,4 @@
-import type { ReferenceResolution, ResolutionReason, ResolutionState } from "./api/types";
+import type { ReferenceResolution, ResolutionReason, ResolutionState } from "./api/domainTypes";
 
 export interface ReferenceResolutionPresentation {
   state: ResolutionState;

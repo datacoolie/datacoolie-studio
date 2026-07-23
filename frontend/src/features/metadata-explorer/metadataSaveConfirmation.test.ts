@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MetadataEditorDocument } from "../../shared/api/types";
+import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { metadataSaveConfirmation, metadataSaveImpacts } from "./metadataSaveConfirmation";
 
 type Row = Record<string, unknown>;

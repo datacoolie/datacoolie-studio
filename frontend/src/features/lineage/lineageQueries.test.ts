@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../shared/api/client";
-import type { LatestStatusResponse, LineageResponse, MonitoringRecord, MonitoringRecordsResponse } from "../../shared/api/types";
+import type { LatestStatusResponse, LineageResponse, MonitoringRecord, MonitoringRecordsResponse } from "../../shared/api/domainTypes";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 import {
   lineageDataflowRunsOptions,

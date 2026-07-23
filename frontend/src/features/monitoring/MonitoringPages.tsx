@@ -6,5 +6,4 @@ export { DiagnosticsPage } from "./pages/DiagnosticsPage";
 export { PerformancePage } from "./pages/PerformancePage";
 export { VolumePage } from "./pages/VolumePage";
 export { MaintenancePage } from "./pages/MaintenancePage";
-export { FreshnessPage } from "./pages/FreshnessPage";
-export { monitoringTrendBucketTestUtils } from "./monitoringShared";
+export { FreshnessPage } from "./pages/FreshnessPage";export { monitoringTrendBucketTestUtils } from "./components/monitoringPrimitives";

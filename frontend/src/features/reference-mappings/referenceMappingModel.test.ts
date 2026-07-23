@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/domainTypes";
 import {
   buildReferenceMappingPayload,
   buildReferenceMappingTargets,

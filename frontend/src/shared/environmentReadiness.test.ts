@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProjectEnvironmentSummary } from "./api/types";
+import type { ProjectEnvironmentSummary } from "./api/domainTypes";
 import { environmentReadiness, environmentReadinessLabel, projectReadinessSummary } from "./environmentReadiness";
 
 function environment(metadataSources: number, logPaths: number, codeArtifacts = 0): ProjectEnvironmentSummary {

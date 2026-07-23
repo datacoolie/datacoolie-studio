@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProjectReferenceRegistryResponse } from "../../shared/api/types";
+import type { ProjectReferenceRegistryResponse } from "../../shared/api/domainTypes";
 import {
   buildProjectMappingRegistry,
   canCreateProjectMapping,

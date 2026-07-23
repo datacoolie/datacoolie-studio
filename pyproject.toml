@@ -33,6 +33,7 @@ dev = [
 
 [project.scripts]
 datacoolie-studio = "datacoolie_studio.cli:main"
+datacoolie-studio-openapi = "datacoolie_studio.openapi_export:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/datacoolie_studio"]

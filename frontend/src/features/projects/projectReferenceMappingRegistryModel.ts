@@ -6,7 +6,7 @@ import type {
   ProjectReferenceRegistryTarget as ApiRegistryTarget,
   ReferenceType,
   ResolutionState,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import { presentReferenceResolution } from "../../shared/referenceResolutionPresentation";
 import type { ReferenceMappingTarget } from "../reference-mappings/referenceMappingModel";
 

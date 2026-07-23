@@ -5,7 +5,7 @@ import type {
   StudioCacheFeature,
   StudioCacheScope,
   StudioCacheStatus,
-} from "../../../shared/api/types";
+} from "../../../shared/api/domainTypes";
 import { toErrorMessage } from "../../../shared/lib/errors";
 import { cacheInvalidationBranches, matchesDerivedQuery } from "../cacheInvalidation";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/types";
+import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/domainTypes";
 import { environmentInvalidationTargets, metadataWorkspaceSatisfiesCatalogVersion } from "./environmentQueries";
 
 const base: EnvironmentContext["versions"] = {

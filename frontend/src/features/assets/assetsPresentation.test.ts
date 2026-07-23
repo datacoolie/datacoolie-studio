@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AssetInventoryItem, AssetReferenceGroupItem } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetReferenceGroupItem } from "../../shared/api/domainTypes";
 import { attentionContextLine, assetSearchValues, metadataQueryForAsset, presentAsset, presentReference, referenceConsumerTypeSummary, referenceContextLine, referenceProvenanceDescription, referenceProvenanceLabel, referenceProvenanceTone, referenceResolutionPresentation, referenceSearchValues } from "./assetsPresentation";
 
 describe("assets presentation", () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../shared/api/client";
-import type { ModuleInfo } from "../shared/api/types";
+import type { ModuleInfo } from "../shared/api/domainTypes";
 import type { CapabilityKey } from "./moduleRegistry";
 
 export interface StudioModulesState {

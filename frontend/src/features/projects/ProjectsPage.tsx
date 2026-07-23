@@ -1,6 +1,6 @@
 import { ArrowUpRight, CheckCircle2, Code2, Database, FolderOpen, Layers3, Plus, Search } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
-import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/types";
+import type { ProjectEnvironmentSummary, ProjectSummary } from "../../shared/api/domainTypes";
 import { orderedEnvironmentNamesWithMissing } from "../../shared/environmentOrder";
 import { environmentReadiness, environmentReadinessLabel } from "../../shared/environmentReadiness";
 import { environmentsByName, filterAndSortProjects, projectReadiness, workspaceTotals } from "./projectsDirectoryModel";

@@ -1,4 +1,4 @@
-import type { ProjectEnvironmentSummary } from "./api/types";
+import type { ProjectEnvironmentSummary } from "./api/domainTypes";
 
 export type EnvironmentReadiness = "ready" | "needs-metadata";
 

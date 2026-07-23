@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import (
+from datacoolie_studio.api.v1.contracts.assets import (
     AssetDetailResponse,
     AssetInventoryResponse,
     AssetReferenceDetailResponse,

@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import type { EnvironmentContext } from "../shared/api/types";
+import type { EnvironmentContext } from "../shared/api/domainTypes";
 import { RelativeTime } from "../shared/components/RelativeTime";
 import type { ModuleKey, ModuleScope } from "./moduleRegistry";
 

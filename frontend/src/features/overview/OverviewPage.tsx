@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, CheckCircle2, Database, GitBranch, SlidersHorizontal } from "lucide-react";
-import type { EnvironmentOverview, ResolutionState } from "../../shared/api/types";
+import type { EnvironmentOverview, ResolutionState } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { RelativeTime } from "../../shared/components/RelativeTime";
 import { elapsedWholeDays } from "../../shared/time";

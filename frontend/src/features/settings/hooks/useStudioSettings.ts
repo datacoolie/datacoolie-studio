@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../../shared/api/client";
-import type { StudioSettings } from "../../../shared/api/types";
+import type { StudioSettings } from "../../../shared/api/domainTypes";
 import { toErrorMessage } from "../../../shared/lib/errors";
 
 export interface StudioSettingsState {

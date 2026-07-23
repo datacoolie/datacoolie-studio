@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.api.v1.schemas import LineageResponse
+from datacoolie_studio.api.v1.contracts.lineage import LineageResponse
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.domains.lineage.service import lineage_graph_etag, load_or_build_lineage_graph, project_lineage_graph
 

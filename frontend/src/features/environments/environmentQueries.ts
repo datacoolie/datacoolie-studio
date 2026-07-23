@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../shared/api/client";
-import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/types";
+import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/domainTypes";
 
 export const environmentQueryKeys = {
   all: ["environments"] as const,

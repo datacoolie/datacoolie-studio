@@ -1,7 +1,7 @@
 import { Boxes, FilterX, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
-import type { AssetInventoryItem, AssetInventoryResponse, AssetReferenceGroupItem, MetadataEditorDocument } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetInventoryResponse, AssetReferenceGroupItem, MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";

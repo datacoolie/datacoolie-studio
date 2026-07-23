@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LineageAsset } from "../../../shared/api/types";
+import type { LineageAsset } from "../../../shared/api/domainTypes";
 import { assetTypeTone, presentLineageAsset, referenceTypeAssetType } from "./presentation";
 
 describe("lineage asset presentation", () => {

@@ -1,4 +1,4 @@
-import type { Dataflow, Endpoint, MetadataEditorDocument, MetadataEditorIssue, MetadataResponse } from "../../shared/api/types";
+import type { Dataflow, Endpoint, MetadataEditorDocument, MetadataEditorIssue, MetadataResponse } from "../../shared/api/domainTypes";
 import { formatCellValue, parseStructuredValue } from "../metadata-explorer/metadataSheetOperations";
 
 export interface MetadataDataflowSelection {

@@ -1,35 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";
-import {
-  DataTable,
-  DetailMetric,
-  HealthStripCard,
-  ReportChart,
-  ReportPanel,
-  TableDateTimeValue,
-  TablePager,
-  baseChartOption,
-  bottomAnchoredValueXAxis,
-  formatBytes,
-  formatBytesShort,
-  formatCompact,
-  formatNumber,
-  formatPercent,
-  formatSeconds,
-  horizontalBarDataZoom,
-  monitoringTimezone,
-  normalizeTrendBucketKey,
-  num,
-  reportChartPalette,
-  reportChartGrid,
-  resolveTrendBucketKeys
-} from "../monitoringShared";
+import type { TableSort } from "../MonitoringCharts";import { DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TableDateTimeValue, TablePager, baseChartOption, bottomAnchoredValueXAxis, formatBytes, formatBytesShort, formatCompact, formatNumber, formatPercent, formatSeconds, horizontalBarDataZoom, monitoringTimezone, normalizeTrendBucketKey, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys } from "../components/monitoringPrimitives";
 
 const MAINTENANCE_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
 type EfficiencyScaleMode = "linear" | "log";

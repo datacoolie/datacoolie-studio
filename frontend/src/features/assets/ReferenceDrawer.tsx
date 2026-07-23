@@ -2,7 +2,7 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Database, Loader2, X
 import { Icon } from "@iconify/react";
 import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
-import type { AssetBrief, AssetInventoryItem, AssetReferenceGroupItem, AssetReferenceOccurrenceItem, ReferenceOccurrenceSourceResponse } from "../../shared/api/types";
+import type { AssetBrief, AssetInventoryItem, AssetReferenceGroupItem, AssetReferenceOccurrenceItem, ReferenceOccurrenceSourceResponse } from "../../shared/api/domainTypes";
 import { presentReferenceResolution, type ReferenceResolutionPresentation } from "../../shared/referenceResolutionPresentation";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AssetReferenceGroupItem, AssetReferenceOccurrenceItem } from "../../shared/api/types";
+import type { AssetReferenceGroupItem, AssetReferenceOccurrenceItem } from "../../shared/api/domainTypes";
 import { groupReferenceUsage, occurrenceLocationLabel, occurrenceScopeLabel, referenceResolutionStory, shouldShowNormalizedValue } from "./referenceDrawerModel";
 
 function reference(overrides: Partial<AssetReferenceGroupItem> = {}) {

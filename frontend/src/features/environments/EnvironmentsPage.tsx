@@ -1,6 +1,6 @@
 import { ArrowRight, CheckCircle2, Code2, Database, FolderOpen, Plus, Settings2, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ProjectSummary } from "../../shared/api/types";
+import type { ProjectSummary } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { ENVIRONMENT_PRESETS, orderEnvironmentItems } from "../../shared/environmentOrder";
 import { environmentReadiness, environmentReadinessLabel } from "../../shared/environmentReadiness";

@@ -1,11 +1,4 @@
-import { describe, expect, it } from "vitest";
-import {
-  childFanoutDistributionOption,
-  durationDistributionBoxOption,
-  lifecycleStatusItems,
-  jobWorkloadEfficiencyOption,
-  statusColor
-} from "./monitoringShared";
+import { describe, expect, it } from "vitest";import { childFanoutDistributionOption, durationDistributionBoxOption, lifecycleStatusItems, jobWorkloadEfficiencyOption, statusColor } from "./components/monitoringPrimitives";
 
 describe("Jobs page chart layout", () => {
   it("anchors workload efficiency to the bottom of its chart area", () => {

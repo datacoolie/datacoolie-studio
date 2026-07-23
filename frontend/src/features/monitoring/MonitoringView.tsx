@@ -6,7 +6,7 @@ import type {
   MonitoringFilterOptionsResponse,
   MonitoringRecord,
   MonitoringReport
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { TableSort } from "./MonitoringCharts";
 import type { MonitoringDetailKind } from "./MonitoringDetailDrawer";

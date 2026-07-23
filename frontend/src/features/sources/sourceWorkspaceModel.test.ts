@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SourcePath, SourceSyncStatus } from "../../shared/api/types";
+import type { SourcePath, SourceSyncStatus } from "../../shared/api/domainTypes";
 import { sourceKey } from "../../shared/lib/sources";
 import {
   aggregateDeleteImpacts,

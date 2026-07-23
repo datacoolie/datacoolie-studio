@@ -1,4 +1,4 @@
-import type { AssetBrief, AssetReferenceGroupItem, AssetReferenceOccurrenceItem } from "../../shared/api/types";
+import type { AssetBrief, AssetReferenceGroupItem, AssetReferenceOccurrenceItem } from "../../shared/api/domainTypes";
 
 export interface ReferenceResolutionStory {
   tone: "resolved" | "attention" | "warning" | "review";

@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import type { MetadataEditorIssue } from "../../shared/api/types";
+import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 
 interface MetadataIssuesDrawerProps {

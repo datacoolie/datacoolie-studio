@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { EnvironmentContext } from "../shared/api/types";
+import type { EnvironmentContext } from "../shared/api/domainTypes";
 import { useDrawerEscape } from "../shared/hooks/useDrawerEscape";
 import { ContextBar } from "./ContextBar";
 import { SidebarNav } from "./SidebarNav";

@@ -12,7 +12,7 @@ import type {
   LineageDependency,
   LineageReference,
   MonitoringRecord,
-} from "../../../shared/api/types";
+} from "../../../shared/api/domainTypes";
 import { StatusPill } from "../../../shared/components/StatusPill";
 import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
 import { latestRun } from "../model/flow";

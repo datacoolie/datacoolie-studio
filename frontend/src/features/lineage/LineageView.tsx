@@ -1,6 +1,6 @@
 import { Activity, Check, ChevronDown, FilterX, GitBranch, LocateFixed, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument } from "../../shared/api/types";
+import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { lineageDataflowFocusFromSearch, type LineageDataflowFocusTarget } from "../../shared/lineageNavigation";

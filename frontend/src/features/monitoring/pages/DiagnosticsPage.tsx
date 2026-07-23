@@ -1,25 +1,6 @@
 import type { EChartsOption } from "echarts";
-import type { MonitoringReport } from "../../../shared/api/types";
-import {
-  DataTable,
-  DetailMetric,
-  HealthStripCard,
-  ReportChart,
-  ReportPanel,
-  baseChartOption,
-  bottomAnchoredValueXAxis,
-  fixedHorizontalBarGrid,
-  fixedHorizontalCategoryAxis,
-  formatNumber,
-  formatPercent,
-  formatTimestampForDisplay,
-  horizontalBarDataZoom,
-  horizontalBarSeriesSizing,
-  monitoringTimezone,
-  num,
-  reportChartPalette,
-  reportTightChartGrid
-} from "../monitoringShared";
+import type { MonitoringReport } from "../../../shared/api/domainTypes";import { DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, baseChartOption, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatNumber, formatPercent, formatTimestampForDisplay, horizontalBarDataZoom, horizontalBarSeriesSizing, monitoringTimezone, num, reportChartPalette } from "../components/monitoringPrimitives";
+import { reportTightChartGrid } from "./DiagnosticsPageSupport";
 import {
   diagnosticsCoverageSummary,
   diagnosticsCategoryLabel,

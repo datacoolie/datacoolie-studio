@@ -1,34 +1,6 @@
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
-import type { MonitoringFilters } from "../monitoringFilters";
-import {
-  DataflowEndpointHealthPanel,
-  LifecycleStatusValues,
-  DataflowNameStatusHealthPanel,
-  DataflowRunsTable,
-  DetailMetric,
-  DurationDistributionBoxPlot,
-  DurationHeadline,
-  HealthStripCard,
-  ReportChart,
-  ReportPanel,
-  RuntimePhaseContribution,
-  RuntimePhaseLegend,
-  StatusHealthLegend,
-  StatusTrendLegend,
-  type TableSort,
-  TablePager,
-  WindowPairDetail,
-  dataflowStatusTrendOption,
-  durationIntent,
-  durationPercentilesDetail,
-  durationStatsTitle,
-  formatBytes,
-  formatNumber,
-  formatPercent,
-  monitoringTimezone,
-  runtimePhaseContributionTooltip,
-  successRateIntent
-} from "../monitoringShared";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import type { MonitoringFilters } from "../monitoringFilters";import { DataflowEndpointHealthPanel, DataflowNameStatusHealthPanel, DataflowRunsTable } from "./DataflowsPageSupport";
+import { LifecycleStatusValues, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, formatBytes, formatNumber, formatPercent, monitoringTimezone, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
 
 export function DataflowsPage({
   report,

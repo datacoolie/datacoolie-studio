@@ -1,4 +1,4 @@
-import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/domainTypes";
 import { ReferenceMappingEditor } from "./ReferenceMappingEditor";
 import type { ReferenceMappingPayload } from "./referenceMappingModel";
 

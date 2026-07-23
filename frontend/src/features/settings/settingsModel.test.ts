@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StudioSettings } from "../../shared/api/types";
+import type { StudioSettings } from "../../shared/api/domainTypes";
 import {
   buildStudioSettingsPatch,
   createStudioSettingsDraft,

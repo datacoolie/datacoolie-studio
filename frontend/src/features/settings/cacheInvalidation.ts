@@ -1,5 +1,5 @@
 import type { QueryKey } from "@tanstack/react-query";
-import type { StudioCacheFeature, StudioCacheScope } from "../../shared/api/types";
+import type { StudioCacheFeature, StudioCacheScope } from "../../shared/api/domainTypes";
 
 export type DerivedQueryBranch = "overview" | "assets" | "lineage" | "monitoring";
 

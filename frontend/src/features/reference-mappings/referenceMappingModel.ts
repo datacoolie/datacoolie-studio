@@ -1,4 +1,4 @@
-import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping, ReferenceType, TargetIdentifierKind } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping, ReferenceType, TargetIdentifierKind } from "../../shared/api/domainTypes";
 
 export interface ReferenceMappingPayload {
   reference_type: ReferenceType;

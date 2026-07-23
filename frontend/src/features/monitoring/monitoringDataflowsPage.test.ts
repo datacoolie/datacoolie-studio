@@ -1,5 +1,4 @@
-import { describe, expect, it } from "vitest";
-import { lifecycleStatusItems, statusColor } from "./monitoringShared";
+import { describe, expect, it } from "vitest";import { lifecycleStatusItems, statusColor } from "./components/monitoringPrimitives";
 
 describe("Dataflows page lifecycle status values", () => {
   it("preserves label order and canonical status colors", () => {

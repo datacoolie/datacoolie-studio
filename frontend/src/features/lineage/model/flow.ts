@@ -4,7 +4,7 @@ import type {
   LineageAsset,
   LineageDependency,
   LineageReference
-} from "../../../shared/api/types";
+} from "../../../shared/api/domainTypes";
 import { assetIconKind, presentLineageAsset, referenceTypeAssetType } from "./presentation";
 import type {
   LineageAssetFlowNode,

@@ -9,7 +9,7 @@ import type {
   MetadataBackup,
   MetadataEditorDocument,
   MetadataEditorWorkspace,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 
 const metadataQueryStaleTime = Number.POSITIVE_INFINITY;

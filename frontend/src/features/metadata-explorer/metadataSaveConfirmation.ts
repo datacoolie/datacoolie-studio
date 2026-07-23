@@ -1,4 +1,4 @@
-import type { MetadataEditorDocument } from "../../shared/api/types";
+import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
 
 const sheetKeys = ["connections", "dataflows", "schema_hints"] as const;
 

@@ -7,7 +7,6 @@ from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics.schema import (
     DATAFLOW_TABLE,
     FILTER_VALUES_TABLE,
-    JOB_TABLE,
 )
 from datacoolie_studio.domains.monitoring.read_models.common import (
     AnalyticsContext,

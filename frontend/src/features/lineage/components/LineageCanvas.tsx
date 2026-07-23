@@ -8,7 +8,7 @@ import {
 } from "@xyflow/react";
 import { LocateFixed, LoaderCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { LatestStatusResponse } from "../../../shared/api/types";
+import type { LatestStatusResponse } from "../../../shared/api/domainTypes";
 import { EmptyState } from "../../../shared/components/EmptyState";
 import { useLineageLayout } from "../hooks/useLineageLayout";
 import { applyLineageEdgeHover, buildLineageFlow } from "../model/flow";

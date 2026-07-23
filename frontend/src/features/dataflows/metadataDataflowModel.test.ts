@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MetadataEditorDocument, MetadataResponse } from "../../shared/api/types";
+import type { MetadataEditorDocument, MetadataResponse } from "../../shared/api/domainTypes";
 import {
   buildMetadataDataflowRecords,
   dataflowFields,

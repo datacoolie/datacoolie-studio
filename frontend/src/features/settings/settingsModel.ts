@@ -1,4 +1,4 @@
-import type { StudioSettings } from "../../shared/api/types";
+import type { StudioSettings } from "../../shared/api/domainTypes";
 import type { StudioSettingsChanges } from "./hooks/useStudioSettings";
 
 export interface StudioSettingsDraft {

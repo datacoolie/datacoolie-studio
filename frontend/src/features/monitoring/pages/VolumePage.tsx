@@ -1,35 +1,7 @@
 import type { EChartsOption } from "echarts";
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";
-import {
-  CompactValue,
-  DataTable,
-  DataflowContextCell,
-  DataflowNameCell,
-  DetailMetric,
-  EndpointCell,
-  EndpointRouteNode,
-  HealthStripCard,
-  ReportChart,
-  ReportPanel,
-  TablePager,
-  baseChartOption,
-  bottomAnchoredValueXAxis,
-  createEmptyVolumeTrendRow,
-  formatBytes,
-  formatBytesShort,
-  formatCompact,
-  formatNumber,
-  horizontalBarDataZoom,
-  mergeVolumeTrendRows,
-  monitoringTimezone,
-  num,
-  reportChartPalette,
-  reportChartGrid,
-  resolveTrendBucketKeys,
-  workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption
-} from "../monitoringShared";
+import type { TableSort } from "../MonitoringCharts";import { CompactValue, DataTable, DataflowContextCell, DataflowNameCell, DetailMetric, EndpointCell, EndpointRouteNode, HealthStripCard, ReportChart, ReportPanel, TablePager, baseChartOption, bottomAnchoredValueXAxis, createEmptyVolumeTrendRow, formatBytes, formatBytesShort, formatCompact, formatNumber, horizontalBarDataZoom, mergeVolumeTrendRows, monitoringTimezone, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption } from "../components/monitoringPrimitives";
 import { alignedVolumeAxisBounds } from "../volumePageModel";
 
 export function VolumePage({

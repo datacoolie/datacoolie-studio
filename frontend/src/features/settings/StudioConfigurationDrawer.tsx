@@ -1,6 +1,6 @@
 import { ChevronDown, Search, X } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { StudioSettings } from "../../shared/api/types";
+import type { StudioSettings } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import type { StudioSettingsChanges } from "./hooks/useStudioSettings";
 import {

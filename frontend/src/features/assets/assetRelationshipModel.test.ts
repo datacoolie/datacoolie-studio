@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AssetBrief, AssetDetailResponse, AssetFlow } from "../../shared/api/types";
+import type { AssetBrief, AssetDetailResponse, AssetFlow } from "../../shared/api/domainTypes";
 import { assetRelationshipGroups } from "./assetRelationshipModel";
 
 const upstream = brief("asset:upstream", "raw.orders");

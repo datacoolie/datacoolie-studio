@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LineageAsset, LineageResponse } from "../../../shared/api/types";
+import type { LineageAsset, LineageResponse } from "../../../shared/api/domainTypes";
 import { createLineageGraphIndex, findLineageDataflowByMetadataIdentity, groupRelationsByNeighbor, referenceNeighborAttentionStatus, searchLineage, selectVisibleLineage } from "./graphIndex";
 
 const lineage: LineageResponse = {

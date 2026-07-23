@@ -1,6 +1,6 @@
 import { Check, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/types";
+import type { AssetInventoryItem, AssetReferenceGroupItem, ProjectReferenceMapping } from "../../shared/api/domainTypes";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { assetIconKind, assetTypeTone } from "../lineage/model/presentation";
 import {

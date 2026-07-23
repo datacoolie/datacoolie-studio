@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
 import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { MonitoringRecord } from "../../shared/api/types";
+import type { MonitoringRecord } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../shared/time";
 import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../shared/statusPresentation";
@@ -15,8 +15,7 @@ import {
   diagnosticsRuleDescription,
   diagnosticsSeverityPresentation,
 } from "./diagnosticsPresentation";
-import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./monitoringShared";
+import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
 import { SystemLogViewer } from "./SystemLogViewer";
 
 export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";

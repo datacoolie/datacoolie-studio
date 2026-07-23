@@ -4,7 +4,7 @@ import type {
   LineageDataflow,
   LineageDependency,
   LineageReference,
-} from "../../../shared/api/types";
+} from "../../../shared/api/domainTypes";
 import type { AssetIconKind } from "./presentation";
 
 export type TraceDirection = "upstream" | "both" | "downstream";

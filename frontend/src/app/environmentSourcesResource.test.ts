@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SourcePath } from "../shared/api/types";
+import type { SourcePath } from "../shared/api/domainTypes";
 
 vi.mock("../shared/api/client", () => ({
   api: {

@@ -1,26 +1,7 @@
 import { useEffect, useState } from "react";
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
-import type { MonitoringFilters } from "../monitoringFilters";
-import {
-  DetailMetric,
-  EndpointImpactTable,
-  FailurePhaseLegend,
-  FailureQueueTable,
-  FailureTrendLegend,
-  HealthStripCard,
-  RepeatedFailureTable,
-  ReportChart,
-  ReportPanel,
-  TablePager,
-  WindowPairDetail,
-  failureCategoryPhaseMatrixOption,
-  failureCategoriesRuleTooltip,
-  failureHorizontalBarOption,
-  failureTrendOption,
-  formatNumber,
-  formatPercent,
-  monitoringTimezone
-} from "../monitoringShared";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import type { MonitoringFilters } from "../monitoringFilters";import { DetailMetric, HealthStripCard, ReportChart, ReportPanel, TablePager, WindowPairDetail, failureCategoryPhaseMatrixOption, failureCategoriesRuleTooltip, failureHorizontalBarOption, failureTrendOption, formatNumber, formatPercent, monitoringTimezone } from "../components/monitoringPrimitives";
+import { EndpointImpactTable, FailurePhaseLegend, FailureQueueTable, FailureTrendLegend, RepeatedFailureTable } from "./FailurePageSupport";
 
 const FAILURE_QUEUE_PAGE_SIZE = 50;
 

@@ -1,35 +1,6 @@
-import type { MonitoringReport } from "../../../shared/api/types";
-import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";
-import {
-  DurationHeadline,
-  EngineProviderHealth,
-  FailureBreakdownDetail,
-  HealthStripCard,
-  OperationHealthPanel,
-  RateBreakdownDetail,
-  ReportChart,
-  ReportPanel,
-  RuntimePhaseContribution,
-  RuntimePhaseLegend,
-  StatusTrendLegend,
-  WorkloadVolumeContextPanel,
-  WorkloadVolumeLegend,
-  attentionQueueRuleTooltip,
-  dataflowStatusTrendOption,
-  durationIntent,
-  durationPercentilesDetail,
-  durationStatsTitle,
-  failureCategoriesRuleTooltip,
-  failureCategoryOption,
-  formatNumber,
-  formatPercent,
-  healthReasonSummary,
-  healthReasonsTooltip,
-  jobStatusTrendOption,
-  resolveAttentionTarget,
-  runtimePhaseContributionTooltip,
-  successRateIntent
-} from "../monitoringShared";
+import type { MonitoringReport } from "../../../shared/api/domainTypes";
+import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";import { DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusTrendLegend, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, failureCategoriesRuleTooltip, formatNumber, formatPercent, jobStatusTrendOption, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
+import { EngineProviderHealth, FailureBreakdownDetail, OperationHealthPanel, RateBreakdownDetail, WorkloadVolumeContextPanel, WorkloadVolumeLegend, attentionQueueRuleTooltip, failureCategoryOption, healthReasonSummary, healthReasonsTooltip, resolveAttentionTarget } from "./MonitoringOverviewPageSupport";
 
 function RunCountHeadline({ jobRuns, dataflowRuns }: { jobRuns: number; dataflowRuns: number }) {
   return (

@@ -1,7 +1,7 @@
 import { Database, FolderOpen, Plus, Server } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { BrandLogo } from "../../app/BrandLogo";
-import type { Environment, Project, SourcePath } from "../../shared/api/types";
+import type { Environment, Project, SourcePath } from "../../shared/api/domainTypes";
 
 interface WorkspacePanelProps {
   projects: Project[];

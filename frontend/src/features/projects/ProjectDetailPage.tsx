@@ -1,7 +1,7 @@
 import { CheckCircle2, CircleAlert, Database, FolderOpen, GitBranch, Layers3, LayoutDashboard, MoreHorizontal, Settings2, Trash2 } from "lucide-react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import type { ProjectSummary } from "../../shared/api/types";
+import type { ProjectSummary } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { ProjectSectionKey } from "../../app/moduleRegistry";
 import { projectReadinessSummary } from "../../shared/environmentReadiness";

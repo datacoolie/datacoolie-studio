@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";
-import { failureCategoryPhaseMatrixOption, failureHorizontalBarOption, failureTrendOption } from "./monitoringShared";
+import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";import { failureCategoryPhaseMatrixOption, failureHorizontalBarOption, failureTrendOption } from "./components/monitoringPrimitives";
 
 type ChartSeries = {
   name: string;

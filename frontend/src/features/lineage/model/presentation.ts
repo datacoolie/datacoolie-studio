@@ -1,4 +1,4 @@
-import type { LineageAsset } from "../../../shared/api/types";
+import type { LineageAsset } from "../../../shared/api/domainTypes";
 
 const PATH_SEPARATOR = /[\\/]+/;
 

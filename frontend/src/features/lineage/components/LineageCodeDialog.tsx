@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AssetDefinitionResponse, LineageAsset } from "../../../shared/api/types";
+import type { AssetDefinitionResponse, LineageAsset } from "../../../shared/api/domainTypes";
 import { SourceCodeViewer } from "../../assets/SourceCodeViewer";
 import { assetIconKind, assetTypeTone, presentLineageAsset } from "../model/presentation";
 import { LineageFormatIcon } from "./LineageFormatIcon";

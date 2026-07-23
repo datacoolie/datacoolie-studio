@@ -12,7 +12,7 @@ import { monitoringDefaultPage } from "./moduleRegistry";
 import type { StudioModulesState } from "./useStudioModules";
 import type { StudioRouter } from "./useStudioRouter";
 import type { StudioWorkspace } from "./useStudioWorkspace";
-import type { EnvironmentContext } from "../shared/api/types";
+import type { EnvironmentContext } from "../shared/api/domainTypes";
 
 // Heavy, graph/chart-heavy pages are code-split so the initial bundle stays small.
 const MetadataExplorer = lazy(() =>

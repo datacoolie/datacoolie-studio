@@ -1,6 +1,6 @@
 import { AlertTriangle, Database, GitBranch, Lightbulb, PlayCircle } from "lucide-react";
 import type { ReactNode } from "react";
-import type { MetadataEditorIssue } from "../../shared/api/types";
+import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
 
 interface MetadataMetricsProps {
   connections: number;

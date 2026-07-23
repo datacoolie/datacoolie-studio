@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api/client";
-import type { ProjectReferenceRegistryResponse } from "../../shared/api/types";
+import type { ProjectReferenceRegistryResponse } from "../../shared/api/domainTypes";
 import { ResourceCache } from "../../shared/data/resourceCache";
 
 const REGISTRY_TTL_MS = 60_000;

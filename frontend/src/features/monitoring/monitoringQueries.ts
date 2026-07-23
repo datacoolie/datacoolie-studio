@@ -3,7 +3,7 @@ import { api } from "../../shared/api/client";
 import type {
   MonitoringPageResponse,
   MonitoringReport,
-} from "../../shared/api/types";
+} from "../../shared/api/domainTypes";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 import type { TableSort } from "./MonitoringCharts";
 import type { MonitoringFilters, MonitoringTabKey } from "./monitoringFilters";

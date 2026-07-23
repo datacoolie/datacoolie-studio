@@ -1,4 +1,4 @@
-import type { MetadataEditorDocument } from "../../shared/api/types";
+import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
 import type { SheetKey, SheetRow } from "./metadataSheetTypes";
 
 export const STUDIO_METADATA_SOURCE_FIELDS = [

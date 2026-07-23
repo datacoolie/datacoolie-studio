@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LatestStatusResponse, LineageDataflow, LineageDependency, LineageReference } from "../../../shared/api/types";
+import type { LatestStatusResponse, LineageDataflow, LineageDependency, LineageReference } from "../../../shared/api/domainTypes";
 import { dependencyEdgePath } from "../components/LineageEdges";
 import { buildLineageFlow, latestRun } from "./flow";
 import type { VisibleLineage } from "./types";

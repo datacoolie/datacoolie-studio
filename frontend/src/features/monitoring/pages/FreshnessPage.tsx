@@ -1,34 +1,8 @@
 import type { EChartsOption } from "echarts";
 import { useMemo } from "react";
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/types";
+import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { TableColumn } from "../MonitoringCharts";
-import type { MonitoringFilters } from "../monitoringFilters";
-import {
-  DataTable,
-  DetailMetric,
-  EndpointCell,
-  HealthStripCard,
-  ReportChart,
-  ReportPanel,
-  TablePager,
-  TableDateTimeValue,
-  WatermarkBadge,
-  baseChartOption,
-  fixedHorizontalBarGrid,
-  fixedHorizontalCategoryAxis,
-  formatCompact,
-  formatNumber,
-  formatPercent,
-  monitoringTimezone,
-  horizontalBarDataZoom,
-  horizontalBarSeriesSizing,
-  reportChartPalette,
-  reportChartGrid,
-  resolveTrendBucketKeys,
-  normalizeTrendBucketKey,
-  normalizeTrendGrain,
-  type TableSort
-} from "../monitoringShared";
+import type { MonitoringFilters } from "../monitoringFilters";import { DataTable, DetailMetric, EndpointCell, HealthStripCard, ReportChart, ReportPanel, TablePager, TableDateTimeValue, WatermarkBadge, baseChartOption, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatNumber, formatPercent, monitoringTimezone, horizontalBarDataZoom, horizontalBarSeriesSizing, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, normalizeTrendBucketKey, normalizeTrendGrain, type TableSort } from "../components/monitoringPrimitives";
 
 type FreshnessRow = Record<string, unknown>;
 

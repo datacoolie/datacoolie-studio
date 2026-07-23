@@ -1,8 +1,8 @@
-import type { JobRecord, MonitoringRecord, MonitoringReport } from "../../shared/api/types";
+import type { JobRecord, MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { MonitoringFilters, MonitoringTabKey } from "./monitoringFilters";
+import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";
 import {
   BarList,
   DataTable,
@@ -15,27 +15,41 @@ import {
   formatNumber,
   formatSeconds,
   num
-} from "./MonitoringCharts";
-import { ReportChart, baseChartOption, reportChartPalette } from "./ReportChart";
-import { formatTimestampForDisplay } from "../../shared/time";
-import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { assetIconKind } from "../lineage/model/presentation";
+} from "../MonitoringCharts";
+import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart";
+import { formatTimestampForDisplay } from "../../../shared/time";
+import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
+import { assetIconKind } from "../../lineage/model/presentation";
+import { formatConfigValue, isMeaningfulConfigValue } from "../pages/JobsPageSupport";
+export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
+export type { JobRecord, MonitoringRecord, MonitoringReport, CSSProperties, ReactPointerEvent, ReactNode, MonitoringFilters, MonitoringTabKey, TableSort };
 
-const OVERVIEW_STATUSES = ["succeeded", "failed", "skipped", "running", "pending"] as const;
-const PHASE_KEYS = ["source", "transform", "destination", "overhead"] as const;
-const FAILURE_PHASES = ["source", "transform", "destination", "overhead", "unknown"] as const;
-const HORIZONTAL_BAR_VISIBLE_ROWS = 8;
-const HORIZONTAL_BAR_LABEL_GAP = 16;
-const REPORT_CHART_GRID_BOTTOM = 6;
-const REPORT_CHART_TIGHT_GRID_BOTTOM = 2;
-const REPORT_CHART_X_ZOOM_GRID_BOTTOM = 30;
-const RUN_TABLE_PAGE_SIZES = [50, 100, 200] as const;
-type HealthIntent = "neutral" | "bad" | "good" | "warning";
+
+export const OVERVIEW_STATUSES = ["succeeded", "failed", "skipped", "running", "pending"] as const;
+
+export const PHASE_KEYS = ["source", "transform", "destination", "overhead"] as const;
+
+export const FAILURE_PHASES = ["source", "transform", "destination", "overhead", "unknown"] as const;
+
+export const HORIZONTAL_BAR_VISIBLE_ROWS = 8;
+
+export const HORIZONTAL_BAR_LABEL_GAP = 16;
+
+export const REPORT_CHART_GRID_BOTTOM = 6;
+
+export const REPORT_CHART_X_ZOOM_GRID_BOTTOM = 30;
+
+export const RUN_TABLE_PAGE_SIZES = [50, 100, 200] as const;
+
+export type HealthIntent = "neutral" | "bad" | "good" | "warning";
+
 export type HealthCardAccent = HealthIntent | "source" | "transform" | "destination" | "storage" | "overhead" | "intent";
-type PhaseKey = typeof PHASE_KEYS[number];
-type FailurePhaseKey = typeof FAILURE_PHASES[number];
 
-function HealthStripCard({
+export type PhaseKey = typeof PHASE_KEYS[number];
+
+export type FailurePhaseKey = typeof FAILURE_PHASES[number];
+
+export function HealthStripCard({
   label,
   value,
   detail,
@@ -61,27 +75,7 @@ function HealthStripCard({
   );
 }
 
-function FailureBreakdownDetail({ jobFailed, flowFailed }: { jobFailed: number; flowFailed: number }) {
-  return (
-    <span className="health-failure-detail">
-      <DetailMetric label="job failed" value={formatNumber(jobFailed)} tone="bad" />
-      <span className="separator"> · </span>
-      <DetailMetric label="flow failed" value={formatNumber(flowFailed)} tone="bad" />
-    </span>
-  );
-}
-
-function RateBreakdownDetail({ failedRate, windowFailedRate }: { failedRate: number; windowFailedRate: number }) {
-  return (
-    <span className="health-rate-detail">
-      <DetailMetric label="failed" value={formatPercent(failedRate)} tone="bad" />
-      <span className="separator"> · </span>
-      <DetailMetric label="7d failed" value={formatPercent(windowFailedRate)} tone="bad" />
-    </span>
-  );
-}
-
-function DetailMetric({
+export function DetailMetric({
   label,
   value,
   tone = "neutral",
@@ -101,27 +95,7 @@ function DetailMetric({
   );
 }
 
-function healthReasonSummary(reasons: string[]) {
-  const items = reasons.filter((reason) => String(reason || "").trim().length > 0);
-  if (!items.length) {
-    return {
-      primary: "No immediate monitoring issues detected.",
-      additionalCount: 0
-    };
-  }
-  return {
-    primary: items[0],
-    additionalCount: Math.max(0, items.length - 1)
-  };
-}
-
-function healthReasonsTooltip(reasons: string[]) {
-  const items = reasons.filter((reason) => String(reason || "").trim().length > 0);
-  if (!items.length) return "No immediate monitoring issues detected.";
-  return items.map((reason, index) => `${index + 1}. ${reason}`).join("\n");
-}
-
-function failureCategoriesRuleTooltip() {
+export function failureCategoriesRuleTooltip() {
   return [
     "Value source:",
     "- Count of failed dataflow runs in current filters.",
@@ -150,27 +124,11 @@ function failureCategoriesRuleTooltip() {
   ].join("\n");
 }
 
-function attentionQueueRuleTooltip() {
-  return [
-    "Value source:",
-    "- Signals roll up actionable current-filter health evidence from Jobs, Dataflows, Failures, Performance, Maintenance, Freshness, and Diagnostics.",
-    "Display condition:",
-    "- Recent failed jobs/dataflows: last 3d => bad, else last 7d => warning.",
-    "- Repeated failure: top failing dataflow has >= 3 failed runs.",
-    "- No log evidence: warning when no monitoring logs are found in current filters.",
-    "- Stale logs: warning when latest log age > 7 days.",
-    "- Performance pressure uses the same P95/P50 thresholds as Performance; optimization candidates and a slow stage can also produce signals.",
-    "- Maintenance coverage/lag, freshness, runtime context, active runs, linkage, cache, and reconciliation evidence reuse their page metrics.",
-    "- High volume alone is not treated as an issue without anomaly evidence.",
-    "- Queue is deduplicated, then ranked by severity and impact; it shows up to 8 signals."
-  ].join("\n");
-}
-
-function durationStatsTitle(label: string, _stats: Record<string, number>) {
+export function durationStatsTitle(label: string, _stats: Record<string, number>) {
   return `${label} includes succeeded and failed runs.`;
 }
 
-function DurationHeadline({ avgSeconds, p50Seconds }: { avgSeconds: number; p50Seconds: number }) {
+export function DurationHeadline({ avgSeconds, p50Seconds }: { avgSeconds: number; p50Seconds: number }) {
   return (
     <span className="health-duration-headline">
       <span className="duration-avg">AVG {formatSecondsSingleDecimal(avgSeconds)}</span>
@@ -180,7 +138,7 @@ function DurationHeadline({ avgSeconds, p50Seconds }: { avgSeconds: number; p50S
   );
 }
 
-function WindowPairDetail({
+export function WindowPairDetail({
   firstLabel,
   firstValue,
   firstTone,
@@ -210,7 +168,7 @@ function WindowPairDetail({
   );
 }
 
-function durationPercentilesDetail(stats: Record<string, number>) {
+export function durationPercentilesDetail(stats: Record<string, number>) {
   const p75 = stats.q3_duration_seconds ?? 0;
   const p95 = stats.p95_duration_seconds ?? stats.p99_duration_seconds ?? 0;
   const p99 = stats.p99_duration_seconds ?? p95;
@@ -225,7 +183,7 @@ function durationPercentilesDetail(stats: Record<string, number>) {
   );
 }
 
-function ReportPanel({
+export function ReportPanel({
   title,
   subtitle,
   titleTooltip,
@@ -256,175 +214,7 @@ function ReportPanel({
   );
 }
 
-function OperationHealthPanel({
-  jobRows,
-  dataflowRows
-}: {
-  jobRows: Array<Record<string, string | number>>;
-  dataflowRows: Array<Record<string, string | number>>;
-}) {
-  const jobOperations = sortOperationRows(filterOperationRows(jobRows));
-  const dataflowOperations = sortOperationRows(filterOperationRows(dataflowRows));
-  if (!jobOperations.length && !dataflowOperations.length) {
-    return <div className="table-empty">No operation signals in current filters.</div>;
-  }
-  return (
-    <div className="overview-operation-health">
-      <ReportChart option={operationHealthCombinedBarOption(jobOperations, dataflowOperations)} height="100%" />
-    </div>
-  );
-}
-
-function operationHealthCombinedBarOption(
-  jobRows: Array<Record<string, string | number>>,
-  dataflowRows: Array<Record<string, string | number>>
-) {
-  const hasJobRows = jobRows.length > 0;
-  const hasDataflowRows = dataflowRows.length > 0;
-  const jobLabels = jobRows.map((row) => String(row.operation_type ?? "unknown"));
-  const dataflowLabels = dataflowRows.map((row) => String(row.operation_type ?? "unknown"));
-  const hasBothGroups = hasJobRows && hasDataflowRows;
-  const jobTop = hasBothGroups ? 14 : 8;
-  const jobHeight = hasBothGroups ? "43%" : "86%";
-  const dataflowTop = hasJobRows ? "54%" : 8;
-  const dataflowHeight = hasBothGroups ? "43%" : "86%";
-  const grids = [];
-  const xAxes = [];
-  const yAxes = [];
-  const graphics = [];
-  if (hasJobRows) {
-    grids.push(fixedHorizontalBarGrid(76, false, { right: 14, top: jobTop, height: jobHeight }));
-    xAxes.push(operationHealthValueAxis(0, "bottom"));
-    yAxes.push(operationHealthCategoryAxis(jobLabels, 0));
-    graphics.push(operationHealthGroupLabel("Job runs", hasBothGroups ? 0 : 0));
-  }
-  if (hasDataflowRows) {
-    grids.push(fixedHorizontalBarGrid(76, false, { right: 14, top: dataflowTop, height: dataflowHeight }));
-    xAxes.push(operationHealthValueAxis(hasJobRows ? 1 : 0, "bottom"));
-    yAxes.push(operationHealthCategoryAxis(dataflowLabels, hasJobRows ? 1 : 0));
-    graphics.push(operationHealthGroupLabel("Dataflow runs", hasJobRows ? "51.5%" : 0));
-  }
-  if (hasBothGroups) graphics.push(operationHealthDivider());
-  const jobAxisIndex = hasJobRows ? 0 : -1;
-  const dataflowAxisIndex = hasJobRows && hasDataflowRows ? 1 : hasDataflowRows ? 0 : -1;
-  return baseChartOption({
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      confine: false,
-      appendToBody: true,
-      extraCssText: "max-width: 260px; white-space: normal; line-height: 1.35; z-index: 9999;",
-      formatter: (params: any) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const seriesName = String(first?.seriesName ?? "");
-        const isDataflow = seriesName.startsWith("Dataflow ");
-        const title = isDataflow ? "Dataflow runs" : "Job runs";
-        const sourceRows = isDataflow ? dataflowRows : jobRows;
-        const row = sourceRows[Number(first?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${title}</strong>`,
-          ...operationHealthTooltip(row).split("\n")
-        ].join("<br/>");
-      }
-    },
-    legend: { show: false },
-    grid: grids,
-    xAxis: xAxes,
-    yAxis: yAxes,
-    graphic: graphics,
-    series: [
-      ...(hasJobRows
-        ? OVERVIEW_STATUSES.map((status) => operationHealthStatusSeries("Job", status, jobRows, jobAxisIndex))
-        : []),
-      ...(hasDataflowRows
-        ? OVERVIEW_STATUSES.map((status) => operationHealthStatusSeries("Dataflow", status, dataflowRows, dataflowAxisIndex))
-        : [])
-    ]
-  });
-}
-
-function operationHealthValueAxis(gridIndex: number, position: "top" | "bottom") {
-  return {
-    type: "value" as const,
-    gridIndex,
-    position,
-    axisLabel: { fontSize: 9, margin: 3, formatter: (value: number) => formatCompact(value) },
-    axisTick: { show: false },
-    axisLine: { lineStyle: { color: reportChartPalette.grid } },
-    splitLine: { lineStyle: { color: reportChartPalette.grid } }
-  };
-}
-
-function operationHealthCategoryAxis(labels: string[], gridIndex: number) {
-  return {
-    type: "category" as const,
-    gridIndex,
-    data: labels,
-    inverse: true,
-    boundaryGap: false,
-    axisTick: { show: false },
-    axisLabel: {
-      fontSize: 10,
-      color: reportChartPalette.muted,
-      overflow: "truncate" as const,
-      width: 76,
-      margin: 4
-    }
-  };
-}
-
-function operationHealthStatusSeries(
-  group: "Job" | "Dataflow",
-  status: string,
-  rows: Array<Record<string, string | number>>,
-  axisIndex: number
-) {
-  return {
-    name: `${group} ${status}`,
-    type: "bar" as const,
-    stack: `${group}-runs`,
-    barWidth: 16,
-    emphasis: { focus: "series" as const },
-    itemStyle: { color: statusColor(status), borderRadius: 2 },
-    xAxisIndex: axisIndex,
-    yAxisIndex: axisIndex,
-    data: rows.map((row) => num(row, status))
-  };
-}
-
-function operationHealthGroupLabel(text: string, top: number | string) {
-  return {
-    type: "text" as const,
-    left: 0,
-    top,
-    style: {
-      text,
-      fill: reportChartPalette.muted,
-      font: "800 10px Inter, ui-sans-serif, system-ui",
-      align: "left",
-      backgroundColor: "#ffffff",
-      padding: [1, 4, 1, 0],
-      textTransform: "uppercase"
-    },
-    silent: true
-  };
-}
-
-function operationHealthDivider() {
-  return {
-    type: "rect" as const,
-    left: 0,
-    right: 0,
-    top: "50%",
-    shape: { width: 520, height: 1 },
-    style: {
-      fill: reportChartPalette.grid
-    },
-    silent: true
-  };
-}
-
-function RuntimePhaseContribution({
+export function RuntimePhaseContribution({
   rows,
   labelKey = "operation_type",
   emptyText = "No phase duration signals in current filters.",
@@ -517,7 +307,7 @@ function RuntimePhaseContribution({
   );
 }
 
-function LifecycleStatusValues({
+export function LifecycleStatusValues({
   skipped,
   running,
   pending
@@ -541,7 +331,7 @@ function LifecycleStatusValues({
   );
 }
 
-function lifecycleStatusItems(skipped: number, running: number, pending: number) {
+export function lifecycleStatusItems(skipped: number, running: number, pending: number) {
   return ([
     ["skipped", skipped],
     ["running", running],
@@ -549,9 +339,9 @@ function lifecycleStatusItems(skipped: number, running: number, pending: number)
   ] as const).map(([status, value]) => ({ status, value, color: statusColor(status) }));
 }
 
-type MonitoringChartLegendItem = readonly [label: string, color: string];
+export type MonitoringChartLegendItem = readonly [label: string, color: string];
 
-function MonitoringChartLegend({
+export function MonitoringChartLegend({
   label,
   items
 }: {
@@ -570,27 +360,18 @@ function MonitoringChartLegend({
   );
 }
 
-function StatusTrendLegend() {
+export function StatusTrendLegend() {
   return <MonitoringChartLegend label="Run status legend" items={[
     ...OVERVIEW_STATUSES.map((status) => [humanize(status), statusColor(status)] as const),
     ["Success rate", reportChartPalette.blue]
   ]} />;
 }
 
-function StatusHealthLegend() {
+export function StatusHealthLegend() {
   return <MonitoringChartLegend
     label="Run status legend"
     items={OVERVIEW_STATUSES.map((status) => [humanize(status), statusColor(status)] as const)}
   />;
-}
-
-function WorkloadVolumeLegend() {
-  return <MonitoringChartLegend label="Input and output workload legend" items={[
-    ["Rows read", reportChartPalette.read],
-    ["Est rows written", reportChartPalette.written],
-    ["Bytes added", reportChartPalette.teal],
-    ["Bytes removed", reportChartPalette.failed]
-  ]} />;
 }
 
 export function healthCardAccentClass(accent: HealthCardAccent, intent: HealthIntent) {
@@ -598,7 +379,7 @@ export function healthCardAccentClass(accent: HealthCardAccent, intent: HealthIn
   return `health-card-accent-${resolved}`;
 }
 
-function RuntimePhaseLegend() {
+export function RuntimePhaseLegend() {
   return (
     <div className="runtime-phase-legend" aria-label="Phase legend">
       {PHASE_KEYS.map((phase) => (
@@ -608,7 +389,7 @@ function RuntimePhaseLegend() {
   );
 }
 
-function runtimePhaseContributionTooltip(grouping: string) {
+export function runtimePhaseContributionTooltip(grouping: string) {
   return [
     `Groups dataflow runs by ${grouping}.`,
     "Runs, Total, AVG, P95, and Failed exclude pending and running runs; eligible statuses are succeeded, failed, and skipped.",
@@ -617,7 +398,7 @@ function runtimePhaseContributionTooltip(grouping: string) {
   ].join("\n");
 }
 
-function RuntimePhaseMatrixTooltip({
+export function RuntimePhaseMatrixTooltip({
   row,
   labelKey,
   style
@@ -674,7 +455,7 @@ function RuntimePhaseMatrixTooltip({
   );
 }
 
-function runtimePhaseTotalRow(rows: Array<Record<string, string | number>>, labelKey: string) {
+export function runtimePhaseTotalRow(rows: Array<Record<string, string | number>>, labelKey: string) {
   const durations = Object.fromEntries(
     PHASE_KEYS.map((phase) => [
       `${phase}_duration_seconds`,
@@ -701,11 +482,11 @@ function runtimePhaseTotalRow(rows: Array<Record<string, string | number>>, labe
   return totalRow;
 }
 
-function phaseRowLabel(row: Record<string, unknown>, labelKey: string) {
+export function phaseRowLabel(row: Record<string, unknown>, labelKey: string) {
   return String(row[labelKey] ?? row.group ?? row.operation_type ?? "unknown");
 }
 
-function runtimePhaseSegments(row: Record<string, unknown>) {
+export function runtimePhaseSegments(row: Record<string, unknown>) {
   const rawSegments = PHASE_KEYS.map((phase) => ({
     phase,
     percent: Math.max(0, num(row, `${phase}_duration_percent`))
@@ -718,42 +499,7 @@ function runtimePhaseSegments(row: Record<string, unknown>) {
   }));
 }
 
-function WorkloadVolumeContextPanel({
-  report,
-  filters,
-  dateRange,
-  timezoneName,
-  effectiveGrain
-}: {
-  report: MonitoringReport;
-  filters: MonitoringFilters;
-  dateRange: { min?: string | null; max?: string | null };
-  timezoneName: string;
-  effectiveGrain?: string;
-}) {
-  const trendOption = workloadVolumeTrendOption(
-    report.volume.rows_by_date ?? [],
-    report.volume.bytes_by_date ?? [],
-    filters,
-    dateRange,
-    timezoneName,
-    effectiveGrain,
-    false
-  );
-  return (
-    <div className="overview-workload-context">
-      {trendOption ? (
-        <div className="overview-workload-trend">
-          <ReportChart option={trendOption} height="100%" />
-        </div>
-      ) : (
-        <div className="table-empty">No workload volume trend in current filters.</div>
-      )}
-    </div>
-  );
-}
-
-function workloadVolumeTrendOption(
+export function workloadVolumeTrendOption(
   rowsByDate: Array<Record<string, string | number | null>>,
   bytesByDate: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
@@ -873,7 +619,7 @@ function workloadVolumeTrendOption(
   });
 }
 
-function jobStatusTrendOption(
+export function jobStatusTrendOption(
   rows: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
@@ -883,7 +629,7 @@ function jobStatusTrendOption(
   return statusTrendOption(rows, "jobs", filters, dateRange, timezoneName, effectiveGrain);
 }
 
-function dataflowStatusTrendOption(
+export function dataflowStatusTrendOption(
   rows: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
@@ -893,7 +639,7 @@ function dataflowStatusTrendOption(
   return statusTrendOption(rows, "dataflows", filters, dateRange, timezoneName, effectiveGrain);
 }
 
-function statusTrendOption(
+export function statusTrendOption(
   rows: Array<Record<string, string | number | null>>,
   runLabel: "jobs" | "dataflows",
   filters: MonitoringFilters,
@@ -996,7 +742,7 @@ function statusTrendOption(
   });
 }
 
-function fillMissingTrendDates(
+export function fillMissingTrendDates(
   rows: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
@@ -1020,7 +766,7 @@ function fillMissingTrendDates(
   return keys.map((dateKey) => rowByDate.get(dateKey) ?? createEmptyTrendRow(dateKey, effectiveGrain));
 }
 
-function createEmptyTrendRow(dateKey: string, grain: string): Record<string, string | number> {
+export function createEmptyTrendRow(dateKey: string, grain: string): Record<string, string | number> {
   return {
     date: dateKey,
     bucket: dateKey,
@@ -1036,44 +782,7 @@ function createEmptyTrendRow(dateKey: string, grain: string): Record<string, str
   };
 }
 
-function sortOperationRows(rows: Array<Record<string, string | number>>) {
-  return rows
-    .slice()
-    .sort((left, right) => {
-      const failed = num(right, "failed") - num(left, "failed");
-      if (failed !== 0) return failed;
-      const active = num(right, "running") + num(right, "pending") - (num(left, "running") + num(left, "pending"));
-      if (active !== 0) return active;
-      const total = operationTotal(right) - operationTotal(left);
-      if (total !== 0) return total;
-      return String(left.operation_type ?? "unknown").localeCompare(String(right.operation_type ?? "unknown"));
-    });
-}
-
-function filterOperationRows(rows: Array<Record<string, string | number>>) {
-  return rows.filter((row) => {
-    const operation = String(row.operation_type ?? "unknown").trim();
-    return operation !== "" && operation !== "not_available";
-  });
-}
-
-function operationTotal(row: Record<string, unknown>) {
-  return num(row, "count") || OVERVIEW_STATUSES.reduce((sum, status) => sum + num(row, status), 0);
-}
-
-function operationHealthTooltip(row: Record<string, unknown>) {
-  return [
-    String(row.operation_type ?? "unknown"),
-    `Total: ${formatNumber(operationTotal(row))}`,
-    `Succeeded: ${formatNumber(num(row, "succeeded"))}`,
-    `Failed: ${formatNumber(num(row, "failed"))}`,
-    `Skipped: ${formatNumber(num(row, "skipped"))}`,
-    `Running: ${formatNumber(num(row, "running"))}`,
-    `Pending: ${formatNumber(num(row, "pending"))}`
-  ].join("\n");
-}
-
-function phaseLabel(phase: string) {
+export function phaseLabel(phase: string) {
   if (phase === "source") return "Source";
   if (phase === "transform") return "Transform";
   if (phase === "destination") return "Destination";
@@ -1081,7 +790,7 @@ function phaseLabel(phase: string) {
   return phase;
 }
 
-function createEmptyVolumeTrendRow(dateKey: string, grain: string) {
+export function createEmptyVolumeTrendRow(dateKey: string, grain: string) {
   return {
     date: dateKey,
     bucket: dateKey,
@@ -1098,7 +807,7 @@ function createEmptyVolumeTrendRow(dateKey: string, grain: string) {
   };
 }
 
-function resolveTrendBucketKeys(
+export function resolveTrendBucketKeys(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
@@ -1113,7 +822,7 @@ function resolveTrendBucketKeys(
   return resolveTrendDateKeys(filters, dateRange, timezoneName, knownDateKeys);
 }
 
-function normalizeTrendBucketKey(value: unknown, grainValue: string, timezoneName: string) {
+export function normalizeTrendBucketKey(value: unknown, grainValue: string, timezoneName: string) {
   const rawValue = String(value ?? "").trim();
   if (!rawValue) return "";
   const grain = normalizeTrendGrain(grainValue);
@@ -1131,7 +840,7 @@ function normalizeTrendBucketKey(value: unknown, grainValue: string, timezoneNam
   return dateKey;
 }
 
-function resolveTrendDateKeys(
+export function resolveTrendDateKeys(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
@@ -1164,7 +873,7 @@ function resolveTrendDateKeys(
   return enumerateDateKeys(minKnown, maxKnown);
 }
 
-function resolveTrendHourKeys(
+export function resolveTrendHourKeys(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
@@ -1191,7 +900,7 @@ function resolveTrendHourKeys(
   return knownDateKeys.slice().sort();
 }
 
-function resolveTrendWeekKeys(
+export function resolveTrendWeekKeys(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
@@ -1202,7 +911,7 @@ function resolveTrendWeekKeys(
   return Array.from(new Set(dateKeys.map((dateKey) => weekKeyFromDateKey(dateKey)).filter(Boolean))).sort();
 }
 
-function resolveTrendMonthKeys(
+export function resolveTrendMonthKeys(
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
   timezoneName: string,
@@ -1213,11 +922,11 @@ function resolveTrendMonthKeys(
   return Array.from(new Set(dateKeys.map((dateKey) => dateKey.slice(0, 7)).filter(Boolean))).sort();
 }
 
-function rowLabel(row: Record<string, unknown>) {
+export function rowLabel(row: Record<string, unknown>) {
   return String(row.bucket ?? row.date ?? "");
 }
 
-function normalizeToDateKey(value: string, timezoneName: string) {
+export function normalizeToDateKey(value: string, timezoneName: string) {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return "";
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
@@ -1226,7 +935,7 @@ function normalizeToDateKey(value: string, timezoneName: string) {
   return timezoneDateKey(timestamp, timezoneName);
 }
 
-function timezoneDateKey(timestamp: number, timezoneName: string): string {
+export function timezoneDateKey(timestamp: number, timezoneName: string): string {
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezoneName,
@@ -1243,7 +952,7 @@ function timezoneDateKey(timestamp: number, timezoneName: string): string {
   }
 }
 
-function timezoneHourKey(timestamp: number, timezoneName: string): string {
+export function timezoneHourKey(timestamp: number, timezoneName: string): string {
   try {
     const formatter = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezoneName,
@@ -1262,13 +971,13 @@ function timezoneHourKey(timestamp: number, timezoneName: string): string {
   }
 }
 
-function floorToHour(timestamp: number) {
+export function floorToHour(timestamp: number) {
   const date = new Date(timestamp);
   date.setUTCMinutes(0, 0, 0);
   return date.getTime();
 }
 
-function enumerateHourKeys(startTimestamp: number, endTimestamp: number, timezoneName: string) {
+export function enumerateHourKeys(startTimestamp: number, endTimestamp: number, timezoneName: string) {
   if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) return [];
   const from = Math.min(floorToHour(startTimestamp), floorToHour(endTimestamp));
   const to = Math.max(floorToHour(startTimestamp), floorToHour(endTimestamp));
@@ -1280,21 +989,21 @@ function enumerateHourKeys(startTimestamp: number, endTimestamp: number, timezon
   return keys;
 }
 
-function parseFilterTime(value: string | null | undefined) {
+export function parseFilterTime(value: string | null | undefined) {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return null;
   const timestamp = Date.parse(trimmed);
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function parseHourKey(value: string) {
+export function parseHourKey(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):00$/.exec(value);
   if (!match) return null;
   const [, year, month, day, hour] = match;
   return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour));
 }
 
-function weekKeyFromDateKey(dateKey: string) {
+export function weekKeyFromDateKey(dateKey: string) {
   const date = dateKeyToUtcDate(dateKey);
   if (!date) return "";
   const day = date.getUTCDay() || 7;
@@ -1305,7 +1014,7 @@ function weekKeyFromDateKey(dateKey: string) {
   return `${isoYear}-W${String(week).padStart(2, "0")}`;
 }
 
-function resolveClientTrendGrain(grainValue: string, filters: MonitoringFilters) {
+export function resolveClientTrendGrain(grainValue: string, filters: MonitoringFilters) {
   const requestedGrain = normalizeTrendGrain(grainValue);
   const minimumGrain = minimumClientTrendGrain(filters);
   if (requestedGrain === "auto") return minimumGrain;
@@ -1315,13 +1024,13 @@ function resolveClientTrendGrain(grainValue: string, filters: MonitoringFilters)
   return DATE_GRAINS[Math.max(requestedIndex, minimumIndex)];
 }
 
-function normalizeTrendGrain(grain: string) {
+export function normalizeTrendGrain(grain: string) {
   return grain === "hour" || grain === "day" || grain === "week" || grain === "month" || grain === "auto" ? grain : "day";
 }
 
-const DATE_GRAINS = ["hour", "day", "week", "month"] as const;
+export const DATE_GRAINS = ["hour", "day", "week", "month"] as const;
 
-function minimumClientTrendGrain(filters: MonitoringFilters) {
+export function minimumClientTrendGrain(filters: MonitoringFilters) {
   if (filters.range === "24h" || filters.range === "3d") return "hour";
   if (filters.range === "7d" || filters.range === "30d" || filters.range === "90d") return "day";
   if (filters.range === "custom") {
@@ -1333,7 +1042,7 @@ function minimumClientTrendGrain(filters: MonitoringFilters) {
   return "day";
 }
 
-function minimumClientTrendGrainForSpan(spanSeconds: number) {
+export function minimumClientTrendGrainForSpan(spanSeconds: number) {
   if (spanSeconds <= 3 * 24 * 3600) return "hour";
   if (spanSeconds <= 90 * 86400) return "day";
   if (spanSeconds <= 365 * 86400) return "week";
@@ -1346,27 +1055,27 @@ export const monitoringTrendBucketTestUtils = {
   workloadVolumeTrendOption
 };
 
-function dateKeyToUtcDate(dateKey: string) {
+export function dateKeyToUtcDate(dateKey: string) {
   const [year, month, day] = dateKey.split("-").map((value) => Number(value));
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
   return new Date(Date.UTC(year, month - 1, day));
 }
 
-function utcDateToDateKey(date: Date) {
+export function utcDateToDateKey(date: Date) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function addDaysToDateKey(dateKey: string, offsetDays: number) {
+export function addDaysToDateKey(dateKey: string, offsetDays: number) {
   const date = dateKeyToUtcDate(dateKey);
   if (!date) return "";
   date.setUTCDate(date.getUTCDate() + offsetDays);
   return utcDateToDateKey(date);
 }
 
-function enumerateDateKeys(startDateKey: string, endDateKey: string) {
+export function enumerateDateKeys(startDateKey: string, endDateKey: string) {
   const start = dateKeyToUtcDate(startDateKey);
   const end = dateKeyToUtcDate(endDateKey);
   if (!start || !end) return [];
@@ -1379,38 +1088,7 @@ function enumerateDateKeys(startDateKey: string, endDateKey: string) {
   return keys;
 }
 
-function failureCategoryOption(rows: Array<Record<string, string | number>>) {
-  const visible = rows
-    .slice()
-    .sort((left, right) => {
-      const byCount = num(right, "count") - num(left, "count");
-      if (byCount !== 0) return byCount;
-      return String(left.category ?? "unknown").localeCompare(String(right.category ?? "unknown"));
-    });
-  const zoomConfig = horizontalBarDataZoom(visible.length);
-  const hasZoom = Boolean(zoomConfig);
-  const barSizing = horizontalBarSeriesSizing(visible.length);
-  return baseChartOption({
-    animation: false,
-    animationDurationUpdate: 0,
-    grid: fixedHorizontalBarGrid(110, hasZoom, { top: 12 }),
-    tooltip: { trigger: "item", triggerOn: "mousemove", confine: true, axisPointer: { type: "none" } },
-    xAxis: bottomAnchoredValueXAxis(),
-    yAxis: fixedHorizontalCategoryAxis(visible.map((row) => String(row.category ?? "unknown")), 110),
-    dataZoom: zoomConfig,
-    series: [
-      {
-        name: "Failures",
-        type: "bar",
-        ...barSizing,
-        itemStyle: { color: reportChartPalette.failed, borderRadius: [0, 3, 3, 0] },
-        data: visible.map((row) => num(row, "count"))
-      }
-    ]
-  });
-}
-
-function slowestDataflowOption(rows: Array<Record<string, unknown>>) {
+export function slowestDataflowOption(rows: Array<Record<string, unknown>>) {
   const hasP95 = rows.some((row) => typeof row.p95_duration_seconds === "number");
   const valueKey = hasP95 ? "p95_duration_seconds" : "duration_seconds";
   const seriesLabel = hasP95 ? "P95 duration" : "Duration";
@@ -1442,7 +1120,7 @@ function slowestDataflowOption(rows: Array<Record<string, unknown>>) {
   });
 }
 
-function slowestOrFailuresPanel(
+export function slowestOrFailuresPanel(
   slowestRows: Array<Record<string, unknown>>,
   failureRows: Array<Record<string, string | number | null>>
 ): { option: ReturnType<typeof baseChartOption>; subtitle: string; empty: boolean } {
@@ -1512,7 +1190,7 @@ function slowestOrFailuresPanel(
   };
 }
 
-function horizontalBarDataZoom(categoryCount: number, visibleRows = HORIZONTAL_BAR_VISIBLE_ROWS) {
+export function horizontalBarDataZoom(categoryCount: number, visibleRows = HORIZONTAL_BAR_VISIBLE_ROWS) {
   if (categoryCount <= visibleRows) return undefined;
   return [
     {
@@ -1550,7 +1228,7 @@ function horizontalBarDataZoom(categoryCount: number, visibleRows = HORIZONTAL_B
   ];
 }
 
-function horizontalBarSeriesSizing(categoryCount: number, visibleRows = HORIZONTAL_BAR_VISIBLE_ROWS) {
+export function horizontalBarSeriesSizing(categoryCount: number, visibleRows = HORIZONTAL_BAR_VISIBLE_ROWS) {
   if (categoryCount > visibleRows) {
     return {
       barWidth: 14,
@@ -1563,7 +1241,7 @@ function horizontalBarSeriesSizing(categoryCount: number, visibleRows = HORIZONT
   };
 }
 
-function fixedHorizontalBarGrid(
+export function fixedHorizontalBarGrid(
   labelWidth: number,
   hasZoom: boolean,
   overrides: Record<string, string | number | boolean> = {}
@@ -1577,7 +1255,7 @@ function fixedHorizontalBarGrid(
   };
 }
 
-function reportChartGrid(overrides: Record<string, string | number | boolean> = {}) {
+export function reportChartGrid(overrides: Record<string, string | number | boolean> = {}) {
   return {
     left: 8,
     right: 10,
@@ -1588,21 +1266,14 @@ function reportChartGrid(overrides: Record<string, string | number | boolean> = 
   };
 }
 
-function reportTightChartGrid(overrides: Record<string, string | number | boolean> = {}) {
-  return {
-    ...reportChartGrid(overrides),
-    bottom: REPORT_CHART_TIGHT_GRID_BOTTOM
-  };
-}
-
-function reportXAxisZoomGrid(hasZoom: boolean, overrides: Record<string, string | number | boolean> = {}) {
+export function reportXAxisZoomGrid(hasZoom: boolean, overrides: Record<string, string | number | boolean> = {}) {
   return {
     ...reportChartGrid(overrides),
     bottom: hasZoom ? REPORT_CHART_X_ZOOM_GRID_BOTTOM : REPORT_CHART_GRID_BOTTOM
   };
 }
 
-function fixedHorizontalCategoryAxis(
+export function fixedHorizontalCategoryAxis(
   labels: string[],
   labelWidth: number,
   overrides: Record<string, unknown> = {}
@@ -1617,7 +1288,7 @@ function fixedHorizontalCategoryAxis(
   };
 }
 
-function fixedHorizontalAxisLabel(labelWidth: number, overrides: Record<string, unknown> = {}) {
+export function fixedHorizontalAxisLabel(labelWidth: number, overrides: Record<string, unknown> = {}) {
   return {
     show: true,
     align: "right" as const,
@@ -1630,7 +1301,7 @@ function fixedHorizontalAxisLabel(labelWidth: number, overrides: Record<string, 
   };
 }
 
-function xCategoryDataZoom(categoryCount: number, visibleColumns = 12) {
+export function xCategoryDataZoom(categoryCount: number, visibleColumns = 12) {
   if (categoryCount <= visibleColumns) return undefined;
   return [
     {
@@ -1666,7 +1337,7 @@ function xCategoryDataZoom(categoryCount: number, visibleColumns = 12) {
   ];
 }
 
-function bottomAnchoredValueXAxis(
+export function bottomAnchoredValueXAxis(
   axisLabelOverrides?: { formatter?: (value: number) => string }
 ) {
   return {
@@ -1681,7 +1352,7 @@ function bottomAnchoredValueXAxis(
   };
 }
 
-function operationColor(operationType: string, index: number) {
+export function operationColor(operationType: string, index: number) {
   const palette = [
     "#2f7d7b",
     "#3d6fa8",
@@ -1699,7 +1370,7 @@ function operationColor(operationType: string, index: number) {
   return palette[Math.abs(hash) % palette.length];
 }
 
-function statusColor(status: string) {
+export function statusColor(status: string) {
   if (status === "succeeded") return reportChartPalette.success;
   if (status === "failed") return reportChartPalette.failed;
   if (status === "skipped") return reportChartPalette.skipped;
@@ -1708,27 +1379,16 @@ function statusColor(status: string) {
   return reportChartPalette.unknown;
 }
 
-function resolveAttentionTarget(target: string): MonitoringTabKey {
-  if (target === "jobs") return "jobs";
-  if (target === "dataflows") return "dataflows";
-  if (target === "failures") return "failures";
-  if (target === "performance") return "performance";
-  if (target === "maintenance") return "maintenance";
-  if (target === "freshness") return "freshness";
-  if (target === "diagnostics" || target === "sources") return "diagnostics";
-  return "overview";
-}
-
-function stageTotal(row: Record<string, string | number>) {
+export function stageTotal(row: Record<string, string | number>) {
   return OVERVIEW_STATUSES.reduce((total, status) => total + num(row, status), 0);
 }
 
-function valueOf(row: Record<string, unknown>, key: string) {
+export function valueOf(row: Record<string, unknown>, key: string) {
   const value = row[key];
   return typeof value === "number" ? value : Number(value ?? 0);
 }
 
-function trendRate(row: Record<string, string | number | null>, key: "success_rate" | "failure_rate", basis: "succeeded" | "failed") {
+export function trendRate(row: Record<string, string | number | null>, key: "success_rate" | "failure_rate", basis: "succeeded" | "failed") {
   const explicit = row[key];
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   const succeeded = num(row, "succeeded");
@@ -1739,13 +1399,13 @@ function trendRate(row: Record<string, string | number | null>, key: "success_ra
   return Math.round((numerator / executable) * 10000) / 100;
 }
 
-function trendLineRate(row: Record<string, string | number | null>, key: "success_rate" | "failure_rate", basis: "succeeded" | "failed") {
+export function trendLineRate(row: Record<string, string | number | null>, key: "success_rate" | "failure_rate", basis: "succeeded" | "failed") {
   const total = Number(row.total ?? 0);
   if (Number.isFinite(total) && total === 0) return 0;
   return trendRate(row, key, basis);
 }
 
-function mergeVolumeTrendRows(
+export function mergeVolumeTrendRows(
   rowsByDate: Array<Record<string, string | number | null>>,
   bytesByDate: Array<Record<string, string | number | null>> = []
 ) {
@@ -1810,12 +1470,12 @@ function mergeVolumeTrendRows(
   return Array.from(buckets.values()).sort((left, right) => left.date.localeCompare(right.date));
 }
 
-function formatCompact(value: number) {
+export function formatCompact(value: number) {
   if (!Number.isFinite(value)) return "-";
   return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-function formatBytesShort(value: number) {
+export function formatBytesShort(value: number) {
   if (!Number.isFinite(value) || value === 0) return "0";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let size = Math.abs(value);
@@ -1829,15 +1489,15 @@ function formatBytesShort(value: number) {
   return `${sign}${size.toFixed(digits)}${units[unitIndex]}`;
 }
 
-function formatPercent(value: number) {
+export function formatPercent(value: number) {
   return `${Math.round(value * 100) / 100}%`;
 }
 
-function formatPhasePercent(value: number) {
+export function formatPhasePercent(value: number) {
   return `${Math.round(value * 10) / 10}%`;
 }
 
-function formatRelativeTime(value: string) {
+export function formatRelativeTime(value: string) {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return value;
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -1851,27 +1511,27 @@ function formatRelativeTime(value: string) {
   return new Date(value).toLocaleDateString();
 }
 
-function shortIdentifier(value: unknown) {
+export function shortIdentifier(value: unknown) {
   const text = value === null || value === undefined || value === "" ? "unknown" : String(value);
   if (text.length <= 18) return text;
   return `${text.slice(0, 8)}...${text.slice(-6)}`;
 }
 
-function formatSecondsSingleDecimal(value: number) {
+export function formatSecondsSingleDecimal(value: number) {
   if (!Number.isFinite(value)) return "-";
   const formatter = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   if (value < 60) return `${formatter.format(value)}s`;
   return `${formatter.format(value / 60)}m`;
 }
 
-function successRateIntent(successRate: number, failureRate: number, executableRuns: number): HealthIntent {
+export function successRateIntent(successRate: number, failureRate: number, executableRuns: number): HealthIntent {
   if (!Number.isFinite(executableRuns) || executableRuns <= 0) return "neutral";
   if (failureRate >= 5 || successRate < 95) return "bad";
   if (failureRate >= 1 || successRate < 99) return "warning";
   return "good";
 }
 
-function durationIntent(stats: Record<string, number>, fallbackAvg: number, fallbackP95: number): HealthIntent {
+export function durationIntent(stats: Record<string, number>, fallbackAvg: number, fallbackP95: number): HealthIntent {
   const avg = Number(stats.avg_duration_seconds ?? fallbackAvg ?? 0);
   const p95 = Number(stats.p95_duration_seconds ?? fallbackP95 ?? 0);
   if (!Number.isFinite(avg) || !Number.isFinite(p95) || p95 <= 0) return "neutral";
@@ -1880,18 +1540,7 @@ function durationIntent(stats: Record<string, number>, fallbackAvg: number, fall
   return "good";
 }
 
-function JobStageHealthPanel({ rows }: { rows: Array<Record<string, string | number>> }) {
-  const visible = rows
-    .filter((row) => String(row.stage ?? "").trim() && stageTotal(row) > 0);
-  if (!visible.length) return <div className="table-empty">No job x stage signals in current filters.</div>;
-  return (
-    <div className="overview-operation-health">
-      <ReportChart option={jobStageHealthOption(visible)} height="100%" wheelDataZoomStep={1} />
-    </div>
-  );
-}
-
-function jobStageHealthOption(rows: Array<Record<string, string | number>>) {
+export function jobStageHealthOption(rows: Array<Record<string, string | number>>) {
   const labels = rows.map((row) => String(row.stage ?? "unknown"));
   const zoomConfig = horizontalBarDataZoom(labels.length);
   const barSizing = horizontalBarSeriesSizing(labels.length);
@@ -1971,16 +1620,7 @@ function jobStageHealthOption(rows: Array<Record<string, string | number>>) {
   });
 }
 
-function JobDurationByOperationBoxPlot({ rows }: { rows: Array<Record<string, unknown>> }) {
-  return <DurationDistributionBoxPlot
-    rows={rows}
-    labelKey="operation_type"
-    emptyText="No job operation duration data in current filters."
-    entityKind="job"
-  />;
-}
-
-function DurationDistributionBoxPlot({
+export function DurationDistributionBoxPlot({
   rows,
   labelKey,
   emptyText,
@@ -2000,7 +1640,7 @@ function DurationDistributionBoxPlot({
   );
 }
 
-function durationDistributionBoxOption(
+export function durationDistributionBoxOption(
   rows: Array<Record<string, unknown>>,
   labelKey: string,
   entityKind: "dataflow" | "job" = "dataflow"
@@ -2114,7 +1754,7 @@ function durationDistributionBoxOption(
   });
 }
 
-function durationOutlierPoints(row: Record<string, unknown>, rowIndex: number) {
+export function durationOutlierPoints(row: Record<string, unknown>, rowIndex: number) {
   const rawOutliers = Array.isArray(row.outliers) ? row.outliers : [];
   const stage = String(row.stage ?? row.group ?? row.operation_type ?? "unknown");
   return rawOutliers
@@ -2142,31 +1782,7 @@ function durationOutlierPoints(row: Record<string, unknown>, rowIndex: number) {
     }));
 }
 
-function JobWorkloadEfficiencyScatter({
-  rows,
-  onInspect
-}: {
-  rows: Array<Record<string, string | number | null>>;
-  onInspect?: (row: JobRecord) => void;
-}) {
-  const visible = rows.filter((row) => num(row, "duration_seconds") > 0).slice(0, 500);
-  if (!visible.length) return <div className="table-empty">No workload efficiency points in current filters.</div>;
-  return (
-    <div className="monitoring-job-chart-fill">
-      <ReportChart option={jobWorkloadEfficiencyOption(visible, onInspect)} height="100%" />
-    </div>
-  );
-}
-
-function WorkloadEfficiencyLegend({ rows }: { rows: Array<Record<string, string | number | null>> }) {
-  const operationTypes = workloadEfficiencyOperationTypes(rows);
-  return <MonitoringChartLegend
-    label="Workload efficiency operation legend"
-    items={operationTypes.map((operationType, index) => [humanize(operationType), operationColor(operationType, index)] as const)}
-  />;
-}
-
-function workloadEfficiencyOperationTypes(rows: Array<Record<string, string | number | null>>) {
+export function workloadEfficiencyOperationTypes(rows: Array<Record<string, string | number | null>>) {
   return Array.from(new Set(
     rows
       .filter((row) => num(row, "duration_seconds") > 0)
@@ -2175,7 +1791,7 @@ function workloadEfficiencyOperationTypes(rows: Array<Record<string, string | nu
   )).sort((left, right) => left.localeCompare(right));
 }
 
-function jobWorkloadEfficiencyOption(
+export function jobWorkloadEfficiencyOption(
   rows: Array<Record<string, string | number | null>>,
   onInspect?: (row: JobRecord) => void
 ) {
@@ -2245,17 +1861,7 @@ function jobWorkloadEfficiencyOption(
   });
 }
 
-function ChildFanoutDistributionPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
-  const visible = buildFanoutHistogramBins(rows);
-  if (!visible.length) return <div className="table-empty">No child fan-out histogram in current filters.</div>;
-  return (
-    <div className="monitoring-job-chart-fill">
-      <ReportChart option={childFanoutDistributionOption(visible)} height="100%" />
-    </div>
-  );
-}
-
-function childFanoutDistributionOption(rows: Array<Record<string, string | number | null>>) {
+export function childFanoutDistributionOption(rows: Array<Record<string, string | number | null>>) {
   const zoomConfig = xCategoryDataZoom(rows.length, 16);
   return baseChartOption({
     tooltip: {
@@ -2315,86 +1921,7 @@ function childFanoutDistributionOption(rows: Array<Record<string, string | numbe
   });
 }
 
-type FanoutHistogramBin = {
-  bin_start: number;
-  bin_end: number;
-  bin_label: string;
-  jobs: number;
-  succeeded: number;
-  failed: number;
-  skipped: number;
-  running: number;
-  pending: number;
-  unknown: number;
-};
-
-function buildFanoutHistogramBins(rows: Array<Record<string, string | number | null>>): FanoutHistogramBin[] {
-  const source = rows
-    .map((row) => ({
-      totalDataflows: Math.max(0, Math.floor(num(row, "total_dataflows"))),
-      jobs: num(row, "jobs"),
-      succeeded: num(row, "succeeded"),
-      failed: num(row, "failed"),
-      skipped: num(row, "skipped"),
-      running: num(row, "running"),
-      pending: num(row, "pending"),
-      unknown: num(row, "unknown")
-    }))
-    .filter((row) => row.jobs > 0);
-  if (!source.length) return [];
-  const maxValue = Math.max(...source.map((row) => row.totalDataflows), 1);
-  const binSize = niceHistogramBinSize(maxValue, autoHistogramTargetBins(source));
-  const maxBinStart = Math.floor(maxValue / binSize) * binSize;
-  const bins: FanoutHistogramBin[] = [];
-  for (let start = 0; start <= maxBinStart; start += binSize) {
-    const end = start + binSize - 1;
-    bins.push({
-      bin_start: start,
-      bin_end: end,
-      bin_label: binSize === 1 ? String(start) : `${start}-${end}`,
-      jobs: 0,
-      succeeded: 0,
-      failed: 0,
-      skipped: 0,
-      running: 0,
-      pending: 0,
-      unknown: 0
-    });
-  }
-  source.forEach((row) => {
-    const index = Math.min(bins.length - 1, Math.floor(row.totalDataflows / binSize));
-    const target = bins[index];
-    if (!target) return;
-    target.jobs += row.jobs;
-    target.succeeded += row.succeeded;
-    target.failed += row.failed;
-    target.skipped += row.skipped;
-    target.running += row.running;
-    target.pending += row.pending;
-    target.unknown += row.unknown;
-  });
-  return bins;
-}
-
-function autoHistogramTargetBins(rows: Array<{ totalDataflows: number; jobs: number }>) {
-  const totalJobs = rows.reduce((sum, row) => sum + row.jobs, 0);
-  const distinctValues = new Set(rows.map((row) => row.totalDataflows)).size;
-  const sqrtRule = Math.ceil(Math.sqrt(Math.max(totalJobs, 1)) * 1.6);
-  const sturgesRule = Math.ceil(Math.log2(Math.max(totalJobs, 1)) + 1);
-  const densityRule = Math.min(24, Math.max(1, distinctValues * 2));
-  return Math.max(8, Math.min(24, Math.max(sqrtRule, sturgesRule, densityRule)));
-}
-
-function niceHistogramBinSize(maxValue: number, targetBins: number) {
-  if (maxValue <= targetBins) return 1;
-  const raw = maxValue / targetBins;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
-  const normalized = raw / magnitude;
-  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
-  return Math.max(1, nice * magnitude);
-}
-
-function JobRuntimeConfigSignals({
+export function JobRuntimeConfigSignals({
   rows,
   engineRows
 }: {
@@ -2416,7 +1943,7 @@ function JobRuntimeConfigSignals({
   );
 }
 
-function buildJobRuntimeConfigSignals(rows: JobRecord[], engineRows: Array<Record<string, string | number>>) {
+export function buildJobRuntimeConfigSignals(rows: JobRecord[], engineRows: Array<Record<string, string | number>>) {
   const runtimeSignals = engineRows.slice(0, 3).map((row) => ({
     kind: "runtime",
     label: String(row.engine_name ?? "Engine"),
@@ -2435,7 +1962,7 @@ function buildJobRuntimeConfigSignals(rows: JobRecord[], engineRows: Array<Recor
   return [...runtimeSignals, ...configSignals];
 }
 
-function jobConfigModeSignal(rows: JobRecord[], key: string, label: string) {
+export function jobConfigModeSignal(rows: JobRecord[], key: string, label: string) {
   const buckets = new Map<string, { count: number; failed: number }>();
   rows.forEach((row) => {
     const rawValue = row[key];
@@ -2462,17 +1989,7 @@ function jobConfigModeSignal(rows: JobRecord[], key: string, label: string) {
   };
 }
 
-function isMeaningfulConfigValue(value: unknown) {
-  return value !== null && value !== undefined && value !== "";
-}
-
-function formatConfigValue(value: unknown, key: string) {
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (key === "retention_hours" && typeof value === "number") return `${formatNumber(value)}h`;
-  return String(value);
-}
-
-function SlowestJobsList({
+export function SlowestJobsList({
   rows,
   p95Duration,
   p99Duration,
@@ -2527,282 +2044,7 @@ function SlowestJobsList({
   );
 }
 
-type RuntimeContextSortKey =
-  | "engine_name"
-  | "metadata_provider_name"
-  | "platform_name"
-  | "jobs"
-  | "success_rate"
-  | "avg_duration_seconds"
-  | "p95_duration_seconds";
-
-const RUNTIME_CONTEXT_AUTO_COLUMNS = [
-  "Engine",
-  "Provider",
-  "Platform",
-  "Jobs",
-  "Success",
-  "AVG / P95"
-];
-const RUNTIME_CONTEXT_COLUMN_GAP = 8;
-const RUNTIME_CONTEXT_MIN_COLUMN_WIDTHS = [64, 68, 64, 46, 54, 66];
-const RUNTIME_CONTEXT_MAX_COLUMN_WIDTHS = [190, 190, 150, 86, 82, 112];
-
-function EngineProviderHealth({ rows }: { rows: Array<Record<string, string | number>> }) {
-  const matrixRef = useRef<HTMLDivElement | null>(null);
-  const [sort, setSort] = useState<{ key: RuntimeContextSortKey; dir: "asc" | "desc" }>({ key: "jobs", dir: "desc" });
-  const [columnWidths, setColumnWidths] = useState<Array<number | null>>(() => RUNTIME_CONTEXT_AUTO_COLUMNS.map(() => null));
-  const [matrixWidth, setMatrixWidth] = useState(0);
-  const visible = useMemo(() => sortRuntimeContextRows(rows, sort.key, sort.dir), [rows, sort.key, sort.dir]);
-  const autoColumnWidths = useMemo(() => buildRuntimeContextAutoWidths(visible), [visible]);
-  const fittedColumnWidths = useMemo(
-    () => fitRuntimeContextColumnWidths(columnWidths.map((width, index) => width ?? autoColumnWidths[index]), matrixWidth),
-    [autoColumnWidths, columnWidths, matrixWidth]
-  );
-  const gridTemplateColumns = useMemo(
-    () => fittedColumnWidths.map((width) => `${width}px`).join(" "),
-    [fittedColumnWidths]
-  );
-  const gridStyle: CSSProperties = { gridTemplateColumns };
-  useEffect(() => {
-    const element = matrixRef.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => {
-      setMatrixWidth(Math.floor(entry.contentRect.width));
-    });
-    observer.observe(element);
-    setMatrixWidth(Math.floor(element.getBoundingClientRect().width));
-    return () => observer.disconnect();
-  }, []);
-  if (!visible.length) return <div className="table-empty">No runtime context in current filters.</div>;
-  function toggleSort(key: RuntimeContextSortKey) {
-    setSort((current) => ({ key, dir: current.key === key && current.dir === "desc" ? "asc" : "desc" }));
-  }
-  function startColumnResize(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
-    event.preventDefault();
-    event.stopPropagation();
-    const headerCell = event.currentTarget.parentElement;
-    if (!headerCell) return;
-    const startX = event.clientX;
-    const startWidth = headerCell.getBoundingClientRect().width;
-    const minWidth = RUNTIME_CONTEXT_MIN_COLUMN_WIDTHS[index] ?? 52;
-    const handleMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.max(minWidth, Math.round(startWidth + moveEvent.clientX - startX));
-      setColumnWidths((current) => current.map((width, widthIndex) => (widthIndex === index ? nextWidth : width)));
-    };
-    const handleUp = () => {
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", handleUp);
-    };
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", handleUp);
-  }
-  function resetColumnWidth(index: number) {
-    setColumnWidths((current) => current.map((width, widthIndex) => (widthIndex === index ? null : width)));
-  }
-  return (
-    <div className="monitoring-compact-matrix" ref={matrixRef}>
-      <div className="monitoring-compact-matrix-header" style={gridStyle}>
-        <RuntimeContextHeaderCell
-          label={`Engine${sortIndicator(sort, "engine_name")}`}
-          title="Sort by engine"
-          onSort={() => toggleSort("engine_name")}
-          onResize={(event) => startColumnResize(event, 0)}
-          onReset={() => resetColumnWidth(0)}
-        />
-        <RuntimeContextHeaderCell
-          label={`Provider${sortIndicator(sort, "metadata_provider_name")}`}
-          title="Sort by provider"
-          onSort={() => toggleSort("metadata_provider_name")}
-          onResize={(event) => startColumnResize(event, 1)}
-          onReset={() => resetColumnWidth(1)}
-        />
-        <RuntimeContextHeaderCell
-          label={`Platform${sortIndicator(sort, "platform_name")}`}
-          title="Sort by platform"
-          onSort={() => toggleSort("platform_name")}
-          onResize={(event) => startColumnResize(event, 2)}
-          onReset={() => resetColumnWidth(2)}
-        />
-        <RuntimeContextHeaderCell
-          label={`Jobs${sortIndicator(sort, "jobs")}`}
-          title="Sort by job runs"
-          onSort={() => toggleSort("jobs")}
-          onResize={(event) => startColumnResize(event, 3)}
-          onReset={() => resetColumnWidth(3)}
-        />
-        <RuntimeContextHeaderCell
-          label={`Success${sortIndicator(sort, "success_rate")}`}
-          title="Sort by success rate"
-          onSort={() => toggleSort("success_rate")}
-          onResize={(event) => startColumnResize(event, 4)}
-          onReset={() => resetColumnWidth(4)}
-        />
-        <RuntimeContextHeaderCell
-          label={`AVG / P95${sortIndicator(sort, "avg_duration_seconds")}`}
-          title="Sort by average duration. P95 is the second value in each row."
-          onSort={() => toggleSort("avg_duration_seconds")}
-          onResize={(event) => startColumnResize(event, 5)}
-          onReset={() => resetColumnWidth(5)}
-        />
-      </div>
-      {visible.map((row, index) => {
-        const failed = num(row, "failed");
-        const successRate = num(row, "success_rate");
-        return (
-          <div key={`${row.engine_name}-${row.metadata_provider_name}-${index}`} className="monitoring-compact-matrix-row" style={gridStyle}>
-            <span className="monitoring-stack-cell" title={`${row.engine_name ?? "unknown"} / ${row.metadata_provider_name ?? "unknown"} / ${row.platform_name ?? "unknown"}`}>
-              <strong>{row.engine_name ?? "unknown"}</strong>
-            </span>
-            <span title={String(row.metadata_provider_name ?? "unknown")}>{row.metadata_provider_name ?? "unknown"}</span>
-            <span title={String(row.platform_name ?? "unknown")}>{row.platform_name ?? "unknown"}</span>
-            <span>
-              <strong>{formatNumber(num(row, "jobs"))}</strong>
-              <small><span className="status-bad">{formatNumber(failed)}</span> failed</small>
-            </span>
-            <span className={successRate < 95 ? "status-bad" : "status-good"}>{formatPercent(successRate)}</span>
-            <span>
-              <strong>{formatSeconds(num(row, "avg_duration_seconds"))}</strong>
-              <small>P95 {formatSeconds(num(row, "p95_duration_seconds"))}</small>
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function RuntimeContextHeaderCell({
-  label,
-  title,
-  onSort,
-  onResize,
-  onReset
-}: {
-  label: string;
-  title: string;
-  onSort: () => void;
-  onResize: (event: ReactPointerEvent<HTMLSpanElement>) => void;
-  onReset: () => void;
-}) {
-  return (
-    <span className="monitoring-resizable-header-cell">
-      <button type="button" onClick={onSort} title={title}>
-        {label}
-      </button>
-      <span
-        className="monitoring-column-resizer"
-        role="separator"
-        aria-orientation="vertical"
-        title="Drag to resize. Double click to auto width."
-        onPointerDown={onResize}
-        onDoubleClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onReset();
-        }}
-      />
-    </span>
-  );
-}
-
-function buildRuntimeContextAutoWidths(rows: Array<Record<string, string | number>>) {
-  const columnValues = RUNTIME_CONTEXT_AUTO_COLUMNS.map((label) => [label]);
-  rows.forEach((row) => {
-    const failed = num(row, "failed");
-    columnValues[0].push(String(row.engine_name ?? "unknown"));
-    columnValues[1].push(String(row.metadata_provider_name ?? "unknown"));
-    columnValues[2].push(String(row.platform_name ?? "unknown"));
-    columnValues[3].push(formatNumber(num(row, "jobs")), failed ? `${formatNumber(failed)} failed` : "0 failed");
-    columnValues[4].push(formatPercent(num(row, "success_rate")));
-    columnValues[5].push(formatSeconds(num(row, "avg_duration_seconds")), `P95 ${formatSeconds(num(row, "p95_duration_seconds"))}`);
-  });
-  return columnValues.map((values, index) => {
-    const maxTextWidth = values.reduce((maxWidth, value) => Math.max(maxWidth, measureRuntimeContextText(value)), 0);
-    const padding = index < 3 ? 22 : 16;
-    return clampNumber(
-      Math.ceil(maxTextWidth + padding),
-      RUNTIME_CONTEXT_MIN_COLUMN_WIDTHS[index] ?? 52,
-      RUNTIME_CONTEXT_MAX_COLUMN_WIDTHS[index] ?? 220
-    );
-  });
-}
-
-function fitRuntimeContextColumnWidths(widths: number[], availableWidth: number) {
-  if (!availableWidth) return widths;
-  const gapWidth = RUNTIME_CONTEXT_COLUMN_GAP * Math.max(0, widths.length - 1);
-  const targetWidth = Math.max(0, availableWidth - gapWidth);
-  const totalWidth = widths.reduce((sum, width) => sum + width, 0);
-  if (totalWidth <= targetWidth) return widths;
-
-  const minimums = RUNTIME_CONTEXT_MIN_COLUMN_WIDTHS;
-  const minTotalWidth = minimums.reduce((sum, width) => sum + width, 0);
-  if (targetWidth <= minTotalWidth) return minimums;
-
-  const shrinkableTotal = widths.reduce((sum, width, index) => sum + Math.max(0, width - minimums[index]), 0);
-  if (!shrinkableTotal) return widths;
-  const shrinkNeeded = totalWidth - targetWidth;
-
-  return widths.map((width, index) => {
-    const minWidth = minimums[index];
-    const shrinkable = Math.max(0, width - minWidth);
-    const shrink = (shrinkable / shrinkableTotal) * shrinkNeeded;
-    return Math.max(minWidth, Math.floor(width - shrink));
-  });
-}
-
-let runtimeContextMeasureCanvas: HTMLCanvasElement | null = null;
-
-function measureRuntimeContextText(value: string) {
-  if (typeof document === "undefined") {
-    return value.length * 7;
-  }
-  runtimeContextMeasureCanvas ??= document.createElement("canvas");
-  const context = runtimeContextMeasureCanvas.getContext("2d");
-  if (!context) return value.length * 7;
-  context.font = "750 12px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-  return context.measureText(value).width;
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function sortRuntimeContextRows(
-  rows: Array<Record<string, string | number>>,
-  key: RuntimeContextSortKey,
-  dir: "asc" | "desc"
-) {
-  const multiplier = dir === "asc" ? 1 : -1;
-  return rows.slice().sort((left, right) => {
-    const leftValue = runtimeContextSortValue(left, key);
-    const rightValue = runtimeContextSortValue(right, key);
-    if (typeof leftValue === "number" && typeof rightValue === "number") {
-      const delta = leftValue - rightValue;
-      if (delta !== 0) return delta * multiplier;
-    } else {
-      const delta = String(leftValue).localeCompare(String(rightValue));
-      if (delta !== 0) return delta * multiplier;
-    }
-    const failed = num(right, "failed") - num(left, "failed");
-    if (failed !== 0) return failed;
-    return String(left.engine_name ?? "").localeCompare(String(right.engine_name ?? ""));
-  });
-}
-
-function runtimeContextSortValue(row: Record<string, string | number>, key: RuntimeContextSortKey) {
-  if (key === "jobs") return num(row, "jobs");
-  if (key === "success_rate") return num(row, "success_rate");
-  if (key === "avg_duration_seconds") return num(row, "avg_duration_seconds");
-  if (key === "p95_duration_seconds") return num(row, "p95_duration_seconds");
-  return String(row[key] ?? "unknown");
-}
-
-function sortIndicator(sort: { key: RuntimeContextSortKey; dir: "asc" | "desc" }, key: RuntimeContextSortKey) {
-  return sort.key === key ? (sort.dir === "asc" ? " ↑" : " ↓") : "";
-}
-
-function ChildImpactList({
+export function ChildImpactList({
   rows,
   onInspect
 }: {
@@ -2840,7 +2082,7 @@ function ChildImpactList({
   );
 }
 
-function JobAttentionList({
+export function JobAttentionList({
   rows,
   allJobs,
   onInspect
@@ -2872,17 +2114,7 @@ function JobAttentionList({
   );
 }
 
-function DataflowNameStatusHealthPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
-  const visible = rows.filter((row) => String(row.dataflow_name ?? "").trim() && stageTotal(row as Record<string, string | number>) > 0);
-  if (!visible.length) return <div className="table-empty">No dataflow status health signals in current filters.</div>;
-  return (
-    <div className="overview-operation-health">
-      <ReportChart option={dataflowNameStatusHealthOption(visible)} height="100%" wheelDataZoomStep={1} />
-    </div>
-  );
-}
-
-function dataflowNameStatusHealthOption(rows: Array<Record<string, string | number | null>>) {
+export function dataflowNameStatusHealthOption(rows: Array<Record<string, string | number | null>>) {
   const labels = rows.map((row) => String(row.dataflow_name ?? "unknown"));
   const zoomConfig = horizontalBarDataZoom(labels.length);
   const barSizing = horizontalBarSeriesSizing(labels.length);
@@ -2962,78 +2194,7 @@ function dataflowNameStatusHealthOption(rows: Array<Record<string, string | numb
   });
 }
 
-function DataflowEndpointHealthPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
-  const visible = rows.filter((row) => num(row, "runs") > 0);
-  if (!visible.length) return <div className="table-empty">No endpoint health signals in current filters.</div>;
-  return (
-    <div className="dataflow-signal-list dataflow-endpoint-route-list">
-      {visible.map((row, index) => {
-        const failed = num(row, "failed");
-        const succeeded = num(row, "succeeded");
-        const successRate = num(row, "success_rate");
-        const executableRuns = succeeded + failed;
-        const failureRate = executableRuns > 0 ? (failed / executableRuns) * 100 : 0;
-        const healthIntent = successRateIntent(successRate, failureRate, executableRuns);
-        const rowsRead = num(row, "rows_read");
-        const rowsWritten = num(row, "rows_written");
-        const p95 = num(row, "p95_duration_seconds");
-        const source = endpointRoutePresentation(row, "source");
-        const destination = endpointRoutePresentation(row, "destination");
-        const sourceFormat = String(row.source_format ?? row.source_connection_type ?? "unknown");
-        const destinationFormat = String(row.destination_format ?? row.destination_connection_type ?? "unknown");
-        return (
-          <div
-            key={`${source.connection}-${source.locator}-${destination.connection}-${destination.locator}-${index}`}
-            className="dataflow-signal-row dataflow-endpoint-route-row"
-            title={[
-              `Source connection: ${source.connection}`,
-              `Destination connection: ${destination.connection}`,
-              `Source format: ${sourceFormat}`,
-              `Destination format: ${destinationFormat}`,
-              `Runs: ${formatNumber(num(row, "runs"))}`,
-              `Succeeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(failed)} / ${formatNumber(num(row, "skipped"))}`,
-              `Success rate: ${formatPercent(successRate)}`,
-              `AVG / P95 duration: ${formatSeconds(num(row, "avg_duration_seconds"))} / ${formatSeconds(p95)}`,
-              `Rows read / written: ${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`,
-              `Bytes added / removed: ${formatBytes(num(row, "bytes_added"))} / ${formatBytes(num(row, "bytes_removed"))}`
-            ].join("\n")}
-          >
-            <div className="dataflow-route-flow">
-              <div className="dataflow-route-line">
-                <EndpointRouteNode endpoint={source} />
-                <span className="dataflow-route-arrow" aria-hidden="true">→</span>
-                <EndpointRouteNode endpoint={destination} />
-              </div>
-            </div>
-            <div className="dataflow-route-health">
-              <strong className={`status-${healthIntent}`}>{formatPercent(successRate)}</strong>
-              <small>
-                <span>{formatNumber(num(row, "runs"))} runs</span>
-                {failed ? <><span aria-hidden="true"> · </span><span className="dataflow-route-failures">{formatNumber(failed)} failed</span></> : null}
-              </small>
-            </div>
-            <div className="dataflow-route-volume">
-              <strong>{formatNumber(rowsRead)} / {formatNumber(rowsWritten)}</strong>
-              <small className="dataflow-route-duration">P95 {formatSeconds(p95)}</small>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function endpointRoutePresentation(row: Record<string, string | number | null>, direction: "source" | "destination") {
-  const prefix = direction === "source" ? "source" : "destination";
-  const value = (key: string) => row[`${prefix}_${key}`];
-  const connection = cleanDisplayValue(value("name")) ?? "unknown connection";
-  const connectionType = cleanDisplayValue(value("connection_type")) ?? "unknown type";
-  const format = cleanDisplayValue(value("format") ?? connectionType) ?? "";
-  const locator = connection;
-  return { locator, connection, connectionType, format };
-}
-
-function EndpointRouteNode({ endpoint }: { endpoint: { locator: string; connection: string; connectionType: string; format: string } }) {
+export function EndpointRouteNode({ endpoint }: { endpoint: { locator: string; connection: string; connectionType: string; format: string } }) {
   return (
     <span className="dataflow-route-endpoint is-connection-only" title={`${endpoint.connection}\n${endpoint.connectionType}${endpoint.format ? `\n${endpoint.format}` : ""}`}>
       {endpoint.format ? (
@@ -3049,7 +2210,7 @@ function EndpointRouteNode({ endpoint }: { endpoint: { locator: string; connecti
   );
 }
 
-function DataflowWatermarkSignalPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
+export function DataflowWatermarkSignalPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
   const visible = rows.filter((row) => num(row, "runs") > 0).slice(0, 10);
   if (!visible.length) return <div className="table-empty">No watermark or skip signals in current filters.</div>;
   return (
@@ -3103,136 +2264,7 @@ function DataflowWatermarkSignalPanel({ rows }: { rows: Array<Record<string, str
   );
 }
 
-function FailureQueueTable({
-  rows,
-  maxRows,
-  offset = 0,
-  onInspect,
-  timezoneName
-}: {
-  rows: Array<Record<string, string | number | null>>;
-  maxRows: number;
-  offset?: number;
-  onInspect?: (row: Record<string, unknown>) => void;
-  timezoneName?: string | null;
-}) {
-  return (
-    <DataTable<Record<string, string | number | null>>
-      rows={rows}
-      columns={[
-        { key: "failure_time", label: "Time", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.failure_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.failure_time, activeTimezone, "-") },
-        { key: "dataflow_name", label: "Dataflow", sortable: true, width: 178, render: (row) => <FailureDataflowNameCell row={row} /> },
-        { key: "failure_phase", label: "Phase", sortable: true, autoFit: true, maxWidth: 112, render: (row) => <FailurePhaseBadge value={row.failure_phase} />, measureValue: (row) => humanize(String(row.failure_phase || "unknown")) },
-        { key: "failure_category", label: "Category", sortable: true, autoFit: true, maxWidth: 180, render: (row) => <CompactValue value={row.failure_category} />, measureValue: (row) => String(row.failure_category || "unknown") },
-        { key: "failure_message", label: "Message", sortable: true, width: 300, render: (row) => <IssuePreview row={{ error_preview: row.failure_message }} /> }
-      ]}
-      maxRows={maxRows}
-      offset={offset}
-      onRowClick={onInspect}
-      timezoneName={timezoneName}
-      className="monitoring-failure-table monitoring-table-one-line"
-    />
-  );
-}
-
-function RepeatedFailureTable({
-  rows,
-  maxRows,
-  timezoneName
-}: {
-  rows: Array<Record<string, string | number | null>>;
-  maxRows: number;
-  timezoneName?: string | null;
-}) {
-  return (
-    <DataTable<Record<string, string | number | null>>
-      rows={rows}
-      columns={[
-        { key: "failure_category", label: "Category", sortable: true, autoFit: true, maxWidth: 180, measureValue: (row) => String(row.failure_category || "unknown") },
-        { key: "failure_phase", label: "Phase", sortable: true, autoFit: true, maxWidth: 112, render: (row) => <FailurePhaseBadge value={row.failure_phase} />, measureValue: (row) => humanize(String(row.failure_phase || "unknown")) },
-        { key: "latest_error", label: "Error", sortable: true, minWidth: 240, fillPriority: "last", render: (row) => <IssuePreview row={{ error_preview: row.latest_error }} /> },
-        { key: "failed_runs", label: "Runs", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
-        { key: "affected_jobs", label: "Jobs", sortable: true, autoFit: true, minWidth: 50, maxWidth: 66 },
-        { key: "affected_dataflows", label: "Flows", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
-        { key: "latest_time", label: "Latest", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_time, activeTimezone, "-") }
-      ]}
-      maxRows={maxRows}
-      timezoneName={timezoneName}
-      className="monitoring-failure-table monitoring-table-one-line"
-    />
-  );
-}
-
-function EndpointImpactTable({
-  rows,
-  maxRows,
-  timezoneName
-}: {
-  rows: Array<Record<string, string | number | null>>;
-  maxRows: number;
-  timezoneName?: string | null;
-}) {
-  return (
-    <DataTable<Record<string, string | number | null>>
-      rows={rows}
-      columns={[
-        { key: "source_name", label: "Route", sortable: true, minWidth: 210, fillPriority: "last", render: (row) => <FailureRouteCell row={row} /> },
-        { key: "failed_runs", label: "Runs", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },
-        { key: "affected_jobs", label: "Jobs", sortable: true, autoFit: true, minWidth: 50, maxWidth: 66 },
-        { key: "latest_time", label: "Latest", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_time, activeTimezone, "-") }
-      ]}
-      maxRows={maxRows}
-      timezoneName={timezoneName}
-      className="monitoring-failure-table monitoring-table-one-line"
-    />
-  );
-}
-
-function FailureDataflowNameCell({ row }: { row: Record<string, unknown> }) {
-  const name = String(row.dataflow_name || "unknown");
-  const details = [
-    `Dataflow: ${name}`,
-    row.dataflow_id ? `Dataflow ID: ${row.dataflow_id}` : null,
-    row.dataflow_run_id ? `Run ID: ${row.dataflow_run_id}` : null,
-    row.job_id ? `Job ID: ${row.job_id}` : null
-  ].filter(Boolean).join("\n");
-  return (
-    <span className="monitor-inline-cell" title={details}>
-      <strong>{name}</strong>
-    </span>
-  );
-}
-
-function FailureRouteCell({ row }: { row: Record<string, unknown> }) {
-  const source = String(row.source_name ?? "unknown");
-  const destination = String(row.destination_name ?? "unknown");
-  const sourceFormat = String(row.source_format ?? row.source_connection_type ?? "");
-  const destinationFormat = String(row.destination_format ?? row.destination_connection_type ?? "");
-  return (
-    <span className="failure-route-cell" title={`${source} -> ${destination}`}>
-      <span className="failure-route-node">
-        <span className="monitor-endpoint-icon" aria-hidden="true">
-          <LineageFormatIcon kind={assetIconKind(sourceFormat || "unknown")} label={sourceFormat || "source"} size={16} />
-        </span>
-        <strong>{source}</strong>
-      </span>
-      <span className="failure-route-arrow">→</span>
-      <span className="failure-route-node">
-        <span className="monitor-endpoint-icon" aria-hidden="true">
-          <LineageFormatIcon kind={assetIconKind(destinationFormat || "unknown")} label={destinationFormat || "destination"} size={16} />
-        </span>
-        <strong>{destination}</strong>
-      </span>
-    </span>
-  );
-}
-
-function FailurePhaseBadge({ value }: { value: unknown }) {
-  const textValue = String(value || "unknown");
-  return <span className={`failure-phase-badge is-${textValue}`}>{humanize(textValue)}</span>;
-}
-
-const FAILURE_PHASE_LABELS: Record<FailurePhaseKey, string> = {
+export const FAILURE_PHASE_LABELS: Record<FailurePhaseKey, string> = {
   source: "Source",
   transform: "Transform",
   destination: "Destination",
@@ -3240,7 +2272,7 @@ const FAILURE_PHASE_LABELS: Record<FailurePhaseKey, string> = {
   unknown: "Unknown"
 };
 
-const monitoringPhaseColors = {
+export const monitoringPhaseColors = {
   source: "#2563eb",
   transform: "#7c3aed",
   destination: "#16805c",
@@ -3248,30 +2280,16 @@ const monitoringPhaseColors = {
   unknown: "#b45309"
 } as const;
 
-const FAILURE_PHASE_COLORS: Record<FailurePhaseKey, string> = {
+export const FAILURE_PHASE_COLORS: Record<FailurePhaseKey, string> = {
   ...monitoringPhaseColors
 };
 
-const FAILURE_TREND_COLORS = {
+export const FAILURE_TREND_COLORS = {
   dataflows: "#c24141",
   jobs: "#7c3aed"
 } as const;
 
-function FailureTrendLegend() {
-  return <MonitoringChartLegend label="Failure trend legend" items={[
-    ["Dataflows", FAILURE_TREND_COLORS.dataflows],
-    ["Jobs", FAILURE_TREND_COLORS.jobs]
-  ]} />;
-}
-
-function FailurePhaseLegend() {
-  return <MonitoringChartLegend
-    label="Failure phase legend"
-    items={FAILURE_PHASES.map((phase) => [FAILURE_PHASE_LABELS[phase], FAILURE_PHASE_COLORS[phase]] as const)}
-  />;
-}
-
-function failureHorizontalBarOption(
+export function failureHorizontalBarOption(
   rows: Array<Record<string, string | number>>,
   labelKey: string,
   valueKey: string,
@@ -3283,7 +2301,7 @@ function failureHorizontalBarOption(
   return failurePhaseHorizontalBarOption(visibleRows, labelKey, valueKey, zoomConfig, barSizing);
 }
 
-function failurePhaseHorizontalBarOption(
+export function failurePhaseHorizontalBarOption(
   visibleRows: Array<Record<string, string | number>>,
   labelKey: string,
   valueKey: string,
@@ -3324,7 +2342,7 @@ function failurePhaseHorizontalBarOption(
   });
 }
 
-function failurePhaseCount(row: Record<string, string | number>, phase: FailurePhaseKey, totalKey: string) {
+export function failurePhaseCount(row: Record<string, string | number>, phase: FailurePhaseKey, totalKey: string) {
   if (phase !== "unknown") return num(row, phase);
   const explicitUnknown = num(row, "unknown");
   if (explicitUnknown > 0) return explicitUnknown;
@@ -3332,11 +2350,11 @@ function failurePhaseCount(row: Record<string, string | number>, phase: FailureP
   return Math.max(0, num(row, totalKey) - attributed);
 }
 
-function failurePhaseFromSeriesName(seriesName: string): FailurePhaseKey | undefined {
+export function failurePhaseFromSeriesName(seriesName: string): FailurePhaseKey | undefined {
   return FAILURE_PHASES.find((phase) => FAILURE_PHASE_LABELS[phase] === seriesName);
 }
 
-function failureTrendOption(
+export function failureTrendOption(
   rows: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
@@ -3415,7 +2433,7 @@ function failureTrendOption(
   });
 }
 
-function fillMissingFailureTrendDates(
+export function fillMissingFailureTrendDates(
   rows: Array<Record<string, string | number | null>>,
   filters: MonitoringFilters,
   dateRange: { min?: string | null; max?: string | null },
@@ -3435,7 +2453,7 @@ function fillMissingFailureTrendDates(
   return keys.map((dateKey) => rowByDate.get(dateKey) ?? createEmptyFailureTrendRow(dateKey, effectiveGrain));
 }
 
-function createEmptyFailureTrendRow(dateKey: string, grain: string): Record<string, string | number> {
+export function createEmptyFailureTrendRow(dateKey: string, grain: string): Record<string, string | number> {
   return {
     date: dateKey,
     bucket: dateKey,
@@ -3446,7 +2464,7 @@ function createEmptyFailureTrendRow(dateKey: string, grain: string): Record<stri
   };
 }
 
-function failureCategoryPhaseMatrixOption(rows: Array<Record<string, string | number>>) {
+export function failureCategoryPhaseMatrixOption(rows: Array<Record<string, string | number>>) {
   const visibleRows = rows.filter((row) => num(row, "total") > 0);
   const zoomConfig = horizontalBarDataZoom(visibleRows.length);
   const barSizing = horizontalBarSeriesSizing(visibleRows.length);
@@ -3484,124 +2502,7 @@ function failureCategoryPhaseMatrixOption(rows: Array<Record<string, string | nu
   });
 }
 
-function JobRunsTable({
-  rows,
-  sort,
-  onSort,
-  onInspect,
-  timezoneName
-}: {
-  rows: JobRecord[];
-  sort?: TableSort;
-  onSort?: (sort: TableSort) => void;
-  onInspect?: (row: JobRecord) => void;
-  timezoneName?: string | null;
-}) {
-  return (
-    <DataTable<JobRecord>
-      rows={rows}
-      columns={[
-        { key: "job_id", label: "Job", sortable: true, width: 132, className: "job-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
-        { key: "job_config", label: "Config", autoFit: true, minWidth: 72, maxWidth: 128, className: "job-run-col-config", render: (row) => <JobConfigCell row={row} />, measureValue: (row) => jobConfigLines(row) },
-        { key: "runtime_context", label: "Runtime", autoFit: true, minWidth: 72, maxWidth: 170, className: "job-run-col-runtime", render: (row) => <RuntimeContextCell row={row} />, measureValue: (row) => runtimeContextLines(row) },
-        { key: "stages", label: "Stages", sortable: true, autoFit: true, minWidth: 110, maxWidth: 160, fillPriority: "last", className: "job-run-col-stages", render: (row) => <JobListValue value={row.stages} multiline />, measureValue: (row) => parseListValue(row.stages).join(", ") || "-" },
-        { key: "operation_types", label: "Operation", sortable: true, autoFit: true, minWidth: 86, maxWidth: 160, className: "job-run-col-operation", render: (row) => <JobListValue value={row.operation_types} />, measureValue: (row) => parseListValue(row.operation_types).join(", ") || "-" },
-        { key: "start_time", label: "Start", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.start_time, activeTimezone, "-") },
-        { key: "end_time", label: "End", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.end_time, activeTimezone, "-") },
-        { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 96, className: "job-run-col-duration", render: (row) => formatSeconds(num(row, "duration_seconds")), measureValue: (row) => formatSeconds(num(row, "duration_seconds")) },
-        { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 88, maxWidth: 112, className: "job-run-col-status", render: (row) => <StatusCell row={row} />, measureValue: (row) => String(row.status || "unknown") },
-        { key: "child_dataflow_count", label: "Child flows", autoFit: true, minWidth: 92, maxWidth: 132, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} />, measureValue: (row) => childFlowSummaryLines(row) },
-        { key: "volume", label: "Volume", autoFit: true, minWidth: 96, maxWidth: 142, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} />, measureValue: (row) => jobVolumeLines(row) },
-        { key: "reconciliation_status", label: "Reconcile", autoFit: true, minWidth: 94, maxWidth: 128, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={row.reconciliation_status} />, measureValue: (row) => humanize(String(row.reconciliation_status || "not_available")) },
-        { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
-      ]}
-      maxRows={rows.length}
-      sort={sort}
-      onSort={onSort}
-      onRowClick={onInspect}
-      timezoneName={timezoneName}
-      fixedLayout
-    />
-  );
-}
-
-function JobListValue({ value, multiline = false }: { value: unknown; multiline?: boolean }) {
-  const values = parseListValue(value);
-  const label = values.length ? values.join(", ") : "-";
-  return (
-    <span className={`monitor-compact-value job-run-list-value${multiline ? " is-multiline" : ""}`} title={label}>
-      {label}
-    </span>
-  );
-}
-
-function parseListValue(value: unknown) {
-  if (Array.isArray(value)) return value.map((item) => String(item ?? "").trim()).filter(Boolean);
-  const textValue = String(value ?? "").trim();
-  if (!textValue) return [];
-  if (textValue.startsWith("[") && textValue.endsWith("]")) {
-    try {
-      const parsed = JSON.parse(textValue);
-      if (Array.isArray(parsed)) return parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
-    } catch {
-      return [textValue];
-    }
-  }
-  return textValue.split(",").map((item) => item.trim()).filter(Boolean);
-}
-
-function DataflowRunsTable({
-  rows,
-  maxRows = 12,
-  includeReason = false,
-  sort,
-  onSort,
-  onInspect,
-  timezoneName
-}: {
-  rows: MonitoringRecord[];
-  maxRows?: number;
-  includeReason?: boolean;
-  sort?: TableSort;
-  onSort?: (sort: TableSort) => void;
-  onInspect?: (row: MonitoringRecord) => void;
-  timezoneName?: string | null;
-}) {
-  return (
-    <DataTable<MonitoringRecord>
-      rows={rows}
-      columns={[
-        { key: "job_id", label: "Job", sortable: true, width: 104, className: "dataflow-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
-        { key: "dataflow_name", label: "Dataflow", sortable: true, width: 148, className: "dataflow-run-col-dataflow", render: (row) => <DataflowNameCell row={row} /> },
-        { key: "context", label: "Context", sortable: true, sortKey: "stage", width: 118, className: "dataflow-run-col-context", render: (row) => <DataflowContextCell row={row} /> },
-        { key: "source_name", label: "Source", sortable: true, width: 150, className: "dataflow-run-col-endpoint", render: (row) => <EndpointCell row={row} direction="source" /> },
-        { key: "destination_name", label: "Destination", sortable: true, width: 150, className: "dataflow-run-col-endpoint", render: (row) => <EndpointCell row={row} direction="destination" /> },
-        { key: "phase_health", label: "Phase", width: 140, className: "dataflow-run-col-phase", render: (row) => <DataflowPhaseCell row={row} /> },
-        { key: "start_time", label: "Start", sortable: true, width: 178, className: "dataflow-run-col-time", render: (row) => <TableDateTimeValue value={row.start_time} timezoneName={timezoneName} /> },
-        { key: "end_time", label: "End", sortable: true, width: 178, className: "dataflow-run-col-time", render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} /> },
-        { key: "duration_seconds", label: "Duration", sortable: true, width: 76, className: "dataflow-run-col-duration", render: (row) => formatSeconds(num(row, "duration_seconds")) },
-        { key: "status", label: "Status", sortable: true, width: 98, className: "dataflow-run-col-status", render: (row) => <StatusCell row={row} /> },
-        { key: "volume", label: "Volume", width: 106, className: "dataflow-run-col-volume", render: (row) => <DataflowVolumeCell row={row} /> },
-        { key: "movement_state", label: "Watermark", width: 90, className: "dataflow-run-col-watermark", render: (row) => <WatermarkBadge value={row.movement_state} effective={row.source_watermark_effective} /> },
-        { key: "error_preview", label: "Issue", minWidth: 64, fillPriority: "last", className: "dataflow-run-col-issue", render: (row) => <IssuePreview row={row} /> },
-        ...(includeReason
-          ? [
-              { key: "potential_seconds_saved", label: "Potential saved", width: 120, render: (row: MonitoringRecord) => formatSeconds(num(row, "potential_seconds_saved")) },
-              { key: "candidate_reason", label: "Reason", width: 180 }
-            ]
-          : [])
-      ]}
-      maxRows={onSort ? rows.length : maxRows}
-      sort={sort}
-      onSort={onSort}
-      onRowClick={onInspect}
-      timezoneName={timezoneName}
-      fixedLayout
-    />
-  );
-}
-
-function DataflowNameCell({ row }: { row: MonitoringRecord }) {
+export function DataflowNameCell({ row }: { row: MonitoringRecord }) {
   const name = row.dataflow_name ?? row.dataflow_id ?? "-";
   const id = row.dataflow_id ?? "";
   return (
@@ -3611,7 +2512,7 @@ function DataflowNameCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
-function DataflowContextCell({ row }: { row: MonitoringRecord }) {
+export function DataflowContextCell({ row }: { row: MonitoringRecord }) {
   const stage = String(row.stage || "unknown");
   const operation = String(row.operation_type || "unknown");
   return (
@@ -3631,7 +2532,7 @@ function DataflowContextCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
-function DataflowPhaseCell({ row }: { row: MonitoringRecord }) {
+export function DataflowPhaseCell({ row }: { row: MonitoringRecord }) {
   const source = num(row, "source_duration_seconds");
   const transform = num(row, "transform_duration_seconds");
   const destination = num(row, "destination_duration_seconds");
@@ -3666,7 +2567,7 @@ function DataflowPhaseCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
-function normalizedPhaseSegments(segments: Array<{ phase: PhaseKey; value: number }>) {
+export function normalizedPhaseSegments(segments: Array<{ phase: PhaseKey; value: number }>) {
   const visibleSegments = segments
     .map((segment) => ({ ...segment, value: Math.max(0, Number.isFinite(segment.value) ? segment.value : 0) }))
     .filter((segment) => segment.value > 0);
@@ -3682,7 +2583,7 @@ function normalizedPhaseSegments(segments: Array<{ phase: PhaseKey; value: numbe
   });
 }
 
-function optionalNum(row: Record<string, unknown>, field: string) {
+export function optionalNum(row: Record<string, unknown>, field: string) {
   const value = row[field];
   if (value === null || value === undefined || value === "") return null;
   if (Array.isArray(value) && !value.length) return null;
@@ -3690,7 +2591,7 @@ function optionalNum(row: Record<string, unknown>, field: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function phaseBottleneck(row: MonitoringRecord, source: number, transform: number, destination: number, overhead = 0) {
+export function phaseBottleneck(row: MonitoringRecord, source: number, transform: number, destination: number, overhead = 0) {
   const health = String(row.phase_health || "").toLowerCase();
   if (health.includes("source")) return { phase: "source", label: "Source" };
   if (health.includes("transform")) return { phase: "transform", label: "Transform" };
@@ -3706,7 +2607,7 @@ function phaseBottleneck(row: MonitoringRecord, source: number, transform: numbe
   return { phase: maxPhase.phase, label };
 }
 
-function DataflowVolumeCell({ row }: { row: MonitoringRecord }) {
+export function DataflowVolumeCell({ row }: { row: MonitoringRecord }) {
   const rowsRead = num(row, "source_rows_read");
   const rowsWritten = num(row, "destination_rows_written");
   const bytesAdded = num(row, "destination_bytes_added");
@@ -3729,7 +2630,7 @@ function DataflowVolumeCell({ row }: { row: MonitoringRecord }) {
   );
 }
 
-function CopyableText({ value, displayValue }: { value: unknown; displayValue?: string }) {
+export function CopyableText({ value, displayValue }: { value: unknown; displayValue?: string }) {
   const textValue = value === null || value === undefined || value === "" ? "-" : String(value);
   const visibleValue = displayValue ?? textValue;
   return (
@@ -3747,108 +2648,29 @@ function CopyableText({ value, displayValue }: { value: unknown; displayValue?: 
   );
 }
 
-function compactRunId(value: unknown) {
+export function compactRunId(value: unknown) {
   if (value === null || value === undefined || value === "") return "-";
   const textValue = String(value);
   if (textValue.length <= 18) return textValue;
   return `${textValue.slice(0, 8)}...${textValue.slice(-6)}`;
 }
 
-function CompactValue({ value, fallback = "-" }: { value: unknown; fallback?: string }) {
+export function CompactValue({ value, fallback = "-" }: { value: unknown; fallback?: string }) {
   const textValue = value === null || value === undefined || value === "" ? fallback : String(value);
   return <span className="monitor-compact-value" title={textValue}>{textValue}</span>;
 }
 
-function TableDateTimeValue({ value, fallback = "-", timezoneName }: { value: unknown; fallback?: string; timezoneName?: string | null }) {
+export function TableDateTimeValue({ value, fallback = "-", timezoneName }: { value: unknown; fallback?: string; timezoneName?: string | null }) {
   const rawValue = value === null || value === undefined || value === "" ? fallback : String(value);
   const textValue = rawValue === fallback ? fallback : formatTimestampForDisplay(rawValue, timezoneName, fallback);
   return <span className="monitor-compact-value" title={textValue}>{textValue}</span>;
 }
 
-function monitoringTimezone(report: MonitoringReport) {
+export function monitoringTimezone(report: MonitoringReport) {
   return report.summary.timezone || "UTC";
 }
 
-function JobConfigCell({ row }: { row: JobRecord }) {
-  const [mainLabel, stopValue] = jobConfigLines(row);
-  const title = `${mainLabel === "-" ? "Workers / Retry: -" : mainLabel.replace(/^w /u, "Workers: ").replace(/ · r /u, " · Retry: ")}\nStop on error: ${stopValue === "-" ? "-" : stopValue.replace(/^stop /u, "")}`;
-  return (
-    <span className="monitor-stack-cell" title={title}>
-      <strong>{mainLabel}</strong>
-      <small>{stopValue}</small>
-    </span>
-  );
-}
-
-function jobConfigLines(row: JobRecord) {
-  const mainParts = [
-    isMeaningfulConfigValue(row.max_workers) ? `w ${formatConfigValue(row.max_workers, "max_workers")}` : "",
-    isMeaningfulConfigValue(row.retry_count) ? `r ${formatConfigValue(row.retry_count, "retry_count")}` : ""
-  ].filter(Boolean);
-  const stopValue = isMeaningfulConfigValue(row.stop_on_error) ? `stop ${formatConfigValue(row.stop_on_error, "stop_on_error")}` : "-";
-  const mainLabel = mainParts.length ? mainParts.join(" · ") : "-";
-  return [mainLabel, stopValue];
-}
-
-function RuntimeContextCell({ row }: { row: JobRecord }) {
-  const [mainLabel, provider] = runtimeContextLines(row);
-  const [platform, engine] = mainLabel.split(" · ");
-  const title = `Platform: ${platform} · Engine: ${engine}\nProvider: ${provider}`;
-  return (
-    <span className="monitor-stack-cell" title={title}>
-      <strong>{mainLabel}</strong>
-      <small>{provider}</small>
-    </span>
-  );
-}
-
-function runtimeContextLines(row: JobRecord) {
-  const engine = shortRuntimeName(row.engine_name, "engine");
-  const platform = shortRuntimeName(row.platform_name, "platform");
-  const provider = String(row.metadata_provider_name || "unknown");
-  const mainLabel = `${platform} · ${engine}`;
-  return [mainLabel, provider];
-}
-
-function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
-  const fallback = kind === "engine" ? "unknown" : "unknown";
-  const textValue = value === null || value === undefined || value === "" ? fallback : String(value);
-  const stripped = textValue
-    .replace(/\b(engine|platform)\b/giu, "")
-    .replace(/(engine|platform)$/iu, "")
-    .replace(/[_-]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return stripped || textValue;
-}
-
-function JobVolumeCell({ row }: { row: JobRecord }) {
-  const [mainLabel, netBytesLabel] = jobVolumeLines(row);
-  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
-  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  return (
-    <span
-      className="monitor-stack-cell"
-      title={`Rows read / written: ${mainLabel}\nBytes added: ${formatBytes(bytesAdded)} · Bytes removed: ${formatBytes(bytesRemoved)} · Net bytes: ${netBytesLabel}`}
-    >
-      <strong>{mainLabel}</strong>
-      <small>{netBytesLabel}</small>
-    </span>
-  );
-}
-
-function jobVolumeLines(row: JobRecord) {
-  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
-  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
-  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
-  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  const netBytes = bytesAdded - bytesRemoved;
-  const mainLabel = `${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`;
-  const netBytesLabel = formatBytes(netBytes);
-  return [mainLabel, netBytesLabel];
-}
-
-function EndpointCell({ row, direction }: { row: MonitoringRecord; direction: "source" | "destination" }) {
+export function EndpointCell({ row, direction }: { row: MonitoringRecord; direction: "source" | "destination" }) {
   const endpoint = monitoringEndpointPresentation(row, direction);
   return (
     <span className="monitor-endpoint-cell" title={endpoint.title}>
@@ -3865,7 +2687,7 @@ function EndpointCell({ row, direction }: { row: MonitoringRecord; direction: "s
   );
 }
 
-function monitoringEndpointPresentation(row: MonitoringRecord, direction: "source" | "destination") {
+export function monitoringEndpointPresentation(row: MonitoringRecord, direction: "source" | "destination") {
   const prefix = direction === "source" ? "source" : "destination";
   const value = (key: string) => row[`${prefix}_${key}` as keyof MonitoringRecord];
   const connection = cleanDisplayValue(value("name") ?? value("connection_name")) ?? "unknown connection";
@@ -3897,102 +2719,64 @@ function monitoringEndpointPresentation(row: MonitoringRecord, direction: "sourc
   return { locator, connection, format, title };
 }
 
-function cleanDisplayValue(value: unknown) {
+export function cleanDisplayValue(value: unknown) {
   if (value === null || value === undefined) return null;
   const textValue = String(value).trim();
   return textValue ? textValue : null;
 }
 
-function compactQualifiedTable(value: string | null) {
+export function compactQualifiedTable(value: string | null) {
   if (!value) return null;
   const parts = value.replace(/`/g, "").split(".").filter(Boolean);
   return parts.at(-1) || value;
 }
 
-function pythonFunctionTail(value: string | null) {
+export function pythonFunctionTail(value: string | null) {
   if (!value) return null;
   return value.split(".").filter(Boolean).at(-1) || value;
 }
 
-function pathBasename(value: string | null) {
+export function pathBasename(value: string | null) {
   if (!value) return null;
   const parts = value.split(/[\\/]+/).filter((part) => part && part !== ".");
   return parts.at(-1) || value;
 }
 
-function ChildFlowSummary({ row }: { row: JobRecord }) {
-  const [mainLabel] = childFlowSummaryLines(row);
-  const succeeded = num(row, "child_succeeded_count");
-  const failed = num(row, "child_failed_count");
-  const skipped = num(row, "child_skipped_count");
-  return (
-    <span
-      className="monitor-stack-cell monitor-child-summary"
-      title={`Total child flows: ${mainLabel}\nSucceeded: ${succeeded} / Failed: ${failed} / Skipped: ${skipped}`}
-    >
-      <strong>{mainLabel}</strong>
-      <small>
-        <span className={succeeded > 0 ? "monitor-child-value is-success" : "monitor-child-value"}>{formatNumber(succeeded)}</span>
-        <span> / </span>
-        <span className={failed > 0 ? "monitor-child-value is-failed" : "monitor-child-value"}>{formatNumber(failed)}</span>
-        <span> / </span>
-        <span className={skipped > 0 ? "monitor-child-value is-skipped" : "monitor-child-value"}>{formatNumber(skipped)}</span>
-      </small>
-    </span>
-  );
-}
-
-function childFlowSummaryLines(row: JobRecord) {
-  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
-  const succeeded = num(row, "child_succeeded_count");
-  const failed = num(row, "child_failed_count");
-  const skipped = num(row, "child_skipped_count");
-  const mainLabel = formatNumber(total);
-  const statusLabel = `${formatNumber(succeeded)} / ${formatNumber(failed)} / ${formatNumber(skipped)}`;
-  return [mainLabel, statusLabel];
-}
-
-function ReconciliationBadge({ value }: { value: unknown }) {
-  const textValue = String(value || "not_available");
-  const intent = textValue === "mismatch" ? "bad" : textValue === "matched" ? "good" : "neutral";
-  return <span className={`monitor-mini-badge badge-${intent}`}>{humanize(textValue)}</span>;
-}
-
-function PhaseHealthBadge({ value }: { value: unknown }) {
+export function PhaseHealthBadge({ value }: { value: unknown }) {
   const textValue = String(value || "unknown");
   const intent = textValue.includes("failed") ? "bad" : textValue === "ok" ? "good" : textValue.includes("bottleneck") ? "warning" : "neutral";
   return <span className={`monitor-mini-badge badge-${intent}`} title={humanize(textValue)}>{humanize(textValue)}</span>;
 }
 
-function WatermarkBadge({ value, effective }: { value: unknown; effective: unknown }) {
+export function WatermarkBadge({ value, effective }: { value: unknown; effective: unknown }) {
   const textValue = String(value || "not_configured");
   const intent = textValue === "advanced" ? "good" : textValue === "initialized" ? "neutral" : textValue === "unchanged" || textValue === "incomplete" || textValue === "invalid" ? "warning" : "neutral";
   const detail = effective === null || effective === undefined || effective === "" ? "" : String(effective);
   return <span className={`monitor-mini-badge badge-${intent}`} title={detail || humanize(textValue)}>{humanize(textValue)}</span>;
 }
 
-function IssuePreview({ row }: { row: Record<string, unknown> }) {
+export function IssuePreview({ row }: { row: Record<string, unknown> }) {
   const issue = String(row.error_preview || row.error_message || row.source_error_message || row.transform_error_message || row.destination_error_message || "");
   if (!issue) return <span className="monitor-muted">-</span>;
   return <span className="monitor-issue-preview" title={issue}>{issue}</span>;
 }
 
-function humanize(value: string) {
+export function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function formatCoverage(value: string | number | null) {
+export function formatCoverage(value: string | number | null) {
   if (typeof value === "number") return formatNumber(value);
   if (value === null || value === undefined || value === "") return "-";
   return String(value);
 }
 
-function tableSubtitle(records: number, totalRows: number, loading: boolean) {
+export function tableSubtitle(records: number, totalRows: number, loading: boolean) {
   const prefix = loading ? "Loading" : `${formatNumber(records)} loaded`;
   return `${prefix} of ${formatNumber(totalRows)} records`;
 }
 
-function TablePager({
+export function TablePager({
   limit,
   offset,
   loadedRows,
@@ -4053,13 +2837,13 @@ function TablePager({
   );
 }
 
-function DiagnosticsSeverity({ value }: { value: string }) {
+export function DiagnosticsSeverity({ value }: { value: string }) {
   const normalized = value.toLowerCase();
   const intent = normalized === "error" || normalized === "bad" || normalized === "failed" ? "bad" : normalized === "warning" ? "warning" : "info";
   return <span className={`diagnostics-severity diagnostics-${intent}`}>{value}</span>;
 }
 
-function WatermarkValue({ value }: { value: unknown }) {
+export function WatermarkValue({ value }: { value: unknown }) {
   if (value === null || value === undefined || value === "") return <span>-</span>;
   const textValue = String(value);
   let formatted = textValue;
@@ -4075,229 +2859,3 @@ function WatermarkValue({ value }: { value: unknown }) {
     </details>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Shared monitoring primitives barrel.
-// The page components (Overview, Jobs, Dataflows, Failure, Diagnostics,
-// Performance, Volume, Maintenance, Freshness) live in ./pages/*.tsx and import
-// the helpers/sub-components/constants below from this module.
-// ---------------------------------------------------------------------------
-export {
-  // Re-exported chart/format primitives so pages import everything from one module.
-  BarList,
-  DataTable,
-  MetricGrid,
-  Panel,
-  ScatterPlot,
-  StatusCell,
-  formatBytes,
-  formatNumber,
-  formatSeconds,
-  num,
-  ReportChart,
-  baseChartOption,
-  reportChartPalette,
-  monitoringPhaseColors,
-  formatTimestampForDisplay,
-  // Constants
-  OVERVIEW_STATUSES,
-  PHASE_KEYS,
-  HORIZONTAL_BAR_VISIBLE_ROWS,
-  RUN_TABLE_PAGE_SIZES,
-  DATE_GRAINS,
-  RUNTIME_CONTEXT_AUTO_COLUMNS,
-  RUNTIME_CONTEXT_COLUMN_GAP,
-  RUNTIME_CONTEXT_MIN_COLUMN_WIDTHS,
-  RUNTIME_CONTEXT_MAX_COLUMN_WIDTHS,
-  // Overview helpers & sub-components
-  HealthStripCard,
-  FailureBreakdownDetail,
-  RateBreakdownDetail,
-  DetailMetric,
-  healthReasonSummary,
-  healthReasonsTooltip,
-  failureCategoriesRuleTooltip,
-  attentionQueueRuleTooltip,
-  durationStatsTitle,
-  DurationHeadline,
-  WindowPairDetail,
-  durationPercentilesDetail,
-  ReportPanel,
-  MonitoringChartLegend,
-  StatusHealthLegend,
-  StatusTrendLegend,
-  WorkloadVolumeLegend,
-  OperationHealthPanel,
-  operationHealthCombinedBarOption,
-  operationHealthValueAxis,
-  operationHealthCategoryAxis,
-  operationHealthStatusSeries,
-  operationHealthGroupLabel,
-  operationHealthDivider,
-  RuntimePhaseContribution,
-  RuntimePhaseLegend,
-  RuntimePhaseMatrixTooltip,
-  runtimePhaseContributionTooltip,
-  runtimePhaseTotalRow,
-  phaseRowLabel,
-  runtimePhaseSegments,
-  WorkloadVolumeContextPanel,
-  workloadVolumeTrendOption,
-  jobStatusTrendOption,
-  dataflowStatusTrendOption,
-  statusTrendOption,
-  fillMissingTrendDates,
-  createEmptyTrendRow,
-  sortOperationRows,
-  filterOperationRows,
-  operationTotal,
-  operationHealthTooltip,
-  phaseLabel,
-  createEmptyVolumeTrendRow,
-  resolveTrendBucketKeys,
-  resolveTrendDateKeys,
-  resolveTrendHourKeys,
-  resolveTrendWeekKeys,
-  resolveTrendMonthKeys,
-  rowLabel,
-  normalizeToDateKey,
-  timezoneDateKey,
-  timezoneHourKey,
-  floorToHour,
-  enumerateHourKeys,
-  parseFilterTime,
-  parseHourKey,
-  weekKeyFromDateKey,
-  resolveClientTrendGrain,
-  normalizeTrendGrain,
-  normalizeTrendBucketKey,
-  minimumClientTrendGrain,
-  minimumClientTrendGrainForSpan,
-  dateKeyToUtcDate,
-  utcDateToDateKey,
-  addDaysToDateKey,
-  enumerateDateKeys,
-  failureCategoryOption,
-  slowestDataflowOption,
-  slowestOrFailuresPanel,
-  fixedHorizontalBarGrid,
-  fixedHorizontalCategoryAxis,
-  horizontalBarDataZoom,
-  horizontalBarSeriesSizing,
-  xCategoryDataZoom,
-  bottomAnchoredValueXAxis,
-  reportChartGrid,
-  reportTightChartGrid,
-  reportXAxisZoomGrid,
-  operationColor,
-  statusColor,
-  resolveAttentionTarget,
-  stageTotal,
-  valueOf,
-  trendRate,
-  trendLineRate,
-  mergeVolumeTrendRows,
-  formatCompact,
-  formatBytesShort,
-  formatPercent,
-  formatPhasePercent,
-  formatRelativeTime,
-  shortIdentifier,
-  formatSecondsSingleDecimal,
-  successRateIntent,
-  durationIntent,
-  // Jobs helpers & sub-components
-  JobStageHealthPanel,
-  jobStageHealthOption,
-  LifecycleStatusValues,
-  lifecycleStatusItems,
-  JobDurationByOperationBoxPlot,
-  DurationDistributionBoxPlot,
-  durationDistributionBoxOption,
-  durationOutlierPoints,
-  JobWorkloadEfficiencyScatter,
-  WorkloadEfficiencyLegend,
-  workloadEfficiencyOperationTypes,
-  jobWorkloadEfficiencyOption,
-  ChildFanoutDistributionPanel,
-  childFanoutDistributionOption,
-  buildFanoutHistogramBins,
-  autoHistogramTargetBins,
-  niceHistogramBinSize,
-  JobRuntimeConfigSignals,
-  buildJobRuntimeConfigSignals,
-  jobConfigModeSignal,
-  isMeaningfulConfigValue,
-  formatConfigValue,
-  SlowestJobsList,
-  EngineProviderHealth,
-  RuntimeContextHeaderCell,
-  buildRuntimeContextAutoWidths,
-  fitRuntimeContextColumnWidths,
-  measureRuntimeContextText,
-  clampNumber,
-  sortRuntimeContextRows,
-  runtimeContextSortValue,
-  sortIndicator,
-  ChildImpactList,
-  JobAttentionList,
-  // Dataflows helpers & sub-components
-  DataflowNameStatusHealthPanel,
-  dataflowNameStatusHealthOption,
-  DataflowEndpointHealthPanel,
-  endpointRoutePresentation,
-  EndpointRouteNode,
-  DataflowWatermarkSignalPanel,
-  // Failure helpers & sub-components
-  FailureQueueTable,
-  RepeatedFailureTable,
-  EndpointImpactTable,
-  FailureDataflowNameCell,
-  FailureRouteCell,
-  FailurePhaseBadge,
-  FailureTrendLegend,
-  FailurePhaseLegend,
-  failureHorizontalBarOption,
-  failureTrendOption,
-  failureCategoryPhaseMatrixOption,
-  // Shared run tables & cell renderers
-  JobRunsTable,
-  JobListValue,
-  parseListValue,
-  DataflowRunsTable,
-  DataflowNameCell,
-  DataflowContextCell,
-  DataflowPhaseCell,
-  normalizedPhaseSegments,
-  optionalNum,
-  phaseBottleneck,
-  DataflowVolumeCell,
-  CopyableText,
-  compactRunId,
-  CompactValue,
-  TableDateTimeValue,
-  monitoringTimezone,
-  JobConfigCell,
-  RuntimeContextCell,
-  shortRuntimeName,
-  JobVolumeCell,
-  EndpointCell,
-  monitoringEndpointPresentation,
-  cleanDisplayValue,
-  compactQualifiedTable,
-  pythonFunctionTail,
-  pathBasename,
-  ChildFlowSummary,
-  ReconciliationBadge,
-  PhaseHealthBadge,
-  WatermarkBadge,
-  IssuePreview,
-  humanize,
-  formatCoverage,
-  tableSubtitle,
-  TablePager,
-  DiagnosticsSeverity,
-  WatermarkValue
-};
-
-export type { TableSort, HealthIntent, PhaseKey, FanoutHistogramBin, RuntimeContextSortKey };
