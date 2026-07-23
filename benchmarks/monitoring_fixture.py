@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
 from datacoolie_studio.domains.analytics import schema as analytics_schema
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.logs import cache
 
 
@@ -28,9 +30,9 @@ def build_analytics_fixture(
     try:
         cache._ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, cache.DATAFLOW_COLUMN_TYPES)
         cache._ensure_typed_table(connection, analytics_schema.JOB_TABLE, cache.JOB_COLUMN_TYPES)
-        cache._ensure_filter_values_table(connection)
-        cache._ensure_cache_sources_table(connection)
-        cache._ensure_analytics_meta_table(connection)
+        analytics_schema.ensure_filter_values_table(connection)
+        analytics_schema.ensure_cache_sources_table(connection)
+        analytics_schema.ensure_analytics_meta_table(connection)
         connection.execute(
             f"""
             INSERT INTO {analytics_schema.JOB_TABLE} (
@@ -125,7 +127,12 @@ def build_analytics_fixture(
         )
         for source_id in source_ids:
             cache._refresh_filter_values(connection, source_id)
-        cache._publish_analytics_generation(connection)
+        analytics_store.publish_generation(
+            connection,
+            dataflow_column_types=cache.DATAFLOW_COLUMN_TYPES,
+            job_column_types=cache.JOB_COLUMN_TYPES,
+            published_at=datetime.fromisoformat(now),
+        )
     finally:
         connection.close()
     return {"sources": len(source_ids), "dataflow_rows": dataflow_rows, "job_rows": job_rows}

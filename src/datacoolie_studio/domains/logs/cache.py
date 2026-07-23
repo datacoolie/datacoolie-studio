@@ -17,11 +17,10 @@ from datacoolie_studio.core.config import analytics_database_path
 from datacoolie_studio.core.time import parse_utc_datetime, utc_datetime_sort_key
 from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
 from datacoolie_studio.domains.analytics import schema as analytics_schema
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.analytics.connections import analytics_connections
 from datacoolie_studio.domains.analytics.serving_facts import (
     monitoring_serving_schema_is_ready,
-    rebuild_monitoring_serving_facts,
-    validate_monitoring_serving_facts,
 )
 from datacoolie_studio.domains.logs.discovery import (
     DiscoveredLogFile,
@@ -298,13 +297,13 @@ def analytics_cache_stats() -> dict[str, Any]:
     _ensure_duckdb_cache_ready(path)
     conn = _connect_analytics(path, read_only=True)
     try:
-        meta = _analytics_meta(conn)
+        meta = analytics_store.analytics_meta(conn)
         if meta is not None:
             stats.update(meta)
         stats["dataflow_row_count"] = _table_row_count(conn, analytics_schema.DATAFLOW_TABLE)
         stats["job_row_count"] = _table_row_count(conn, analytics_schema.JOB_TABLE)
         stats["filter_value_count"] = _table_row_count(conn, analytics_schema.FILTER_VALUES_TABLE)
-        stats["cached_source_ids"] = sorted(_cache_source_ids(conn))
+        stats["cached_source_ids"] = sorted(analytics_store.cache_source_ids(conn))
     finally:
         conn.close()
     return stats
@@ -1573,16 +1572,22 @@ def _write_duckdb_rows(
             if job_rows:
                 _insert_typed_rows(conn, analytics_schema.JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
             _assert_ingest_files_stable(ingest_files or [])
-            _upsert_ingest_control_rows(
+            analytics_store.upsert_ingest_control_rows(
                 conn,
                 source_id,
                 ingest_files or [],
                 checkpoints or [],
                 file_row_counts,
+                ingested_at=utc_now(),
             )
             _refresh_filter_values(conn, source_id)
-            _mark_cache_source(conn, source_id)
-            _publish_analytics_generation(conn)
+            analytics_store.mark_cache_source(conn, source_id, refreshed_at=utc_now())
+            analytics_store.publish_generation(
+                conn,
+                dataflow_column_types=DATAFLOW_COLUMN_TYPES,
+                job_column_types=JOB_COLUMN_TYPES,
+                published_at=utc_now(),
+            )
             conn.execute("COMMIT")
         except Exception as exc:
             conn.execute("ROLLBACK")
@@ -1603,64 +1608,6 @@ def _write_duckdb_rows(
         "errors": errors,
         "published": not errors,
     }
-
-
-def _upsert_ingest_control_rows(
-    conn,
-    source_id: int,
-    files: list[dict[str, Any]],
-    checkpoints: list[dict[str, Any]],
-    file_row_counts: dict[str, int],
-) -> None:
-    _ensure_ingest_control_tables(conn)
-    ingested_at = utc_now().isoformat()
-    for item in files:
-        file_uri = str(item["file_uri"])
-        file_kind = str(item["file_kind"])
-        conn.execute(
-            f"DELETE FROM {analytics_schema.INGEST_MANIFEST_TABLE} WHERE source_id = ? AND log_kind = ? AND file_uri = ?",
-            [source_id, file_kind, file_uri],
-        )
-        conn.execute(
-            f"""
-            INSERT INTO {analytics_schema.INGEST_MANIFEST_TABLE} (
-              source_id, log_kind, file_uri, partition_value, partition_format,
-              revision_json, row_count, ingested_at
-            ) VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?::TIMESTAMPTZ)
-            """,
-            [
-                source_id,
-                file_kind,
-                file_uri,
-                str(item["partition_value"]),
-                str(item["partition_format"]),
-                str(item["revision_json"]),
-                int(file_row_counts.get(file_uri, item.get("row_count") or 0)),
-                ingested_at,
-            ],
-        )
-    for checkpoint in checkpoints:
-        file_kind = str(checkpoint["file_kind"])
-        conn.execute(
-            f"DELETE FROM {analytics_schema.INGEST_CHECKPOINT_TABLE} WHERE source_id = ? AND log_kind = ?",
-            [source_id, file_kind],
-        )
-        conn.execute(
-            f"""
-            INSERT INTO {analytics_schema.INGEST_CHECKPOINT_TABLE} (
-              source_id, log_kind, partition_format, partition_value,
-              boundary_last_modified, updated_at
-            ) VALUES (?, ?, ?, ?::DATE, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ)
-            """,
-            [
-                source_id,
-                file_kind,
-                str(checkpoint["partition_format"]),
-                str(checkpoint["partition_value"]),
-                str(checkpoint["boundary_last_modified"]),
-                ingested_at,
-            ],
-        )
 
 
 def _read_duckdb_rows(
@@ -2182,10 +2129,10 @@ def _ensure_duckdb_tables(conn) -> None:
     _drop_empty_generated_job_columns(conn)
     if any(recreated) and analytics_schema.table_exists(conn, analytics_schema.FILTER_VALUES_TABLE):
         conn.execute(f"DROP TABLE {analytics_schema.FILTER_VALUES_TABLE}")
-    _ensure_filter_values_table(conn)
-    _ensure_cache_sources_table(conn)
-    _ensure_ingest_control_tables(conn)
-    _ensure_analytics_meta_table(conn)
+    analytics_schema.ensure_filter_values_table(conn)
+    analytics_schema.ensure_cache_sources_table(conn)
+    analytics_schema.ensure_ingest_control_tables(conn)
+    analytics_schema.ensure_analytics_meta_table(conn)
     _migrate_legacy_cache(conn)
 
 
@@ -2244,9 +2191,9 @@ def _analytics_materialization_token_from_connection(conn, enabled_source_ids: l
             missing_source_ids=enabled_source_ids,
             reason="schema_mismatch",
         )
-    meta = _analytics_meta(conn)
-    cached_source_ids = _cache_source_ids(conn)
-    source_generations = _cache_source_generations(conn)
+    meta = analytics_store.analytics_meta(conn)
+    cached_source_ids = analytics_store.cache_source_ids(conn)
+    source_generations = analytics_store.cache_source_generations(conn)
     missing_source_ids = sorted(set(enabled_source_ids) - cached_source_ids)
     if (
         meta is None
@@ -2297,137 +2244,6 @@ def _typed_cache_is_ready(path: Path) -> bool:
         conn.close()
 
 
-def _ensure_filter_values_table(conn) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {analytics_schema.FILTER_VALUES_TABLE} (
-          _source_id BIGINT,
-          field VARCHAR,
-          value VARCHAR,
-          record_count BIGINT,
-          _updated_at TIMESTAMPTZ
-        )
-        """
-    )
-
-
-def _ensure_cache_sources_table(conn) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {analytics_schema.CACHE_SOURCES_TABLE} (
-          source_id BIGINT PRIMARY KEY,
-          refreshed_at TIMESTAMPTZ,
-          generation BIGINT NOT NULL DEFAULT 0
-        )
-        """
-    )
-    if "generation" not in analytics_schema.table_columns(conn, analytics_schema.CACHE_SOURCES_TABLE):
-        conn.execute(
-            f"ALTER TABLE {analytics_schema.CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
-        )
-
-
-def _ensure_ingest_control_tables(conn) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {analytics_schema.INGEST_CHECKPOINT_TABLE} (
-          source_id BIGINT NOT NULL,
-          log_kind VARCHAR NOT NULL,
-          partition_format VARCHAR NOT NULL,
-          partition_value DATE NOT NULL,
-          boundary_last_modified TIMESTAMPTZ NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (source_id, log_kind)
-        )
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {analytics_schema.INGEST_MANIFEST_TABLE} (
-          source_id BIGINT NOT NULL,
-          log_kind VARCHAR NOT NULL,
-          file_uri VARCHAR NOT NULL,
-          partition_value DATE NOT NULL,
-          partition_format VARCHAR NOT NULL,
-          revision_json VARCHAR NOT NULL,
-          row_count BIGINT NOT NULL,
-          ingested_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (source_id, log_kind, file_uri)
-        )
-        """
-    )
-
-
-def _ensure_analytics_meta_table(conn) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {analytics_schema.ANALYTICS_META_TABLE} (
-          singleton_id INTEGER PRIMARY KEY,
-          schema_version INTEGER NOT NULL,
-          generation BIGINT NOT NULL,
-          build_state VARCHAR NOT NULL,
-          published_at TIMESTAMPTZ
-        )
-        """
-    )
-    if conn.execute(f"SELECT COUNT(*) FROM {analytics_schema.ANALYTICS_META_TABLE}").fetchone()[0] == 0:
-        conn.execute(
-            f"""
-            INSERT INTO {analytics_schema.ANALYTICS_META_TABLE}
-              (singleton_id, schema_version, generation, build_state, published_at)
-            VALUES (1, ?, 0, 'rebuild_required', NULL)
-            """,
-            [analytics_schema.ANALYTICS_SCHEMA_VERSION],
-        )
-
-
-def _publish_analytics_generation(conn) -> None:
-    rebuild_monitoring_serving_facts(
-        conn,
-        dataflow_table=analytics_schema.DATAFLOW_TABLE,
-        job_table=analytics_schema.JOB_TABLE,
-        dataflow_column_types=analytics_schema.cache_table_column_types(DATAFLOW_COLUMN_TYPES),
-        job_column_types=analytics_schema.cache_table_column_types(JOB_COLUMN_TYPES),
-    )
-    validate_monitoring_serving_facts(
-        conn,
-        dataflow_table=analytics_schema.DATAFLOW_TABLE,
-        job_table=analytics_schema.JOB_TABLE,
-    )
-    _ensure_analytics_meta_table(conn)
-    conn.execute(
-        f"""
-        UPDATE {analytics_schema.ANALYTICS_META_TABLE}
-        SET schema_version = ?,
-            generation = generation + 1,
-            build_state = 'ready',
-            published_at = ?::TIMESTAMPTZ
-        WHERE singleton_id = 1
-        """,
-        [analytics_schema.ANALYTICS_SCHEMA_VERSION, utc_now().isoformat()],
-    )
-
-
-def _analytics_meta(conn) -> dict[str, Any] | None:
-    if not analytics_schema.table_exists(conn, analytics_schema.ANALYTICS_META_TABLE):
-        return None
-    row = conn.execute(
-        f"""
-        SELECT schema_version, generation, build_state, published_at
-        FROM {analytics_schema.ANALYTICS_META_TABLE}
-        WHERE singleton_id = 1
-        """
-    ).fetchone()
-    if row is None:
-        return None
-    return {
-        "schema_version": int(row[0]),
-        "generation": int(row[1]),
-        "build_state": str(row[2]),
-        "published_at": row[3].isoformat() if row[3] is not None else None,
-    }
-
-
 def _rebuild_required(paths: list[EnvironmentSource], *, reason: str) -> AnalyticsRebuildRequired:
     source_ids = _analytics_source_ids(paths)
     return AnalyticsRebuildRequired(
@@ -2449,37 +2265,6 @@ def _analytics_source_ids(paths: list[EnvironmentSource]) -> list[int]:
 def _unavailable_analytics_token(source_ids: list[int], reason: str) -> str:
     source_key = ",".join(str(source_id) for source_id in source_ids)
     return f"analytics-v{analytics_schema.ANALYTICS_SCHEMA_VERSION}:unavailable:{reason}:{source_key}"
-
-
-def _mark_cache_source(conn, source_id: int) -> None:
-    _ensure_cache_sources_table(conn)
-    current = conn.execute(
-        f"SELECT generation FROM {analytics_schema.CACHE_SOURCES_TABLE} WHERE source_id = ?",
-        [source_id],
-    ).fetchone()
-    generation = int(current[0] or 0) + 1 if current is not None else 1
-    conn.execute(f"DELETE FROM {analytics_schema.CACHE_SOURCES_TABLE} WHERE source_id = ?", [source_id])
-    conn.execute(
-        f"INSERT INTO {analytics_schema.CACHE_SOURCES_TABLE} (source_id, refreshed_at, generation) VALUES (?, ?::TIMESTAMPTZ, ?)",
-        [source_id, utc_now().isoformat(), generation],
-    )
-
-
-def _cache_source_ids(conn) -> set[int]:
-    if not analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE):
-        return set()
-    return {int(row[0]) for row in conn.execute(f"SELECT source_id FROM {analytics_schema.CACHE_SOURCES_TABLE}").fetchall()}
-
-
-def _cache_source_generations(conn) -> dict[int, int]:
-    if not analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE):
-        return {}
-    return {
-        int(source_id): int(generation or 0)
-        for source_id, generation in conn.execute(
-            f"SELECT source_id, generation FROM {analytics_schema.CACHE_SOURCES_TABLE}"
-        ).fetchall()
-    }
 
 
 def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
@@ -2508,12 +2293,12 @@ def _analytics_cache_has_source(source_id: int) -> bool:
         return False
     conn = _connect_analytics(path, read_only=True)
     try:
-        meta = _analytics_meta(conn)
+        meta = analytics_store.analytics_meta(conn)
         return bool(
             meta
             and meta["schema_version"] == analytics_schema.ANALYTICS_SCHEMA_VERSION
             and meta["build_state"] == "ready"
-            and source_id in _cache_source_ids(conn)
+            and source_id in analytics_store.cache_source_ids(conn)
         )
     finally:
         conn.close()
@@ -2556,7 +2341,7 @@ def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[
 
 
 def _refresh_filter_values(conn, source_id: int) -> None:
-    _ensure_filter_values_table(conn)
+    analytics_schema.ensure_filter_values_table(conn)
     conn.execute(f"DELETE FROM {analytics_schema.FILTER_VALUES_TABLE} WHERE _source_id = ?", [source_id])
     updated_at = utc_now().isoformat()
     for field, (table_name, column_name) in FILTER_VALUE_SOURCES.items():

@@ -10,6 +10,7 @@ from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import schema as analytics_schema
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.logs import cache as logs_cache
 from datacoolie_studio.domains.logs.reader import (
     discover_dataflow_parquet_files,
@@ -1873,8 +1874,17 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
             ],
             logs_cache.JOB_COLUMN_TYPES,
         )
-        logs_cache._mark_cache_source(connection, 7)
-        logs_cache._publish_analytics_generation(connection)
+        analytics_store.mark_cache_source(
+            connection,
+            7,
+            refreshed_at=datetime.now(timezone.utc),
+        )
+        analytics_store.publish_generation(
+            connection,
+            dataflow_column_types=logs_cache.DATAFLOW_COLUMN_TYPES,
+            job_column_types=logs_cache.JOB_COLUMN_TYPES,
+            published_at=datetime.now(timezone.utc),
+        )
 
     def reject_row_materialization(*_args, **_kwargs):
         raise AssertionError("Overview aggregate must not materialize cached Monitoring rows")
@@ -1956,8 +1966,17 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
             ],
             logs_cache.DATAFLOW_COLUMN_TYPES,
         )
-        logs_cache._mark_cache_source(connection, 7)
-        logs_cache._publish_analytics_generation(connection)
+        analytics_store.mark_cache_source(
+            connection,
+            7,
+            refreshed_at=datetime.now(timezone.utc),
+        )
+        analytics_store.publish_generation(
+            connection,
+            dataflow_column_types=logs_cache.DATAFLOW_COLUMN_TYPES,
+            job_column_types=logs_cache.JOB_COLUMN_TYPES,
+            published_at=datetime.now(timezone.utc),
+        )
 
     source = PathRecord(str(tmp_path))
     source.id = 7

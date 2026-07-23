@@ -64,3 +64,87 @@ def duckdb_type_matches(actual_type: str, expected_type: str) -> bool:
     if expected == "TIMESTAMPTZ":
         return actual in {"TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"}
     return actual == expected or actual.startswith(f"{expected}(")
+
+
+def ensure_filter_values_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {FILTER_VALUES_TABLE} (
+          _source_id BIGINT,
+          field VARCHAR,
+          value VARCHAR,
+          record_count BIGINT,
+          _updated_at TIMESTAMPTZ
+        )
+        """
+    )
+
+
+def ensure_cache_sources_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CACHE_SOURCES_TABLE} (
+          source_id BIGINT PRIMARY KEY,
+          refreshed_at TIMESTAMPTZ,
+          generation BIGINT NOT NULL DEFAULT 0
+        )
+        """
+    )
+    if "generation" not in table_columns(conn, CACHE_SOURCES_TABLE):
+        conn.execute(
+            f"ALTER TABLE {CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
+        )
+
+
+def ensure_ingest_control_tables(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {INGEST_CHECKPOINT_TABLE} (
+          source_id BIGINT NOT NULL,
+          log_kind VARCHAR NOT NULL,
+          partition_format VARCHAR NOT NULL,
+          partition_value DATE NOT NULL,
+          boundary_last_modified TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (source_id, log_kind)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {INGEST_MANIFEST_TABLE} (
+          source_id BIGINT NOT NULL,
+          log_kind VARCHAR NOT NULL,
+          file_uri VARCHAR NOT NULL,
+          partition_value DATE NOT NULL,
+          partition_format VARCHAR NOT NULL,
+          revision_json VARCHAR NOT NULL,
+          row_count BIGINT NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (source_id, log_kind, file_uri)
+        )
+        """
+    )
+
+
+def ensure_analytics_meta_table(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ANALYTICS_META_TABLE} (
+          singleton_id INTEGER PRIMARY KEY,
+          schema_version INTEGER NOT NULL,
+          generation BIGINT NOT NULL,
+          build_state VARCHAR NOT NULL,
+          published_at TIMESTAMPTZ
+        )
+        """
+    )
+    if conn.execute(f"SELECT COUNT(*) FROM {ANALYTICS_META_TABLE}").fetchone()[0] == 0:
+        conn.execute(
+            f"""
+            INSERT INTO {ANALYTICS_META_TABLE}
+              (singleton_id, schema_version, generation, build_state, published_at)
+            VALUES (1, ?, 0, 'rebuild_required', NULL)
+            """,
+            [ANALYTICS_SCHEMA_VERSION],
+        )

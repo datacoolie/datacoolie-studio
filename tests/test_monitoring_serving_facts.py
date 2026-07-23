@@ -4,6 +4,7 @@ import duckdb
 
 from benchmarks.monitoring_fixture import build_analytics_fixture
 from datacoolie_studio.domains.analytics import schema as analytics_schema
+from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_DATAFLOW_FACTS_TABLE,
     MONITORING_JOB_FACTS_TABLE,
@@ -102,7 +103,11 @@ def test_failed_serving_validation_rolls_back_generation(tmp_path: Path, monkeyp
     def reject_serving_facts(*_args, **_kwargs):
         raise RuntimeError("serving validation failed")
 
-    monkeypatch.setattr(logs_cache, "validate_monitoring_serving_facts", reject_serving_facts)
+    monkeypatch.setattr(
+        analytics_store,
+        "validate_monitoring_serving_facts",
+        reject_serving_facts,
+    )
     failed = logs_cache._upsert_duckdb_rows(
         7,
         [],
