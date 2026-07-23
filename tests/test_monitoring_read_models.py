@@ -550,7 +550,7 @@ def test_freshness_read_model_tracks_the_actual_consecutive_skipped_streak() -> 
         analytics_schema.DATAFLOW_TABLE,
         1,
         skipped_rows,
-        logs_cache.DATAFLOW_COLUMN_TYPES,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
     )
     _rebuild_serving_facts(connection)
 
@@ -643,7 +643,7 @@ def test_maintenance_read_model_returns_wide_trends_and_registry_drawer_evidence
                 "destination_files_removed": 2,
             },
         )],
-        logs_cache.DATAFLOW_COLUMN_TYPES,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
     )
     _rebuild_serving_facts(connection)
 
@@ -710,12 +710,12 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
     logs_cache._ensure_typed_table(
         connection,
         analytics_schema.DATAFLOW_TABLE,
-        logs_cache.DATAFLOW_COLUMN_TYPES,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
     )
     logs_cache._ensure_typed_table(
         connection,
         analytics_schema.JOB_TABLE,
-        logs_cache.JOB_COLUMN_TYPES,
+        analytics_schema.JOB_COLUMN_TYPES,
     )
     logs_cache._insert_typed_rows(
         connection,
@@ -742,7 +742,7 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
                 },
             )
         ],
-        logs_cache.JOB_COLUMN_TYPES,
+        analytics_schema.JOB_COLUMN_TYPES,
     )
     common = {
         "job_id": "job-1",
@@ -812,7 +812,7 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
                 },
             ),
         ],
-        logs_cache.DATAFLOW_COLUMN_TYPES,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
     )
     _rebuild_serving_facts(connection)
     return connection
@@ -823,6 +823,6 @@ def _rebuild_serving_facts(connection) -> None:
         connection,
         dataflow_table=analytics_schema.DATAFLOW_TABLE,
         job_table=analytics_schema.JOB_TABLE,
-        dataflow_column_types=analytics_schema.cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
-        job_column_types=analytics_schema.cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
+        dataflow_column_types=analytics_schema.cache_table_column_types(analytics_schema.DATAFLOW_COLUMN_TYPES),
+        job_column_types=analytics_schema.cache_table_column_types(analytics_schema.JOB_COLUMN_TYPES),
     )

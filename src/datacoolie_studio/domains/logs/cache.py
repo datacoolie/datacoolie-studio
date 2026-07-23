@@ -140,141 +140,6 @@ FILTER_VALUE_SOURCES = {
     "destination_operation_type": (analytics_schema.DATAFLOW_TABLE, "destination_operation_type"),
 }
 
-DATAFLOW_COLUMN_TYPES = {
-    "_type": "VARCHAR",
-    "job_id": "VARCHAR",
-    "dataflow_id": "VARCHAR",
-    "workspace_id": "VARCHAR",
-    "dataflow_name": "VARCHAR",
-    "dataflow_description": "VARCHAR",
-    "stage": "VARCHAR",
-    "group_number": "BIGINT",
-    "execution_order": "BIGINT",
-    "processing_mode": "VARCHAR",
-    "is_active": "BOOLEAN",
-    "configure": "VARCHAR",
-    "source_id": "VARCHAR",
-    "source_name": "VARCHAR",
-    "source_connection_type": "VARCHAR",
-    "source_format": "VARCHAR",
-    "source_catalog": "VARCHAR",
-    "source_database": "VARCHAR",
-    "source_schema": "VARCHAR",
-    "source_table": "VARCHAR",
-    "source_full_table": "VARCHAR",
-    "source_path": "VARCHAR",
-    "source_query": "VARCHAR",
-    "source_python_function": "VARCHAR",
-    "source_watermark_columns": "VARCHAR",
-    "source_filter_expression": "VARCHAR",
-    "source_configure": "VARCHAR",
-    "transform_deduplicate_columns": "VARCHAR",
-    "transform_latest_data_columns": "VARCHAR",
-    "transform_filter_expression": "VARCHAR",
-    "transform_additional_columns": "VARCHAR",
-    "transform_schema_hints": "VARCHAR",
-    "transform_configure": "VARCHAR",
-    "destination_id": "VARCHAR",
-    "destination_name": "VARCHAR",
-    "destination_connection_type": "VARCHAR",
-    "destination_format": "VARCHAR",
-    "destination_catalog": "VARCHAR",
-    "destination_database": "VARCHAR",
-    "destination_schema": "VARCHAR",
-    "destination_table": "VARCHAR",
-    "destination_full_table": "VARCHAR",
-    "destination_path": "VARCHAR",
-    "destination_load_type": "VARCHAR",
-    "destination_merge_keys": "VARCHAR",
-    "destination_partition_columns": "VARCHAR",
-    "destination_configure": "VARCHAR",
-    "dataflow_run_id": "VARCHAR",
-    "operation_type": "VARCHAR",
-    "start_time": "TIMESTAMPTZ",
-    "end_time": "TIMESTAMPTZ",
-    "duration_seconds": "DOUBLE",
-    "status": "VARCHAR",
-    "error_message": "VARCHAR",
-    "retry_attempts": "BIGINT",
-    "source_start_time": "TIMESTAMPTZ",
-    "source_end_time": "TIMESTAMPTZ",
-    "source_duration_seconds": "DOUBLE",
-    "source_status": "VARCHAR",
-    "source_error_message": "VARCHAR",
-    "source_rows_read": "BIGINT",
-    "source_action": "VARCHAR",
-    "source_watermark_before": "VARCHAR",
-    "source_watermark_after": "VARCHAR",
-    "source_watermark_effective": "VARCHAR",
-    "transform_start_time": "TIMESTAMPTZ",
-    "transform_end_time": "TIMESTAMPTZ",
-    "transform_duration_seconds": "DOUBLE",
-    "transform_status": "VARCHAR",
-    "transform_error_message": "VARCHAR",
-    "transformers_applied": "VARCHAR",
-    "destination_start_time": "TIMESTAMPTZ",
-    "destination_end_time": "TIMESTAMPTZ",
-    "destination_duration_seconds": "DOUBLE",
-    "destination_status": "VARCHAR",
-    "destination_error_message": "VARCHAR",
-    "destination_operation_type": "VARCHAR",
-    "destination_rows_written": "BIGINT",
-    "destination_rows_inserted": "BIGINT",
-    "destination_rows_updated": "BIGINT",
-    "destination_rows_deleted": "BIGINT",
-    "destination_files_added": "BIGINT",
-    "destination_files_removed": "BIGINT",
-    "destination_bytes_added": "BIGINT",
-    "destination_bytes_removed": "BIGINT",
-    "destination_bytes_saved": "BIGINT",
-    "destination_operation_details": "VARCHAR",
-    "overhead_duration_seconds": "DOUBLE",
-    "__run_date": "DATE",
-}
-
-JOB_COLUMN_TYPES = {
-    "_type": "VARCHAR",
-    "job_id": "VARCHAR",
-    "workspace_id": "VARCHAR",
-    "job_index": "BIGINT",
-    "job_num": "BIGINT",
-    "platform_name": "VARCHAR",
-    "engine_name": "VARCHAR",
-    "metadata_provider_name": "VARCHAR",
-    "watermark_manager_name": "VARCHAR",
-    "start_time": "VARCHAR",
-    "end_time": "VARCHAR",
-    "duration_seconds": "DOUBLE",
-    "status": "VARCHAR",
-    "error_message": "VARCHAR",
-    "dry_run": "BOOLEAN",
-    "stop_on_error": "BOOLEAN",
-    "max_workers": "BIGINT",
-    "retry_count": "BIGINT",
-    "retry_delay": "DOUBLE",
-    "retention_hours": "BIGINT",
-    "stages": "VARCHAR",
-    "total_dataflows": "BIGINT",
-    "total_succeeded": "BIGINT",
-    "total_failed": "BIGINT",
-    "total_skipped": "BIGINT",
-    "total_running": "BIGINT",
-    "total_pending": "BIGINT",
-    "total_rows_read": "BIGINT",
-    "total_rows_written": "BIGINT",
-    "total_rows_inserted": "BIGINT",
-    "total_rows_updated": "BIGINT",
-    "total_rows_deleted": "BIGINT",
-    "total_files_added": "BIGINT",
-    "total_files_removed": "BIGINT",
-    "total_bytes_added": "BIGINT",
-    "total_bytes_removed": "BIGINT",
-    "operation_types": "VARCHAR",
-    "__event_time": "TIMESTAMPTZ",
-    "__run_date": "DATE",
-}
-
-
 def analytics_cache_stats() -> dict[str, Any]:
     path = analytics_database_path()
     exists = path.exists()
@@ -1442,7 +1307,7 @@ def query_cached_monitoring_rows(
         )
 
         dataflow_available = set(analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE))
-        requested_dataflow_columns = list(dataflow_columns or tuple(DATAFLOW_COLUMN_TYPES))
+        requested_dataflow_columns = list(dataflow_columns or tuple(analytics_schema.DATAFLOW_COLUMN_TYPES))
         selected_dataflow_columns = [column for column in requested_dataflow_columns if column in dataflow_available]
         dataflow_select_sql = _select_alias_columns("d", selected_dataflow_columns)
         dataflow_where_sql, dataflow_filter_params = _monitoring_filter_sql(filters, "d", "j")
@@ -1464,7 +1329,7 @@ def query_cached_monitoring_rows(
         dataflows = _result_rows(dataflow_result)
 
         job_available = set(analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
-        requested_job_columns = list(job_columns or tuple(JOB_COLUMN_TYPES))
+        requested_job_columns = list(job_columns or tuple(analytics_schema.JOB_COLUMN_TYPES))
         selected_job_columns = [column for column in requested_job_columns if column in job_available]
         job_select_sql = _select_alias_columns("j", selected_job_columns)
         job_where_sql, job_filter_params = _monitoring_filter_sql(
@@ -1570,7 +1435,7 @@ def _write_duckdb_rows(
                 parsed_dataflow_records += row_count
                 file_row_counts[file_uri] = row_count
             if job_rows:
-                _insert_typed_rows(conn, analytics_schema.JOB_TABLE, source_id, job_rows, JOB_COLUMN_TYPES)
+                _insert_typed_rows(conn, analytics_schema.JOB_TABLE, source_id, job_rows, analytics_schema.JOB_COLUMN_TYPES)
             _assert_ingest_files_stable(ingest_files or [])
             analytics_store.upsert_ingest_control_rows(
                 conn,
@@ -1584,8 +1449,8 @@ def _write_duckdb_rows(
             analytics_store.mark_cache_source(conn, source_id, refreshed_at=utc_now())
             analytics_store.publish_generation(
                 conn,
-                dataflow_column_types=DATAFLOW_COLUMN_TYPES,
-                job_column_types=JOB_COLUMN_TYPES,
+                dataflow_column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,
+                job_column_types=analytics_schema.JOB_COLUMN_TYPES,
                 published_at=utc_now(),
             )
             conn.execute("COMMIT")
@@ -2124,7 +1989,7 @@ def _json_ready(row: dict[str, Any]) -> dict[str, Any]:
 def _ensure_duckdb_tables(conn) -> None:
     recreated = [
         _ensure_dataflow_cache_table(conn),
-        _ensure_typed_table(conn, analytics_schema.JOB_TABLE, JOB_COLUMN_TYPES),
+        _ensure_typed_table(conn, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES),
     ]
     _drop_empty_generated_job_columns(conn)
     if any(recreated) and analytics_schema.table_exists(conn, analytics_schema.FILTER_VALUES_TABLE):
@@ -2224,8 +2089,8 @@ def _typed_cache_schema_is_ready(conn) -> bool:
         and analytics_schema.table_exists(conn, analytics_schema.CACHE_SOURCES_TABLE)
         and analytics_schema.table_exists(conn, analytics_schema.ANALYTICS_META_TABLE)
         and "generation" in analytics_schema.table_columns(conn, analytics_schema.CACHE_SOURCES_TABLE)
-        and _typed_table_schema_is_current(conn, analytics_schema.DATAFLOW_TABLE, DATAFLOW_COLUMN_TYPES)
-        and _typed_table_schema_is_current(conn, analytics_schema.JOB_TABLE, JOB_COLUMN_TYPES)
+        and _typed_table_schema_is_current(conn, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
+        and _typed_table_schema_is_current(conn, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
         and monitoring_serving_schema_is_ready(conn)
         and not _has_empty_generated_job_columns(conn)
         and not analytics_schema.table_exists(conn, analytics_schema.LEGACY_DATAFLOW_TABLE)
@@ -2421,7 +2286,7 @@ def _migrate_legacy_cache(conn) -> None:
             conn,
             legacy_table=analytics_schema.LEGACY_DATAFLOW_TABLE,
             target_table=analytics_schema.DATAFLOW_TABLE,
-            column_types=DATAFLOW_COLUMN_TYPES,
+            column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,
             file_kind="legacy_dataflow_json",
         )
     )
@@ -2430,7 +2295,7 @@ def _migrate_legacy_cache(conn) -> None:
             conn,
             legacy_table=analytics_schema.LEGACY_JOB_TABLE,
             target_table=analytics_schema.JOB_TABLE,
-            column_types=JOB_COLUMN_TYPES,
+            column_types=analytics_schema.JOB_COLUMN_TYPES,
             file_kind="legacy_job_json",
         )
     )

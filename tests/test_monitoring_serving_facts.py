@@ -50,8 +50,8 @@ def test_serving_fact_rebuild_is_idempotent(tmp_path: Path):
             connection,
             dataflow_table=analytics_schema.DATAFLOW_TABLE,
             job_table=analytics_schema.JOB_TABLE,
-            dataflow_column_types=analytics_schema.cache_table_column_types(logs_cache.DATAFLOW_COLUMN_TYPES),
-            job_column_types=analytics_schema.cache_table_column_types(logs_cache.JOB_COLUMN_TYPES),
+            dataflow_column_types=analytics_schema.cache_table_column_types(analytics_schema.DATAFLOW_COLUMN_TYPES),
+            job_column_types=analytics_schema.cache_table_column_types(analytics_schema.JOB_COLUMN_TYPES),
         )
         validate_monitoring_serving_facts(
             connection,

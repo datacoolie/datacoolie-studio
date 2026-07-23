@@ -1843,12 +1843,12 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
         logs_cache._ensure_typed_table(
             connection,
             analytics_schema.DATAFLOW_TABLE,
-            logs_cache.DATAFLOW_COLUMN_TYPES,
+            analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
         logs_cache._ensure_typed_table(
             connection,
             analytics_schema.JOB_TABLE,
-            logs_cache.JOB_COLUMN_TYPES,
+            analytics_schema.JOB_COLUMN_TYPES,
         )
         logs_cache._insert_typed_rows(
             connection,
@@ -1859,7 +1859,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
                 ("success.parquet", "dataflow_parquet", "{}", {"status": "succeeded", "end_time": "2026-07-01T22:00:00Z"}),
                 ("failed.parquet", "dataflow_parquet", "{}", {"status": "failed", "end_time": "2026-07-02T01:00:00Z"}),
             ],
-            logs_cache.DATAFLOW_COLUMN_TYPES,
+            analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
         logs_cache._insert_typed_rows(
             connection,
@@ -1872,7 +1872,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
                 ("success.jsonl", "job_jsonl", "{}", {"status": "succeeded", "engine_name": "polars", "end_time": "2026-07-10T00:00:00Z"}),
                 ("fallback.jsonl", "job_jsonl", "{}", {"status": "succeeded", "engine_name": "spark", "end_time": "not-a-timestamp", "start_time": "2026-07-09T00:00:00Z", "__run_date": "2026-07-09"}),
             ],
-            logs_cache.JOB_COLUMN_TYPES,
+            analytics_schema.JOB_COLUMN_TYPES,
         )
         analytics_store.mark_cache_source(
             connection,
@@ -1881,8 +1881,8 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(tmp_path
         )
         analytics_store.publish_generation(
             connection,
-            dataflow_column_types=logs_cache.DATAFLOW_COLUMN_TYPES,
-            job_column_types=logs_cache.JOB_COLUMN_TYPES,
+            dataflow_column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,
+            job_column_types=analytics_schema.JOB_COLUMN_TYPES,
             published_at=datetime.now(timezone.utc),
         )
 
@@ -1943,7 +1943,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
         logs_cache._ensure_typed_table(
             connection,
             analytics_schema.DATAFLOW_TABLE,
-            logs_cache.DATAFLOW_COLUMN_TYPES,
+            analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
         logs_cache._insert_typed_rows(
             connection,
@@ -1964,7 +1964,7 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
                     },
                 ),
             ],
-            logs_cache.DATAFLOW_COLUMN_TYPES,
+            analytics_schema.DATAFLOW_COLUMN_TYPES,
         )
         analytics_store.mark_cache_source(
             connection,
@@ -1973,8 +1973,8 @@ def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch
         )
         analytics_store.publish_generation(
             connection,
-            dataflow_column_types=logs_cache.DATAFLOW_COLUMN_TYPES,
-            job_column_types=logs_cache.JOB_COLUMN_TYPES,
+            dataflow_column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,
+            job_column_types=analytics_schema.JOB_COLUMN_TYPES,
             published_at=datetime.now(timezone.utc),
         )
 
@@ -2027,7 +2027,7 @@ def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path
             analytics_schema.JOB_TABLE,
             1,
             [("job.jsonl", "job_jsonl", "{}", job_row)],
-            logs_cache.JOB_COLUMN_TYPES,
+            analytics_schema.JOB_COLUMN_TYPES,
         )
 
         columns = {str(row[1]): str(row[2]).upper() for row in connection.execute("PRAGMA table_info('etl_job_runs')").fetchall()}
