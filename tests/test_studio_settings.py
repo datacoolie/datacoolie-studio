@@ -43,17 +43,25 @@ def test_studio_settings_and_diagnostics_have_separate_read_costs(tmp_path: Path
         current = client.get("/api/v1/studio/settings")
         assert current.status_code == 200
         assert current.json()["source_check_interval_seconds"] == 30
+        assert current.json()["source_check_mode"] == "adaptive"
+        assert current.json()["source_check_max_interval_seconds"] == 300
         assert isinstance(current.json()["timezone_offset_minutes"], int)
         assert "storage" not in current.json()
         assert analytics_calls == 0
 
         updated = client.patch(
             "/api/v1/studio/settings",
-            json={"timezone": "Asia/Ho_Chi_Minh", "source_check_interval_seconds": 45},
+            json={
+                "timezone": "Asia/Ho_Chi_Minh",
+                "source_check_mode": "fixed",
+                "source_check_interval_seconds": 45,
+                "source_check_max_interval_seconds": 300,
+            },
         )
         assert updated.status_code == 200
         assert updated.json()["timezone"] == "Asia/Ho_Chi_Minh"
         assert updated.json()["source_check_interval_seconds"] == 45
+        assert updated.json()["source_check_mode"] == "fixed"
         assert analytics_calls == 0
 
         diagnostics = client.get("/api/v1/studio/diagnostics")
@@ -152,6 +160,14 @@ def test_studio_settings_update_is_atomic_and_avoids_noop_commits(tmp_path: Path
             json={"timezone": "Invalid/Timezone", "source_check_interval_seconds": 60},
         )
         assert invalid_timezone.status_code == 422
+        invalid_max = client.patch(
+            "/api/v1/studio/settings",
+            json={
+                "source_check_interval_seconds": 60,
+                "source_check_max_interval_seconds": 30,
+            },
+        )
+        assert invalid_max.status_code == 422
         assert commit_count == 1
 
         persisted = client.get("/api/v1/studio/settings").json()

@@ -51,6 +51,38 @@ describe("lineage fan routing", () => {
       expect.not.objectContaining({ laneOffset: expect.anything() })
     ]);
   });
+
+  it("anchors labels by topology with fan-out taking precedence over fan-in", () => {
+    const visible: VisibleLineage = {
+      entities: [],
+      dataflows: [
+        dataflow("fan-both-a", "shared-source", "shared-target"),
+        dataflow("fan-both-b", "shared-source", "shared-target"),
+        dataflow("fan-out", "shared-source", "other-target"),
+        dataflow("fan-in-a", "other-source-a", "fan-in-target"),
+        dataflow("fan-in-b", "other-source-b", "fan-in-target"),
+        dataflow("single", "single-source", "single-target")
+      ],
+      dependencies: [],
+      focusNodeIds: new Set(),
+      focusEdgeIds: new Set(),
+      issueCountByAsset: new Map(),
+      filtersActive: false,
+      traceActive: true
+    };
+
+    const flow = buildLineageFlow(visible, null, false, null, null);
+
+    expect(flow.edges.map((edge) => edge.data?.labelSegment)).toEqual([
+      "target",
+      "target",
+      "target",
+      "source",
+      "source",
+      "longest"
+    ]);
+  });
+
 });
 
 describe("lineage reference nodes", () => {

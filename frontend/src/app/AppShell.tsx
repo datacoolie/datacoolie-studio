@@ -15,6 +15,7 @@ interface AppShellProps {
   metadataSourceCount: number;
   logPathCount: number;
   freshness: EnvironmentContext["freshness"] | null;
+  timezoneName: string | null;
   error: string | null;
   children: ReactNode;
   onNavigate: (module: ModuleKey) => void;
@@ -33,6 +34,7 @@ export function AppShell({
   metadataSourceCount,
   logPathCount,
   freshness,
+  timezoneName,
   error,
   children,
   onNavigate,
@@ -72,6 +74,7 @@ export function AppShell({
           metadataSourceCount={metadataSourceCount}
           logPathCount={logPathCount}
           freshness={freshness}
+          timezoneName={timezoneName}
           onProjectSelect={onProjectSelect}
           onOpenProject={onOpenProject}
         />

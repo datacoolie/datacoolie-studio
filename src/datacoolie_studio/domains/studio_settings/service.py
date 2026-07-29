@@ -11,13 +11,21 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.core.config import analytics_database_path, database_url
 from datacoolie_studio.db.session import get_engine
-from datacoolie_studio.db.models import StudioSetting
-from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.db.models import (
+    EnvironmentSource,
+    SourceObservation,
+    StudioSetting,
+    utc_now,
+)
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 
 STUDIO_TIMEZONE_KEY = "studio.timezone"
 SOURCE_CHECK_INTERVAL_KEY = "studio.source_check_interval_seconds"
+SOURCE_CHECK_MODE_KEY = "studio.source_check_mode"
+SOURCE_CHECK_MAX_INTERVAL_KEY = "studio.source_check_max_interval_seconds"
 DEFAULT_SOURCE_CHECK_INTERVAL_SECONDS = 30
+DEFAULT_SOURCE_CHECK_MODE = "adaptive"
+DEFAULT_SOURCE_CHECK_MAX_INTERVAL_SECONDS = 300
 MIN_SOURCE_CHECK_INTERVAL_SECONDS = 5
 MAX_SOURCE_CHECK_INTERVAL_SECONDS = 3600
 
@@ -52,12 +60,25 @@ def studio_timezone_context(session: Session) -> dict[str, Any]:
 def get_studio_settings(session: Session) -> dict[str, Any]:
     context = studio_timezone_context(session)
     source_check_setting = session.get(StudioSetting, SOURCE_CHECK_INTERVAL_KEY)
+    source_check_mode_setting = session.get(StudioSetting, SOURCE_CHECK_MODE_KEY)
+    source_check_max_setting = session.get(StudioSetting, SOURCE_CHECK_MAX_INTERVAL_KEY)
+    policy = source_check_policy(
+        session,
+        interval_setting=source_check_setting,
+        mode_setting=source_check_mode_setting,
+        max_setting=source_check_max_setting,
+    )
     return {
         "timezone": context["timezone"],
         "timezone_source": context["timezone_source"],
         "timezone_offset_minutes": _timezone_offset_minutes(context["timezone_info"]),
-        "source_check_interval_seconds": source_check_interval_seconds(session, source_check_setting),
-        "updated_at": _latest_updated_at(context["updated_at"], source_check_setting.updated_at if source_check_setting else None),
+        **policy,
+        "updated_at": _latest_updated_at(
+            context["updated_at"],
+            source_check_setting.updated_at if source_check_setting else None,
+            source_check_mode_setting.updated_at if source_check_mode_setting else None,
+            source_check_max_setting.updated_at if source_check_max_setting else None,
+        ),
     }
 
 
@@ -78,7 +99,12 @@ def compact_workspace_database() -> dict[str, Any]:
 
 
 def update_studio_settings(session: Session, changes: Mapping[str, Any]) -> dict[str, Any]:
-    unknown_keys = set(changes) - {"timezone", "source_check_interval_seconds"}
+    unknown_keys = set(changes) - {
+        "timezone",
+        "source_check_interval_seconds",
+        "source_check_mode",
+        "source_check_max_interval_seconds",
+    }
     if unknown_keys:
         raise ValueError(f"Unsupported Studio settings: {', '.join(sorted(unknown_keys))}")
 
@@ -95,6 +121,33 @@ def update_studio_settings(session: Session, changes: Mapping[str, Any]) -> dict
         if raw_interval is None:
             raise ValueError("Source check interval cannot be null")
         normalized_interval = _validate_source_check_interval(raw_interval)
+
+    normalized_mode: str | None = None
+    if "source_check_mode" in changes:
+        normalized_mode = str(changes["source_check_mode"] or "").strip().lower()
+        if normalized_mode not in {"fixed", "adaptive"}:
+            raise ValueError("Source check mode must be fixed or adaptive")
+
+    normalized_max_interval: int | None = None
+    if "source_check_max_interval_seconds" in changes:
+        raw_max_interval = changes["source_check_max_interval_seconds"]
+        if raw_max_interval is None:
+            raise ValueError("Source check max interval cannot be null")
+        normalized_max_interval = _validate_source_check_interval(raw_max_interval)
+
+    current_policy = source_check_policy(session)
+    effective_interval = (
+        normalized_interval
+        if normalized_interval is not None
+        else int(current_policy["source_check_interval_seconds"])
+    )
+    effective_max = (
+        normalized_max_interval
+        if normalized_max_interval is not None
+        else int(current_policy["source_check_max_interval_seconds"])
+    )
+    if effective_max < effective_interval:
+        raise ValueError("Source check max interval must be greater than or equal to the base interval")
 
     changed = False
     if "timezone" in changes:
@@ -120,6 +173,43 @@ def update_studio_settings(session: Session, changes: Mapping[str, Any]) -> dict
             interval_setting.value = interval_value
             changed = True
 
+    if normalized_mode is not None:
+        mode_setting = session.get(StudioSetting, SOURCE_CHECK_MODE_KEY)
+        if mode_setting is None:
+            session.add(StudioSetting(key=SOURCE_CHECK_MODE_KEY, value=normalized_mode))
+            changed = True
+        elif mode_setting.value != normalized_mode:
+            mode_setting.value = normalized_mode
+            changed = True
+
+    if normalized_max_interval is not None:
+        max_setting = session.get(StudioSetting, SOURCE_CHECK_MAX_INTERVAL_KEY)
+        max_value = str(normalized_max_interval)
+        if max_setting is None:
+            session.add(StudioSetting(key=SOURCE_CHECK_MAX_INTERVAL_KEY, value=max_value))
+            changed = True
+        elif max_setting.value != max_value:
+            max_setting.value = max_value
+            changed = True
+
+    policy_changed = bool(
+        {"source_check_mode", "source_check_interval_seconds", "source_check_max_interval_seconds"}
+        .intersection(changes)
+    ) and changed
+    if policy_changed:
+        cloud_source_ids = select(EnvironmentSource.id).where(
+            EnvironmentSource.storage_provider != "local"
+        )
+        session.query(SourceObservation).filter(
+            SourceObservation.source_id.in_(cloud_source_ids)
+        ).update(
+            {
+                SourceObservation.next_observation_at: utc_now(),
+                SourceObservation.unchanged_streak: 0,
+                SourceObservation.failure_streak: 0,
+            },
+            synchronize_session=False,
+        )
     if changed:
         try:
             session.commit()
@@ -140,6 +230,44 @@ def source_check_interval_seconds(session: Session, setting: StudioSetting | Non
     if value < MIN_SOURCE_CHECK_INTERVAL_SECONDS or value > MAX_SOURCE_CHECK_INTERVAL_SECONDS:
         return DEFAULT_SOURCE_CHECK_INTERVAL_SECONDS
     return value
+
+
+def source_check_policy(
+    session: Session,
+    *,
+    interval_setting: StudioSetting | None = None,
+    mode_setting: StudioSetting | None = None,
+    max_setting: StudioSetting | None = None,
+) -> dict[str, int | str]:
+    interval = source_check_interval_seconds(session, interval_setting)
+    mode_setting = (
+        mode_setting
+        if mode_setting is not None
+        else session.get(StudioSetting, SOURCE_CHECK_MODE_KEY)
+    )
+    mode = str(mode_setting.value).lower() if mode_setting else DEFAULT_SOURCE_CHECK_MODE
+    if mode not in {"fixed", "adaptive"}:
+        mode = DEFAULT_SOURCE_CHECK_MODE
+    max_setting = (
+        max_setting
+        if max_setting is not None
+        else session.get(StudioSetting, SOURCE_CHECK_MAX_INTERVAL_KEY)
+    )
+    try:
+        max_interval = int(max_setting.value) if max_setting else DEFAULT_SOURCE_CHECK_MAX_INTERVAL_SECONDS
+    except (TypeError, ValueError):
+        max_interval = DEFAULT_SOURCE_CHECK_MAX_INTERVAL_SECONDS
+    if (
+        max_interval < interval
+        or max_interval < MIN_SOURCE_CHECK_INTERVAL_SECONDS
+        or max_interval > MAX_SOURCE_CHECK_INTERVAL_SECONDS
+    ):
+        max_interval = max(interval, DEFAULT_SOURCE_CHECK_MAX_INTERVAL_SECONDS)
+    return {
+        "source_check_mode": mode,
+        "source_check_interval_seconds": interval,
+        "source_check_max_interval_seconds": max_interval,
+    }
 
 
 def _validate_source_check_interval(value: Any) -> int:

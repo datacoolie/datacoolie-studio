@@ -18,7 +18,7 @@ from datacoolie_studio.db.models import (
     MetadataMaterialization,
     Project,
     ProjectReferenceMapping,
-    SourceRevision,
+    SourceObservation,
 )
 
 FRESHNESS_ORDER = {
@@ -36,11 +36,10 @@ class EnvironmentContextState:
     project: Project
     all_sources: list[EnvironmentSource]
     sources: list[EnvironmentSource]
-    revisions: dict[int, SourceRevision]
+    observations: dict[int, SourceObservation]
     metadata_materializations: dict[int, MetadataMaterialization]
     code_materializations: dict[int, CodeArtifactMaterialization]
     manifest_rows: dict[int, list[LogFileManifest]]
-    log_pending_changes: dict[int, bool]
     mappings: list[ProjectReferenceMapping]
 
 
@@ -110,10 +109,12 @@ def _load_environment_context_state(session: Session, environment_id: int) -> En
     )
     sources = [source for source in all_sources if source.enabled]
     source_ids = [source.id for source in sources]
-    revisions = {
+    observations = {
         item.source_id: item
         for item in session.scalars(
-            select(SourceRevision).where(SourceRevision.source_id.in_(source_ids))
+            select(SourceObservation).where(
+                SourceObservation.source_id.in_(source_ids)
+            )
         )
     } if source_ids else {}
     metadata_materializations = _structural_materializations(
@@ -135,30 +136,15 @@ def _load_environment_context_state(session: Session, environment_id: int) -> En
         .where(ProjectReferenceMapping.project_id == environment.project_id)
         .order_by(ProjectReferenceMapping.id)
     ))
-    # Detect Log sources whose files changed since their last sync. This is a
-    # read-only live check (no ingestion); it lets the header show "Not synced"
-    # for a cached Log source with new/changed files, on the same read that
-    # reports Metadata and Code freshness. The scan result is cached for the
-    # source-check interval (TTL) so it is not repeated on every read.
-    from datacoolie_studio.domains.logs.ingestion import log_source_has_pending_changes
-    from datacoolie_studio.domains.studio_settings.service import source_check_interval_seconds
-
-    pending_ttl = source_check_interval_seconds(session)
-    log_pending_changes = {
-        source.id: log_source_has_pending_changes(session, source, ttl_seconds=pending_ttl)
-        for source in sources
-        if source.source_kind == "logs" and source.id in manifest_rows
-    }
     return EnvironmentContextState(
         environment=environment,
         project=project,
         all_sources=all_sources,
         sources=sources,
-        revisions=revisions,
+        observations=observations,
         metadata_materializations=metadata_materializations,
         code_materializations=code_materializations,
         manifest_rows=dict(manifest_rows),
-        log_pending_changes=log_pending_changes,
         mappings=mappings,
     )
 
@@ -167,11 +153,10 @@ def _freshness_from_state(state: EnvironmentContextState) -> dict[str, Any]:
     item_pairs = [
         _source_freshness(
             source,
-            revision=state.revisions.get(source.id),
+            observation=state.observations.get(source.id),
             metadata_materialization=state.metadata_materializations.get(source.id),
             code_materialization=state.code_materializations.get(source.id),
             manifest_rows=state.manifest_rows.get(source.id, []),
-            pending_changes=state.log_pending_changes.get(source.id, False),
         )
         for source in state.sources
     ]
@@ -228,8 +213,9 @@ def _dependency_versions(state: EnvironmentContextState) -> dict[str, str]:
         "operations": _fingerprint([
             {
                 "source_id": source.id,
-                "revision": state.revisions.get(source.id).revision_json if state.revisions.get(source.id) else None,
-                "status": state.revisions.get(source.id).status if state.revisions.get(source.id) else None,
+                "revision": state.observations.get(source.id).observed_revision_json if state.observations.get(source.id) else None,
+                "status": state.observations.get(source.id).last_outcome if state.observations.get(source.id) else None,
+                "pending_changes": state.observations.get(source.id).pending_changes if state.observations.get(source.id) else None,
                 "manifests": [
                     (row.id, row.revision_json, row.row_count, row.status, row.last_seen_at)
                     for row in state.manifest_rows.get(source.id, [])
@@ -277,16 +263,19 @@ def _fingerprint(payload: Any) -> str:
 def _source_freshness(
     source: EnvironmentSource,
     *,
-    revision: SourceRevision | None,
+    observation: SourceObservation | None,
     metadata_materialization: MetadataMaterialization | None,
     code_materialization: CodeArtifactMaterialization | None,
     manifest_rows: list[LogFileManifest],
-    pending_changes: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    stored_revision = _json_or_none(revision.revision_json) if revision else None
+    stored_revision = (
+        _json_or_none(observation.observed_revision_json)
+        if observation
+        else None
+    )
     materialized_revision = _materialized_revision(
         source,
-        revision,
+        observation,
         metadata_materialization=metadata_materialization,
         code_materialization=code_materialization,
         manifest_rows=manifest_rows,
@@ -295,8 +284,10 @@ def _source_freshness(
     observed_revision = _observed_revision(source, stored_revision)
     source_modified_at = _revision_modified_at(observed_revision)
     cached_modified_at = _revision_modified_at(cache_revision)
-    cache_synced_at = _cache_synced_at(source, revision, metadata_materialization)
-    status = _source_status(revision, cache_revision, pending_changes=pending_changes)
+    cache_synced_at = _cache_synced_at(
+        source, observation, metadata_materialization
+    )
+    status = _source_status(observation, cache_revision)
     return {
         "source_id": source.id,
         "source_kind": source.source_kind,
@@ -314,7 +305,7 @@ def _source_freshness(
 
 def _materialized_revision(
     source: EnvironmentSource,
-    revision: SourceRevision | None,
+    observation: SourceObservation | None,
     *,
     metadata_materialization: MetadataMaterialization | None,
     code_materialization: CodeArtifactMaterialization | None,
@@ -324,7 +315,11 @@ def _materialized_revision(
         return _json_or_none(metadata_materialization.source_revision_json) if metadata_materialization else None
     if source.source_kind == "logs":
         if not manifest_rows:
-            return _json_or_none(revision.revision_json) if revision and revision.status != "error" else None
+            return (
+                _json_or_none(observation.observed_revision_json)
+                if observation and observation.last_outcome != "error"
+                else None
+            )
         revisions = [_json_or_none(row.revision_json) for row in manifest_rows]
         revisions = [revision for revision in revisions if revision]
         return {
@@ -353,20 +348,20 @@ def _observed_revision(source: EnvironmentSource, revision: dict[str, Any] | Non
 
 
 def _source_status(
-    revision: SourceRevision | None,
+    observation: SourceObservation | None,
     cache_revision: dict[str, Any] | None,
-    *,
-    pending_changes: bool = False,
 ) -> str:
-    if revision and revision.status == "error":
-        error = _json_or_none(revision.error_json)
+    if observation and observation.last_outcome == "error":
+        error = _json_or_none(observation.error_json)
         if error and error.get("code") == "not_found":
             return "missing"
         return "sync_failed"
     if cache_revision is None:
         return "not_cached"
-    if pending_changes:
+    if observation and observation.pending_changes:
         return "not_cached"
+    if observation is None or observation.last_outcome == "never":
+        return "unknown"
     return "current"
 
 
@@ -397,13 +392,21 @@ def _revision_modified_at(revision: dict[str, Any] | None) -> datetime | None:
 
 def _cache_synced_at(
     source: EnvironmentSource,
-    revision: SourceRevision | None,
+    observation: SourceObservation | None,
     metadata_materialization: MetadataMaterialization | None,
 ) -> datetime | None:
     if source.source_kind == "metadata":
-        return metadata_materialization.materialized_at if metadata_materialization else (revision.checked_at if revision and revision.status != "error" else None)
-    if revision and revision.status != "error":
-        return revision.checked_at
+        return (
+            metadata_materialization.materialized_at
+            if metadata_materialization
+            else (
+                observation.last_succeeded_at
+                if observation and observation.last_outcome != "error"
+                else None
+            )
+        )
+    if observation and observation.last_outcome != "error":
+        return observation.last_succeeded_at
     return None
 
 

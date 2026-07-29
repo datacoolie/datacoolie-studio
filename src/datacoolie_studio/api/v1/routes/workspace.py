@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.api.v1.contracts.sources import (
@@ -13,6 +13,7 @@ from datacoolie_studio.api.v1.contracts.sources import (
     MetadataSourceRead,
     SourceCreate,
     SourceImportResponse,
+    SourcesWorkspaceResponse,
 )
 from datacoolie_studio.api.v1.contracts.workspace import (
     EnvironmentCreate,
@@ -34,10 +35,23 @@ from datacoolie_studio.api.v1.contracts.workspace import (
     StudioWorkspaceDatabaseMaintenanceRequest,
 )
 from datacoolie_studio.db.session import get_session
+from datacoolie_studio.api.v1.routes.credentials import (
+    get_credential_secret_store,
+    require_loopback_client,
+)
+from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.freshness.service import environment_context, environment_freshness
+from datacoolie_studio.domains.sources.initialization import (
+    queue_source_initialization_ids,
+    run_source_initialization_jobs,
+)
 from datacoolie_studio.domains.cache_admin import service as cache_admin
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace
+from datacoolie_studio.domains.storage.errors import (
+    StorageConfigurationError,
+    StorageError,
+)
 
 router = APIRouter(tags=["workspace"])
 
@@ -238,49 +252,118 @@ def get_environment_context(environment_id: int, session: Session = Depends(get_
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get(
+    "/environments/{environment_id}/sources/workspace",
+    response_model=SourcesWorkspaceResponse,
+)
+def get_sources_workspace(environment_id: int, session: Session = Depends(get_session)):
+    try:
+        return workspace.sources_workspace(session, environment_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/environments/{environment_id}/metadata-sources", response_model=list[MetadataSourceRead])
 def get_metadata_sources(environment_id: int, session: Session = Depends(get_session)):
     return workspace.list_metadata_sources_with_validation(session, environment_id)
 
 
 @router.post("/environments/{environment_id}/metadata-sources", response_model=MetadataSourceRead)
-def post_metadata_source(environment_id: int, payload: SourceCreate, session: Session = Depends(get_session)):
-    return workspace.add_metadata_source(session, environment_id, payload.uri, payload.label, payload.enabled, payload.source_config)
+def post_metadata_source(
+    environment_id: int,
+    payload: SourceCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        source = workspace.add_metadata_source(
+            session,
+            environment_id,
+            payload.uri,
+            payload.label,
+            payload.enabled,
+            payload.source_config,
+            _storage_payload(payload.storage),
+        )
+        job_ids = queue_source_initialization_ids(session, [source.id])
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return workspace.source_to_dict(source)
+    except StorageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/environments/{environment_id}/metadata-sources/import", response_model=SourceImportResponse)
 def import_metadata_sources(
     environment_id: int,
     payload: MetadataSourceImportRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
-    return workspace.import_metadata_sources(
-        session,
-        environment_id,
-        uri=payload.uri,
-        label=payload.label,
-        enabled=payload.enabled,
-    )
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        result = workspace.import_metadata_sources(
+            session,
+            environment_id,
+            uri=payload.uri,
+            label=payload.label,
+            enabled=payload.enabled,
+            storage=_storage_payload(payload.storage),
+        )
+        source_ids = [
+            int(item["id"])
+            for item in [*result["created"], *result["existing"]]
+        ]
+        job_ids = queue_source_initialization_ids(session, source_ids)
+        result["summary"]["initialization_queued"] = len(job_ids)
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return result
+    except StorageConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/environments/{environment_id}/datacoolie-project-sources", response_model=SourceImportResponse)
 def import_datacoolie_project_sources(
     environment_id: int,
     payload: DatacoolieProjectSourceImportRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    secret_store: CredentialSecretStore = Depends(get_credential_secret_store),
 ):
-    return workspace.import_datacoolie_project_sources(
-        session,
-        environment_id,
-        project_uri=payload.project_uri,
-        metadata_subpath=payload.metadata_subpath,
-        code_subpath=payload.code_subpath,
-        metadata_uri=payload.metadata_uri,
-        code_uri=payload.code_uri,
-        include_metadata=payload.include_metadata,
-        include_code=payload.include_code,
-        enabled=payload.enabled,
-    )
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        result = workspace.import_datacoolie_project_sources(
+            session,
+            environment_id,
+            project_uri=payload.project_uri,
+            metadata_subpath=payload.metadata_subpath,
+            code_subpath=payload.code_subpath,
+            metadata_uri=payload.metadata_uri,
+            code_uri=payload.code_uri,
+            include_metadata=payload.include_metadata,
+            include_code=payload.include_code,
+            enabled=payload.enabled,
+            storage=_storage_payload(payload.storage),
+            secret_store=secret_store,
+        )
+        source_ids = [
+            int(item["id"])
+            for item in [*result["created"], *result["existing"]]
+        ]
+        job_ids = queue_source_initialization_ids(session, source_ids)
+        result["summary"].pop("auto_validated", None)
+        result["summary"].pop("auto_synced", None)
+        result["summary"]["initialization_queued"] = len(job_ids)
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return result
+    except StorageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/log-sources", response_model=list[LogSourceRead])
@@ -289,9 +372,32 @@ def get_log_sources(environment_id: int, session: Session = Depends(get_session)
 
 
 @router.post("/environments/{environment_id}/log-sources", response_model=LogSourceRead)
-def post_log_source(environment_id: int, payload: SourceCreate, session: Session = Depends(get_session)):
-    source = workspace.add_log_source(session, environment_id, payload.uri, payload.label, payload.enabled, payload.source_config)
-    return workspace.source_to_dict(source)
+def post_log_source(
+    environment_id: int,
+    payload: SourceCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    secret_store: CredentialSecretStore = Depends(get_credential_secret_store),
+):
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        source = workspace.add_log_source(
+            session,
+            environment_id,
+            payload.uri,
+            payload.label,
+            payload.enabled,
+            payload.source_config,
+            _storage_payload(payload.storage),
+            secret_store=secret_store,
+        )
+        job_ids = queue_source_initialization_ids(session, [source.id])
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return workspace.source_to_dict(source)
+    except StorageConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/code-artifacts", response_model=list[CodeArtifactRead])
@@ -300,13 +406,36 @@ def get_code_artifacts(environment_id: int, session: Session = Depends(get_sessi
 
 
 @router.post("/environments/{environment_id}/code-artifacts", response_model=CodeArtifactRead)
-def post_code_artifact(environment_id: int, payload: SourceCreate, session: Session = Depends(get_session)):
-    artifact = workspace.add_code_artifact(
-        session,
-        environment_id,
-        payload.uri,
-        payload.label,
-        payload.enabled,
-        payload.source_config,
-    )
-    return workspace.source_to_dict(artifact)
+def post_code_artifact(
+    environment_id: int,
+    payload: SourceCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        artifact = workspace.add_code_artifact(
+            session,
+            environment_id,
+            payload.uri,
+            payload.label,
+            payload.enabled,
+            payload.source_config,
+            _storage_payload(payload.storage),
+        )
+        job_ids = queue_source_initialization_ids(session, [artifact.id])
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return workspace.source_to_dict(artifact)
+    except StorageConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _storage_payload(storage) -> dict | None:
+    return storage.model_dump() if storage is not None else None
+
+
+def _guard_profile_mutation(request: Request, storage) -> None:
+    if storage is not None and storage.auth_mode == "credential_profile":
+        require_loopback_client(request)

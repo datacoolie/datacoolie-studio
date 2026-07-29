@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -95,6 +97,20 @@ def _refresh(
     return body
 
 
+def _source_status(
+    client: TestClient,
+    environment_id: int,
+    source_id: int,
+) -> dict[str, object]:
+    response = client.get(f"/api/v1/environments/{environment_id}/sources/workspace")
+    assert response.status_code == 200, response.text
+    return next(
+        item
+        for item in response.json()["statuses"]
+        if int(item["source_id"]) == source_id
+    )
+
+
 def _raw_ids(analytics_path: Path, table: str, id_column: str) -> list[str]:
     connection = duckdb.connect(str(analytics_path), read_only=True)
     try:
@@ -114,6 +130,11 @@ def _query_rows(analytics_path: Path, sql: str) -> list[tuple[object, ...]]:
         return connection.execute(sql).fetchall()
     finally:
         connection.close()
+
+
+def _workspace_rows(database_path: Path, sql: str) -> list[tuple[object, ...]]:
+    with sqlite3.connect(database_path) as connection:
+        return connection.execute(sql).fetchall()
 
 
 def _test_client(tmp_path: Path, monkeypatch):
@@ -148,12 +169,20 @@ def test_incremental_replaces_same_job_and_dataflow_file_paths(tmp_path: Path, m
     client, analytics_path = _test_client(tmp_path, monkeypatch)
     with client:
         environment_id, source_id = _create_workspace(client, log_root)
+        # A redundant no-op refresh must not make the active checkpoint
+        # partition invisible to the next incremental run.
         _refresh(client, environment_id, source_id)
         assert _raw_ids(analytics_path, "etl_job_runs", "job_id") == ["job-old"]
         assert _raw_ids(analytics_path, "etl_dataflow_runs", "dataflow_run_id") == ["run-old"]
-        assert _query_rows(
-            analytics_path,
-            "SELECT log_kind, count(*) FROM log_ingest_checkpoint GROUP BY log_kind ORDER BY log_kind",
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT stream_kind, count(*)
+            FROM log_stream_states
+            WHERE stream_kind IN ('dataflow_parquet', 'job_jsonl')
+            GROUP BY stream_kind
+            ORDER BY stream_kind
+            """,
         ) == [("dataflow_parquet", 1), ("job_jsonl", 1)]
 
         _write_job_file(job_file, ["job-new-a", "job-new-b"])
@@ -168,9 +197,14 @@ def test_incremental_replaces_same_job_and_dataflow_file_paths(tmp_path: Path, m
             "run-new-a",
             "run-new-b",
         ]
-        assert _query_rows(
-            analytics_path,
-            "SELECT log_kind, row_count FROM log_ingest_file_manifest ORDER BY log_kind",
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT file_kind, row_count
+            FROM log_file_manifest
+            WHERE file_kind IN ('dataflow_parquet', 'job_jsonl')
+            ORDER BY file_kind
+            """,
         ) == [("dataflow_parquet", 2), ("job_jsonl", 2)]
 
 
@@ -211,14 +245,21 @@ def test_invalid_changed_file_fails_without_advancing_published_state(
     with client:
         environment_id, source_id = _create_workspace(client, log_root)
         _refresh(client, environment_id, source_id)
-        before = _query_rows(
+        before_analytics = _query_rows(
             analytics_path,
             """
             SELECT
               (SELECT generation FROM etl_analytics_meta WHERE singleton_id = 1),
-              (SELECT generation FROM etl_cache_sources WHERE source_id = 1),
-              (SELECT count(*) FROM log_ingest_file_manifest WHERE source_id = 1),
-              (SELECT max(boundary_last_modified) FROM log_ingest_checkpoint WHERE source_id = 1)
+              (SELECT generation FROM etl_cache_sources WHERE source_id = 1)
+            """,
+        )
+        before_control = _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT
+              (SELECT count(*) FROM log_file_manifest WHERE source_id = 1),
+              (SELECT max(boundary_last_modified)
+               FROM log_stream_states WHERE source_id = 1)
             """,
         )
 
@@ -240,11 +281,18 @@ def test_invalid_changed_file_fails_without_advancing_published_state(
             """
             SELECT
               (SELECT generation FROM etl_analytics_meta WHERE singleton_id = 1),
-              (SELECT generation FROM etl_cache_sources WHERE source_id = 1),
-              (SELECT count(*) FROM log_ingest_file_manifest WHERE source_id = 1),
-              (SELECT max(boundary_last_modified) FROM log_ingest_checkpoint WHERE source_id = 1)
+              (SELECT generation FROM etl_cache_sources WHERE source_id = 1)
             """,
-        ) == before
+        ) == before_analytics
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT
+              (SELECT count(*) FROM log_file_manifest WHERE source_id = 1),
+              (SELECT max(boundary_last_modified)
+               FROM log_stream_states WHERE source_id = 1)
+            """,
+        ) == before_control
 
 
 def test_incremental_refresh_does_not_use_legacy_recursive_source_scans(
@@ -266,7 +314,164 @@ def test_incremental_refresh_does_not_use_legacy_recursive_source_scans(
 
         monkeypatch.setattr(log_ingestion.sync, "stat_source", fail_legacy_scan)
         monkeypatch.setattr(log_ingestion.source_validation, "validate_log_source", fail_legacy_scan)
+        monkeypatch.setattr(log_ingestion.source_validation, "record_source_validation", fail_legacy_scan)
         _refresh(client, environment_id, source_id)
+
+
+def test_log_refresh_records_real_completion_time_and_phase_timings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log_root = tmp_path / "logs"
+    job_file = (
+        log_root
+        / "etl_logs"
+        / "analyst"
+        / "job_run_log"
+        / "2026-07-22"
+        / "jobs.jsonl"
+    )
+    _write_job_file(job_file, ["job-timing"])
+
+    client, _ = _test_client(tmp_path, monkeypatch)
+    with client:
+        environment_id, source_id = _create_workspace(client, log_root)
+        result = _refresh(client, environment_id, source_id)
+
+    job = result["latest_job"]
+    assert datetime.fromisoformat(job["completed_at"]) >= datetime.fromisoformat(
+        job["started_at"]
+    )
+    timings = job["result"]["timings_ms"]
+    assert {
+        "adapter_init",
+        "planning",
+        "materialization",
+        "parsing",
+        "publish",
+        "control_commit",
+        "total",
+    } <= timings.keys()
+    assert all(value >= 0 for value in timings.values())
+    assert timings["total"] >= timings["materialization"]
+
+
+def test_materialization_failure_does_not_publish_or_advance_control_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log_root = tmp_path / "logs"
+    job_file = (
+        log_root
+        / "etl_logs"
+        / "analyst"
+        / "job_run_log"
+        / "2026-07-22"
+        / "jobs.jsonl"
+    )
+    _write_job_file(job_file, ["job-must-not-publish"])
+
+    client, _ = _test_client(tmp_path, monkeypatch)
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
+
+    def fail_materialization(*_args, **_kwargs):
+        raise OSError("simulated materialization failure")
+
+    def fail_publish(*_args, **_kwargs):
+        raise AssertionError("publish must not run after materialization failure")
+
+    monkeypatch.setattr(log_ingestion, "map_storage_io", fail_materialization)
+    monkeypatch.setattr(log_ingestion.analytics_store, "publish_rows", fail_publish)
+    with client:
+        environment_id, source_id = _create_workspace(client, log_root)
+        response = client.post(
+            f"/api/v1/environments/{environment_id}/log-sources/{source_id}/refresh",
+            json={"mode": "incremental"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["latest_job"]["status"] == "failed"
+    assert body["latest_job"]["result"]["timings_ms"]["total"] >= 0
+    assert _workspace_rows(
+        tmp_path / "studio.db",
+        """
+        SELECT
+          (SELECT count(*) FROM log_file_manifest WHERE source_id = 1),
+          (SELECT count(*) FROM log_stream_states WHERE source_id = 1)
+        """,
+    ) == [(0, 0)]
+
+
+def test_system_sync_is_manifest_only_and_uses_learned_exact_partitions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log_root = tmp_path / "logs"
+    system_file = (
+        log_root
+        / "system_logs"
+        / "__run_date=2026-07-22"
+        / "system_log_20260722_010203_job-system.jsonl"
+    )
+    system_file.parent.mkdir(parents=True)
+    system_file.write_text('{"message": "must not be read during sync"}\n', encoding="utf-8")
+
+    from datacoolie_studio.domains.storage.adapters import LocalStorageAdapter
+
+    def fail_content_read(*_args, **_kwargs):
+        raise AssertionError("System sync must not read file contents")
+
+    monkeypatch.setattr(LocalStorageAdapter, "open_read", fail_content_read)
+    client, _ = _test_client(tmp_path, monkeypatch)
+    with client:
+        environment_id, source_id = _create_workspace(client, log_root)
+        first = _source_status(client, environment_id, source_id)
+        assert first["latest_job"]["result"]["record_counts"][
+            "system_jsonl_files"
+        ] == 1
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT file_kind, row_count, job_id, partition_value
+            FROM log_file_manifest
+            WHERE source_id = 1 AND file_kind = 'system_jsonl'
+            """,
+        ) == [
+            ("system_jsonl", 0, "job-system", "2026-07-22"),
+        ]
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT layout_status, partition_format, partition_granularity
+            FROM log_stream_states
+            WHERE source_id = 1 AND stream_kind = 'system_jsonl'
+            """,
+        ) == [
+            ("learned", "__run_date=%Y-%m-%d", "day"),
+        ]
+
+        original_inventory = LocalStorageAdapter.inventory
+
+        def fail_system_tree_discovery(adapter, request):
+            if (
+                request.object_types == frozenset({"directory"})
+                and "system_logs" in str(request.uri)
+            ):
+                raise AssertionError(
+                    "Learned System sync must not discover partition children"
+                )
+            return original_inventory(adapter, request)
+
+        monkeypatch.setattr(
+            LocalStorageAdapter,
+            "inventory",
+            fail_system_tree_discovery,
+        )
+        second = _refresh(client, environment_id, source_id)
+        assert second["latest_job"]["result"]["record_counts"][
+            "system_jsonl_files"
+        ] == 0
 
 
 def test_historical_change_requires_explicit_lookback(tmp_path: Path, monkeypatch) -> None:

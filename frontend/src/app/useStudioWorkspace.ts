@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   environmentDefaultModule,
   moduleByKey,
@@ -22,14 +22,14 @@ import type {
   SourcePath,
   SourceReadCheckResult,
   SourceSyncStatus,
+  StorageBinding,
   ReferenceType,
   TargetIdentifierKind
 } from "../shared/api/domainTypes";
 import { toErrorMessage } from "../shared/lib/errors";
-import { sourceKey, type SourceKind } from "../shared/lib/sources";
+import type { SourceKind } from "../shared/lib/sources";
 import { projectRouteResources } from "./projectRouteResources";
 import { ResourceCache } from "../shared/data/resourceCache";
-import { fetchEnvironmentSources } from "./environmentSourcesResource";
 import { environmentQueryKeys } from "../features/environments/environmentQueries";
 import { createEnvironmentMutations } from "../features/environments/environmentMutations";
 import { useEnvironmentMetadataEditor } from "../features/metadata-explorer/metadataEditorQueries";
@@ -38,8 +38,11 @@ import type {
   SourceBatchAction,
   SourceBatchEntry,
   SourceBatchResult,
+  SourceOperations,
 } from "../features/sources/sourceWorkspaceModel";
 import { createEnvironmentSourceMutations } from "../features/sources/sourceMutations";
+import { useEnvironmentSourcesQuery } from "../features/sources/sourceQueries";
+import { useLocalSourceObservation } from "../features/sources/useLocalSourceObservation";
 
 export interface StudioWorkspace {
   projects: Project[];
@@ -54,6 +57,7 @@ export interface StudioWorkspace {
   logPaths: SourcePath[];
   codeArtifacts: SourcePath[];
   sourceSyncStatuses: Record<string, SourceSyncStatus>;
+  sourceOperations: SourceOperations;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
   loading: boolean;
@@ -83,7 +87,7 @@ export interface StudioWorkspace {
   createEnvironment: (name: string, projectIdOverride?: number) => Promise<number>;
   deleteEnvironment: (environmentId: number) => Promise<void>;
   addMetadataSource: (uri: string, label?: string) => Promise<void>;
-  importMetadataSources: (uri: string, label?: string) => Promise<SourceImportResponse | null>;
+  importMetadataSources: (uri: string, label?: string, storage?: StorageBinding) => Promise<SourceImportResponse | null>;
   importDatacoolieProjectSources: (payload: {
     project_uri: string;
     metadata_subpath?: string;
@@ -92,9 +96,10 @@ export interface StudioWorkspace {
     code_uri?: string | null;
     include_metadata?: boolean;
     include_code?: boolean;
+    storage?: StorageBinding;
   }) => Promise<SourceImportResponse | null>;
-  addLogPath: (uri: string, label?: string, sourceConfig?: Record<string, unknown>) => Promise<void>;
-  addCodeArtifact: (uri: string, label?: string, sourceConfig?: Record<string, unknown>) => Promise<void>;
+  addLogPath: (uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) => Promise<void>;
+  addCodeArtifact: (uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) => Promise<void>;
   updateSource: (
     kind: SourceKind,
     id: number,
@@ -103,6 +108,7 @@ export interface StudioWorkspace {
       label?: string | null;
       enabled?: boolean;
       source_config?: Record<string, unknown>;
+      storage?: StorageBinding;
       sync_schedule_enabled?: boolean;
       sync_interval_minutes?: number | null;
     }
@@ -148,6 +154,7 @@ export function useStudioWorkspace(
   const [logPaths, setLogPaths] = useState<SourcePath[]>([]);
   const [codeArtifacts, setCodeArtifacts] = useState<SourcePath[]>([]);
   const [sourceSyncStatuses, setSourceSyncStatuses] = useState<Record<string, SourceSyncStatus>>({});
+  const [sourceOperations, setSourceOperations] = useState<SourceOperations>({});
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,21 +174,16 @@ export function useStudioWorkspace(
     [projectSummaries, route.projectId]
   );
 
-  const sourcesQuery = useQuery({
-    queryKey: route.environmentId ? environmentQueryKeys.sources(route.environmentId) : ["environments", "no-sources"],
-    queryFn: async () => {
-      const environmentId = route.environmentId!;
-      const sources = await fetchEnvironmentSources(environmentId);
-      const statuses = await fetchSourceSyncStatuses(
-        environmentId,
-        sources.metadataSources,
-        sources.logPaths,
-        sources.codeArtifacts,
-      );
-      return { ...sources, statuses };
-    },
-    enabled: route.environmentId !== null && route.module === "sources",
-    staleTime: Number.POSITIVE_INFINITY,
+  const sourcesQuery = useEnvironmentSourcesQuery({
+    environmentId: route.environmentId,
+    enabled: route.module === "sources",
+  });
+  useLocalSourceObservation({
+    environmentId: route.environmentId,
+    activationKey: route.module,
+    isActive: (environmentId) => activeEnvironmentIdRef.current === environmentId,
+    onEnvironmentChanged: options?.onEnvironmentChanged,
+    onError: setError,
   });
   const metadataEditor = useEnvironmentMetadataEditor(route.environmentId, {
     enabled: route.module === "metadata",
@@ -190,6 +192,7 @@ export function useStudioWorkspace(
       await refreshEnvironmentHeader(route.environmentId);
     },
   });
+
   // The source lists are derived solely from the query so the displayed data can
   // never desync from the cache. Clearing here (instead of in a separate
   // environment-change effect) avoids a race that could wipe freshly loaded data.
@@ -354,24 +357,6 @@ export function useStudioWorkspace(
     }
   }
 
-  async function fetchSourceSyncStatuses(environmentId: number, sources: SourcePath[], paths: SourcePath[], artifacts: SourcePath[]) {
-    const entries = await Promise.all([
-      ...sources.map(async (source): Promise<[string, SourceSyncStatus]> => [
-        sourceKey("metadata", source.id),
-        await api.getMetadataSourceSyncStatus(environmentId, source.id)
-      ]),
-      ...paths.map(async (path): Promise<[string, SourceSyncStatus]> => [
-        sourceKey("logs", path.id),
-        await api.getLogSourceSyncStatus(environmentId, path.id)
-      ]),
-      ...artifacts.map(async (artifact): Promise<[string, SourceSyncStatus]> => [
-        sourceKey("code", artifact.id),
-        await api.getCodeArtifactSyncStatus(environmentId, artifact.id)
-      ])
-    ]);
-    return Object.fromEntries(entries);
-  }
-
   async function refreshEnvironmentHeader(environmentId = route.environmentId) {
     if (!environmentId) return;
     await options?.onEnvironmentChanged?.(environmentId);
@@ -432,6 +417,7 @@ export function useStudioWorkspace(
     setBusy,
     setError,
     setSourceSyncStatuses,
+    setSourceOperations,
     invalidateProjectSummaries,
     refreshEnvironment,
   });
@@ -491,9 +477,10 @@ export function useStudioWorkspace(
     logPaths,
     codeArtifacts,
     sourceSyncStatuses,
+    sourceOperations,
     metadataEditorDocument: metadataEditor.workspace?.document ?? null,
     metadataEditorDraft: metadataEditor.workspace?.draft ?? null,
-    loading: loading || sourcesQuery.isFetching || metadataEditor.loading,
+    loading: loading || sourcesQuery.isPending || metadataEditor.loading,
     busy: busy || metadataEditor.busy,
     error: error
       ?? (activeQueryError ? toErrorMessage(activeQueryError) : null)

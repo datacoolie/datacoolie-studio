@@ -21,68 +21,6 @@ from datacoolie_studio.domains.analytics.serving_facts import (
 )
 
 
-def upsert_ingest_control_rows(
-    conn,
-    source_id: int,
-    files: list[dict[str, Any]],
-    checkpoints: list[dict[str, Any]],
-    file_row_counts: dict[str, int],
-    *,
-    ingested_at: datetime,
-) -> None:
-    schema.ensure_ingest_control_tables(conn)
-    ingested_at_value = ingested_at.isoformat()
-    for item in files:
-        file_uri = str(item["file_uri"])
-        file_kind = str(item["file_kind"])
-        conn.execute(
-            f"DELETE FROM {schema.INGEST_MANIFEST_TABLE} "
-            "WHERE source_id = ? AND log_kind = ? AND file_uri = ?",
-            [source_id, file_kind, file_uri],
-        )
-        conn.execute(
-            f"""
-            INSERT INTO {schema.INGEST_MANIFEST_TABLE} (
-              source_id, log_kind, file_uri, partition_value, partition_format,
-              revision_json, row_count, ingested_at
-            ) VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?::TIMESTAMPTZ)
-            """,
-            [
-                source_id,
-                file_kind,
-                file_uri,
-                str(item["partition_value"]),
-                str(item["partition_format"]),
-                str(item["revision_json"]),
-                int(file_row_counts.get(file_uri, item.get("row_count") or 0)),
-                ingested_at_value,
-            ],
-        )
-    for checkpoint in checkpoints:
-        file_kind = str(checkpoint["file_kind"])
-        conn.execute(
-            f"DELETE FROM {schema.INGEST_CHECKPOINT_TABLE} "
-            "WHERE source_id = ? AND log_kind = ?",
-            [source_id, file_kind],
-        )
-        conn.execute(
-            f"""
-            INSERT INTO {schema.INGEST_CHECKPOINT_TABLE} (
-              source_id, log_kind, partition_format, partition_value,
-              boundary_last_modified, updated_at
-            ) VALUES (?, ?, ?, ?::DATE, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ)
-            """,
-            [
-                source_id,
-                file_kind,
-                str(checkpoint["partition_format"]),
-                str(checkpoint["partition_value"]),
-                str(checkpoint["boundary_last_modified"]),
-                ingested_at_value,
-            ],
-        )
-
-
 def publish_generation(
     conn,
     *,
@@ -178,14 +116,13 @@ def cache_source_generations(conn) -> dict[int, int]:
 
 def publish_rows(
     source_id: int,
-    dataflow_files: list[tuple[str, str, str]],
+    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
     *,
     database_path: Path,
-    ingest_files: list[dict[str, Any]] | None = None,
-    checkpoints: list[dict[str, Any]] | None = None,
+    source_files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
@@ -202,8 +139,7 @@ def publish_rows(
                     job_rows,
                     removed_files,
                     changed_files,
-                    ingest_files=ingest_files,
-                    checkpoints=checkpoints,
+                    source_files=source_files,
                 )
                 if result["published"]:
                     try:
@@ -226,21 +162,19 @@ def publish_rows(
         job_rows,
         removed_files,
         changed_files,
-        ingest_files=ingest_files,
-        checkpoints=checkpoints,
+        source_files=source_files,
     )
 
 
 def _write_duckdb_rows(
     path: Path,
     source_id: int,
-    dataflow_files: list[tuple[str, str, str]],
+    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
     *,
-    ingest_files: list[dict[str, Any]] | None = None,
-    checkpoints: list[dict[str, Any]] | None = None,
+    source_files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
@@ -253,28 +187,31 @@ def _write_duckdb_rows(
         ensure_tables(conn)
         conn.execute("BEGIN TRANSACTION")
         try:
-            _preflight_dataflow_schemas(conn, [file_uri for file_uri, _, _ in dataflow_files])
+            _preflight_dataflow_schemas(
+                conn, [_dataflow_read_uri(item) for item in dataflow_files]
+            )
             stale_files = [*removed_files, *changed_files]
             for file_uri in stale_files:
                 if schema.table_exists(conn, schema.DATAFLOW_TABLE):
                     conn.execute(f"DELETE FROM {schema.DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
                 if schema.table_exists(conn, schema.JOB_TABLE):
                     conn.execute(f"DELETE FROM {schema.JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
-            for file_uri, file_kind, revision_json in dataflow_files:
-                row_count = insert_dataflow_file(conn, source_id, file_uri, file_kind, revision_json)
+            for item in dataflow_files:
+                file_uri, file_kind, revision_json = item[:3]
+                read_uri = item[3] if len(item) == 4 else file_uri
+                row_count = insert_dataflow_file(
+                    conn,
+                    source_id,
+                    file_uri,
+                    file_kind,
+                    revision_json,
+                    read_uri=read_uri,
+                )
                 parsed_dataflow_records += row_count
                 file_row_counts[file_uri] = row_count
             if job_rows:
                 insert_typed_rows(conn, schema.JOB_TABLE, source_id, job_rows, schema.JOB_COLUMN_TYPES)
-            _assert_ingest_files_stable(ingest_files or [])
-            upsert_ingest_control_rows(
-                conn,
-                source_id,
-                ingest_files or [],
-                checkpoints or [],
-                file_row_counts,
-                ingested_at=utc_now(),
-            )
+            _assert_ingest_files_stable(source_files or [])
             refresh_filter_values(conn, source_id)
             mark_cache_source(conn, source_id, refreshed_at=utc_now())
             publish_generation(
@@ -313,6 +250,8 @@ def _file_revision_json(file_uri: str) -> str:
 def _assert_ingest_files_stable(files: list[dict[str, Any]]) -> None:
     """Abort the transaction when bytes changed after candidate discovery."""
     for file_state in files:
+        if file_state.get("staged_path"):
+            continue
         file_uri = str(file_state["file_uri"])
         expected = str(file_state["revision_json"])
         try:
@@ -348,7 +287,6 @@ def ensure_tables(conn) -> None:
         conn.execute(f"DROP TABLE {schema.FILTER_VALUES_TABLE}")
     schema.ensure_filter_values_table(conn)
     schema.ensure_cache_sources_table(conn)
-    schema.ensure_ingest_control_tables(conn)
     schema.ensure_analytics_meta_table(conn)
     _migrate_legacy_cache(conn)
 
@@ -548,9 +486,18 @@ def insert_typed_rows(
     conn.executemany(f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders})", values)
 
 
-def insert_dataflow_file(conn, source_id: int, file_uri: str, file_kind: str, revision_json: str) -> int:
-    _ensure_dataflow_table_for_parquet(conn, file_uri)
-    escaped = file_uri.replace("'", "''")
+def insert_dataflow_file(
+    conn,
+    source_id: int,
+    file_uri: str,
+    file_kind: str,
+    revision_json: str,
+    *,
+    read_uri: str | None = None,
+) -> int:
+    source_read_uri = read_uri or file_uri
+    _ensure_dataflow_table_for_parquet(conn, source_read_uri)
+    escaped = source_read_uri.replace("'", "''")
     row_count = conn.execute(f"SELECT count(*) FROM read_parquet('{escaped}', union_by_name=true)").fetchone()[0]
     conn.execute(
         f"""
@@ -568,6 +515,12 @@ def insert_dataflow_file(conn, source_id: int, file_uri: str, file_kind: str, re
         """
     )
     return int(row_count)
+
+
+def _dataflow_read_uri(
+    item: tuple[str, str, str] | tuple[str, str, str, str]
+) -> str:
+    return item[3] if len(item) == 4 else item[0]
 
 
 def ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> bool:

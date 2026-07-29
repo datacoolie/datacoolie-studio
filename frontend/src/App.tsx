@@ -25,7 +25,11 @@ export function App() {
   });
   const environmentContext = useEnvironmentContextQuery(
     router.route.environmentId,
-    sourceCheckIntervalMs(settings.settings?.source_check_interval_seconds),
+    sourceCheckIntervalMs(
+      settings.settings?.source_check_interval_seconds,
+      settings.settings?.source_check_mode,
+      settings.settings?.source_check_max_interval_seconds,
+    ),
     router.route.module,
   );
   const workspace = useStudioWorkspace(router, {
@@ -63,6 +67,7 @@ export function App() {
       metadataSourceCount={environmentContext.data?.source_counts.metadata ?? 0}
       logPathCount={environmentContext.data?.source_counts.logs ?? 0}
       freshness={environmentContext.data?.freshness ?? null}
+      timezoneName={settings.settings?.timezone ?? null}
       error={error}
       onNavigate={router.navigate}
       onToggleSidebar={router.toggleSidebar}

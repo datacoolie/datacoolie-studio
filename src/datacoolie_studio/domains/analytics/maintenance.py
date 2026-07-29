@@ -153,8 +153,6 @@ def purge_source_ids(source_ids: list[int]) -> dict[str, int]:
         )
         for table_name in (
             schema.CACHE_SOURCES_TABLE,
-            schema.INGEST_MANIFEST_TABLE,
-            schema.INGEST_CHECKPOINT_TABLE,
         ):
             store.delete_rows_by_source_ids(
                 conn,

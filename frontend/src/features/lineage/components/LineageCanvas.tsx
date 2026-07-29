@@ -7,7 +7,7 @@ import {
   type ReactFlowInstance
 } from "@xyflow/react";
 import { LocateFixed, LoaderCircle } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type { LatestStatusResponse } from "../../../shared/api/domainTypes";
 import { EmptyState } from "../../../shared/components/EmptyState";
 import { useLineageLayout } from "../hooks/useLineageLayout";
@@ -154,6 +154,14 @@ export function LineageCanvas({
     }
   }
 
+  function selectDataflowLabel(event: MouseEvent<HTMLDivElement>) {
+    const edgeId = dataflowLabelEdgeId(event.target);
+    if (!edgeId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectionChange({ kind: "dataflow", id: edgeId });
+  }
+
   if (!visible.entities.length) {
     return (
       <EmptyState
@@ -173,7 +181,14 @@ export function LineageCanvas({
   }
 
   return (
-    <div className="lineage-flow-host" onKeyDown={selectFromKeyboard}>
+    <div
+      className="lineage-flow-host"
+      onKeyDown={selectFromKeyboard}
+      onClickCapture={selectDataflowLabel}
+      onPointerDownCapture={(event) => {
+        if (dataflowLabelEdgeId(event.target)) event.stopPropagation();
+      }}
+    >
       <ReactFlow
         nodes={nodes}
         edges={flow.edges}
@@ -225,4 +240,9 @@ export function LineageCanvas({
       </ReactFlow>
     </div>
   );
+}
+
+function dataflowLabelEdgeId(target: EventTarget | null) {
+  if (!(target instanceof Element)) return null;
+  return target.closest<HTMLElement>(".lineage-edge-label[data-edge-id]")?.dataset.edgeId ?? null;
 }

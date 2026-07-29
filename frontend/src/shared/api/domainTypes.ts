@@ -185,16 +185,18 @@ export interface StudioCacheMutation {
   scope: string;
   environment_id?: number | null;
   features: string[];
-  read_models?: Record<string, number> | null;
-  analytics?: Record<string, number> | null;
-  analytics_dependent_read_models?: Record<string, number> | null;
+  read_models?: Record<string, unknown> | null;
+  analytics?: Record<string, unknown> | null;
+  analytics_dependent_read_models?: Record<string, unknown> | null;
 }
 
 export interface StudioSettings {
   timezone: string;
   timezone_source: "configured" | "server_default";
   timezone_offset_minutes: number;
+  source_check_mode: "fixed" | "adaptive";
   source_check_interval_seconds: number;
+  source_check_max_interval_seconds: number;
   updated_at?: string | null;
 }
 
@@ -230,8 +232,65 @@ export interface SourcePath {
   sync_interval_minutes?: number | null;
   last_scheduled_sync_at?: string | null;
   source_config?: Record<string, unknown> | null;
+  storage?: StorageBinding;
+  configured_location?: ConfiguredSourceLocation | null;
   created_at: string;
   latest_validation?: SourceValidationResult | null;
+}
+
+export interface ConfiguredSourceLocation {
+  registration_id: number;
+  purpose: "project" | "metadata" | "code" | "logs";
+  input_uri: string;
+  canonical_uri: string;
+  input_locations: Record<string, string>;
+  canonical_locations: Record<string, string>;
+}
+
+export type StorageProvider = "local" | "s3" | "minio" | "adls" | "onelake" | "gcs" | "dbfs";
+export type StorageAuthMode = "none" | "ambient" | "anonymous" | "credential_profile";
+
+export interface StorageBinding {
+  provider: StorageProvider;
+  auth_mode: StorageAuthMode;
+  credential_profile_id?: string | null;
+  options: Record<string, unknown>;
+}
+
+export interface CredentialProfile {
+  id: string;
+  name: string;
+  provider: Exclude<StorageProvider, "local">;
+  auth_type: string;
+  secret_state: "present" | "missing" | "unavailable";
+  masked_summary: Record<string, unknown>;
+  version: number;
+  reference_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CredentialProfileDetail extends CredentialProfile {
+  config: Record<string, unknown>;
+}
+
+export interface CredentialCapabilities {
+  providers: Record<string, string[]>;
+  secret_store_available: boolean;
+  secret_store_backend: string;
+  remediation?: string | null;
+}
+
+export interface StorageConnectionValidation {
+  status: "ok" | "error";
+  provider: string;
+  canonical_uri?: string | null;
+  object_type?: "file" | "directory" | null;
+  objects_scanned: number;
+  provider_revision?: string | null;
+  metadata_write_back_supported: boolean;
+  message: string;
+  error?: Record<string, unknown> | null;
 }
 
 export interface SourceImportItem {
@@ -287,7 +346,44 @@ export interface SourceSyncStatus {
   revision?: Record<string, unknown> | null;
   error?: Record<string, unknown> | null;
   checked_at?: string | null;
+  last_observed_at?: string | null;
+  next_check_at?: string | null;
+  pending_changes?: boolean | null;
+  active_operation?: "validate" | "sync" | null;
   latest_job?: SourceSyncJob | null;
+}
+
+export interface SourceObservationOutcome {
+  source_id: number;
+  source_kind: string;
+  outcome: "changed" | "unchanged" | "error" | "skipped";
+  pending_changes?: boolean | null;
+  error?: Record<string, unknown> | null;
+  started_at: string;
+  completed_at: string;
+  status: SourceSyncStatus;
+}
+
+export interface LocalSourceObservation {
+  environment_id: number;
+  total: number;
+  observed: number;
+  changed: number;
+  skipped: number;
+  failed: number;
+  observed_at: string;
+  outcomes: SourceObservationOutcome[];
+}
+
+export interface SourcesWorkspace {
+  schema_version: "sources-workspace.v1";
+  environment_id: number;
+  metadata_sources: SourcePath[];
+  log_sources: SourcePath[];
+  code_artifacts: SourcePath[];
+  statuses: SourceSyncStatus[];
+  earliest_cloud_due_at?: string | null;
+  dependency_version: string;
 }
 
 export type LogSyncRequest =

@@ -11,7 +11,7 @@ MAX_FILES = 10_000
 MAX_FILE_SIZE = 5 * 1024 * 1024
 MAX_TOTAL_SIZE = 100 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
-SUPPORTED_ARTIFACT_TYPES = {"directory", "zip", "wheel", "installed_distribution"}
+SUPPORTED_ARTIFACT_TYPES = {"directory", "python_file", "zip", "wheel", "installed_distribution"}
 
 
 class ArtifactIndexError(RuntimeError):
@@ -30,6 +30,8 @@ def build_artifact_index(
     prefix = _normalize_module_prefix(module_prefix)
     if artifact_type == "directory":
         return _index_directory(Path(uri).expanduser(), roots, prefix)
+    if artifact_type == "python_file":
+        return _index_python_file(Path(uri).expanduser(), prefix)
     if artifact_type in {"zip", "wheel"}:
         return _index_archive(Path(uri).expanduser(), roots, artifact_type, prefix)
     return _index_distribution(uri, roots, prefix)
@@ -54,6 +56,11 @@ def read_artifact_module(
             path.relative_to(root)
         except ValueError as exc:
             raise ArtifactIndexError(f"Python source escapes artifact root: {relative}") from exc
+        content = path.read_bytes()
+    elif artifact_type == "python_file":
+        path = Path(uri).expanduser().resolve()
+        if relative != path.name:
+            raise ArtifactIndexError(f"Python source not found in file artifact: {relative}")
         content = path.read_bytes()
     elif artifact_type in {"zip", "wheel"}:
         with ZipFile(Path(uri).expanduser()) as archive:
@@ -93,8 +100,26 @@ def _index_directory(root: Path, module_roots: list[str], module_prefix: str | N
         relative = path.relative_to(root).as_posix()
         size = path.stat().st_size
         total_size = _check_limits(len(files) + 1, size, total_size, relative)
-        files.append(_file_entry(relative, size, _module_name(relative, module_roots, module_prefix), path.read_bytes()))
+        files.append(_file_entry(relative, size, None, path.read_bytes()))
+    _assign_module_names(
+        files,
+        module_roots,
+        module_prefix,
+        root_package=root.name if (root / "__init__.py").is_file() else None,
+    )
     return _result("directory", str(root), files, total_size)
+
+
+def _index_python_file(path: Path, module_prefix: str | None) -> dict[str, Any]:
+    if not path.exists():
+        raise ArtifactIndexError(f"Python source file not found: {path}")
+    if not path.is_file() or path.suffix.lower() != ".py":
+        raise ArtifactIndexError(f"Code artifact must be a Python file: {path}")
+    size = path.stat().st_size
+    total_size = _check_limits(1, size, 0, path.name)
+    module = _apply_module_prefix(path.stem, module_prefix)
+    files = [_file_entry(path.name, size, module, path.read_bytes())]
+    return _result("python_file", str(path), files, total_size)
 
 
 def _index_archive(path: Path, module_roots: list[str], artifact_type: str, module_prefix: str | None) -> dict[str, Any]:
@@ -117,9 +142,11 @@ def _index_archive(path: Path, module_roots: list[str], artifact_type: str, modu
                     raise ArtifactIndexError(f"Archive member compression ratio is too high: {member}")
                 total_size = _check_limits(len(files) + 1, info.file_size, total_size, member)
                 content = archive.read(info)
-                files.append(_file_entry(member, info.file_size, _module_name(member, module_roots, module_prefix), content))
+                files.append(_file_entry(member, info.file_size, None, content))
     except BadZipFile as exc:
         raise ArtifactIndexError(f"Invalid ZIP or wheel file: {path}") from exc
+    root_package = path.stem if artifact_type == "zip" and any(item["path"] == "__init__.py" for item in files) else None
+    _assign_module_names(files, module_roots, module_prefix, root_package=root_package)
     return _result(artifact_type, str(path), files, total_size)
 
 
@@ -139,7 +166,9 @@ def _index_distribution(name: str, module_roots: list[str], module_prefix: str |
             continue
         size = path.stat().st_size
         total_size = _check_limits(len(files) + 1, size, total_size, relative)
-        files.append(_file_entry(relative, size, _module_name(relative, module_roots, module_prefix), path.read_bytes()))
+        files.append(_file_entry(relative, size, None, path.read_bytes()))
+    distribution_root = name.replace("-", "_") if any(item["path"] == "__init__.py" for item in files) else None
+    _assign_module_names(files, module_roots, module_prefix, root_package=distribution_root)
     result = _result("installed_distribution", name, files, total_size)
     result["distribution_version"] = distribution.version
     return result
@@ -163,8 +192,39 @@ def _file_entry(relative: str, size: int, module: str | None, content: bytes) ->
     }
 
 
-def _module_name(path: str, module_roots: list[str], module_prefix: str | None) -> str | None:
-    normalized = path.replace("\\", "/")
+def _assign_module_names(
+    files: list[dict[str, Any]],
+    module_roots: list[str],
+    module_prefix: str | None,
+    *,
+    root_package: str | None,
+) -> None:
+    effective_paths = {
+        str(item["path"]): effective
+        for item in files
+        if (effective := _effective_module_path(str(item["path"]), module_roots)) is not None
+    }
+    package_directories = {
+        _parent_path(effective)
+        for effective in effective_paths.values()
+        if _filename(effective) == "__init__.py"
+    }
+    normalized_root_package = _normalize_module_prefix(root_package)
+    for item in files:
+        effective = effective_paths.get(str(item["path"]))
+        if effective is None:
+            item["module"] = None
+            continue
+        item["module"] = _module_name(
+            effective,
+            package_directories,
+            module_prefix,
+            root_package=normalized_root_package,
+        )
+
+
+def _effective_module_path(path: str, module_roots: list[str]) -> str | None:
+    normalized = path.replace("\\", "/").strip("/")
     if module_roots:
         matching_root = next(
             (
@@ -177,15 +237,67 @@ def _module_name(path: str, module_roots: list[str], module_prefix: str | None) 
         if matching_root is None:
             return None
         normalized = normalized[len(matching_root):].lstrip("/")
+    return normalized or None
+
+
+def _module_name(
+    path: str,
+    package_directories: set[str],
+    module_prefix: str | None,
+    *,
+    root_package: str | None,
+) -> str | None:
+    normalized = path.replace("\\", "/").strip("/")
     if not normalized.endswith(".py"):
         return None
-    module_path = normalized[:-3]
-    if module_path.endswith("/__init__"):
-        module_path = module_path[:-9]
-    module_name = module_path.strip("/").replace("/", ".") or None
-    if module_name and module_prefix:
-        return f"{module_prefix}.{module_name}"
-    return module_name
+    filename = _filename(normalized)
+    stem = filename[:-3]
+    parent = _parent_path(normalized)
+    package_name = _containing_package_name(parent, package_directories, root_package)
+    if filename == "__init__.py":
+        module_name = package_name
+    elif package_name:
+        module_name = f"{package_name}.{stem}"
+    else:
+        module_name = stem
+    return _apply_module_prefix(module_name, module_prefix)
+
+
+def _containing_package_name(
+    parent: str,
+    package_directories: set[str],
+    root_package: str | None,
+) -> str | None:
+    if parent not in package_directories:
+        return None
+    parts = [part for part in parent.split("/") if part]
+    package_parts: list[str] = []
+    current = parts
+    while "/".join(current) in package_directories:
+        if not current:
+            if root_package:
+                package_parts.insert(0, root_package)
+            break
+        package_parts.insert(0, current[-1])
+        current = current[:-1]
+    return ".".join(package_parts) or None
+
+
+def _apply_module_prefix(module_name: str | None, module_prefix: str | None) -> str | None:
+    if not module_name:
+        return None
+    if not module_prefix or module_name == module_prefix or module_name.startswith(f"{module_prefix}."):
+        return module_name
+    return f"{module_prefix}.{module_name}"
+
+
+def _parent_path(path: str) -> str:
+    normalized = path.replace("\\", "/").strip("/")
+    return normalized.rpartition("/")[0]
+
+
+def _filename(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
 
 
 def _normalize_root(value: str) -> str:
@@ -213,13 +325,30 @@ def _check_limits(file_count: int, file_size: int, total_size: int, name: str) -
 
 
 def _result(artifact_type: str, uri: str, files: list[dict[str, Any]], total_size: int) -> dict[str, Any]:
-    modules = {entry["module"]: entry for entry in files if entry["module"]}
+    module_entries: dict[str, list[dict[str, Any]]] = {}
+    for entry in files:
+        if entry["module"]:
+            module_entries.setdefault(str(entry["module"]), []).append(entry)
+    modules = {
+        module_name: entries[0]
+        for module_name, entries in module_entries.items()
+        if len(entries) == 1
+    }
     diagnostics = []
     if not files:
         diagnostics.append({
             "severity": "warning",
             "code": "no_python_sources",
             "message": "No Python source files were found in the artifact",
+        })
+    for module_name, entries in sorted(module_entries.items()):
+        if len(entries) < 2:
+            continue
+        diagnostics.append({
+            "severity": "warning",
+            "code": "duplicate_python_module",
+            "message": f"Multiple Python files resolve to module {module_name}",
+            "details": {"module": module_name, "paths": [str(entry["path"]) for entry in entries]},
         })
     return {
         "artifact_type": artifact_type,

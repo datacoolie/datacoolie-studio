@@ -8,6 +8,7 @@ export interface EdgeLabelPlacement {
 
 export const EDGE_LABEL_MAX_WIDTH = 320;
 export const EDGE_LABEL_HORIZONTAL_PADDING = 14;
+export const EDGE_LABEL_STRAIGHT_TOLERANCE = 8;
 
 export function resolveLabelSegment(
   preference: LabelSegmentPreference,
@@ -21,11 +22,16 @@ export function resolveLabelSegment(
 export function resolveLabelPlacement(
   preference: LabelSegmentPreference,
   sourceSegmentLength: number,
-  targetSegmentLength: number
+  targetSegmentLength: number,
+  verticalDisplacement = 0
 ): EdgeLabelPlacement {
-  const segment = resolveLabelSegment(preference, sourceSegmentLength, targetSegmentLength);
-  if (preference === "source") return { segment, alignment: "start" };
-  if (preference === "target") return { segment, alignment: "end" };
+  const effectivePreference = preference === "longest"
+    && Math.abs(verticalDisplacement) > EDGE_LABEL_STRAIGHT_TOLERANCE
+    ? "target"
+    : preference;
+  const segment = resolveLabelSegment(effectivePreference, sourceSegmentLength, targetSegmentLength);
+  if (effectivePreference === "source") return { segment, alignment: "start" };
+  if (effectivePreference === "target") return { segment, alignment: "end" };
   return { segment, alignment: "center" };
 }
 

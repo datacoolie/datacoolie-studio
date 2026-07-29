@@ -38,6 +38,21 @@ describe("dataflow label segment placement", () => {
     expect(labelAnchorX("start", 100, 400)).toBe(112);
   });
 
+  it("centers straight standalone labels and moves Z-shaped standalone labels to the destination", () => {
+    expect(resolveLabelPlacement("longest", 100, 100, 8)).toEqual({
+      segment: "source",
+      alignment: "center"
+    });
+    expect(resolveLabelPlacement("longest", 100, 100, 9)).toEqual({
+      segment: "target",
+      alignment: "end"
+    });
+    expect(resolveLabelPlacement("longest", 100, 100, -9)).toEqual({
+      segment: "target",
+      alignment: "end"
+    });
+  });
+
   it("sizes labels from their content and caps exceptionally long values", () => {
     expect(estimateLabelWidth("short")).toBeLessThan(estimateLabelWidth("a much longer dataflow name"));
     expect(estimateLabelWidth("x".repeat(200))).toBe(320);

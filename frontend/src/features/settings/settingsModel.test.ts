@@ -10,7 +10,9 @@ const configured: StudioSettings = {
   timezone: "Asia/Ho_Chi_Minh",
   timezone_source: "configured",
   timezone_offset_minutes: 420,
+  source_check_mode: "adaptive",
   source_check_interval_seconds: 30,
+  source_check_max_interval_seconds: 300,
 };
 
 describe("Studio Settings draft", () => {
@@ -40,12 +42,16 @@ describe("Studio Settings draft", () => {
   it("rejects incomplete and out-of-range drafts", () => {
     expect(isStudioSettingsDraftValid({
       timezoneInput: "",
+      sourceCheckMode: "adaptive",
       sourceCheckIntervalInput: "30",
+      sourceCheckMaxIntervalInput: "300",
       useServerDefaultTimezone: false,
     })).toBe(false);
     expect(isStudioSettingsDraftValid({
       timezoneInput: "UTC",
+      sourceCheckMode: "adaptive",
       sourceCheckIntervalInput: "4",
+      sourceCheckMaxIntervalInput: "300",
       useServerDefaultTimezone: false,
     })).toBe(false);
   });

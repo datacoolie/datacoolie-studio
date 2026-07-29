@@ -16,7 +16,7 @@ from datacoolie_studio.db.models import (
     LogFileManifest,
     MetadataMaterialization,
     ProjectReferenceMapping,
-    SourceRevision,
+    SourceObservation,
 )
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
@@ -169,9 +169,11 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
         CodeArtifactMaterialization,
         source_ids,
     )
-    revisions = {
+    observations = {
         item.source_id: item
-        for item in session.scalars(select(SourceRevision).where(SourceRevision.source_id.in_(source_ids)))
+        for item in session.scalars(
+            select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
+        )
     } if source_ids else {}
     manifests = list(
         session.scalars(
@@ -219,15 +221,17 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
             }
             for source_id, materialization in sorted(code_materializations.items())
         ],
-        "source_revisions": [
+        "source_observations": [
             {
                 "source_id": source_id,
-                "status": revision.status,
-                "revision": revision.revision_json,
-                "error": revision.error_json,
-                "updated_at": revision.updated_at,
+                "outcome": observation.last_outcome,
+                "pending_changes": observation.pending_changes,
+                "revision": observation.observed_revision_json,
+                "error": observation.error_json,
+                "last_attempted_at": observation.last_attempted_at,
+                "last_succeeded_at": observation.last_succeeded_at,
             }
-            for source_id, revision in sorted(revisions.items())
+            for source_id, observation in sorted(observations.items())
         ],
         "log_manifests": [
             {

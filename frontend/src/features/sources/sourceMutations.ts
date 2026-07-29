@@ -1,11 +1,18 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 
-import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourceReadCheckResult, SourceSyncStatus } from "../../shared/api/domainTypes";
+import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourceReadCheckResult, SourceSyncStatus, StorageBinding } from "../../shared/api/domainTypes";
 import { api } from "../../shared/api/client";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 import type { ModuleKey } from "../../app/moduleRegistry";
-import type { SourceBatchAction, SourceBatchEntry, SourceBatchResult } from "./sourceWorkspaceModel";
+import {
+  beginSourceOperations,
+  finishSourceOperations,
+  type SourceBatchAction,
+  type SourceBatchEntry,
+  type SourceBatchResult,
+  type SourceOperations,
+} from "./sourceWorkspaceModel";
 
 type SourceMutationContext = {
   environmentId: number | null;
@@ -14,6 +21,7 @@ type SourceMutationContext = {
   setBusy: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setSourceSyncStatuses: Dispatch<SetStateAction<Record<string, SourceSyncStatus>>>;
+  setSourceOperations: Dispatch<SetStateAction<SourceOperations>>;
   invalidateProjectSummaries: () => void;
   refreshEnvironment: (environmentId: number, module: ModuleKey, options: { forceHeader: boolean; forceModule: boolean }) => Promise<void>;
 };
@@ -26,6 +34,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     setBusy,
     setError,
     setSourceSyncStatuses,
+    setSourceOperations,
     invalidateProjectSummaries,
     refreshEnvironment,
   } = context;
@@ -54,12 +63,12 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
   }
 
-  async function importMetadataSources(uri: string, label?: string): Promise<SourceImportResponse | null> {
+  async function importMetadataSources(uri: string, label?: string, storage?: StorageBinding): Promise<SourceImportResponse | null> {
     if (!route.environmentId) return null;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.importMetadataSources(route.environmentId, { uri, label, enabled: true });
+      const result = await api.importMetadataSources(route.environmentId, { uri, label, enabled: true, storage });
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
       return result;
@@ -79,6 +88,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     code_uri?: string | null;
     include_metadata?: boolean;
     include_code?: boolean;
+    storage?: StorageBinding;
   }): Promise<SourceImportResponse | null> {
     if (!route.environmentId) return null;
     setBusy(true);
@@ -96,12 +106,12 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
   }
 
-  async function addLogPath(uri: string, label?: string, sourceConfig?: Record<string, unknown>) {
+  async function addLogPath(uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) {
     if (!route.environmentId) throw new Error("Select an environment before adding a log source");
     setBusy(true);
     setError(null);
     try {
-      await api.addLogSource(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
+      await api.addLogSource(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig, storage });
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId);
     } catch (err) {
@@ -112,12 +122,12 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
   }
 
-  async function addCodeArtifact(uri: string, label?: string, sourceConfig?: Record<string, unknown>) {
+  async function addCodeArtifact(uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) {
     if (!route.environmentId) throw new Error("Select an environment before adding source code");
     setBusy(true);
     setError(null);
     try {
-      await api.addCodeArtifact(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig });
+      await api.addCodeArtifact(route.environmentId, { uri, label, enabled: true, source_config: sourceConfig, storage });
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId);
     } catch (err) {
@@ -136,6 +146,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
       label?: string | null;
       enabled?: boolean;
       source_config?: Record<string, unknown>;
+      storage?: StorageBinding;
       sync_schedule_enabled?: boolean;
       sync_interval_minutes?: number | null;
     }
@@ -164,7 +175,10 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
   async function deleteSource(kind: SourceKind, id: number) {
     const environmentId = route.environmentId;
     if (!environmentId) return;
-    setBusy(true);
+    const entry = { kind, id };
+    setSourceOperations((current) =>
+      beginSourceOperations(current, environmentId, [entry], "delete")
+    );
     setError(null);
     try {
       if (kind === "metadata") {
@@ -179,7 +193,9 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     } catch (err) {
       setError(toErrorMessage(err));
     } finally {
-      setBusy(false);
+      setSourceOperations((current) =>
+        finishSourceOperations(current, environmentId, [entry])
+      );
     }
   }
 
@@ -190,7 +206,10 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
       setError(message);
       return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
     }
-    setBusy(true);
+    const entry = { kind, id };
+    setSourceOperations((current) =>
+      beginSourceOperations(current, environmentId, [entry], "validate")
+    );
     setError(null);
     try {
       const result =
@@ -206,7 +225,9 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
       setError(message);
       return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
     } finally {
-      setBusy(false);
+      setSourceOperations((current) =>
+        finishSourceOperations(current, environmentId, [entry])
+      );
     }
   }
 
@@ -225,6 +246,10 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
         latest_job: null
       };
     }
+    const entry = { kind, id };
+    setSourceOperations((current) =>
+      beginSourceOperations(current, environmentId, [entry], "sync")
+    );
     setError(null);
     try {
       const result =
@@ -254,6 +279,10 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
         setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
       }
       return result;
+    } finally {
+      setSourceOperations((current) =>
+        finishSourceOperations(current, environmentId, [entry])
+      );
     }
   }
 
@@ -276,7 +305,9 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
     if (!uniqueEntries.length) return result;
 
-    setBusy(true);
+    setSourceOperations((current) =>
+      beginSourceOperations(current, environmentId, uniqueEntries, action)
+    );
     setError(null);
     try {
       for (const entry of uniqueEntries) {
@@ -314,11 +345,14 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
           result.errors.push(`${entry.kind} source #${entry.id}: ${toErrorMessage(err)}`);
         }
       }
-
       if (action === "delete") invalidateProjectSummaries();
       await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
+    } catch (err) {
+      setError(toErrorMessage(err));
     } finally {
-      setBusy(false);
+      setSourceOperations((current) =>
+        finishSourceOperations(current, environmentId, uniqueEntries)
+      );
     }
 
     if (result.failed) setError(`${result.failed} source ${result.failed === 1 ? "action" : "actions"} failed`);

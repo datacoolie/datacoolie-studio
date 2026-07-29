@@ -29,7 +29,8 @@ export function LineageDataflowEdge(props: EdgeProps<LineageFlowEdge>) {
   const labelPlacement = resolveLabelPlacement(
     data?.relationType === "dataflow" ? data.labelSegment : "longest",
     sourceSegmentLength,
-    targetSegmentLength
+    targetSegmentLength,
+    targetY - sourceY
   );
   const labelX = labelPlacement.alignment === "center"
     ? centerX
@@ -43,8 +44,10 @@ export function LineageDataflowEdge(props: EdgeProps<LineageFlowEdge>) {
       <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} />
       {data?.relationType === "dataflow" ? (
         <EdgeLabelRenderer>
-          <div
-            className={`lineage-edge-label${data.status !== "unknown" ? ` status-${data.status}` : ""} selection-${data.selectionState}`}
+          <button
+            type="button"
+            className={`lineage-edge-label nodrag nopan${data.status !== "unknown" ? ` status-${data.status}` : ""} selection-${data.selectionState}`}
+            data-edge-id={id}
             style={{
               maxWidth: EDGE_LABEL_MAX_WIDTH,
               transform: labelTransform(
@@ -54,9 +57,11 @@ export function LineageDataflowEdge(props: EdgeProps<LineageFlowEdge>) {
               )
             }}
             title={data.label}
+            aria-label={`Select dataflow ${data.label}`}
+            aria-pressed={data.selectionState === "selected"}
           >
             {data.label}
-          </div>
+          </button>
         </EdgeLabelRenderer>
       ) : null}
     </>

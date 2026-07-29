@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
+import tempfile
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -11,9 +14,18 @@ import duckdb
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.core.config import analytics_database_path
+from datacoolie_studio.core.config import (
+    analytics_database_path,
+    source_materialization_cache_dir,
+)
 from datacoolie_studio.core.time import parse_utc_datetime
-from datacoolie_studio.db.models import EnvironmentSource, LogFileManifest, utc_now
+from datacoolie_studio.db.models import (
+    EnvironmentSource,
+    LogFileManifest,
+    LogStreamState,
+    SyncJob,
+    utc_now,
+)
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
@@ -23,25 +35,43 @@ from datacoolie_studio.domains.analytics.errors import (
 from datacoolie_studio.domains.logs.discovery import (
     DiscoveredLogFile,
     LogStreamCheckpoint,
-    LogSyncMode,
     LogSyncSpec,
-    deduplicate_candidates,
-    discover_partition_files,
-    discover_partitions,
-    plan_incremental_candidates,
-    plan_incremental_partitions,
-    plan_lookback_candidates,
-    plan_lookback_partitions,
 )
-from datacoolie_studio.domains.logs.partition import ParsedPartition, PartitionGranularity
+from datacoolie_studio.domains.logs import control as log_control
+from datacoolie_studio.domains.logs.control import StreamStateUpdate
+from datacoolie_studio.domains.logs.partition import (
+    ParsedPartition,
+    PartitionGranularity,
+    parse_partition_path,
+)
+from datacoolie_studio.domains.logs.planner import (
+    PlannerState,
+    StreamDefinition,
+    StreamPlan,
+    plan_stream_sync,
+)
 from datacoolie_studio.domains.logs.reader import (
-    discover_system_jsonl_files,
     parse_system_log_file_metadata,
 )
 from datacoolie_studio.domains.logs.source_config import resolve_log_source_paths
 from datacoolie_studio.domains.sources import service as source_validation
-from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, require_local_path
-from datacoolie_studio.domains.storage.adapters import FileRevision, LocalStorageAdapter
+from datacoolie_studio.domains.storage.uri import (
+    StorageProviderNotEnabled,
+    join_uri,
+    require_local_path,
+    uri_basename,
+)
+from datacoolie_studio.domains.storage.adapters import (
+    StorageRevision,
+    StorageAdapter,
+)
+from datacoolie_studio.domains.storage.concurrency import map_storage_io
+from datacoolie_studio.domains.sources.storage_binding import binding_from_source
+from datacoolie_studio.domains.storage.factory import create_storage_adapter
+from datacoolie_studio.domains.credentials.store import (
+    CredentialSecretStore,
+    KeyringCredentialSecretStore,
+)
 from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 
@@ -81,94 +111,195 @@ def log_source_revision(source: EnvironmentSource) -> dict[str, Any]:
     }
 
 
-def _log_stream_root(etl_path: Path, stream_name: str) -> str:
-    if etl_path.name == stream_name:
-        return etl_path.as_posix()
-    return (etl_path / stream_name).as_posix()
+def _log_stream_root(etl_uri: str, stream_name: str) -> str:
+    if uri_basename(etl_uri) == stream_name:
+        return etl_uri
+    return join_uri(etl_uri, stream_name)
 
 
-def _checkpoint_from_state(state: dict[str, Any] | None) -> LogStreamCheckpoint | None:
-    if not state:
+def _stream_definitions(
+    etl_uri: str,
+    system_uri: str | None,
+) -> tuple[StreamDefinition, ...]:
+    definitions = [
+        StreamDefinition(
+            stream_kind="dataflow_parquet",
+            root_uri=_log_stream_root(etl_uri, "dataflow_run_log"),
+            suffix=".parquet",
+        ),
+        StreamDefinition(
+            stream_kind="job_jsonl",
+            root_uri=_log_stream_root(etl_uri, "job_run_log"),
+            suffix=".jsonl",
+        ),
+    ]
+    if system_uri:
+        definitions.append(
+            StreamDefinition(
+                stream_kind="system_jsonl",
+                root_uri=system_uri,
+                suffix=".jsonl",
+                name_prefix="system_log_",
+                manifest_only=True,
+            )
+        )
+    return tuple(definitions)
+
+
+def _planner_state_from_row(row: LogStreamState | None) -> PlannerState | None:
+    if row is None:
         return None
-    boundary = state.get("boundary_last_modified")
-    if not isinstance(boundary, datetime):
-        boundary = parse_utc_datetime(boundary)
-    if boundary is None:
-        return None
-    partition_value = state.get("partition_value")
-    if isinstance(partition_value, datetime):
-        partition_value = partition_value.date()
-    elif not isinstance(partition_value, date):
-        try:
-            partition_value = date.fromisoformat(str(partition_value))
-        except ValueError:
-            return None
-    return LogStreamCheckpoint(
-        partition_value=partition_value,
-        boundary_last_modified=boundary,
-        partition_format=str(state.get("partition_format") or "%Y-%m-%d"),
+    granularity = (
+        PartitionGranularity(row.partition_granularity)
+        if row.partition_granularity
+        else None
+    )
+    return PlannerState(
+        stream_kind=row.stream_kind,
+        root_uri=row.root_uri,
+        layout_status=row.layout_status,  # type: ignore[arg-type]
+        partition_format=row.partition_format,
+        partition_granularity=granularity,
+        checkpoint_partition_value=row.checkpoint_partition_value,
+        boundary_last_modified=_as_aware_utc(row.boundary_last_modified),
+        last_scanned_partition_value=row.last_scanned_partition_value,
     )
 
 
+def _stream_state_update(plan: StreamPlan) -> StreamStateUpdate:
+    state = plan.state
+    return StreamStateUpdate(
+        stream_kind=state.stream_kind,
+        root_uri=state.root_uri,
+        layout_status=state.layout_status,
+        partition_format=state.partition_format,
+        partition_granularity=(
+            state.partition_granularity.value
+            if state.partition_granularity is not None
+            else None
+        ),
+        checkpoint_partition_value=state.checkpoint_partition_value,
+        boundary_last_modified=state.boundary_last_modified,
+        last_scanned_partition_value=state.last_scanned_partition_value,
+    )
+
+
+def _merge_rebuild_candidates(
+    adapter: StorageAdapter,
+    planned: list[tuple[DiscoveredLogFile, str]],
+    manifest_rows: list[LogFileManifest],
+    states: dict[str, LogStreamState],
+) -> list[tuple[DiscoveredLogFile, str]]:
+    by_identity = {
+        (file_kind, candidate.canonical_uri): (candidate, file_kind)
+        for candidate, file_kind in planned
+    }
+    for row in manifest_rows:
+        if row.file_kind not in {"dataflow_parquet", "job_jsonl"}:
+            continue
+        revision = adapter.stat(row.file_uri)
+        state = states.get(row.file_kind)
+        granularity = (
+            PartitionGranularity(state.partition_granularity)
+            if state is not None and state.partition_granularity
+            else PartitionGranularity.DAY
+        )
+        partition_value = (
+            row.partition_value
+            or row.run_date
+            or revision.last_modified.date()
+        )
+        partition_format = (
+            row.partition_format
+            or (state.partition_format if state is not None else None)
+            or ""
+        )
+        by_identity[(row.file_kind, row.file_uri)] = (
+            DiscoveredLogFile(
+                partition=ParsedPartition(
+                    partition_value=partition_value,
+                    raw_partition_path=(
+                        partition_value.strftime(partition_format)
+                        if partition_format
+                        else ""
+                    ),
+                    partition_granularity=granularity,
+                    partition_format=partition_format,
+                ),
+                revision=revision,
+            ),
+            row.file_kind,
+        )
+    return sorted(
+        by_identity.values(),
+        key=lambda item: (
+            item[0].partition.partition_value,
+            item[1],
+            item[0].canonical_uri,
+        ),
+    )
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _plan_stream_sync(
-    adapter: LocalStorageAdapter,
+    adapter: StorageAdapter,
     root_uri: str,
     *,
     suffix: str,
     checkpoint: LogStreamCheckpoint | None,
     spec: LogSyncSpec,
-    manifest: dict[str, FileRevision],
+    manifest: dict[str, StorageRevision],
 ) -> tuple[list[DiscoveredLogFile], list[DiscoveredLogFile], int]:
-    expected_format = checkpoint.partition_format if checkpoint else None
-    partitions = discover_partitions(adapter, root_uri, expected_format=expected_format)
-    if partitions:
-        incremental_partitions = plan_incremental_partitions(partitions, checkpoint)
-        incremental_files = discover_partition_files(adapter, incremental_partitions, suffix=suffix)
-    else:
-        incremental_partitions = []
-        incremental_files = _unpartitioned_log_files(adapter, root_uri, suffix)
-    incremental = plan_incremental_candidates(incremental_files, checkpoint)
-    lookback: list[DiscoveredLogFile] = []
-    lookback_partition_count = 0
-    if spec.mode is LogSyncMode.INCREMENTAL_WITH_LOOKBACK and spec.lookback is not None:
-        if partitions:
-            lookback_partitions = plan_lookback_partitions(partitions, spec.lookback)
-            lookback_partition_count = len(lookback_partitions)
-            lookback_files = discover_partition_files(adapter, lookback_partitions, suffix=suffix)
-        else:
-            lookback_files = _unpartitioned_log_files(adapter, root_uri, suffix)
-        lookback = plan_lookback_candidates(lookback_files, spec.lookback, manifest)
-    return incremental, deduplicate_candidates(lookback, incremental), len(incremental_partitions) + lookback_partition_count
-
-
-def _unpartitioned_log_files(
-    adapter: LocalStorageAdapter,
-    root_uri: str,
-    suffix: str,
-) -> list[DiscoveredLogFile]:
-    files: list[DiscoveredLogFile] = []
-    for file_uri in adapter.list_files(root_uri, suffix):
-        revision = adapter.stat(file_uri)
-        partition_value = revision.last_modified.date()
-        files.append(
-            DiscoveredLogFile(
-                partition=ParsedPartition(
-                    partition_value=partition_value,
-                    raw_partition_path=partition_value.isoformat(),
-                    partition_granularity=PartitionGranularity.DAY,
-                    partition_format="%Y-%m-%d",
-                ),
-                revision=revision,
-            )
+    state = None
+    if checkpoint is not None:
+        parsed = parse_partition_path(
+            checkpoint.partition_value.strftime(checkpoint.partition_format),
+            expected_format=checkpoint.partition_format,
         )
-    return files
+        granularity = (
+            parsed.partition_granularity
+            if parsed is not None
+            else PartitionGranularity.DAY
+        )
+        state = PlannerState(
+            stream_kind="compatibility",
+            root_uri=root_uri,
+            layout_status="learned",
+            partition_format=checkpoint.partition_format,
+            partition_granularity=granularity,
+            checkpoint_partition_value=checkpoint.partition_value,
+            boundary_last_modified=checkpoint.boundary_last_modified,
+            last_scanned_partition_value=checkpoint.partition_value,
+        )
+    plan = plan_stream_sync(
+        adapter,
+        StreamDefinition(
+            stream_kind="compatibility",
+            root_uri=root_uri,
+            suffix=suffix,
+        ),
+        state=state,
+        manifest=manifest,
+        spec=spec,
+    )
+    return list(plan.files), list(plan.candidates), plan.scanned_partition_count
 
 
-def _revision_json(revision: FileRevision) -> str:
+def _revision_json(revision: StorageRevision) -> str:
     provider_revision = revision.provider_revision
+    local_mtime_token = (
+        provider_revision.split(":", 1)[0] if provider_revision else ""
+    )
     mtime_ns = (
-        int(provider_revision)
-        if provider_revision and provider_revision.isdigit()
+        int(local_mtime_token)
+        if local_mtime_token.isdigit()
         else int(revision.last_modified.timestamp() * 1_000_000_000)
     )
     return json.dumps(
@@ -182,7 +313,7 @@ def _revision_json(revision: FileRevision) -> str:
     )
 
 
-def _file_revision_from_json(file_uri: str, revision_json: str) -> FileRevision | None:
+def _file_revision_from_json(file_uri: str, revision_json: str) -> StorageRevision | None:
     try:
         payload = json.loads(revision_json)
     except (TypeError, json.JSONDecodeError):
@@ -195,7 +326,7 @@ def _file_revision_from_json(file_uri: str, revision_json: str) -> FileRevision 
             return None
     if last_modified is None:
         return None
-    return FileRevision(
+    return StorageRevision(
         canonical_uri=file_uri,
         size=int(payload.get("size") or 0),
         last_modified=last_modified,
@@ -216,165 +347,277 @@ def _ingest_file_state(candidate: DiscoveredLogFile, file_kind: str) -> dict[str
     }
 
 
-def _checkpoint_update(
-    file_kind: str,
-    incremental_candidates: list[DiscoveredLogFile],
-    previous: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not incremental_candidates:
-        return None
-    latest_partition = max(
-        incremental_candidates,
-        key=lambda item: (item.partition.partition_value, item.canonical_uri),
-    ).partition
-    boundary = max(item.revision.last_modified for item in incremental_candidates)
-    previous_boundary = _checkpoint_from_state(previous)
-    if previous_boundary is not None:
-        boundary = max(boundary, previous_boundary.boundary_last_modified)
-    return {
-        "file_kind": file_kind,
-        "partition_format": latest_partition.partition_format,
-        "partition_value": latest_partition.partition_value,
-        "boundary_last_modified": boundary,
-    }
-
-
 def refresh_log_source_cache(
     session: Session,
     source: EnvironmentSource,
     *,
     job_type: str = "force_refresh",
     sync_spec: LogSyncSpec | None = None,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict[str, Any]:
+    operation_started = time.perf_counter()
+    try:
+        return _refresh_log_source_cache_impl(
+            session,
+            source,
+            job_type=job_type,
+            sync_spec=sync_spec,
+            secret_store=secret_store,
+            operation_started=operation_started,
+        )
+    except Exception as exc:
+        checked_at = utc_now()
+        error = {
+            "message": "Log storage refresh failed",
+            "code": getattr(exc, "code", "log_storage_error"),
+        }
+        job = session.scalar(
+            select(SyncJob)
+            .where(
+                SyncJob.source_id == source.id,
+                SyncJob.status == "running",
+            )
+            .order_by(SyncJob.id.desc())
+        )
+        sync.record_source_observation(
+            session,
+            source=source,
+            status="error",
+            revision=None,
+            error=error,
+            checked_at=checked_at,
+        )
+        if job is not None:
+            completed_at = utc_now()
+            sync.finish_sync_job(
+                session,
+                job,
+                status="failed",
+                message=error["message"],
+                result={
+                    "status": "error",
+                    "message": error["message"],
+                    "revision": None,
+                    "error": error,
+                    "timings_ms": {
+                        "total": _elapsed_ms(operation_started),
+                    },
+                },
+                completed_at=completed_at,
+            )
+        _clear_log_staging(source.id)
+        invalidate_pending_changes(source.id)
+        return sync.source_sync_status(session, source, job)
+
+
+def _refresh_log_source_cache_impl(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    job_type: str = "force_refresh",
+    sync_spec: LogSyncSpec | None = None,
+    secret_store: CredentialSecretStore | None = None,
+    operation_started: float | None = None,
 ) -> dict[str, Any]:
     if source.source_kind != "logs":
         raise ValueError("Source is not a log source")
 
+    started = operation_started or time.perf_counter()
+    timings_ms: dict[str, float] = {}
     job = sync.begin_sync_job(session, source, job_type)
     checked_at = utc_now()
-    revision = log_source_revision(source)
-    error = _revision_error(source, revision)
+    phase_started = time.perf_counter()
+    try:
+        adapter = create_storage_adapter(
+            binding_from_source(source),
+            uri=source.uri,
+            session=session,
+            secret_store=secret_store or KeyringCredentialSecretStore(),
+        )
+        revision = {
+            "provider": source.storage_provider,
+            "uri": source.uri,
+            "path": source.uri,
+            "exists": True,
+            "source_kind": source.source_kind,
+            "object_type": "directory",
+            "file_count": None,
+            "total_size": None,
+            "max_mtime_ns": None,
+        }
+        error = None
+    except Exception as exc:
+        revision = {
+            "provider": source.storage_provider,
+            "uri": source.uri,
+            "exists": False,
+            "source_kind": source.source_kind,
+            "object_type": "provider_error",
+        }
+        error = {
+            "message": "Log storage is not accessible",
+            "code": getattr(exc, "code", "storage_access_failed"),
+        }
+    timings_ms["adapter_init"] = _elapsed_ms(phase_started)
     if error:
-        sync.record_source_revision(session, source=source, status="error", revision=None, error=error, checked_at=checked_at)
+        completed_at = utc_now()
+        timings_ms["total"] = _elapsed_ms(started)
+        sync.record_source_observation(session, source=source, status="error", revision=None, error=error, checked_at=checked_at)
         sync.finish_sync_job(
             session,
             job,
             status="failed",
             message=error["message"],
-            result={"status": "error", "message": error["message"], "revision": None, "error": error},
-            completed_at=checked_at,
-        )
-        source_validation.record_source_validation(
-            session,
-            source,
-            source_validation.source_validation_error(source, error["message"]),
-            checked_at=checked_at,
+            result={
+                "status": "error",
+                "message": error["message"],
+                "revision": None,
+                "error": error,
+                "timings_ms": timings_ms,
+            },
+            completed_at=completed_at,
         )
         return sync.source_sync_status(session, source, job)
 
+    phase_started = time.perf_counter()
     spec = sync_spec or LogSyncSpec()
     log_paths = resolve_log_source_paths(source)
-    try:
-        etl_path = require_local_path(log_paths.etl_logs_uri or source.uri)
-        system_path = require_local_path(log_paths.system_logs_uri) if log_paths.system_logs_uri else None
-    except StorageProviderNotEnabled as exc:
-        error = {"message": str(exc), "code": "provider_not_enabled", "provider": exc.provider}
-        sync.record_source_revision(session, source=source, status="error", revision=None, error=error, checked_at=checked_at)
-        sync.finish_sync_job(
-            session,
-            job,
-            status="failed",
-            message=error["message"],
-            result={"status": "error", "message": error["message"], "revision": None, "error": error},
-            completed_at=checked_at,
-        )
-        source_validation.record_source_validation(
-            session,
-            source,
-            source_validation.source_validation_error(
-                source,
-                error["message"],
-                provider=exc.provider,
-            ),
-            checked_at=checked_at,
-        )
-        return sync.source_sync_status(session, source, job)
-    adapter = LocalStorageAdapter()
-    checkpoints, ingest_manifest_json = _read_ingest_state(source.id)
-    ingest_manifest = {
-        file_uri: parsed_revision
-        for file_uri, revision_json in ingest_manifest_json.items()
-        if (parsed_revision := _file_revision_from_json(file_uri, revision_json)) is not None
+    etl_uri = log_paths.etl_logs_uri or source.uri
+    system_uri = log_paths.system_logs_uri
+    persisted_states = log_control.stream_states(session, source.id)
+    persisted_manifest_rows = log_control.manifest_rows(session, source.id)
+    manifest_json = {
+        row.file_uri: row.revision_json
+        for row in persisted_manifest_rows
     }
-    dataflow_incremental, dataflow_candidates, dataflow_partition_count = _plan_stream_sync(
-        adapter,
-        _log_stream_root(etl_path, "dataflow_run_log"),
-        suffix=".parquet",
-        checkpoint=_checkpoint_from_state(checkpoints.get("dataflow_parquet")),
-        spec=spec,
-        manifest=ingest_manifest,
-    )
-    job_incremental, job_candidates, job_partition_count = _plan_stream_sync(
-        adapter,
-        _log_stream_root(etl_path, "job_run_log"),
-        suffix=".jsonl",
-        checkpoint=_checkpoint_from_state(checkpoints.get("job_jsonl")),
-        spec=spec,
-        manifest=ingest_manifest,
-    )
-    system_files = discover_system_jsonl_files(system_path.as_posix() if system_path else None)
-    existing = _existing_manifest(session, source.id)
+    manifests_by_kind: dict[str, dict[str, StorageRevision]] = {}
+    for row in persisted_manifest_rows:
+        parsed_revision = _file_revision_from_json(
+            row.file_uri,
+            row.revision_json,
+        )
+        if parsed_revision is not None:
+            manifests_by_kind.setdefault(row.file_kind, {})[
+                row.file_uri
+            ] = parsed_revision
+    stream_plans = [
+        plan_stream_sync(
+            adapter,
+            definition,
+            state=_planner_state_from_row(
+                persisted_states.get(definition.stream_kind)
+            ),
+            manifest=manifests_by_kind.get(definition.stream_kind, {}),
+            spec=spec,
+        )
+        for definition in _stream_definitions(etl_uri, system_uri)
+    ]
+    plans_by_kind = {
+        plan.definition.stream_kind: plan
+        for plan in stream_plans
+    }
     cache_has_source = _analytics_cache_has_source(source.id)
     analytic_candidates = [
-        *((candidate, "dataflow_parquet") for candidate in dataflow_candidates),
-        *((candidate, "job_jsonl") for candidate in job_candidates),
+        (candidate, plan.definition.stream_kind)
+        for plan in stream_plans
+        if not plan.definition.manifest_only
+        for candidate in plan.candidates
     ]
+    if not cache_has_source:
+        analytic_candidates = _merge_rebuild_candidates(
+            adapter,
+            analytic_candidates,
+            persisted_manifest_rows,
+            persisted_states,
+        )
+    dataflow_candidates = [
+        candidate
+        for candidate, file_kind in analytic_candidates
+        if file_kind == "dataflow_parquet"
+    ]
+    job_candidates = [
+        candidate
+        for candidate, file_kind in analytic_candidates
+        if file_kind == "job_jsonl"
+    ]
+    system_plan = plans_by_kind.get("system_jsonl")
+    system_candidates = list(system_plan.candidates) if system_plan else []
+    system_files = [item.canonical_uri for item in system_candidates]
+    existing = manifest_json
     changed_files = [_ingest_file_state(candidate, file_kind) for candidate, file_kind in analytic_candidates]
-    system_states = [_manifest_file_state(file_uri, "system_jsonl") for file_uri in system_files]
+    system_states = [
+        _manifest_file_state_from_candidate(
+            candidate,
+            "system_jsonl",
+        )
+        for candidate in system_candidates
+    ]
+    timings_ms["planning"] = _elapsed_ms(phase_started)
     revision = _revision_with_known_files(
         revision,
         {
             **existing,
-            **ingest_manifest_json,
             **{
                 str(state["file_uri"]): str(state["revision_json"])
                 for state in [*changed_files, *system_states]
             },
         },
     )
-    changed_system_files = [
-        state for state in system_states if existing.get(str(state["file_uri"])) != state["revision_json"]
-    ]
+    changed_system_files = system_states
 
     errors: list[dict[str, Any]] = []
-    parsed_dataflow_files: list[tuple[str, str, str]] = []
+    parsed_dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]] = []
     parsed_job_rows: list[tuple[str, str, str, dict[str, Any]]] = []
     file_row_counts: dict[str, int] = {}
-    for file_state in changed_files:
+    staging_dir = _log_staging_dir(source.id)
+    candidate_by_uri = {
+        candidate.canonical_uri: candidate
+        for candidate, _ in analytic_candidates
+    }
+
+    phase_started = time.perf_counter()
+
+    def materialize_file(
+        file_state: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        file_uri = str(file_state["file_uri"])
+        candidate = candidate_by_uri[file_uri]
+        read_uri = _materialized_log_uri(
+            adapter, candidate, staging_dir, source.storage_provider
+        )
+        return file_state, read_uri
+
+    materialized_files = map_storage_io(
+        adapter,
+        materialize_file,
+        changed_files,
+    )
+    timings_ms["materialization"] = _elapsed_ms(phase_started)
+
+    phase_started = time.perf_counter()
+    for file_state, read_uri in materialized_files:
         file_uri = str(file_state["file_uri"])
         file_kind = str(file_state["file_kind"])
         revision_json = str(file_state["revision_json"])
+        if read_uri != file_uri:
+            file_state["staged_path"] = read_uri
         if file_kind == "dataflow_parquet":
-            parsed_dataflow_files.append((file_uri, file_kind, revision_json))
+            parsed_dataflow_files.append(
+                (file_uri, file_kind, revision_json, read_uri)
+                if read_uri != file_uri
+                else (file_uri, file_kind, revision_json)
+            )
             read_errors = []
         elif file_kind == "job_jsonl":
-            rows, read_errors = _read_job_file(file_uri)
+            rows, read_errors = _read_job_file(read_uri, display_uri=file_uri)
             parsed_job_rows.extend((file_uri, file_kind, revision_json, row) for row in rows)
             file_row_counts[file_uri] = len(rows)
             file_state["row_count"] = len(rows)
         errors.extend(read_errors)
-    for file_state in changed_system_files:
-        file_row_counts[str(file_state["file_uri"])] = _count_jsonl_lines(str(file_state["file_uri"]))
-
-    checkpoint_updates = [
-        update
-        for update in (
-            _checkpoint_update("dataflow_parquet", dataflow_incremental, checkpoints.get("dataflow_parquet")),
-            _checkpoint_update("job_jsonl", job_incremental, checkpoints.get("job_jsonl")),
-        )
-        if update is not None
-    ]
+    timings_ms["parsing"] = _elapsed_ms(phase_started)
     needs_publish = not cache_has_source or bool(changed_files)
     changed_file_uris = [str(file_state["file_uri"]) for file_state in changed_files]
+    phase_started = time.perf_counter()
     if errors:
         upsert_result = {
             "parsed_dataflow_records": 0,
@@ -390,8 +633,7 @@ def refresh_log_source_cache(
             [],
             changed_file_uris,
             database_path=analytics_database_path(),
-            ingest_files=changed_files,
-            checkpoints=checkpoint_updates,
+            source_files=changed_files,
         )
     else:
         upsert_result = {
@@ -400,10 +642,12 @@ def refresh_log_source_cache(
             "errors": [],
             "published": True,
         }
+    timings_ms["publish"] = _elapsed_ms(phase_started)
     file_row_counts.update(upsert_result["file_row_counts"])
     errors.extend(upsert_result["errors"])
     published = bool(upsert_result["published"])
-    if published and (changed_files or changed_system_files):
+    phase_started = time.perf_counter()
+    if published:
         _upsert_manifest(
             session,
             source.id,
@@ -412,15 +656,22 @@ def refresh_log_source_cache(
             file_row_counts,
             checked_at,
         )
+        log_control.upsert_stream_states(
+            session,
+            source.id,
+            [_stream_state_update(plan) for plan in stream_plans],
+            updated_at=checked_at,
+        )
     if published and needs_publish:
         invalidate_environment_derived_caches(session, source.environment_id, structural=False)
+    timings_ms["control_commit"] = _elapsed_ms(phase_started)
 
     status = "error" if errors else "ok"
     message = "Log source cache refreshed" if changed_files or changed_system_files else "Log source cache is current"
     if errors:
         message = "Log source analytics were not published; the previous cache was preserved"
     error = errors[0] if errors else None
-    sync.record_source_revision(
+    sync.record_source_observation(
         session,
         source=source,
         status=status,
@@ -428,6 +679,8 @@ def refresh_log_source_cache(
         error=error,
         checked_at=checked_at,
     )
+    completed_at = utc_now()
+    timings_ms["total"] = _elapsed_ms(started)
     sync.finish_sync_job(
         session,
         job,
@@ -446,49 +699,43 @@ def refresh_log_source_cache(
                 "system_jsonl_files": len(system_files),
                 "parsed_files": len(changed_files),
                 "replaced_files": sum(
-                    1 for state in changed_files if str(state["file_uri"]) in ingest_manifest_json
+                    1
+                    for state in changed_files
+                    if str(state["file_uri"]) in manifest_json
                 ),
                 "new_files": sum(
-                    1 for state in changed_files if str(state["file_uri"]) not in ingest_manifest_json
+                    1
+                    for state in changed_files
+                    if str(state["file_uri"]) not in manifest_json
                 ),
                 "removed_files": 0,
-                "scanned_partitions": dataflow_partition_count + job_partition_count,
+                "scanned_partitions": sum(
+                    plan.scanned_partition_count for plan in stream_plans
+                ),
             },
             "sync_mode": spec.mode.value,
             "errors": errors,
+            "timings_ms": timings_ms,
         },
-        completed_at=checked_at,
+        completed_at=completed_at,
     )
     invalidate_pending_changes(source.id)
-    validation_counts = {
-        "dataflow_parquet_files": len(dataflow_candidates),
-        "job_jsonl_files": len(job_candidates),
-        "system_jsonl_files": len(system_files),
-    }
-    validation_result = (
-        {
-            **source_validation.source_validation_error(source, message),
-            "errors": errors,
-        }
-        if errors
-        else {
-            "source_id": source.id,
-            "source_kind": "logs",
-            "status": "ok",
-            "message": "Log source is readable",
-            "detected_provider": "local",
-            "detected_format": "logs",
-            "record_counts": validation_counts,
-            "records_scanned": sum(validation_counts.values()),
-            "errors": [],
-        }
+    from datacoolie_studio.domains.source_observation.repository import (
+        reset_observation,
     )
-    source_validation.record_source_validation(
+    from datacoolie_studio.domains.studio_settings.service import (
+        source_check_interval_seconds,
+    )
+
+    reset_observation(
         session,
-        source,
-        validation_result,
-        checked_at=checked_at,
+        source.id,
+        due_at=utc_now()
+        + timedelta(seconds=source_check_interval_seconds(session)),
+        pending_changes=False,
     )
+    session.commit()
+    shutil.rmtree(staging_dir, ignore_errors=True)
     return sync.source_sync_status(session, source, job)
 
 
@@ -497,6 +744,7 @@ def log_source_has_pending_changes(
     source: EnvironmentSource,
     *,
     ttl_seconds: float = 0.0,
+    secret_store: CredentialSecretStore | None = None,
 ) -> bool:
     """Return True when a cached Log source has files that differ from the last sync.
 
@@ -517,66 +765,57 @@ def log_source_has_pending_changes(
             entry = _pending_changes_cache.get(source.id)
             if entry is not None and entry[0] > now:
                 return entry[1]
-    result = _compute_log_source_pending_changes(session, source)
+    result = _compute_log_source_pending_changes(
+        session, source, secret_store=secret_store
+    )
     if ttl_seconds > 0:
         with _pending_changes_lock:
             _pending_changes_cache[source.id] = (time.monotonic() + ttl_seconds, result)
     return result
 
 
-def _compute_log_source_pending_changes(session: Session, source: EnvironmentSource) -> bool:
-    try:
-        log_paths = resolve_log_source_paths(source)
-        etl_path = require_local_path(log_paths.etl_logs_uri or source.uri)
-        system_path = require_local_path(log_paths.system_logs_uri) if log_paths.system_logs_uri else None
-    except StorageProviderNotEnabled:
+def _compute_log_source_pending_changes(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> bool:
+    persisted_states = log_control.stream_states(session, source.id)
+    if not persisted_states:
         return False
-    try:
-        checkpoints, ingest_manifest_json = _read_ingest_state(source.id)
-        if not checkpoints:
-            return False
-        ingest_manifest = {
-            file_uri: parsed_revision
-            for file_uri, revision_json in ingest_manifest_json.items()
-            if (parsed_revision := _file_revision_from_json(file_uri, revision_json)) is not None
-        }
-        adapter = LocalStorageAdapter()
-        for stream_name, suffix, file_kind in (
-            ("dataflow_run_log", ".parquet", "dataflow_parquet"),
-            ("job_run_log", ".jsonl", "job_jsonl"),
-        ):
-            _, candidates, _ = _plan_stream_sync(
-                adapter,
-                _log_stream_root(etl_path, stream_name),
-                suffix=suffix,
-                checkpoint=_checkpoint_from_state(checkpoints.get(file_kind)),
-                spec=LogSyncSpec(),
-                manifest=ingest_manifest,
-            )
-            if candidates:
-                return True
-        system_manifest = {
-            row.file_uri: row.revision_json
-            for row in session.scalars(
-                select(LogFileManifest).where(
-                    LogFileManifest.source_id == source.id,
-                    LogFileManifest.file_kind == "system_jsonl",
-                )
-            )
-        }
-        system_files = discover_system_jsonl_files(system_path.as_posix() if system_path else None)
-        current_system = {
-            file_uri: _file_revision_json(file_uri)
-            for file_uri in system_files
-        }
-    except OSError:
-        return False
-    if set(system_manifest) != set(current_system):
-        return bool(system_manifest or current_system)
-    return any(
-        not _revision_equivalent(system_manifest.get(file_uri), revision_json)
-        for file_uri, revision_json in current_system.items()
+    log_paths = resolve_log_source_paths(source)
+    etl_uri = log_paths.etl_logs_uri or source.uri
+    system_uri = log_paths.system_logs_uri
+    adapter = create_storage_adapter(
+        binding_from_source(source),
+        uri=source.uri,
+        session=session,
+        secret_store=secret_store or KeyringCredentialSecretStore(),
     )
+    persisted_manifest_rows = log_control.manifest_rows(session, source.id)
+    manifests_by_kind: dict[str, dict[str, StorageRevision]] = {}
+    for row in persisted_manifest_rows:
+        parsed_revision = _file_revision_from_json(
+            row.file_uri,
+            row.revision_json,
+        )
+        if parsed_revision is not None:
+            manifests_by_kind.setdefault(row.file_kind, {})[
+                row.file_uri
+            ] = parsed_revision
+    for definition in _stream_definitions(etl_uri, system_uri):
+        plan = plan_stream_sync(
+            adapter,
+            definition,
+            state=_planner_state_from_row(
+                persisted_states.get(definition.stream_kind)
+            ),
+            manifest=manifests_by_kind.get(definition.stream_kind, {}),
+            spec=LogSyncSpec(),
+        )
+        if plan.candidates:
+            return True
+    return False
 
 
 def invalidate_pending_changes(source_id: int) -> None:
@@ -599,48 +838,68 @@ def _upsert_manifest(
                 LogFileManifest.file_uri.in_(removed_files),
             )
         )
-    for file_state in changed_files:
-        file_uri = str(file_state["file_uri"])
-        session.execute(
-            delete(LogFileManifest).where(
-                LogFileManifest.source_id == source_id,
-                LogFileManifest.file_uri == file_uri,
-            )
-        )
-        session.add(_manifest_row(source_id, file_state, file_row_counts.get(file_uri, 0), checked_at))
-
-
-def _manifest_row(source_id: int, file_state: dict[str, Any], row_count: int, checked_at: datetime) -> LogFileManifest:
-    return LogFileManifest(
-        source_id=source_id,
-        file_uri=str(file_state["file_uri"]),
-        file_kind=str(file_state["file_kind"]),
-        revision_json=str(file_state["revision_json"]),
-        row_count=row_count,
-        job_id=file_state.get("job_id"),
-        log_timestamp=file_state.get("log_timestamp"),
-        run_date=file_state.get("run_date"),
-        status="ok",
-        first_seen_at=checked_at,
-        last_seen_at=checked_at,
+    log_control.upsert_manifest_rows(
+        session,
+        source_id,
+        changed_files,
+        file_row_counts,
+        seen_at=checked_at,
     )
 
 
-def _existing_manifest(session: Session, source_id: int) -> dict[str, str]:
-    rows = session.scalars(select(LogFileManifest).where(LogFileManifest.source_id == source_id)).all()
-    return {row.file_uri: row.revision_json for row in rows}
-
-
-def _manifest_file_state(file_uri: str, file_kind: str) -> dict[str, Any]:
-    metadata = parse_system_log_file_metadata(file_uri) if file_kind == "system_jsonl" else {}
+def _manifest_file_state_from_candidate(
+    candidate: DiscoveredLogFile,
+    file_kind: str,
+) -> dict[str, Any]:
+    revision = candidate.revision
+    metadata = (
+        parse_system_log_file_metadata(revision.canonical_uri)
+        if file_kind == "system_jsonl"
+        else {}
+    )
     return {
-        "file_uri": file_uri,
+        "file_uri": revision.canonical_uri,
         "file_kind": file_kind,
-        "revision_json": _file_revision_json(file_uri),
+        "partition_value": candidate.partition.partition_value,
+        "partition_format": candidate.partition.partition_format,
+        "revision_json": _revision_json(revision),
         "job_id": metadata.get("job_id"),
         "log_timestamp": metadata.get("log_timestamp"),
         "run_date": metadata.get("run_date"),
     }
+
+
+def _log_staging_dir(source_id: int) -> Path:
+    root = source_materialization_cache_dir() / "logs" / f"source-{source_id}"
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="sync-", dir=root))
+
+
+def _clear_log_staging(source_id: int) -> None:
+    root = source_materialization_cache_dir() / "logs" / f"source-{source_id}"
+    if not root.is_dir():
+        return
+    for child in root.iterdir():
+        if child.is_dir() and child.name.startswith("sync-"):
+            shutil.rmtree(child, ignore_errors=True)
+
+
+def _materialized_log_uri(
+    adapter: StorageAdapter,
+    candidate: DiscoveredLogFile,
+    staging_dir: Path,
+    provider: str,
+) -> str:
+    if provider == "local":
+        return candidate.canonical_uri
+    digest = hashlib.sha256(candidate.canonical_uri.encode("utf-8")).hexdigest()[:16]
+    target = staging_dir / f"{digest}-{uri_basename(candidate.canonical_uri)}"
+    adapter.materialize(
+        candidate.canonical_uri,
+        target,
+        expected_revision=candidate.revision,
+    )
+    return target.as_posix()
 
 
 def _file_revision_json(file_uri: str) -> str:
@@ -699,6 +958,10 @@ def _revision_with_known_files(
     }
 
 
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
 def _read_dataflow_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     conn = duckdb.connect(database=":memory:")
     try:
@@ -712,7 +975,9 @@ def _read_dataflow_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[
         conn.close()
 
 
-def _read_job_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def _read_job_file(
+    file_uri: str, *, display_uri: str | None = None
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     path = Path(file_uri)
@@ -726,22 +991,20 @@ def _read_job_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[str, 
                 except json.JSONDecodeError as exc:
                     errors.append(
                         {
-                            "uri": file_uri,
+                            "uri": display_uri or file_uri,
                             "message": f"Invalid JSONL at line {line_number}: {exc}",
                             "code": "invalid_jsonl",
                         }
                     )
-    except OSError as exc:
-        errors.append({"uri": file_uri, "message": str(exc), "code": "file_read_failed"})
-    return rows, errors
-
-
-def _count_jsonl_lines(file_uri: str) -> int:
-    try:
-        with Path(file_uri).open("r", encoding="utf-8") as handle:
-            return sum(1 for line in handle if line.strip())
     except OSError:
-        return 0
+        errors.append(
+            {
+                "uri": display_uri or file_uri,
+                "message": "Log object could not be read",
+                "code": "file_read_failed",
+            }
+        )
+    return rows, errors
 
 
 def _json_ready(row: dict[str, Any]) -> dict[str, Any]:
@@ -795,42 +1058,6 @@ def _analytics_cache_has_source(source_id: int) -> bool:
             and meta["build_state"] == "ready"
             and source_id in analytics_store.cache_source_ids(conn)
         )
-    finally:
-        conn.close()
-
-
-def _read_ingest_state(source_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
-    path = analytics_database_path()
-    if not path.exists() or not analytics_access.cache_is_ready(path):
-        return {}, {}
-    conn = analytics_access.connect(path, read_only=True)
-    try:
-        if not analytics_schema.table_exists(conn, analytics_schema.INGEST_CHECKPOINT_TABLE) or not analytics_schema.table_exists(conn, analytics_schema.INGEST_MANIFEST_TABLE):
-            return {}, {}
-        checkpoints = {
-            str(file_kind): {
-                "file_kind": str(file_kind),
-                "partition_format": str(partition_format),
-                "partition_value": partition_value,
-                "boundary_last_modified": boundary_last_modified,
-            }
-            for file_kind, partition_format, partition_value, boundary_last_modified in conn.execute(
-                f"""
-                SELECT log_kind, partition_format, partition_value, boundary_last_modified
-                FROM {analytics_schema.INGEST_CHECKPOINT_TABLE}
-                WHERE source_id = ?
-                """,
-                [source_id],
-            ).fetchall()
-        }
-        manifests = {
-            str(file_uri): str(revision_json)
-            for file_uri, revision_json in conn.execute(
-                f"SELECT file_uri, revision_json FROM {analytics_schema.INGEST_MANIFEST_TABLE} WHERE source_id = ?",
-                [source_id],
-            ).fetchall()
-        }
-        return checkpoints, manifests
     finally:
         conn.close()
 

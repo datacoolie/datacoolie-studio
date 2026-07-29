@@ -61,11 +61,13 @@ export function useEnvironmentContextQuery(
     queryFn: () => api.getEnvironmentContext(environmentId!),
     enabled: environmentId !== null,
     staleTime: staleTimeMs,
+    refetchInterval: staleTimeMs,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
   });
 
-  // Refresh header freshness when the user switches tabs. The backend caches the
-  // expensive log-folder check for the source-check interval (TTL), so fetching on
-  // navigation is cheap and there is no idle background polling.
+  // Header reads are DB-only. Navigation refreshes immediately and visible idle
+  // polling follows the configured fixed/adaptive ceiling without cloud I/O.
   useEffect(() => {
     if (environmentId === null) return;
     if (query.data) void query.refetch();

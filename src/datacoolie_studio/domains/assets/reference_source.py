@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.code_artifacts.indexer import ArtifactIndexError
 from datacoolie_studio.domains.code_artifacts.service import (
@@ -14,6 +16,8 @@ def build_reference_occurrence_source(
     occurrence: dict[str, Any],
     consumer_asset: dict[str, Any] | None,
     code_artifacts: list[EnvironmentSource],
+    *,
+    session: Session | None = None,
 ) -> dict[str, Any]:
     observations = [item for item in occurrence.get("observations") or [] if isinstance(item, dict)]
     provenance = str(occurrence.get("provenance") or "")
@@ -21,7 +25,9 @@ def build_reference_occurrence_source(
     diagnostics: list[dict[str, str]] = []
 
     if provenance in {"python", "python_sql"}:
-        python_view, python_diagnostics = _python_view(occurrence, observations, code_artifacts)
+        python_view, python_diagnostics = _python_view(
+            occurrence, observations, code_artifacts, session=session
+        )
         diagnostics.extend(python_diagnostics)
         if python_view is not None:
             views.append(python_view)
@@ -49,6 +55,8 @@ def _python_view(
     occurrence: dict[str, Any],
     observations: list[dict[str, Any]],
     code_artifacts: list[EnvironmentSource],
+    *,
+    session: Session | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     location = _source_location(occurrence, observations)
     function_path = _string(location.get("function_path"))
@@ -63,7 +71,9 @@ def _python_view(
     artifacts = [item for item in code_artifacts if item.enabled and (source_id is None or item.id == source_id)]
     for artifact in artifacts:
         try:
-            content, module_name, relative_path = read_code_artifact_function_source(artifact, function_path)
+            content, module_name, relative_path = read_code_artifact_function_source(
+                artifact, function_path, session=session
+            )
             source, _, _ = extract_python_function_source(content, function_path)
         except ArtifactIndexError as exc:
             diagnostics.append({

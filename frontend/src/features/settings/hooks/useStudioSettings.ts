@@ -14,7 +14,9 @@ export interface StudioSettingsState {
 
 export interface StudioSettingsChanges {
   timezone?: string | null;
+  source_check_mode?: "fixed" | "adaptive";
   source_check_interval_seconds?: number;
+  source_check_max_interval_seconds?: number;
 }
 
 /**

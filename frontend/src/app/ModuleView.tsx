@@ -147,7 +147,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
 
   switch (route.module) {
     case "overview":
-      return <EnvironmentOverviewRoute environmentId={route.environmentId} onNavigate={router.navigate} />;
+      return <EnvironmentOverviewRoute environmentId={route.environmentId} onNavigate={router.navigate} timezoneName={settings.settings?.timezone ?? null} />;
     case "sources":
       return (
         <SourcesPage
@@ -166,8 +166,9 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           onValidateSource={workspace.validateSource}
           onSyncSource={workspace.syncSource}
           onRunSourceBatch={workspace.runSourceBatch}
-          onRefreshSources={workspace.refreshCurrentEnvironment}
           syncStatuses={workspace.sourceSyncStatuses}
+          sourceOperations={workspace.sourceOperations}
+          timezoneName={settings.settings?.timezone ?? null}
         />
       );
     case "metadata":
@@ -280,9 +281,11 @@ function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, onOpen
 function EnvironmentOverviewRoute({
   environmentId,
   onNavigate,
+  timezoneName,
 }: {
   environmentId: number;
   onNavigate: StudioRouter["navigate"];
+  timezoneName: string | null;
 }) {
   const overview = useEnvironmentOverviewQuery(environmentId);
   if (overview.isError && !overview.data) {
@@ -295,5 +298,5 @@ function EnvironmentOverviewRoute({
     );
   }
   if (!overview.data) return <EmptyState title="Loading overview…" />;
-  return <OverviewPage overview={overview.data} onNavigate={onNavigate} />;
+  return <OverviewPage overview={overview.data} onNavigate={onNavigate} timezoneName={timezoneName} />;
 }

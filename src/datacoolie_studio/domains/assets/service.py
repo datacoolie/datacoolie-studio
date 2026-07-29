@@ -219,7 +219,11 @@ def get_environment_asset_source(session: Session, environment_id: int, asset_id
     )
     if asset is None:
         return None
-    definition = _asset_definition(asset, workspace.list_code_artifacts(session, environment_id))
+    definition = _asset_definition(
+        asset,
+        workspace.list_code_artifacts(session, environment_id),
+        session=session,
+    )
     if definition is None:
         return None
     return {"definition": definition, "catalog_version": catalog.input_fingerprint}
@@ -243,7 +247,9 @@ def get_reference_occurrence_source(
         (item for item in catalog.payload.get("assets") or [] if str(item.get("id") or "") == consumer_asset_id),
         None,
     )
-    return build_reference_occurrence_source(occurrence, consumer_asset, code_artifacts)
+    return build_reference_occurrence_source(
+        occurrence, consumer_asset, code_artifacts, session=session
+    )
 
 
 def build_assets_inventory(
@@ -701,14 +707,21 @@ def build_asset_detail(
     }
 
 
-def _asset_definition(asset: dict[str, Any], code_artifacts: list[EnvironmentSource]) -> dict[str, Any] | None:
+def _asset_definition(
+    asset: dict[str, Any],
+    code_artifacts: list[EnvironmentSource],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any] | None:
     asset_type = str(asset.get("asset_type") or "")
     query = _string_or_none(asset.get("query"))
     python_function = _string_or_none(asset.get("python_function"))
     if asset_type == "sql_query" or query:
         return _sql_definition(query)
     if asset_type == "python_function" or python_function:
-        return _python_definition(python_function, code_artifacts)
+        return _python_definition(
+            python_function, code_artifacts, session=session
+        )
     return None
 
 
@@ -766,7 +779,12 @@ def _sql_definition(query: str | None) -> dict[str, Any]:
     }
 
 
-def _python_definition(function_path: str | None, code_artifacts: list[EnvironmentSource]) -> dict[str, Any]:
+def _python_definition(
+    function_path: str | None,
+    code_artifacts: list[EnvironmentSource],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
     normalized_function_path = (function_path or "").strip()
     if not normalized_function_path:
         return {
@@ -797,7 +815,9 @@ def _python_definition(function_path: str | None, code_artifacts: list[Environme
     matches: list[dict[str, Any]] = []
     for artifact in enabled_artifacts:
         try:
-            content, module_name, relative_path = read_code_artifact_function_source(artifact, normalized_function_path)
+            content, module_name, relative_path = read_code_artifact_function_source(
+                artifact, normalized_function_path, session=session
+            )
             source, start_line, end_line = extract_python_function_source(content, normalized_function_path)
         except ArtifactIndexError as exc:
             diagnostics.append(_definition_diagnostic(

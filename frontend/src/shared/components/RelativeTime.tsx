@@ -8,6 +8,7 @@ interface RelativeTimeProps {
   fallback?: string;
   titlePrefix?: string;
   className?: string;
+  timezoneName?: string | null;
 }
 
 export function RelativeTime({
@@ -15,7 +16,8 @@ export function RelativeTime({
   now,
   fallback = "-",
   titlePrefix,
-  className
+  className,
+  timezoneName
 }: RelativeTimeProps) {
   const [clock, setClock] = useState(() => Date.now());
 
@@ -26,7 +28,7 @@ export function RelativeTime({
   }, [now]);
 
   const relative = formatRelativeTime(value, now ?? clock);
-  const absolute = formatAbsoluteTime(value);
+  const absolute = formatAbsoluteTime(value, timezoneName);
   const title = absolute ? `${titlePrefix ? `${titlePrefix}: ` : ""}${absolute}` : undefined;
 
   return (

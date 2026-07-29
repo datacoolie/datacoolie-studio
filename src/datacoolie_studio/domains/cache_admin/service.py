@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import shutil
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import Environment, EnvironmentSource
+from datacoolie_studio.core.config import source_materialization_cache_dir
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.read_models.keys import (
@@ -77,6 +79,10 @@ def clear_cache(
             environment_id=environment_id,
             namespaces=dependent_namespaces,
         )
+    if scope == "all_disposable":
+        result["source_materializations"] = _clear_source_materializations(
+            session, environment_id
+        )
     return result
 
 
@@ -85,7 +91,16 @@ def prune_cache() -> dict[str, Any]:
 
 
 def compact_cache() -> dict[str, Any]:
-    return {"scope": "read_models", "read_models": SqliteResultCacheStore().compact()}
+    store = SqliteResultCacheStore()
+    pruned = store.prune()
+    compacted = store.compact()
+    return {
+        "scope": "read_models",
+        "read_models": {
+            **compacted,
+            "prune": pruned,
+        },
+    }
 
 
 def _clear_analytics(session: Session, environment_id: int | None) -> dict[str, int]:
@@ -108,6 +123,31 @@ def _clear_analytics(session: Session, environment_id: int | None) -> dict[str, 
         "deleted_file_bytes": 0,
         "deleted_rows": sum(int(value) for value in deleted.values()),
     }
+
+
+def _clear_source_materializations(
+    session: Session, environment_id: int | None
+) -> dict[str, int]:
+    root = source_materialization_cache_dir()
+    if environment_id is None:
+        existed = root.exists()
+        shutil.rmtree(root, ignore_errors=True)
+        return {"deleted_roots": int(existed)}
+    source_ids = [
+        int(value)
+        for value in session.scalars(
+            select(EnvironmentSource.id).where(
+                EnvironmentSource.environment_id == environment_id
+            )
+        )
+    ]
+    deleted = 0
+    for source_id in source_ids:
+        for target in (root / f"source-{source_id}", root / "logs" / f"source-{source_id}"):
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+                deleted += 1
+    return {"deleted_roots": deleted}
 
 
 def _feature_namespaces(features: set[str] | None) -> set[str] | None:

@@ -224,3 +224,29 @@ def test_sqlite_store_reuses_versions_and_bounds_persisted_entries(monkeypatch):
     store.invalidate(1, {"monitoring.page.performance"})
     with create_result_cache_session() as session:
         assert session.scalar(select(func.count()).select_from(ResultCacheEntry)) == 1
+
+
+def test_cache_admin_optimize_reclaims_space_on_first_call(tmp_path: Path, monkeypatch):
+    clear_memory_cache()
+    cache_path = tmp_path / "cache.db"
+    monkeypatch.setenv(
+        "DATACOOLIE_STUDIO_RESULT_CACHE_URL",
+        f"sqlite:///{cache_path.as_posix()}",
+    )
+    reset_result_cache_engine()
+    store = SqliteResultCacheStore()
+
+    for index in range(8):
+        store.put(_key(f"entry-{index}"), {"value": "x" * (1024 * 1024)})
+    store.clear()
+    size_before = cache_path.stat().st_size
+
+    from datacoolie_studio.domains.cache_admin import service as cache_admin
+
+    optimized = cache_admin.compact_cache()["read_models"]
+    pruned = optimized["prune"]
+
+    assert pruned["deleted_entries"] == 0
+    assert optimized["file_bytes_before"] == size_before
+    assert optimized["file_bytes_after"] < size_before
+    assert cache_path.stat().st_size == optimized["file_bytes_after"]

@@ -350,7 +350,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         assert impact_counts["validation_result"] == 1
         assert impact_counts["materialization"] == 1
         assert impact_counts["save_event"] >= 1
-        assert impact_counts["source_revision"] == 1
+        assert impact_counts["source_observation"] == 1
         assert impact_counts["sync_job"] >= 1
         assert "metadata file will not be deleted" in impact["summary"]
 
@@ -366,7 +366,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
                 "metadata_validation_results",
                 "metadata_save_events",
                 "metadata_materializations",
-                "source_revisions",
+                "source_observations",
                 "sync_jobs",
             ]:
                 count = connection.execute(f"select count(*) from {table} where source_id = ?", (source["id"],)).fetchone()[0]

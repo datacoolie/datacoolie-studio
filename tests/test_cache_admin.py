@@ -261,12 +261,16 @@ def test_reenabled_log_source_requires_fresh_analytics_publish(tmp_path: Path, m
             sync_job_count = connection.execute(
                 "select count(*) from sync_jobs where source_id = ?", (source["id"],)
             ).fetchone()[0]
+            assert manifest_count > 0
         assert client.patch(source_url, json={"enabled": False}).status_code == 200
         assert client.patch(source_url, json={"enabled": True}).status_code == 200
         with sqlite3.connect(db_path) as connection:
             assert connection.execute(
                 "select count(*) from log_file_manifest where source_id = ?", (source["id"],)
-            ).fetchone()[0] == manifest_count
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "select count(*) from log_stream_states where source_id = ?", (source["id"],)
+            ).fetchone()[0] == 0
             assert connection.execute(
                 "select count(*) from sync_jobs where source_id = ?", (source["id"],)
             ).fetchone()[0] == sync_job_count

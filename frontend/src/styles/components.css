@@ -1792,6 +1792,48 @@ body,
   grid-column: 1 / -1;
 }
 
+.source-project-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.source-project-option {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.source-project-option-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.source-project-option-header strong {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.source-project-option-header .source-project-option-checkbox {
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.source-project-option-input {
+  font-size: 12px;
+}
+
 .source-checkbox-row {
   display: flex;
   flex-wrap: wrap;
@@ -2160,6 +2202,47 @@ body,
   color: var(--color-danger);
 }
 
+.source-operation-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  animation: spin 0.85s linear infinite;
+}
+
+.source-operation-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.source-operation-pill.is-delete {
+  border-color: color-mix(in srgb, var(--color-danger) 32%, var(--color-border));
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.source-card.is-working {
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border));
+}
+
+.source-card.is-working.is-delete {
+  border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .source-operation-icon {
+    animation: none;
+  }
+}
+
 .source-card-empty {
   display: flex;
   align-items: center;
@@ -2438,6 +2521,10 @@ body,
   }
 
   .source-form-row.two {
+    grid-template-columns: 1fr;
+  }
+
+  .source-project-options {
     grid-template-columns: 1fr;
   }
 
@@ -3676,6 +3763,9 @@ body,
   z-index: 1210;
   right: 18px;
   bottom: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
   background: var(--color-surface);
@@ -3855,7 +3945,6 @@ body,
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--color-accent-strong);
 }
 
@@ -4359,6 +4448,9 @@ label {
 .stack-form button,
 .source-add-form button,
 .text-action.primary {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-compact);
   background: var(--gradient-brand);
   color: var(--color-accent-ink);
   box-shadow: var(--shadow-accent);

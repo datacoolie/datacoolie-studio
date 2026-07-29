@@ -11,6 +11,7 @@ interface ContextBarProps {
   metadataSourceCount: number;
   logPathCount: number;
   freshness: EnvironmentContext["freshness"] | null;
+  timezoneName: string | null;
   onProjectSelect: (projectId: number | null) => void;
   onOpenProject: (projectId: number) => void;
 }
@@ -23,6 +24,7 @@ export function ContextBar({
   metadataSourceCount,
   logPathCount,
   freshness,
+  timezoneName,
   onProjectSelect,
   onOpenProject
 }: ContextBarProps) {
@@ -65,6 +67,7 @@ export function ContextBar({
                 countLabel="sources"
                 modifiedAt={freshness.metadata.max_source_modified_at}
                 status={freshness.metadata.status}
+                timezoneName={timezoneName}
               />
               <FreshnessPill
                 label="Logs"
@@ -72,6 +75,7 @@ export function ContextBar({
                 countLabel="paths"
                 modifiedAt={freshness.etl_logs.max_source_modified_at}
                 status={freshness.etl_logs.status}
+                timezoneName={timezoneName}
               />
             </>
           ) : (
@@ -91,13 +95,15 @@ function FreshnessPill({
   count,
   countLabel,
   modifiedAt,
-  status
+  status,
+  timezoneName
 }: {
   label: string;
   count: number;
   countLabel: string;
   modifiedAt?: string | null;
   status: string;
+  timezoneName: string | null;
 }) {
   return (
     <strong className={`freshness-chip freshness-${status}`} title={freshnessDescription(label, status)}>
@@ -110,6 +116,7 @@ function FreshnessPill({
         value={modifiedAt}
         fallback={modifiedAt ? "Modified unknown" : "No source modified time"}
         titlePrefix="Source modified"
+        timezoneName={timezoneName}
       />
       <em className={`freshness-status freshness-status-${status}`}>{freshnessLabel(status)}</em>
     </strong>

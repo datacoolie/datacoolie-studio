@@ -158,9 +158,7 @@ JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
 CACHE_SOURCES_TABLE = "etl_cache_sources"
 ANALYTICS_META_TABLE = "etl_analytics_meta"
-INGEST_CHECKPOINT_TABLE = "log_ingest_checkpoint"
-INGEST_MANIFEST_TABLE = "log_ingest_file_manifest"
-ANALYTICS_SCHEMA_VERSION = 5
+ANALYTICS_SCHEMA_VERSION = 6
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 
@@ -251,37 +249,6 @@ def ensure_cache_sources_table(conn) -> None:
         conn.execute(
             f"ALTER TABLE {CACHE_SOURCES_TABLE} ADD COLUMN generation BIGINT DEFAULT 0"
         )
-
-
-def ensure_ingest_control_tables(conn) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {INGEST_CHECKPOINT_TABLE} (
-          source_id BIGINT NOT NULL,
-          log_kind VARCHAR NOT NULL,
-          partition_format VARCHAR NOT NULL,
-          partition_value DATE NOT NULL,
-          boundary_last_modified TIMESTAMPTZ NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (source_id, log_kind)
-        )
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {INGEST_MANIFEST_TABLE} (
-          source_id BIGINT NOT NULL,
-          log_kind VARCHAR NOT NULL,
-          file_uri VARCHAR NOT NULL,
-          partition_value DATE NOT NULL,
-          partition_format VARCHAR NOT NULL,
-          revision_json VARCHAR NOT NULL,
-          row_count BIGINT NOT NULL,
-          ingested_at TIMESTAMPTZ NOT NULL,
-          PRIMARY KEY (source_id, log_kind, file_uri)
-        )
-        """
-    )
 
 
 def ensure_analytics_meta_table(conn) -> None:

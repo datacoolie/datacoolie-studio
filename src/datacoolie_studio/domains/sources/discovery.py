@@ -4,7 +4,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from datacoolie_studio.domains.code_artifacts.indexer import ArtifactIndexError, build_artifact_index
 from datacoolie_studio.domains.metadata.reader import MetadataReadError, read_metadata_file
+from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
+from datacoolie_studio.domains.sources.scan_policy import (
+    CODE_SCAN_EXCLUDED_DIRECTORIES,
+    METADATA_SCAN_EXCLUDED_DIRECTORIES,
+)
+from datacoolie_studio.domains.storage.adapters import StorageAdapter, StorageObject
+from datacoolie_studio.domains.storage.inventory import (
+    StorageInventoryRequest,
+    inventory,
+)
 from datacoolie_studio.domains.storage.uri import StorageProviderNotEnabled, join_uri, require_local_path, uri_basename
 
 
@@ -27,7 +38,20 @@ class SourceDiscoveryResult:
     errors: list[dict[str, str]]
 
 
-def discover_metadata_sources(uri: str, *, label: str | None = None) -> SourceDiscoveryResult:
+def discover_metadata_sources(
+    uri: str,
+    *,
+    label: str | None = None,
+    adapter: StorageAdapter | None = None,
+    inspect_contents: bool = True,
+) -> SourceDiscoveryResult:
+    if adapter is not None:
+        return _discover_remote_metadata_sources(
+            uri,
+            label=label,
+            adapter=adapter,
+            inspect_contents=inspect_contents,
+        )
     try:
         path = require_local_path(uri)
     except StorageProviderNotEnabled as exc:
@@ -71,6 +95,7 @@ def discover_datacoolie_project_sources(
     code_uri: str | None = None,
     include_metadata: bool = True,
     include_code: bool = True,
+    adapter: StorageAdapter | None = None,
 ) -> SourceDiscoveryResult:
     metadata_sources: list[DiscoveredSource] = []
     code_artifacts: list[DiscoveredSource] = []
@@ -78,15 +103,24 @@ def discover_datacoolie_project_sources(
 
     if include_metadata:
         resolved_metadata_uri = metadata_uri or join_uri(project_uri, metadata_subpath or "metadata")
-        metadata_result = discover_metadata_sources(resolved_metadata_uri)
+        metadata_result = discover_metadata_sources(
+            resolved_metadata_uri,
+            adapter=adapter,
+            # A datacoolie project's metadata folder is already a typed
+            # boundary. Remote parsing is deferred to the source checker so
+            # project discovery does not download every object serially.
+            inspect_contents=adapter is None,
+        )
         metadata_sources.extend(metadata_result.metadata_sources)
         errors.extend(metadata_result.errors)
 
     if include_code:
         resolved_code_uri = code_uri or join_uri(project_uri, code_subpath or "functions")
-        code = _discover_code_artifact(resolved_code_uri, project_uri=project_uri)
+        code = _discover_code_artifact(
+            resolved_code_uri, project_uri=project_uri, adapter=adapter
+        )
         if code is None:
-            errors.append({"uri": resolved_code_uri, "message": "No readable source code directory found"})
+            errors.append({"uri": resolved_code_uri, "message": "No readable source code artifact found"})
         else:
             code_artifacts.append(code)
 
@@ -115,32 +149,195 @@ def _metadata_file_source(path: Path, *, base_dir: Path, label: str | None = Non
     )
 
 
-def _discover_code_artifact(uri: str, *, project_uri: str) -> DiscoveredSource | None:
+def _discover_code_artifact(
+    uri: str,
+    *,
+    project_uri: str,
+    adapter: StorageAdapter | None = None,
+) -> DiscoveredSource | None:
+    if adapter is not None:
+        return _discover_remote_code_artifact(
+            uri, project_uri=project_uri, adapter=adapter
+        )
     try:
         path = require_local_path(uri)
     except StorageProviderNotEnabled:
         return None
-    if not path.exists() or not path.is_dir():
+    if not path.exists():
         return None
-    python_files = [item for item in path.rglob("*.py") if item.is_file()]
-    if not python_files:
+    if path.is_file():
+        artifact_types = {".py": "python_file", ".zip": "zip", ".whl": "wheel"}
+        artifact_type = artifact_types.get(path.suffix.lower())
+        if artifact_type is None:
+            return None
+        if artifact_type == "python_file":
+            python_file_count = 1
+        else:
+            try:
+                indexed = build_artifact_index(str(path), artifact_type)
+            except ArtifactIndexError:
+                return None
+            python_file_count = int(indexed["manifest"]["python_files"])
+    elif path.is_dir():
+        python_file_count = sum(1 for item in path.rglob("*.py") if item.is_file())
+        artifact_type = "directory"
+    else:
+        return None
+    if not python_file_count:
         return None
     label = uri_basename(uri) or "source code"
     source_config: dict[str, Any] = {
-        "artifact_type": "directory",
+        "artifact_type": artifact_type,
         "module_roots": [],
         "discovery_mode": "datacoolie_project",
         "project_uri": project_uri,
     }
-    if label == "functions":
-        source_config["module_prefix"] = "functions"
     return DiscoveredSource(
         source_kind="code",
         uri=str(path),
         label=label,
         source_config=source_config,
-        record_counts={"python_files": len(python_files)},
+        record_counts={"python_files": python_file_count},
     )
+
+
+def _discover_remote_metadata_sources(
+    uri: str,
+    *,
+    label: str | None,
+    adapter: StorageAdapter,
+    inspect_contents: bool,
+) -> SourceDiscoveryResult:
+    canonical_root = adapter.canonical_uri(uri)
+    suffix = Path(uri.rstrip("/")).suffix.lower()
+    if suffix in METADATA_SUFFIXES:
+        candidates = [
+            StorageObject(
+                canonical_uri=canonical_root,
+                name=uri_basename(canonical_root),
+                object_type="file",
+            )
+        ]
+        metadata_root = canonical_root.rsplit("/", 1)[0]
+    else:
+        try:
+            observed = inventory(
+                adapter,
+                StorageInventoryRequest(
+                    uri=canonical_root,
+                    purpose="observe",
+                    recursive=True,
+                    object_types=frozenset({"file"}),
+                    suffixes=METADATA_SUFFIXES,
+                    exclude_directories=METADATA_SCAN_EXCLUDED_DIRECTORIES,
+                ),
+            )
+            candidates = list(observed.files)
+        except Exception as exc:
+            return SourceDiscoveryResult(
+                [],
+                [],
+                [{"uri": canonical_root, "message": str(exc)}],
+            )
+        metadata_root = canonical_root
+
+    sources: list[DiscoveredSource] = []
+    errors: list[dict[str, str]] = []
+    for candidate in candidates:
+        if Path(candidate.name).suffix.lower() not in METADATA_SUFFIXES:
+            continue
+        if "/environments/" in candidate.canonical_uri.lower():
+            continue
+        counts: dict[str, int] = {}
+        if inspect_contents:
+            try:
+                with adapter.open_read(candidate.canonical_uri) as handle:
+                    raw = read_metadata_bytes(
+                        candidate.canonical_uri, handle.read()
+                    )
+            except Exception:
+                continue
+            counts = _metadata_counts(raw)
+            if not any(counts.values()):
+                continue
+        sources.append(
+            DiscoveredSource(
+                source_kind="metadata",
+                uri=candidate.canonical_uri,
+                label=label
+                or _relative_uri_label(
+                    candidate.canonical_uri, metadata_root
+                ),
+                source_config={
+                    "discovery_mode": "metadata_path",
+                    "metadata_root_uri": metadata_root,
+                },
+                record_counts=counts,
+            )
+        )
+    if not sources:
+        errors.append(
+            {
+                "uri": canonical_root,
+                "message": "No datacoolie metadata files found",
+            }
+        )
+    return SourceDiscoveryResult(sources, [], errors)
+
+
+def _discover_remote_code_artifact(
+    uri: str,
+    *,
+    project_uri: str,
+    adapter: StorageAdapter,
+) -> DiscoveredSource | None:
+    canonical = adapter.canonical_uri(uri)
+    suffix = Path(canonical).suffix.lower()
+    artifact_types = {".py": "python_file", ".zip": "zip", ".whl": "wheel"}
+    artifact_type = artifact_types.get(suffix)
+    if artifact_type is None:
+        try:
+            observed = inventory(
+                adapter,
+                StorageInventoryRequest(
+                    uri=canonical,
+                    purpose="observe",
+                    recursive=True,
+                    object_types=frozenset({"file"}),
+                    suffixes=frozenset({".py"}),
+                    exclude_directories=CODE_SCAN_EXCLUDED_DIRECTORIES,
+                ),
+            )
+            python_files = list(observed.files)
+        except Exception:
+            return None
+        if not python_files:
+            return None
+        artifact_type = "directory"
+        count = len(python_files)
+    else:
+        try:
+            adapter.stat(canonical)
+        except Exception:
+            return None
+        count = 1 if artifact_type == "python_file" else 0
+    return DiscoveredSource(
+        source_kind="code",
+        uri=canonical,
+        label=uri_basename(canonical) or "source code",
+        source_config={
+            "artifact_type": artifact_type,
+            "module_roots": [],
+            "discovery_mode": "datacoolie_project",
+            "project_uri": adapter.canonical_uri(project_uri),
+        },
+        record_counts={"python_files": count},
+    )
+
+
+def _relative_uri_label(uri: str, root_uri: str) -> str:
+    prefix = root_uri.rstrip("/") + "/"
+    return uri.removeprefix(prefix) if uri.startswith(prefix) else uri_basename(uri)
 
 
 def _metadata_counts(raw: dict[str, Any]) -> dict[str, int]:

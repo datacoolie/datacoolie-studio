@@ -116,10 +116,10 @@ class EnvironmentCreate(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_environment_name(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,49}", normalized):
-            raise ValueError("Environment must start with a letter or number and contain only lowercase letters, numbers, hyphens, or underscores")
-        return normalized
+        display_name = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,49}", display_name):
+            raise ValueError("Environment must start with a letter or number and contain only letters, numbers, hyphens, or underscores")
+        return display_name
 
 
 class EnvironmentRead(BaseModel):
@@ -197,13 +197,17 @@ class StudioSettingsResponse(BaseModel):
     timezone: str
     timezone_source: Literal["configured", "server_default"]
     timezone_offset_minutes: int
+    source_check_mode: Literal["fixed", "adaptive"]
     source_check_interval_seconds: int
+    source_check_max_interval_seconds: int
     updated_at: datetime | None = None
 
 
 class StudioSettingsUpdateRequest(BaseModel):
     timezone: str | None = None
+    source_check_mode: Literal["fixed", "adaptive"] | None = None
     source_check_interval_seconds: int | None = Field(default=None, ge=5, le=3600)
+    source_check_max_interval_seconds: int | None = Field(default=None, ge=5, le=3600)
 
 
 class EnvironmentDependencyVersionsResponse(BaseModel):

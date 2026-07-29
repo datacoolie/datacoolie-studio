@@ -19,23 +19,39 @@ from datacoolie_studio.domains.metadata.normalizer import (
     enrich_metadata_documents_with_connections,
     normalize_metadata_document,
 )
-from datacoolie_studio.domains.metadata.reader import MetadataReadError, read_metadata_file
+from datacoolie_studio.domains.metadata.reader import MetadataReadError
+from datacoolie_studio.domains.metadata.reader import read_metadata_file  # noqa: F401
+from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
+from datacoolie_studio.domains.metadata.storage_io import (
+    current_revision as storage_current_revision,
+    read_source_bytes,
+    same_revision,
+    storage_revision_from_dict,
+    storage_for_source,
+)
+from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
-from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.sync import service as sync
 
 
 METADATA_MATERIALIZATION_SCHEMA_VERSION = "metadata-materialization.v1"
 
 
-def load_environment_metadata(session: Session, sources: list[EnvironmentSource]) -> dict:
+def load_environment_metadata(
+    session: Session,
+    sources: list[EnvironmentSource],
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict:
     documents = []
     errors = []
     for source in sources:
         if not source.enabled:
             continue
         try:
-            materialization, warning = _ensure_metadata_materialization_result(session, source)
+            materialization, warning = ensure_metadata_materialization_result(
+                session, source, secret_store=secret_store
+            )
             normalized = json.loads(materialization.normalized_metadata_json or "{}")
             if normalized:
                 documents.append(normalized)
@@ -71,19 +87,35 @@ def load_environment_metadata(session: Session, sources: list[EnvironmentSource]
     }
 
 
-def load_cached_editor_document(session: Session, source: EnvironmentSource) -> dict:
-    materialization = ensure_metadata_materialization(session, source)
+def load_cached_editor_document(
+    session: Session,
+    source: EnvironmentSource,
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict:
+    materialization = ensure_metadata_materialization(
+        session, source, secret_store=secret_store
+    )
     return _refresh_editor_document_routing(source, json.loads(materialization.editor_document_json))
 
 
-def load_environment_editor_document(session: Session, sources: list[EnvironmentSource]) -> dict:
+def load_environment_editor_document(
+    session: Session,
+    sources: list[EnvironmentSource],
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict:
     documents: list[dict] = []
     errors: list[dict] = []
     for source in sources:
         if not source.enabled:
             continue
         try:
-            documents.append(load_cached_editor_document(session, source))
+            documents.append(
+                load_cached_editor_document(
+                    session, source, secret_store=secret_store
+                )
+            )
         except MetadataReadError as exc:
             errors.append({"metadata_source_id": source.id, "uri": source.uri, "message": str(exc)})
 
@@ -123,8 +155,11 @@ def load_environment_editor_workspace(
     *,
     document: dict | None = None,
     draft: dict | None = None,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict:
-    resolved_document = document or load_environment_editor_document(session, sources)
+    resolved_document = document or load_environment_editor_document(
+        session, sources, secret_store=secret_store
+    )
     resolved_draft = (
         load_environment_editor_draft(session, environment_id)
         if draft is None
@@ -177,22 +212,77 @@ def ensure_metadata_materialization(
     source: EnvironmentSource,
     *,
     force: bool = False,
+    secret_store: CredentialSecretStore | None = None,
 ) -> MetadataMaterialization:
-    materialization, _ = _ensure_metadata_materialization_result(session, source, force=force)
+    materialization, _ = ensure_metadata_materialization_result(
+        session,
+        source,
+        force=force,
+        secret_store=secret_store,
+    )
     return materialization
 
 
-def _ensure_metadata_materialization_result(
+def ensure_metadata_materialization_result(
     session: Session,
     source: EnvironmentSource,
     *,
     force: bool = False,
+    secret_store: CredentialSecretStore | None = None,
 ) -> tuple[MetadataMaterialization, dict | None]:
     if source.source_kind != "metadata":
         raise MetadataReadError("Source is not a metadata source")
 
-    current = sync.stat_source(source, include_content_hash=False)
     current_materialization = metadata_materialization(session, source.id)
+    try:
+        storage = storage_for_source(
+            session, source, secret_store=secret_store
+        )
+        current = storage_current_revision(
+            storage, source, include_content_hash=False
+        )
+    except Exception as exc:
+        missing = isinstance(exc, FileNotFoundError)
+        error = {
+            "message": (
+                f"Metadata file not found: {source.uri}"
+                if missing
+                else "Metadata storage is not readable"
+            ),
+            "code": (
+                "not_found"
+                if missing
+                else getattr(exc, "code", "metadata_storage_error")
+            ),
+        }
+        if current_materialization is not None:
+            return current_materialization, error
+        job = sync.begin_sync_job(
+            session, source, "force_refresh" if force else "auto_refresh"
+        )
+        checked_at = utc_now()
+        sync.record_source_observation(
+            session,
+            source=source,
+            status="error",
+            revision=None,
+            error=error,
+            checked_at=checked_at,
+        )
+        sync.finish_sync_job(
+            session,
+            job,
+            status="failed",
+            message=error["message"],
+            result={
+                "status": "error",
+                "message": error["message"],
+                "revision": None,
+                "error": error,
+            },
+            completed_at=checked_at,
+        )
+        raise MetadataReadError(error["message"]) from exc
     if (
         not force
         and current_materialization is not None
@@ -205,7 +295,7 @@ def _ensure_metadata_materialization_result(
     job = sync.begin_sync_job(session, source, "force_refresh" if force else "auto_refresh")
     error = _revision_error(source, current)
     if error:
-        sync.record_source_revision(session, source=source, status="error", revision=None, error=error, checked_at=utc_now())
+        sync.record_source_observation(session, source=source, status="error", revision=None, error=error, checked_at=utc_now())
         sync.finish_sync_job(
             session,
             job,
@@ -213,30 +303,28 @@ def _ensure_metadata_materialization_result(
             message=error["message"],
             result={"status": "error", "message": error["message"], "revision": None, "error": error},
         )
-        source_validation.validate_metadata_source(session, source)
         if current_materialization is not None:
             return current_materialization, error
         raise MetadataReadError(error["message"])
 
     try:
-        raw = read_metadata_file(source.uri)
-        current = sync.stat_source(source, include_content_hash=True)
+        content, current = read_source_bytes(
+            storage,
+            source,
+            expected_revision=storage_revision_from_dict(current),
+        )
+        raw = read_metadata_bytes(source.uri, content)
         editor_document = load_editor_document_from_raw(source, raw, current)
         normalized = normalize_metadata_document(source.id, source.uri, raw)
     except MetadataReadError as exc:
         error = {"message": str(exc), "code": "metadata_read_error"}
-        sync.record_source_revision(session, source=source, status="error", revision=None, error=error, checked_at=utc_now())
+        sync.record_source_observation(session, source=source, status="error", revision=None, error=error, checked_at=utc_now())
         sync.finish_sync_job(
             session,
             job,
             status="failed",
             message=str(exc),
             result={"status": "error", "message": str(exc), "revision": None, "error": error},
-        )
-        source_validation.record_source_validation(
-            session,
-            source,
-            source_validation.source_validation_error(source, str(exc)),
         )
         if current_materialization is not None:
             return current_materialization, error
@@ -268,7 +356,7 @@ def _ensure_metadata_materialization_result(
         current_materialization.materialized_at = utc_now()
     if previous_fingerprint != fingerprint:
         invalidate_environment_derived_caches(session, source.environment_id, structural=True)
-    sync.record_source_revision(session, source=source, status="ok", revision=current, error=None, checked_at=utc_now())
+    sync.record_source_observation(session, source=source, status="ok", revision=current, error=None, checked_at=utc_now())
     sync.finish_sync_job(
         session,
         job,
@@ -281,7 +369,6 @@ def _ensure_metadata_materialization_result(
             "error": None,
         },
     )
-    source_validation.validate_metadata_source(session, source)
     return current_materialization, None
 
 
@@ -316,6 +403,8 @@ def _same_revision_json(current: dict, stored_json: str | None) -> bool:
         stored = json.loads(stored_json)
     except json.JSONDecodeError:
         return False
+    if current.get("provider_revision") is not None:
+        return same_revision(current, stored)
     return (
         current.get("exists") is True
         and stored.get("object_type") == current.get("object_type")

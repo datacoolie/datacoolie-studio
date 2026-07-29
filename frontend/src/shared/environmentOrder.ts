@@ -8,16 +8,20 @@ export function orderEnvironmentItems<T extends { name: string }>(items: T[]) {
 
 export function orderedEnvironmentNamesWithMissing<T extends { name: string }>(items: T[]) {
   const existing = orderEnvironmentItems(items).map((item) => item.name);
-  const existingSet = new Set(existing);
-  const missing = ENVIRONMENT_PRESETS.filter((name) => !existingSet.has(name));
+  const existingSet = new Set(existing.map(normalizeEnvironmentIdentity));
+  const missing = ENVIRONMENT_PRESETS.filter((name) => !existingSet.has(normalizeEnvironmentIdentity(name)));
   return [...existing, ...missing];
 }
 
 function compareEnvironmentName(left: string, right: string) {
-  const leftPreset = PRESET_ORDER.get(left);
-  const rightPreset = PRESET_ORDER.get(right);
+  const leftPreset = PRESET_ORDER.get(normalizeEnvironmentIdentity(left));
+  const rightPreset = PRESET_ORDER.get(normalizeEnvironmentIdentity(right));
   if (leftPreset !== undefined && rightPreset !== undefined) return leftPreset - rightPreset;
   if (leftPreset !== undefined) return -1;
   if (rightPreset !== undefined) return 1;
-  return left.localeCompare(right);
+  return left.localeCompare(right, undefined, { sensitivity: "base" });
+}
+
+function normalizeEnvironmentIdentity(value: string) {
+  return value.toLowerCase();
 }

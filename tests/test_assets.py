@@ -391,6 +391,39 @@ def read_orders(engine):
     assert "def helper" not in python_definition["source"]
 
 
+def test_asset_detail_definition_resolves_manually_selected_package_directory(tmp_path: Path):
+    from datacoolie_studio.db.models import EnvironmentSource
+
+    document = normalize_metadata_document(1, "source.json", _metadata_source_one())
+    lineage = build_lineage({"_documents": [document], "errors": []}, environment_id=42)
+    payload = build_assets_inventory(lineage, {1: "source.json"})
+    package = tmp_path / "functions"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "sources.py").write_text(
+        "def read_orders(engine):\n    return engine.execute_sql('SELECT 1')\n",
+        encoding="utf-8",
+    )
+    artifact = EnvironmentSource(
+        id=99,
+        environment_id=42,
+        source_kind="code",
+        uri=str(package),
+        enabled=True,
+        source_config_json='{"artifact_type": "directory", "module_roots": []}',
+    )
+    python_asset = next(item for item in payload["assets"] if item["asset_type"] == "python_function")
+
+    detail = build_asset_detail(python_asset["id"], payload, lineage, [artifact])
+
+    assert detail is not None
+    definition = detail["definition"]
+    assert definition["status"] == "available"
+    assert definition["module_name"] == "functions.sources"
+    assert definition["relative_path"] == "sources.py"
+    assert "def read_orders" in definition["source"]
+
+
 def _metadata_source_one() -> dict:
     return {
         "connections": [{

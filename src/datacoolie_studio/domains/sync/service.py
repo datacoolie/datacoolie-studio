@@ -8,10 +8,20 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.db.models import EnvironmentSource, SourceRevision, SyncJob, utc_now
+from datacoolie_studio.db.models import (
+    EnvironmentSource,
+    SourceObservation,
+    SyncJob,
+    utc_now,
+)
+from datacoolie_studio.domains.source_observation.repository import (
+    observation_payload,
+    record_source_evidence,
+)
 from datacoolie_studio.domains.storage.uri import parse_storage_uri
 
 
@@ -23,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 SYNC_JOB_RETENTION_DAYS = 30
 SYNC_JOB_RETENTION_MINIMUM = 100
+
+
+class SyncJobOverlapError(RuntimeError):
+    pass
 
 
 @contextmanager
@@ -38,6 +52,18 @@ def source_refresh_guard(source_id: int):
             lock.release()
 
 
+def has_running_sync_job(session: Session, source_id: int) -> bool:
+    """Return whether persistent state already has an active job for the source."""
+    return session.scalar(
+        select(SyncJob.id)
+        .where(
+            SyncJob.source_id == source_id,
+            SyncJob.status == "running",
+        )
+        .limit(1)
+    ) is not None
+
+
 def refresh_source(session: Session, source: EnvironmentSource, job_type: str = "manual_refresh") -> dict[str, Any]:
     job = begin_sync_job(session, source, job_type)
     checked_at = utc_now()
@@ -46,7 +72,7 @@ def refresh_source(session: Session, source: EnvironmentSource, job_type: str = 
     status = "error" if error else "ok"
     message = error["message"] if error else _success_message(source)
 
-    record_source_revision(
+    record_source_observation(
         session,
         source=source,
         status=status,
@@ -80,7 +106,15 @@ def begin_sync_job(session: Session, source: EnvironmentSource, job_type: str) -
         started_at=utc_now(),
     )
     session.add(job)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        if has_running_sync_job(session, source.id):
+            raise SyncJobOverlapError(
+                f"A sync job is already running for source {source.id}"
+            ) from exc
+        raise
     session.refresh(job)
     try:
         diagnostics = prune_terminal_sync_jobs(session, job.source_id)
@@ -182,7 +216,7 @@ def finish_sync_job(
     return job
 
 
-def record_source_revision(
+def record_source_observation(
     session: Session,
     *,
     source: EnvironmentSource,
@@ -191,9 +225,9 @@ def record_source_revision(
     error: dict[str, Any] | None,
     checked_at: datetime | None = None,
 ) -> None:
-    _upsert_source_revision(
+    record_source_evidence(
         session,
-        source=source,
+        source,
         status=status,
         revision=revision,
         error=error,
@@ -202,22 +236,124 @@ def record_source_revision(
 
 
 def source_sync_status(session: Session, source: EnvironmentSource, latest_job: SyncJob | None = None) -> dict[str, Any]:
-    revision = session.scalar(select(SourceRevision).where(SourceRevision.source_id == source.id))
+    observation = session.get(SourceObservation, source.id)
+    if latest_job is None:
+        latest_job = session.scalars(
+            select(SyncJob)
+            .where(
+                SyncJob.source_id == source.id,
+                SyncJob.status.in_({"queued", "initializing", "running"}),
+            )
+            .order_by(
+                case(
+                    (SyncJob.status == "initializing", 0),
+                    (SyncJob.status == "running", 1),
+                    else_=2,
+                ),
+                SyncJob.id.desc(),
+            )
+        ).first()
     if latest_job is None:
         latest_job = session.scalars(
             select(SyncJob).where(SyncJob.source_id == source.id).order_by(SyncJob.started_at.desc(), SyncJob.id.desc())
         ).first()
 
+    return _source_sync_status(source, observation, latest_job)
+
+
+def source_sync_statuses(
+    session: Session,
+    sources: list[EnvironmentSource],
+) -> list[dict[str, Any]]:
+    source_ids = [source.id for source in sources]
+    if not source_ids:
+        return []
+    observations = {
+        item.source_id: item
+        for item in session.scalars(
+            select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
+        )
+    }
+    latest_job_ids = (
+        select(SyncJob.source_id, func.max(SyncJob.id).label("job_id"))
+        .where(SyncJob.source_id.in_(source_ids))
+        .group_by(SyncJob.source_id)
+        .subquery()
+    )
+    latest_jobs = {
+        job.source_id: job
+        for job in session.scalars(
+            select(SyncJob).join(latest_job_ids, SyncJob.id == latest_job_ids.c.job_id)
+        )
+    }
+    active_jobs: dict[int, SyncJob] = {}
+    for job in session.scalars(
+        select(SyncJob)
+        .where(
+            SyncJob.source_id.in_(source_ids),
+            SyncJob.status.in_({"queued", "initializing", "running"}),
+        )
+        .order_by(SyncJob.id.desc())
+    ):
+        current = active_jobs.get(job.source_id)
+        if current is None or _active_job_priority(job) < _active_job_priority(current):
+            active_jobs[job.source_id] = job
+    latest_jobs.update(active_jobs)
+    return [
+        _source_sync_status(
+            source,
+            observations.get(source.id),
+            latest_jobs.get(source.id),
+        )
+        for source in sources
+    ]
+
+
+def _source_sync_status(
+    source: EnvironmentSource,
+    observation: SourceObservation | None,
+    latest_job: SyncJob | None,
+) -> dict[str, Any]:
+    observed = observation_payload(observation)
+    outcome = str(observed["status"])
+    active_operation = _active_operation(latest_job)
     return {
         "source_id": source.id,
         "source_kind": source.source_kind,
-        "status": revision.status if revision else "unknown",
-        "message": _status_message(revision, latest_job),
-        "revision": _json_or_none(revision.revision_json) if revision else None,
-        "error": _json_or_none(revision.error_json) if revision else None,
-        "checked_at": _as_utc(revision.checked_at) if revision else None,
+        "status": (
+            "running"
+            if active_operation
+            else "error"
+            if outcome == "error"
+            else "ok"
+            if outcome in {"changed", "unchanged"}
+            else "unknown"
+        ),
+        "message": _status_message(observation, latest_job),
+        "revision": observed["revision"],
+        "error": observed["error"],
+        "checked_at": observed["checked_at"],
+        "last_observed_at": observed["last_observed_at"],
+        "next_check_at": observed["next_check_at"],
+        "pending_changes": observed["pending_changes"],
+        "active_operation": active_operation,
         "latest_job": _job_to_dict(latest_job) if latest_job else None,
     }
+
+
+def _active_operation(latest_job: SyncJob | None) -> str | None:
+    if latest_job is None or latest_job.status not in {"queued", "initializing", "running"}:
+        return None
+    result = _json_or_none(latest_job.result_json)
+    operation = result.get("active_operation") if result else None
+    if operation in {"validate", "sync"}:
+        return str(operation)
+    return "sync" if latest_job.status == "running" else None
+
+
+def _active_job_priority(job: SyncJob) -> tuple[int, int]:
+    priority = {"initializing": 0, "running": 1, "queued": 2}.get(job.status, 3)
+    return priority, -job.id
 
 
 def stat_source(source: EnvironmentSource, *, include_content_hash: bool = True) -> dict[str, Any]:
@@ -274,27 +410,6 @@ def stat_source(source: EnvironmentSource, *, include_content_hash: bool = True)
     return {**base, "object_type": "unsupported"}
 
 
-def _upsert_source_revision(
-    session: Session,
-    *,
-    source: EnvironmentSource,
-    status: str,
-    revision: dict[str, Any] | None,
-    error: dict[str, Any] | None,
-    checked_at: datetime,
-) -> None:
-    row = session.scalar(select(SourceRevision).where(SourceRevision.source_id == source.id))
-    if row is None:
-        row = SourceRevision(source_id=source.id, source_kind=source.source_kind, status=status, checked_at=checked_at)
-        session.add(row)
-    row.status = status
-    row.source_kind = source.source_kind
-    row.revision_json = json.dumps(revision, sort_keys=True) if revision else None
-    row.error_json = json.dumps(error, sort_keys=True) if error else None
-    row.checked_at = checked_at
-    row.updated_at = checked_at
-
-
 def _revision_error(source: EnvironmentSource, revision: dict[str, Any]) -> dict[str, Any] | None:
     if revision.get("object_type") == "provider_not_enabled":
         provider = str(revision.get("provider") or "storage")
@@ -319,14 +434,17 @@ def _success_message(source: EnvironmentSource) -> str:
     return "Source revision recorded"
 
 
-def _status_message(revision: SourceRevision | None, latest_job: SyncJob | None) -> str:
+def _status_message(
+    observation: SourceObservation | None,
+    latest_job: SyncJob | None,
+) -> str:
     if latest_job and latest_job.message:
         return latest_job.message
-    if revision is None:
+    if observation is None or observation.last_outcome == "never":
         return "Source has not been refreshed"
-    if revision.status == "ok":
+    if observation.last_outcome != "error":
         return "Source revision recorded"
-    error = _json_or_none(revision.error_json)
+    error = _json_or_none(observation.error_json)
     return str(error.get("message") if isinstance(error, dict) else "Source refresh failed")
 
 

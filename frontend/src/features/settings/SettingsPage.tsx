@@ -8,8 +8,9 @@ import { OperationNotification } from "../../shared/components/OperationNotifica
 import { api } from "../../shared/api/client";
 import { toErrorMessage } from "../../shared/lib/errors";
 import type { StudioSettingsChanges } from "./hooks/useStudioSettings";
-import { useStudioCache } from "./hooks/useStudioCache";
+import { type StudioCacheAction, useStudioCache } from "./hooks/useStudioCache";
 import { StudioConfigurationDrawer } from "./StudioConfigurationDrawer";
+import { CredentialProfilesSection } from "./CredentialProfilesSection";
 import type { TimezoneOption } from "./timezoneOptions";
 import "./settings.css";
 
@@ -120,17 +121,29 @@ export function SettingsPage({
               </dl>
             </div>
             <div className="settings-stat-card">
-              <p className="settings-stat-label">Source change check</p>
+              <p className="settings-stat-label">Source change observation</p>
               <dl className="settings-stat-dl">
                 <StatRow
-                  label="Check every"
+                  label={settings?.source_check_mode === "adaptive" ? "Active interval" : "Check every"}
                   value={settings ? `${settings.source_check_interval_seconds} seconds` : loadingValue(settingsLoading)}
                 />
-                <StatRow label="Mode" value="Revision-aware" />
+                <StatRow
+                  label="Mode"
+                  value={settings
+                    ? (settings.source_check_mode === "adaptive" ? "Adaptive" : "Fixed")
+                    : loadingValue(settingsLoading)}
+                />
+                {settings?.source_check_mode === "adaptive" ? (
+                  <StatRow label="Idle interval" value={`${settings.source_check_max_interval_seconds} seconds`} />
+                ) : null}
+                <StatRow label="Local metadata/code" value="On navigation / foreground" />
+                <StatRow label="Log sources" value="Observed periodically; synced by schedule" />
               </dl>
             </div>
           </div>
         </section>
+
+        <CredentialProfilesSection />
 
         <section className="settings-section" aria-labelledby="system-information-heading">
           <div className="settings-section-heading">
@@ -223,24 +236,13 @@ export function SettingsPage({
                     type="button"
                     disabled={maintenanceBusy}
                     onClick={() => setPendingMaintenanceAction({
-                      action: cache.prune,
-                      confirmLabel: "Prune cache",
-                      description: "Older result variants will be removed until the configured limits are met. Core Studio state remains protected.",
-                      title: "Prune result cache?",
-                      tone: "primary",
-                    })}
-                  >Prune to limits</button>
-                  <button
-                    type="button"
-                    disabled={maintenanceBusy}
-                    onClick={() => setPendingMaintenanceAction({
                       action: cache.compact,
-                      confirmLabel: "Compact file",
-                      description: "The result-cache SQLite file will be compacted and cache access may be briefly blocked.",
-                      title: "Compact result cache?",
+                      confirmLabel: "Optimize cache",
+                      description: "Older result variants will be removed until the configured limits are met, then the result-cache SQLite file will reclaim unused space. Cache access may be briefly blocked.",
+                      title: "Optimize result cache?",
                       tone: "primary",
                     })}
-                  >Compact file</button>
+                  >Optimize result cache</button>
                 </div>
               </details>
             </div>
@@ -357,13 +359,38 @@ function loadingValue(loading: boolean): string {
   return loading ? "Loading…" : "—";
 }
 
-function cacheMutationMessage(action: string): string {
-  if (action === "clear:read_models") return "Result cache cleared.";
-  if (action === "clear:analytics") return "Analytics cache cleared.";
-  if (action === "clear:all_disposable") return "All disposable caches cleared.";
-  if (action === "prune") return "Result cache pruned to its configured limits.";
-  if (action === "compact") return "Result cache file compacted.";
-  return "Cache maintenance completed.";
+function cacheMutationMessage(action: StudioCacheAction): string {
+  if (action.type === "clear") {
+    if (action.scope === "read_models") return "Result cache cleared.";
+    if (action.scope === "analytics") return "Analytics cache cleared.";
+    return "All disposable caches cleared.";
+  }
+
+  const prune = asRecord(action.result.read_models?.prune);
+  const compact = asRecord(action.result.read_models);
+  const deletedEntries = asNumber(prune?.deleted_entries) ?? 0;
+  const beforeBytes = asNumber(compact?.file_bytes_before);
+  const afterBytes = asNumber(compact?.file_bytes_after);
+  const entryLabel = deletedEntries === 1 ? "entry" : "entries";
+  if (beforeBytes !== null && afterBytes !== null) {
+    const fileSummary = afterBytes < beforeBytes
+      ? `file reduced from ${formatBytes(beforeBytes)} to ${formatBytes(afterBytes)}`
+      : afterBytes === beforeBytes
+        ? `file remains ${formatBytes(afterBytes)}`
+        : `file changed from ${formatBytes(beforeBytes)} to ${formatBytes(afterBytes)}`;
+    return `Result cache optimized. Removed ${formatCount(deletedEntries)} ${entryLabel}; ${fileSummary}.`;
+  }
+  return `Result cache optimized. Removed ${formatCount(deletedEntries)} ${entryLabel}.`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function formatCount(value: number | null | undefined): string {

@@ -26,7 +26,7 @@ export function EnvironmentsPage({
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const existingNames = useMemo(
-    () => new Set(project?.environments.map((e) => e.name) ?? []),
+    () => new Set((project?.environments ?? []).map((environment) => environment.name.toLowerCase())),
     [project]
   );
   const orderedEnvironments = useMemo(
@@ -72,7 +72,7 @@ export function EnvironmentsPage({
         <div className="env-create-bar">
           <div className="env-preset-chips" aria-label="Suggested environments">
             {ENVIRONMENT_PRESETS.map((name) => {
-              const exists = existingNames.has(name);
+              const exists = existingNames.has(name.toLowerCase());
               return (
                 <button
                   key={name}
@@ -98,7 +98,7 @@ export function EnvironmentsPage({
               aria-label="Add custom environment"
               aria-describedby="environment-name-hint"
             />
-            <span id="environment-name-hint" className="env-custom-hint">Use lowercase letters, numbers, hyphens, and underscores.</span>
+            <span id="environment-name-hint" className="env-custom-hint">Use letters, numbers, hyphens, and underscores.</span>
             <button type="submit" className="env-custom-btn" disabled={busy || !normalizeName(customName)}>
               <Plus size={13} aria-hidden="true" />
               Add
@@ -192,5 +192,5 @@ export function EnvironmentsPage({
 }
 
 function normalizeName(value: string) {
-  return value.trim().toLowerCase();
+  return value.trim();
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import Enum
 
 
@@ -10,6 +10,7 @@ class PartitionGranularity(str, Enum):
     YEAR = "year"
     MONTH = "month"
     DAY = "day"
+    UNPARTITIONED = "unpartitioned"
 
 
 @dataclass(frozen=True, order=True)
@@ -18,6 +19,49 @@ class ParsedPartition:
     raw_partition_path: str
     partition_granularity: PartitionGranularity
     partition_format: str
+
+
+@dataclass(frozen=True)
+class PartitionLayout:
+    partition_format: str | None
+    granularity: PartitionGranularity
+
+    def __post_init__(self) -> None:
+        if (
+            self.granularity is PartitionGranularity.UNPARTITIONED
+            and self.partition_format is not None
+        ):
+            raise ValueError("Unpartitioned layouts cannot define a partition format")
+        if (
+            self.granularity is not PartitionGranularity.UNPARTITIONED
+            and not self.partition_format
+        ):
+            raise ValueError("Partitioned layouts require a partition format")
+
+    def normalize(self, value: date) -> date:
+        if self.granularity is PartitionGranularity.YEAR:
+            return date(value.year, 1, 1)
+        if self.granularity is PartitionGranularity.MONTH:
+            return date(value.year, value.month, 1)
+        return value
+
+    def render(self, value: date) -> str:
+        if self.granularity is PartitionGranularity.UNPARTITIONED:
+            return ""
+        return self.normalize(value).strftime(str(self.partition_format))
+
+    def values(self, from_partition: date, to_partition: date) -> tuple[date, ...]:
+        if self.granularity is PartitionGranularity.UNPARTITIONED:
+            return (self.normalize(from_partition),)
+        current = self.normalize(from_partition)
+        end = self.normalize(to_partition)
+        if current > end:
+            return ()
+        values: list[date] = []
+        while current <= end:
+            values.append(current)
+            current = _next_partition(current, self.granularity)
+        return tuple(values)
 
 
 @dataclass(frozen=True)
@@ -115,3 +159,16 @@ def _apply_prefix_format(prefixes: tuple[str | None, ...], value_format: str) ->
         f"{prefix}={format_segment}" if prefix else format_segment
         for prefix, format_segment in zip(prefixes, format_segments, strict=True)
     )
+
+
+def _next_partition(
+    value: date,
+    granularity: PartitionGranularity,
+) -> date:
+    if granularity is PartitionGranularity.YEAR:
+        return date(value.year + 1, 1, 1)
+    if granularity is PartitionGranularity.MONTH:
+        if value.month == 12:
+            return date(value.year + 1, 1, 1)
+        return date(value.year, value.month + 1, 1)
+    return value + timedelta(days=1)

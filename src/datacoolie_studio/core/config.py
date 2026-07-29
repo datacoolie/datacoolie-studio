@@ -29,6 +29,10 @@ def cache_dir() -> Path:
     return default_config_dir() / "cache"
 
 
+def source_materialization_cache_dir() -> Path:
+    return cache_dir() / "source-materializations"
+
+
 def analytics_database_path() -> Path:
     return cache_dir() / "analytics.duckdb"
 

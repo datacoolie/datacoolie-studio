@@ -8,9 +8,10 @@ import type { ModuleKey } from "../../app/moduleRegistry";
 interface OverviewPageProps {
   overview: EnvironmentOverview | null;
   onNavigate: (module: ModuleKey, search?: string) => void;
+  timezoneName: string | null;
 }
 
-export function OverviewPage({ overview, onNavigate }: OverviewPageProps) {
+export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPageProps) {
   const sources = overview?.sources;
   const metadata = overview?.metadata;
   const lineage = overview?.lineage;
@@ -197,7 +198,7 @@ export function OverviewPage({ overview, onNavigate }: OverviewPageProps) {
           <CompactStat label="Active engines" value={monitoring?.active_engines ?? 0} />
           <CompactStat
             label="Latest log"
-            value={<RelativeTime value={logFreshness.latestAt} titlePrefix="Latest log" />}
+            value={<RelativeTime value={logFreshness.latestAt} titlePrefix="Latest log" timezoneName={timezoneName} />}
             intent={logFreshness.intent}
           />
           <CompactStat label="Date range" value={formatDateRange(monitoring?.date_range)} />

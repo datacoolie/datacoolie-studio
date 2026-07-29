@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import uuid
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,23 @@ from datacoolie_studio.db.models import (
     MetadataSaveEvent,
 )
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
+from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
+from datacoolie_studio.domains.metadata.storage_io import (
+    conditional_replace,
+    conditional_create,
+    create_local_backup,
+    current_revision as storage_current_revision,
+    read_source_bytes,
+    same_revision as storage_same_revision,
+    storage_for_source,
+)
+from datacoolie_studio.domains.credentials.store import CredentialSecretStore
+from datacoolie_studio.domains.storage.errors import StorageConflictError
+from datacoolie_studio.domains.sources.storage_binding import (
+    apply_binding,
+    binding_from_source,
+)
+from datacoolie_studio.domains.storage.uri import join_uri, parse_storage_uri
 
 CONNECTION_COLUMNS = [
     "connection_id",
@@ -165,6 +183,8 @@ def restore_backup(
     backup_id: int,
     expected_revision: dict[str, Any],
     confirm_restore: bool,
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
     if not confirm_restore:
         raise MetadataReadError("Restoring metadata requires confirmation")
@@ -174,7 +194,10 @@ def restore_backup(
     if source is None or source.source_kind != "metadata":
         raise MetadataReadError("Metadata source not found")
 
-    current_revision = source_revision(source.uri)
+    storage = storage_for_source(
+        session, source, secret_store=secret_store, writable=True
+    )
+    current_bytes, current_revision = read_source_bytes(storage, source)
     if not _same_revision(current_revision, expected_revision):
         _record_save_event(session, source, "conflict", "Source file changed before restore", current_revision, None, None)
         raise MetadataConflictError("Source file changed before restore")
@@ -192,17 +215,26 @@ def restore_backup(
     if validation["status"] == "error":
         raise MetadataValidationError("Backup has validation errors", validation)
 
-    current_backup_path = _create_backup_file(source, current_revision)
-    source_path = Path(source.uri).expanduser()
-    tmp_path = source_path.with_name(f".{source_path.name}.tmp-{uuid.uuid4().hex}")
+    current_backup_path = create_local_backup(
+        source, current_bytes, current_revision
+    )
+    restored_bytes = backup_path.read_bytes()
     try:
-        shutil.copy2(backup_path, tmp_path)
-        os.replace(tmp_path, source_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        restored_revision = conditional_replace(
+            storage, source, restored_bytes, current_revision
+        )
+    except StorageConflictError as exc:
+        _record_save_event(
+            session,
+            source,
+            "conflict",
+            "Source object changed before restore",
+            current_revision,
+            None,
+            current_backup_path,
+        )
+        raise MetadataConflictError("Source object changed before restore") from exc
 
-    restored_revision = source_revision(source.uri)
     event = _record_save_event(
         session,
         source,
@@ -228,7 +260,11 @@ def restore_backup(
     if draft is not None:
         session.delete(draft)
     session.commit()
-    return load_editor_document(source)
+    return load_editor_document_from_raw(
+        source,
+        read_metadata_bytes(source.uri, restored_bytes),
+        restored_revision,
+    )
 
 
 def _load_editor_document_from_path(
@@ -360,8 +396,19 @@ def load_editor_draft(session: Session, source: EnvironmentSource) -> dict[str, 
     return json.loads(draft.editor_document_json)
 
 
-def save_editor_draft(session: Session, source: EnvironmentSource, document: dict[str, Any]) -> dict[str, Any]:
-    _assert_source_revision_current(source, document.get("source", {}).get("revision") or {})
+def save_editor_draft(
+    session: Session,
+    source: EnvironmentSource,
+    document: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict[str, Any]:
+    _assert_source_revision_current(
+        session,
+        source,
+        document.get("source", {}).get("revision") or {},
+        secret_store=secret_store,
+    )
     _materialize_generated_ids(_document_sheets_as_rows(document))
     document["issues"] = validate_editor_document(document)["issues"]
     draft = _latest_draft(session, source.id)
@@ -396,8 +443,12 @@ def save_environment_editor_draft(
     environment_id: int,
     document: dict[str, Any],
     expected_revision: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
-    _assert_environment_revision_current(session, document, expected_revision)
+    _assert_environment_revision_current(
+        session, document, expected_revision, secret_store=secret_store
+    )
     _materialize_generated_ids(_document_sheets_as_rows(document))
     document["issues"] = validate_editor_document(document)["issues"]
     payload = json.dumps(document, ensure_ascii=False)
@@ -518,10 +569,14 @@ def save_editor_document(
     confirm_overwrite: bool,
     *,
     validate_document: bool = True,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
     if not confirm_overwrite:
         raise MetadataReadError("Saving metadata requires overwrite confirmation")
-    current_revision = source_revision(source.uri)
+    storage = storage_for_source(
+        session, source, secret_store=secret_store, writable=True
+    )
+    current_bytes, current_revision = read_source_bytes(storage, source)
     if not _same_revision(current_revision, expected_revision):
         _record_save_event(session, source, "conflict", "Source file changed before save", current_revision, None, None)
         raise MetadataConflictError("Source file changed before save")
@@ -533,21 +588,24 @@ def save_editor_document(
             document["issues"] = validation["issues"]
             raise MetadataValidationError("Metadata document has validation errors", validation)
 
-    path = Path(source.uri).expanduser()
-    backup_path = _create_backup_file(source, current_revision)
-    serialized = _serialize_editor_document(document, path)
-    tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
+    path = Path(source.uri)
+    backup_path = create_local_backup(source, current_bytes, current_revision)
+    serialized_bytes = _serialize_editor_document_bytes(document, source.uri)
     try:
-        if path.suffix.lower() in {".xlsx", ".xls"}:
-            _write_xlsx_document(document, tmp_path)
-        else:
-            tmp_path.write_text(serialized, encoding="utf-8")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-    saved_revision = source_revision(source.uri)
+        saved_revision = conditional_replace(
+            storage, source, serialized_bytes, current_revision
+        )
+    except StorageConflictError as exc:
+        _record_save_event(
+            session,
+            source,
+            "conflict",
+            "Source object changed before save",
+            current_revision,
+            None,
+            backup_path,
+        )
+        raise MetadataConflictError("Source object changed before save") from exc
     event = _record_save_event(session, source, "saved", "Metadata source saved", current_revision, saved_revision, backup_path)
     backup = MetadataBackup(
         project_id=source.environment.project_id if source.environment else 0,
@@ -564,7 +622,11 @@ def save_editor_document(
     if draft is not None:
         session.delete(draft)
     session.commit()
-    return load_editor_document(source)
+    return load_editor_document_from_raw(
+        source,
+        read_metadata_bytes(source.uri, serialized_bytes),
+        saved_revision,
+    )
 
 
 def save_environment_editor_document(
@@ -574,6 +636,8 @@ def save_environment_editor_document(
     document: dict[str, Any],
     expected_revision: dict[str, Any],
     confirm_overwrite: bool,
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
     if not confirm_overwrite:
         raise MetadataReadError("Saving metadata requires overwrite confirmation")
@@ -587,20 +651,96 @@ def save_environment_editor_document(
         document["issues"] = validation["issues"]
         raise MetadataValidationError("Metadata document has validation errors", validation)
 
-    _assert_environment_revision_current(session, document, expected_revision)
-    enabled_sources = _resolve_environment_document_sources(session, environment_id, enabled_sources, document)
+    _assert_environment_revision_current(
+        session, document, expected_revision, secret_store=secret_store
+    )
+    enabled_sources = _resolve_environment_document_sources(
+        session,
+        environment_id,
+        enabled_sources,
+        document,
+        secret_store=secret_store,
+    )
 
     source_documents: list[tuple[EnvironmentSource, dict[str, Any], dict[str, Any]]] = []
     for source in enabled_sources:
-        base_document = _load_source_document_from_environment_revision(session, source, expected_revision)
+        base_document = _load_source_document_from_environment_revision(
+            session,
+            source,
+            expected_revision,
+            secret_store=secret_store,
+        )
         source_document = _environment_document_for_source(document, base_document, source)
         if _source_document_changed(base_document, source_document):
             source_documents.append((source, source_document, base_document.get("source", {}).get("revision") or {}))
 
+    originals: dict[int, tuple[Any, bytes, dict[str, Any], Path]] = {}
+    for source, _, source_expected_revision in source_documents:
+        storage = storage_for_source(
+            session, source, secret_store=secret_store, writable=True
+        )
+        original_bytes, original_revision = read_source_bytes(storage, source)
+        if not _same_revision(original_revision, source_expected_revision):
+            raise MetadataConflictError(
+                f"Source file changed before save: {source.uri}"
+            )
+        originals[source.id] = (
+            storage,
+            original_bytes,
+            original_revision,
+            create_local_backup(source, original_bytes, original_revision),
+        )
+
     saved_source_ids: list[int] = []
-    for source, source_document, source_expected_revision in source_documents:
-        save_editor_document(session, source, source_document, source_expected_revision, confirm_overwrite=True, validate_document=False)
-        saved_source_ids.append(source.id)
+    try:
+        for source, source_document, source_expected_revision in source_documents:
+            save_editor_document(
+                session,
+                source,
+                source_document,
+                source_expected_revision,
+                confirm_overwrite=True,
+                validate_document=False,
+                secret_store=secret_store,
+            )
+            saved_source_ids.append(source.id)
+    except Exception:
+        compensation_errors: list[int] = []
+        for source_id in reversed(saved_source_ids):
+            source = next(item for item, _, _ in source_documents if item.id == source_id)
+            storage, original_bytes, _, backup_path = originals[source_id]
+            try:
+                current = storage_current_revision(
+                    storage, source, include_content_hash=True
+                )
+                restored = conditional_replace(
+                    storage, source, original_bytes, current
+                )
+                _record_save_event(
+                    session,
+                    source,
+                    "compensated",
+                    "Metadata source restored after multi-source save failure",
+                    current,
+                    restored,
+                    backup_path,
+                )
+            except Exception:
+                compensation_errors.append(source_id)
+                _record_save_event(
+                    session,
+                    source,
+                    "partial_failure",
+                    "Metadata compensation failed; recover from local backup",
+                    None,
+                    None,
+                    backup_path,
+                )
+        if compensation_errors:
+            raise MetadataReadError(
+                "partial_failure: metadata save could not fully compensate; local backups are available"
+            )
+        raise
 
     delete_environment_editor_draft(session, environment_id)
     from datacoolie_studio.domains.metadata import service as metadata_service
@@ -610,8 +750,11 @@ def save_environment_editor_document(
             session,
             source,
             force=source.id in saved_source_ids,
+            secret_store=secret_store,
         )
-    return metadata_service.load_environment_editor_document(session, enabled_sources)
+    return metadata_service.load_environment_editor_document(
+        session, enabled_sources, secret_store=secret_store
+    )
 
 
 class MetadataConflictError(MetadataReadError):
@@ -665,13 +808,28 @@ def _latest_environment_draft(session: Session, environment_id: int) -> Environm
     ).first()
 
 
-def _assert_source_revision_current(source: EnvironmentSource, expected_revision: dict[str, Any]) -> None:
-    current_revision = source_revision(source.uri)
+def _assert_source_revision_current(
+    session: Session,
+    source: EnvironmentSource,
+    expected_revision: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> None:
+    storage = storage_for_source(session, source, secret_store=secret_store)
+    current_revision = storage_current_revision(
+        storage, source, include_content_hash=True
+    )
     if not _same_revision(current_revision, expected_revision):
         raise MetadataConflictError("Source file changed before draft save")
 
 
-def _assert_environment_revision_current(session: Session, document: dict[str, Any], expected_revision: dict[str, Any]) -> None:
+def _assert_environment_revision_current(
+    session: Session,
+    document: dict[str, Any],
+    expected_revision: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> None:
     source_revision_map = _environment_revision_sources(expected_revision or document.get("source", {}).get("revision") or {})
     source_ids = _document_source_ids(document)
     missing = sorted(source_ids - set(source_revision_map))
@@ -681,7 +839,12 @@ def _assert_environment_revision_current(session: Session, document: dict[str, A
         source = session.get(EnvironmentSource, source_id)
         if source is None or source.source_kind != "metadata":
             raise MetadataReadError(f"Metadata source not found: {source_id}")
-        _assert_source_revision_current(source, source_revision_map[source_id])
+        _assert_source_revision_current(
+            session,
+            source,
+            source_revision_map[source_id],
+            secret_store=secret_store,
+        )
 
 
 def _same_revision(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -720,6 +883,8 @@ def _resolve_environment_document_sources(
     environment_id: int,
     sources: list[EnvironmentSource],
     document: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> list[EnvironmentSource]:
     registry = {source.id: source for source in sources}
     tokens = _metadata_source_tokens(sources)
@@ -734,7 +899,13 @@ def _resolve_environment_document_sources(
                 raise MetadataReadError("metadata_source is required for every metadata row")
             source = tokens.get(_source_token(source_name))
             if source is None:
-                source = _create_metadata_source_for_routing(session, environment_id, source_name, list(registry.values()))
+                source = _create_metadata_source_for_routing(
+                    session,
+                    environment_id,
+                    source_name,
+                    list(registry.values()),
+                    secret_store=secret_store,
+                )
                 registry[source.id] = source
                 for token, value in _metadata_source_tokens([source]).items():
                     tokens[token] = value
@@ -776,7 +947,58 @@ def _create_metadata_source_for_routing(
     environment_id: int,
     source_name: str,
     existing_sources: list[EnvironmentSource],
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> EnvironmentSource:
+    cloud_parent = next(
+        (
+            source
+            for source in existing_sources
+            if source.storage_provider != "local"
+        ),
+        None,
+    )
+    if cloud_parent is not None:
+        root_uri = _metadata_root_uri_text(cloud_parent)
+        if not root_uri:
+            raise MetadataReadError(
+                "metadata_root_uri is required to create a cloud metadata object"
+            )
+        relative_name = _safe_metadata_object_name(source_name)
+        uri = join_uri(root_uri, relative_name)
+        source = EnvironmentSource(
+            environment_id=environment_id,
+            source_kind="metadata",
+            uri=uri,
+            label=relative_name,
+            enabled=True,
+            source_config_json=json.dumps(
+                {
+                    "discovery_mode": "metadata_path",
+                    "metadata_root_uri": root_uri,
+                },
+                sort_keys=True,
+            ),
+        )
+        apply_binding(source, binding_from_source(cloud_parent))
+        session.add(source)
+        session.flush()
+        storage = storage_for_source(
+            session, source, secret_store=secret_store, writable=True
+        )
+        empty = json.dumps(
+            {"connections": [], "dataflows": [], "schema_hints": []},
+            indent=2,
+        ).encode("utf-8")
+        try:
+            conditional_create(storage, source, empty)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        session.refresh(source)
+        return source
+
     base_dir = _metadata_source_base_dir(existing_sources)
     uri = _metadata_source_uri_for_new_name(source_name, base_dir)
     path = Path(uri).expanduser()
@@ -806,6 +1028,32 @@ def _create_metadata_source_for_routing(
     session.commit()
     session.refresh(source)
     return source
+
+
+def _safe_metadata_object_name(source_name: str) -> str:
+    normalized = source_name.strip().replace("\\", "/")
+    parsed = parse_storage_uri(normalized)
+    if (
+        parsed.provider != "local"
+        or normalized.startswith("/")
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise MetadataReadError(
+            "New metadata source name must be a relative path under metadata_root_uri"
+        )
+    candidate = Path(normalized)
+    if not candidate.suffix:
+        normalized = f"{normalized}.json"
+    return normalized
+
+
+def _metadata_root_uri_text(source: EnvironmentSource) -> str | None:
+    try:
+        config = json.loads(source.source_config_json or "{}")
+    except json.JSONDecodeError:
+        return None
+    value = config.get("metadata_root_uri") if isinstance(config, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _metadata_source_uri_for_new_name(source_name: str, base_dir: Path) -> str:
@@ -873,16 +1121,23 @@ def _load_source_document_from_environment_revision(
     session: Session,
     source: EnvironmentSource,
     expected_revision: dict[str, Any],
+    *,
+    secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
     source_revision_map = _environment_revision_sources(expected_revision)
     expected = source_revision_map.get(source.id)
+    storage = storage_for_source(session, source, secret_store=secret_store)
+    content, current = read_source_bytes(storage, source)
     if expected is None:
-        return load_editor_document(source)
-    current = source_revision(source.uri)
+        return load_editor_document_from_raw(
+            source, read_metadata_bytes(source.uri, content), current
+        )
     if not _same_revision(current, expected):
         _record_save_event(session, source, "conflict", "Source file changed before environment save", current, None, None)
         raise MetadataConflictError(f"Source file changed before save: {source.uri}")
-    return load_editor_document(source)
+    return load_editor_document_from_raw(
+        source, read_metadata_bytes(source.uri, content), current
+    )
 
 
 def _environment_document_for_source(
@@ -1018,6 +1273,18 @@ def _serialize_editor_document(document: dict[str, Any], path: Path) -> str:
         except ImportError:
             return yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
     return json.dumps(raw, indent=2, ensure_ascii=False)
+
+
+def _serialize_editor_document_bytes(
+    document: dict[str, Any], uri: str
+) -> bytes:
+    suffix = Path(uri).suffix.lower()
+    if suffix not in {".xlsx", ".xls"}:
+        return _serialize_editor_document(document, Path(uri)).encode("utf-8")
+    with tempfile.TemporaryDirectory(prefix="datacoolie-metadata-") as directory:
+        target = Path(directory) / f"metadata{suffix}"
+        _write_xlsx_document(document, target)
+        return target.read_bytes()
 
 
 def _editor_document_to_raw_metadata(document: dict[str, Any]) -> dict[str, Any]:

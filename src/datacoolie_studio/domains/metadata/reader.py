@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +21,30 @@ def read_metadata_file(uri: str) -> dict[str, Any]:
         raise MetadataReadError(str(exc)) from exc
     if not path.exists():
         raise MetadataReadError(f"Metadata file not found: {uri}")
-    suffix = path.suffix.lower()
     try:
-        if suffix in {".yaml", ".yml"}:
-            return _read_yaml(path)
-        if suffix in {".xlsx", ".xls"}:
-            return _read_excel(path)
-        return _read_json(path)
+        return read_metadata_bytes(uri, path.read_bytes())
     except MetadataReadError:
         raise
     except Exception as exc:
         raise MetadataReadError(f"Cannot parse metadata file: {uri}") from exc
+
+
+def read_metadata_bytes(uri: str, content: bytes) -> dict[str, Any]:
+    suffix = Path(uri.split("?", 1)[0]).suffix.lower()
+    try:
+        if suffix in {".yaml", ".yml"}:
+            data = yaml.safe_load(content.decode("utf-8")) or {}
+        elif suffix in {".xlsx", ".xls"}:
+            return _read_excel_bytes(content)
+        else:
+            data = json.loads(content.decode("utf-8"))
+    except MetadataReadError:
+        raise
+    except Exception as exc:
+        raise MetadataReadError(f"Cannot parse metadata file: {uri}") from exc
+    if not isinstance(data, dict):
+        raise MetadataReadError("Metadata root must be an object")
+    return data
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -53,6 +67,22 @@ def _read_excel(path: Path) -> dict[str, Any]:
     import openpyxl
 
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        return {
+            "connections": _sheet_rows(workbook, "connections"),
+            "dataflows": _excel_dataflows(workbook),
+            "schema_hints": _excel_schema_hints(workbook),
+        }
+    finally:
+        workbook.close()
+
+
+def _read_excel_bytes(content: bytes) -> dict[str, Any]:
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(
+        BytesIO(content), read_only=True, data_only=True
+    )
     try:
         return {
             "connections": _sheet_rows(workbook, "connections"),

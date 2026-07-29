@@ -9,6 +9,7 @@ describe("sourceCheckIntervalMs", () => {
     expect(sourceCheckIntervalMs(45)).toBe(45_000);
     expect(sourceCheckIntervalMs(5)).toBe(5_000);
     expect(sourceCheckIntervalMs(3600)).toBe(3_600_000);
+    expect(sourceCheckIntervalMs(30, "adaptive", 300)).toBe(300_000);
   });
 
   it("falls back to the 30 second default", () => {

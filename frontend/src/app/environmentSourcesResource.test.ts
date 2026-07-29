@@ -3,9 +3,7 @@ import type { SourcePath } from "../shared/api/domainTypes";
 
 vi.mock("../shared/api/client", () => ({
   api: {
-    listMetadataSources: vi.fn(),
-    listLogSources: vi.fn(),
-    listCodeArtifacts: vi.fn(),
+    getSourcesWorkspace: vi.fn(),
   },
 }));
 
@@ -30,13 +28,23 @@ describe("fetchEnvironmentSources", () => {
     const metadataSources = [source(1)];
     const logPaths = [source(2)];
     const codeArtifacts = [source(3)];
-    vi.mocked(api.listMetadataSources).mockResolvedValue(metadataSources);
-    vi.mocked(api.listLogSources).mockResolvedValue(logPaths);
-    vi.mocked(api.listCodeArtifacts).mockResolvedValue(codeArtifacts);
+    vi.mocked(api.getSourcesWorkspace).mockResolvedValue({
+      schema_version: "sources-workspace.v1",
+      environment_id: 7,
+      metadata_sources: metadataSources,
+      log_sources: logPaths,
+      code_artifacts: codeArtifacts,
+      statuses: [],
+      earliest_cloud_due_at: null,
+      dependency_version: "test-version",
+    });
 
-    await expect(fetchEnvironmentSources(7)).resolves.toEqual({ metadataSources, logPaths, codeArtifacts });
-    expect(api.listMetadataSources).toHaveBeenCalledWith(7);
-    expect(api.listLogSources).toHaveBeenCalledWith(7);
-    expect(api.listCodeArtifacts).toHaveBeenCalledWith(7);
+    await expect(fetchEnvironmentSources(7)).resolves.toEqual({
+      metadataSources,
+      logPaths,
+      codeArtifacts,
+      statuses: {},
+    });
+    expect(api.getSourcesWorkspace).toHaveBeenCalledWith(7);
   });
 });

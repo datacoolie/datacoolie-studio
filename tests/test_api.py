@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import io
 import sqlite3
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from datacoolie_studio.domains.analytics import access as analytics_access
@@ -18,6 +20,18 @@ SAMPLE_METADATA = (
 
 def _normalize_duckdb_type(value: str) -> str:
     return value.upper().replace("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE")
+
+
+def _source_status(client, environment_id: int, source_id: int) -> dict:
+    workspace = client.get(
+        f"/api/v1/environments/{environment_id}/sources/workspace"
+    )
+    assert workspace.status_code == 200, workspace.text
+    return next(
+        status
+        for status in workspace.json()["statuses"]
+        if status["source_id"] == source_id
+    )
 
 
 def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
@@ -38,7 +52,9 @@ def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": "metadata.json", "label": "metadata"},
         ).json()
-        assert source["uri"] == "metadata.json"
+        assert Path(source["uri"]).is_absolute()
+        assert Path(source["uri"]).name == "metadata.json"
+        assert source["configured_location"]["input_uri"] == "metadata.json"
         assert client.get("/api/projects").status_code == 404
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
@@ -69,6 +85,9 @@ def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeyp
             f"/api/v1/environments/{environment['id']}/log-sources",
             json={"uri": str(empty_logs), "label": "empty logs"},
         ).json()
+        source = client.get(
+            f"/api/v1/environments/{environment['id']}/log-sources"
+        ).json()[0]
 
         assert source["latest_validation"]["status"] == "error"
         assert source["latest_validation"]["message"] == "No ETL or system log files found"
@@ -139,7 +158,13 @@ def test_environment_overview_is_available_when_monitoring_cache_is_missing(
             f"/api/v1/environments/{environment['id']}/log-sources",
             json={"uri": str(SAMPLE_LOGS), "label": "logs"},
         ).json()
+        source = client.get(
+            f"/api/v1/environments/{environment['id']}/log-sources"
+        ).json()[0]
         assert source["latest_validation"]["status"] == "ok"
+        # Add performs the required initial sync. Remove that cache explicitly
+        # so this test still exercises the fail-soft read contract.
+        analytics_path.unlink()
 
         overview = client.get(f"/api/v1/environments/{environment['id']}/overview")
         filter_options = client.get(
@@ -465,6 +490,27 @@ def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
         assert validation["record_counts"]["files"] == 1
         assert validation["validated_at"].endswith(("Z", "+00:00"))
 
+        observation = client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        )
+        assert observation.status_code == 200
+        assert observation.json()["total"] == 1
+        assert observation.json()["observed"] == 1
+        assert observation.json()["failed"] == 0
+        sync_status = _source_status(client, env["id"], source["id"])
+        assert sync_status["last_observed_at"] is not None
+        assert sync_status["next_check_at"] is None
+        sources_workspace = client.get(
+            f"/api/v1/environments/{env['id']}/sources/workspace"
+        )
+        assert sources_workspace.status_code == 200
+        assert [item["id"] for item in sources_workspace.json()["metadata_sources"]] == [
+            source["id"]
+        ]
+        assert sources_workspace.json()["log_sources"] == []
+        assert sources_workspace.json()["code_artifacts"] == []
+        assert sources_workspace.json()["statuses"][0]["source_id"] == source["id"]
+
         sources = client.get(
             f"/api/v1/environments/{env['id']}/metadata-sources"
         ).json()
@@ -499,7 +545,7 @@ def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
         assert impact["metadata_file_deleted"] is False
         assert impact["has_impact"] is True
         assert {item["kind"] for item in impact["impacts"]} == {
-            "source_revision", "sync_job", "materialization",
+            "source_observation", "sync_job", "materialization",
         }
 
         response = client.delete(f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}")
@@ -512,7 +558,7 @@ def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
-def test_project_scan_materializes_new_metadata_and_code_sources(tmp_path: Path, monkeypatch):
+def test_project_scan_queues_metadata_and_code_initialization(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     project_root = tmp_path / "project"
     metadata_dir = project_root / "metadata"
@@ -546,16 +592,27 @@ def test_project_scan_materializes_new_metadata_and_code_sources(tmp_path: Path,
             "errors": 0,
             "metadata_sources": 1,
             "code_artifacts": 1,
-            "auto_validated": 2,
-            "auto_synced": 2,
+            "initialization_queued": 2,
         }
         assert first["errors"] == []
+        registration_ids = {
+            item["configured_location"]["registration_id"]
+            for item in first["created"]
+        }
+        assert len(registration_ids) == 1
+        assert all(
+            item["configured_location"]["purpose"] == "project"
+            and item["configured_location"]["input_uri"] == str(project_root)
+            for item in first["created"]
+        )
         assert client.get(f"/api/v1/environments/{environment['id']}/log-sources").json() == []
 
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from metadata_materializations").fetchone()[0] == 1
             assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
-            assert connection.execute("select count(*) from sync_jobs where job_type = 'auto_refresh'").fetchone()[0] == 2
+            assert connection.execute(
+                "select count(*) from sync_jobs where job_type = 'initial_refresh'"
+            ).fetchone()[0] == 2
 
         second = client.post(
             f"/api/v1/environments/{environment['id']}/datacoolie-project-sources",
@@ -563,21 +620,179 @@ def test_project_scan_materializes_new_metadata_and_code_sources(tmp_path: Path,
         ).json()
         assert second["summary"]["created"] == 0
         assert second["summary"]["existing"] == 2
-        assert second["summary"]["auto_validated"] == 0
-        assert second["summary"]["auto_synced"] == 0
+        assert second["summary"]["initialization_queued"] == 2
+        assert {
+            item["configured_location"]["registration_id"]
+            for item in second["existing"]
+        } == registration_ids
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from sync_jobs where job_type = 'auto_refresh'").fetchone()[0] == 2
+            assert connection.execute(
+                "select count(*) from sync_jobs where job_type = 'initial_refresh'"
+            ).fetchone()[0] == 4
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
-def test_new_log_source_validates_without_syncing(tmp_path: Path, monkeypatch):
+def test_project_scan_preserves_remote_storage_binding(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.domains.storage.adapters import StorageObject
+    from datacoolie_studio.domains.storage.inventory import StorageInventory
+    from datacoolie_studio.main import app
+
+    class FakeRemoteProjectAdapter:
+        def __init__(self):
+            self.read_count = 0
+
+        def canonical_uri(self, uri: str) -> str:
+            return uri.rstrip("/")
+
+        def inventory(self, request):
+            uri = request.uri
+            if uri.endswith("/metadata"):
+                objects = [
+                    StorageObject(
+                        canonical_uri=f"{uri}/metadata.json",
+                        name="metadata.json",
+                        object_type="file",
+                    )
+                ]
+            elif uri.endswith("/functions"):
+                objects = [
+                    StorageObject(
+                        canonical_uri=f"{uri}/transform.py",
+                        name="transform.py",
+                        object_type="file",
+                        size=32,
+                    )
+                ]
+            else:
+                objects = []
+            return StorageInventory(
+                objects=tuple(objects),
+                completeness="complete",
+                requests=1,
+                pages=1,
+                directories_visited=1,
+                objects_inspected=len(objects),
+                matching_objects=len(objects),
+                retries=0,
+                throttles=0,
+                bytes_read=0,
+                duration_ms=1,
+            )
+
+        def open_read(self, uri: str):
+            self.read_count += 1
+            assert uri.endswith("/metadata.json")
+            return io.BytesIO(
+                b'{"connections":[{"name":"lake"}],"dataflows":[],"schema_hints":[]}'
+            )
+
+    remote_adapter = FakeRemoteProjectAdapter()
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.workspace.service.create_storage_adapter",
+        lambda *_args, **_kwargs: remote_adapter,
+    )
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        response = client.post(
+            f"/api/v1/environments/{environment['id']}/datacoolie-project-sources",
+            json={
+                "project_uri": "/Volumes/catalog/schema/volume/project",
+                "enabled": False,
+                "storage": {
+                    "provider": "dbfs",
+                    "auth_mode": "ambient",
+                    "options": {
+                        "host": "https://workspace.cloud.databricks.com"
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["summary"]["created"] == 2
+        sources = [
+            *client.get(
+                f"/api/v1/environments/{environment['id']}/metadata-sources"
+            ).json(),
+            *client.get(
+                f"/api/v1/environments/{environment['id']}/code-artifacts"
+            ).json(),
+        ]
+        assert {source["storage"]["provider"] for source in sources} == {"dbfs"}
+        assert all(
+            source["uri"].startswith(
+                "dbfs:/Volumes/catalog/schema/volume/project/"
+            )
+            for source in sources
+        )
+        assert all(
+            source["storage"]["options"]["host"]
+            == "https://workspace.cloud.databricks.com"
+            for source in sources
+        )
+
+        onelake = client.post(
+            f"/api/v1/environments/{environment['id']}/datacoolie-project-sources",
+            json={
+                "project_uri": (
+                    "https://onelake.dfs.fabric.microsoft.com/Analytics/"
+                    "Telemetry.Lakehouse/Files/project"
+                ),
+                "enabled": False,
+                "storage": {
+                    "provider": "onelake",
+                    "auth_mode": "ambient",
+                },
+            },
+        )
+        assert onelake.status_code == 200, onelake.text
+        assert onelake.json()["summary"]["created"] == 2
+        onelake_sources = [
+            source
+            for source in [
+                *client.get(
+                    f"/api/v1/environments/{environment['id']}/metadata-sources"
+                ).json(),
+                *client.get(
+                    f"/api/v1/environments/{environment['id']}/code-artifacts"
+                ).json(),
+            ]
+            if source["storage"]["provider"] == "onelake"
+        ]
+        assert len(onelake_sources) == 2
+        assert all(
+            source["uri"].startswith(
+                "abfss://Analytics@onelake.dfs.fabric.microsoft.com/"
+                "Telemetry.Lakehouse/Files/project/"
+            )
+            for source in onelake_sources
+        )
+        assert remote_adapter.read_count == 0
+
+
+def test_new_log_source_queues_validation_and_sync(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
+    analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
 
     from fastapi.testclient import TestClient
 
+    from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app
+
+    monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_access, "analytics_database_path", lambda: analytics_path)
+    monkeypatch.setattr(analytics_maintenance, "analytics_database_path", lambda: analytics_path)
 
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
@@ -588,14 +803,17 @@ def test_new_log_source_validates_without_syncing(tmp_path: Path, monkeypatch):
             f"/api/v1/environments/{environment['id']}/log-sources",
             json={"uri": str(SAMPLE_LOGS), "label": "sample logs"},
         ).json()
-        assert source["latest_validation"]["status"] == "ok"
-        status = client.get(
-            f"/api/v1/environments/{environment['id']}/log-sources/{source['id']}/sync-status"
-        ).json()
-        assert status["status"] == "unknown"
-        assert status["latest_job"] is None
+        assert source["latest_validation"] is None
+        persisted = client.get(
+            f"/api/v1/environments/{environment['id']}/log-sources"
+        ).json()[0]
+        assert persisted["latest_validation"]["status"] == "ok"
+        status = _source_status(client, environment["id"], source["id"])
+        assert status["status"] == "ok"
+        assert status["latest_job"]["job_type"] == "auto_refresh"
+        assert status["latest_job"]["status"] == "succeeded"
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 0
+            assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -715,12 +933,14 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
             json={"uri": str(SAMPLE_METADATA), "label": "metadata"},
         ).json()
 
-        status = client.get(
-            f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/sync-status"
-        ).json()
+        status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "ok"
         assert status["latest_job"]["job_type"] == "auto_refresh"
 
+        validation = client.post(
+            f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/validate"
+        ).json()
+        assert validation["status"] == "ok"
         refreshed = client.post(
             f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/refresh"
         ).json()
@@ -734,16 +954,14 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
         listed = client.get(
             f"/api/v1/environments/{env['id']}/metadata-sources"
         ).json()
-        assert listed[0]["latest_validation"]["status"] == "ok"
-        assert listed[0]["latest_validation"]["record_counts"] == {"files": 1}
-        assert listed[0]["latest_validation"]["validated_at"].endswith(("Z", "+00:00"))
+        assert listed[0]["latest_validation"] == validation
 
         impact = client.get(
             f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/delete-impact"
         ).json()
         assert impact["has_impact"] is True
         assert {item["kind"] for item in impact["impacts"]} == {
-            "source_revision",
+            "source_observation",
             "sync_job",
             "materialization",
         }
@@ -752,7 +970,7 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
         assert response.status_code == 204
         with sqlite3.connect(db_path) as connection:
             assert (
-                connection.execute("select count(*) from source_revisions").fetchone()[
+                connection.execute("select count(*) from source_observations").fetchone()[
                     0
                 ]
                 == 0
@@ -829,16 +1047,20 @@ def test_environment_freshness_reports_materialized_cache_state(
             f"/api/v1/environments/{env['id']}/metadata-sources",
             json={"uri": str(metadata_new), "label": "new"},
         )
-        client.post(
+        log_source = client.post(
             f"/api/v1/environments/{env['id']}/log-sources",
             json={"uri": str(logs_dir), "label": "logs"},
+        ).json()
+        client.post(
+            f"/api/v1/environments/{env['id']}/log-sources/{log_source['id']}/refresh",
+            json={"mode": "incremental"},
         )
 
         freshness = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness["metadata_source_count"] == 2
         assert freshness["etl_log_path_count"] == 1
-        assert freshness["status"] == "not_cached"
-        # Metadata sources materialize on add; logs remain scheduled/manual.
+        assert freshness["status"] == "current"
+        # Metadata and logs have both materialized before freshness is read.
         assert freshness["max_source_modified_at"] == "2023-11-14T22:18:20Z"
         initial_source_cache_version = freshness["source_cache_version"]
 
@@ -904,9 +1126,9 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
                 ).fetchone()[0]
                 == 1
             )
-            assert (
-                connection.execute("select count(*) from sync_jobs").fetchone()[0] == 1
-            )
+            initial_sync_job_count = connection.execute(
+                "select count(*) from sync_jobs"
+            ).fetchone()[0]
 
         original_read_metadata_file = metadata_service.read_metadata_file
 
@@ -923,9 +1145,9 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
                 ).fetchone()[0]
                 == 1
             )
-            assert (
-                connection.execute("select count(*) from sync_jobs").fetchone()[0] == 1
-            )
+            assert connection.execute(
+                "select count(*) from sync_jobs"
+            ).fetchone()[0] == initial_sync_job_count
 
         monkeypatch.setattr(
             metadata_service, "read_metadata_file", original_read_metadata_file
@@ -950,9 +1172,9 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
                 ).fetchone()[0]
                 == 1
             )
-            assert (
-                connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
-            )
+            assert connection.execute(
+                "select count(*) from sync_jobs"
+            ).fetchone()[0] == initial_sync_job_count + 1
 
         metadata_path.write_text("{ invalid json", encoding="utf-8")
         invalid = client.get(f"/api/v1/environments/{env['id']}/metadata").json()
@@ -961,17 +1183,14 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
         listed = client.get(
             f"/api/v1/environments/{env['id']}/metadata-sources"
         ).json()
-        assert listed[0]["latest_validation"]["status"] == "error"
-        assert listed[0]["latest_validation"]["validated_at"].endswith(("Z", "+00:00"))
+        assert listed[0]["latest_validation"] is None
 
         metadata_path.unlink()
         last_good = client.get(f"/api/v1/environments/{env['id']}/metadata").json()
         assert last_good["dataflows"][0]["name"] == "flow_v2"
         assert last_good["summary"]["errors"] == 1
         assert last_good["errors"][0]["cache_status"] == "stale"
-        status = client.get(
-            f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/sync-status"
-        ).json()
+        status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "error"
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
@@ -1005,8 +1224,7 @@ def test_source_refresh_reports_missing_path_without_crashing(
         listed = client.get(
             f"/api/v1/environments/{env['id']}/metadata-sources"
         ).json()
-        assert listed[0]["latest_validation"]["status"] == "error"
-        assert "not found" in listed[0]["latest_validation"]["message"].lower()
+        assert listed[0]["latest_validation"] is None
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -1037,9 +1255,7 @@ def test_source_uri_update_clears_read_check_and_sync_status(
             json={"uri": str(tmp_path / "other.json")},
         ).json()
         assert updated["latest_validation"] is None
-        status = client.get(
-            f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/sync-status"
-        ).json()
+        status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "unknown"
         assert status["latest_job"] is None
 
@@ -1059,7 +1275,7 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.sync.scheduler import run_automatic_source_checks_once, run_due_schedules_once
+    from datacoolie_studio.domains.sync.scheduler import run_due_schedules_once
     from datacoolie_studio.main import app
 
     with TestClient(app) as client:
@@ -1079,10 +1295,10 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
         assert rejected.status_code == 422
 
         assert run_due_schedules_once() == 0
-        assert run_automatic_source_checks_once() == 0
-        status = client.get(
-            f"/api/v1/environments/{env['id']}/metadata-sources/{source['id']}/sync-status"
-        ).json()
+        assert client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        ).json()["failed"] == 0
+        status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "ok"
         assert status["latest_job"]["job_type"] == "auto_refresh"
         with sqlite3.connect(db_path) as connection:
@@ -1095,7 +1311,9 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
             row = connection.execute("select last_scheduled_sync_at from environment_sources where id = ?", (source["id"],)).fetchone()
             assert row[0] is None
 
-        assert run_automatic_source_checks_once() == 0
+        assert client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        ).json()["changed"] == 0
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
@@ -1110,7 +1328,6 @@ def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path
 
     from fastapi.testclient import TestClient
 
-    from datacoolie_studio.domains.sync.scheduler import run_automatic_source_checks_once
     from datacoolie_studio.main import app
 
     with TestClient(app) as client:
@@ -1123,16 +1340,20 @@ def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path
             json={"uri": str(code_path), "label": "functions"},
         ).json()
 
-        assert run_automatic_source_checks_once() == 0
-        status = client.get(
-            f"/api/v1/environments/{env['id']}/code-artifacts/{source['id']}/sync-status"
-        ).json()
+        assert client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        ).json()["failed"] == 0
+        status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "ok"
         assert status["latest_job"]["job_type"] == "auto_refresh"
-        assert run_automatic_source_checks_once() == 0
+        assert client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        ).json()["changed"] == 0
 
         module_path.write_text("def transform(value):\n    return value * 2\n", encoding="utf-8")
-        assert run_automatic_source_checks_once() == 1
+        assert client.post(
+            f"/api/v1/environments/{env['id']}/sources/observe-local"
+        ).json()["changed"] == 1
 
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
@@ -1162,6 +1383,9 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             f"/api/v1/environments/{env['id']}/log-sources",
             json={"uri": str(SAMPLE_LOGS), "label": "sample logs"},
         ).json()
+        validation_before_sync = client.get(
+            f"/api/v1/environments/{env['id']}/log-sources"
+        ).json()[0]["latest_validation"]
 
         refreshed = client.post(
             f"/api/v1/environments/{env['id']}/log-sources/{path['id']}/refresh",
@@ -1171,11 +1395,12 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
         assert refreshed["revision"]["object_type"] == "directory"
         assert refreshed["revision"]["file_count"] > 0
         assert refreshed["latest_job"]["status"] == "succeeded"
-        assert refreshed["latest_job"]["message"] == "Log source cache refreshed"
+        assert refreshed["latest_job"]["message"] == "Log source cache is current"
         assert analytics_path.exists()
         listed = client.get(f"/api/v1/environments/{env['id']}/log-sources").json()
         assert listed[0]["latest_validation"]["status"] == "ok"
         assert listed[0]["latest_validation"]["record_counts"]["job_jsonl_files"] > 0
+        assert listed[0]["latest_validation"] == validation_before_sync
         with sqlite3.connect(tmp_path / "studio.db") as connection:
             assert (
                 connection.execute("select count(*) from log_file_manifest").fetchone()[
@@ -1442,19 +1667,21 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
 
         expected_rows, expected_errors = read_dataflow_logs([str(base / "etl_logs" / "analyst")])
         assert not expected_errors
-        unavailable = client.get(
+        available = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=365d"
         )
-        assert unavailable.status_code == 200
-        assert unavailable.json()["summary"]["total_records"] == 0
+        assert available.status_code == 200
+        assert available.json()["summary"]["total_records"] == len(expected_rows)
+        initial_status = _source_status(client, env["id"], source["id"])
+        counts = initial_status["latest_job"]["result"]["record_counts"]
+        assert counts["dataflow_parquet_files"] == 1
+        assert counts["job_jsonl_files"] == 1
 
         refreshed = client.post(
             f"/api/v1/environments/{env['id']}/log-sources/{source['id']}/refresh",
             json={"mode": "incremental"},
         ).json()
-        counts = refreshed["latest_job"]["result"]["record_counts"]
-        assert counts["dataflow_parquet_files"] == 1
-        assert counts["job_jsonl_files"] == 1
+        assert refreshed["latest_job"]["message"] == "Log source cache is current"
         direct = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=365d"
         ).json()
@@ -1475,13 +1702,43 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         freshness = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness["etl_logs"]["status"] == "current"
 
-        # The pending-changes scan is cached for the source-check interval (TTL); clear
-        # it so each freshness read below re-scans deterministically in the test.
-        # Changing an ignored debug_json file does not affect the synced analyst cache,
-        # so freshness stays current.
+        # Freshness reads are DB-only. Logs are observed periodically, while
+        # their actual sync remains manual or schedule-driven.
+        from datacoolie_studio.db.models import EnvironmentSource
+        from datacoolie_studio.db.session import create_session
+        from datacoolie_studio.domains.source_observation.repository import (
+            claim_due_observation_ids,
+            reset_observation,
+        )
+        from datacoolie_studio.domains.sync.scheduler import _observe_source
+
+        def observe_log_change() -> bool:
+            session = create_session()
+            try:
+                observed_at = datetime.now(timezone.utc)
+                reset_observation(
+                    session,
+                    int(source["id"]),
+                    due_at=observed_at,
+                )
+                session.commit()
+                owner, source_ids = claim_due_observation_ids(
+                    session,
+                    now=observed_at,
+                    lease_owner="test-log-observation",
+                )
+                assert int(source["id"]) in source_ids
+                observed_source = session.get(EnvironmentSource, int(source["id"]))
+                return _observe_source(session, observed_source, owner)
+            finally:
+                session.close()
+
+        # Changing an ignored debug_json file does not affect the synced analyst
+        # cache, so freshness stays current.
         debug_file = debug_jobs / job_sample.name
         debug_file.write_text(debug_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         log_ingestion.invalidate_pending_changes(int(source["id"]))
+        assert observe_log_change() is False
         freshness_after_debug_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_debug_change["etl_logs"]["status"] == "current"
 
@@ -1490,6 +1747,7 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         analyst_file = analyst_jobs / job_sample.name
         analyst_file.write_text(analyst_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         log_ingestion.invalidate_pending_changes(int(source["id"]))
+        assert observe_log_change() is True
         freshness_after_analyst_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_analyst_change["etl_logs"]["status"] == "not_cached"
 
@@ -1499,6 +1757,8 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
 def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
+    scheduled_logs = tmp_path / "scheduled-logs"
+    shutil.copytree(SAMPLE_LOGS, scheduled_logs)
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
 
     from fastapi.testclient import TestClient
@@ -1517,7 +1777,7 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
         ).json()
         path = client.post(
             f"/api/v1/environments/{env['id']}/log-sources",
-            json={"uri": str(SAMPLE_LOGS), "label": "sample logs"},
+            json={"uri": str(scheduled_logs), "label": "sample logs"},
         ).json()
         source_id = int(path["id"])
         assert path["sync_schedule_enabled"] is False
@@ -1534,10 +1794,67 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
             json={"sync_schedule_enabled": True},
         ).json()
         assert scheduled["sync_interval_minutes"] == 1
-        from datacoolie_studio.domains.sync.scheduler import run_due_schedules_once
+        from datacoolie_studio.domains.sync import scheduler as sync_scheduler
 
-        assert run_due_schedules_once() == 1
-        scheduled_status = client.get(f"/api/v1/environments/{env['id']}/log-sources/{source_id}/sync-status").json()
+        with sqlite3.connect(db_path) as connection:
+            running_job = connection.execute(
+                """
+                insert into sync_jobs (
+                    environment_id, source_id, source_kind, job_type, status, started_at
+                ) values (?, ?, 'logs', 'manual_refresh', 'running', ?)
+                """,
+                (env["id"], source_id, datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()),
+            )
+            running_job_id = int(running_job.lastrowid)
+            connection.commit()
+
+        assert sync_scheduler.run_due_schedules_once() == 0
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "select last_scheduled_sync_at from environment_sources where id = ?",
+                (source_id,),
+            ).fetchone()[0] is None
+            assert connection.execute(
+                "select count(*) from sync_jobs where source_id = ? and job_type = 'scheduled_refresh'",
+                (source_id,),
+            ).fetchone()[0] == 0
+            connection.execute(
+                """
+                update sync_jobs
+                set status = 'succeeded', completed_at = ?
+                where id = ?
+                """,
+                (datetime.now(timezone.utc).isoformat(), running_job_id),
+            )
+            connection.commit()
+
+        assert sync_scheduler.run_due_schedules_once() == 1
+        unchanged_status = _source_status(client, env["id"], source_id)
+        assert unchanged_status["latest_job"]["job_type"] == "manual_refresh"
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "select last_scheduled_sync_at from environment_sources where id = ?",
+                (source_id,),
+            ).fetchone()[0] is not None
+            assert connection.execute(
+                "select count(*) from sync_jobs where source_id = ? and job_type = 'scheduled_refresh'",
+                (source_id,),
+            ).fetchone()[0] == 0
+
+        monkeypatch.setattr(
+            sync_scheduler,
+            "log_source_has_pending_changes",
+            lambda *_args, **_kwargs: True,
+        )
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "update environment_sources set last_scheduled_sync_at = ? where id = ?",
+                (datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat(), source_id),
+            )
+            connection.commit()
+
+        assert sync_scheduler.run_due_schedules_once() == 1
+        scheduled_status = _source_status(client, env["id"], source_id)
         assert scheduled_status["latest_job"]["job_type"] == "scheduled_refresh"
 
         import duckdb
@@ -1556,7 +1873,7 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
                 "select count(*) from log_file_manifest where source_id = ?", [source_id]
             ).fetchone()[0] > 0
             assert connection.execute(
-                "select count(*) from source_revisions where source_id = ?", [source_id]
+                "select count(*) from source_observations where source_id = ?", [source_id]
             ).fetchone()[0] > 0
             assert connection.execute(
                 "select count(*) from sync_jobs where source_id = ?", [source_id]
@@ -1571,7 +1888,7 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
         impact_counts = {item["kind"]: item["count"] for item in impact_body["impacts"]}
         assert impact_counts["manifest"] > 0
         assert impact_counts["dataflow_cache"] > 0
-        assert impact_counts["source_revision"] > 0
+        assert impact_counts["source_observation"] > 0
         assert impact_counts["sync_job"] > 0
         assert impact_counts["schedule"] == 1
 
@@ -1579,7 +1896,7 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
         assert deleted.status_code == 204
 
         with sqlite3.connect(db_path) as connection:
-            for table in ("log_file_manifest", "source_revisions", "sync_jobs"):
+            for table in ("log_file_manifest", "source_observations", "sync_jobs"):
                 assert connection.execute(
                     f"select count(*) from {table} where source_id = ?", [source_id]
                 ).fetchone()[0] == 0
@@ -1711,7 +2028,7 @@ def test_environment_api_accepts_custom_name_and_rejects_invalid_name(
         custom = client.post(
             f"/api/v1/projects/{project['id']}/environments", json={"name": "UAT-1"}
         ).json()
-        assert custom["name"] == "uat-1"
+        assert custom["name"] == "UAT-1"
         duplicate = client.post(
             f"/api/v1/projects/{project['id']}/environments", json={"name": "uat-1"}
         )

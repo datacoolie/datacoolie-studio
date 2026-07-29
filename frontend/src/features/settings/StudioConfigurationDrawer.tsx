@@ -218,8 +218,21 @@ export function StudioConfigurationDrawer({
                 <span className="settings-field-hint">This Studio will follow the server timezone when saved.</span>
               ) : null}
             </div>
+            <label htmlFor="source-check-mode-input" className="studio-timezone-field">
+              Source observation mode
+              <select
+                id="source-check-mode-input"
+                value={draft.sourceCheckMode}
+                onChange={(event) => updateDraft({
+                  sourceCheckMode: event.target.value as StudioSettingsDraft["sourceCheckMode"],
+                })}
+              >
+                <option value="adaptive">Adaptive — slow down periodic checks while unchanged</option>
+                <option value="fixed">Fixed — always use the configured interval</option>
+              </select>
+            </label>
             <label htmlFor="source-check-interval-input" className="studio-timezone-field">
-              Source change check (seconds)
+              {draft.sourceCheckMode === "adaptive" ? "Active interval (seconds)" : "Check interval (seconds)"}
               <input
                 id="source-check-interval-input"
                 type="number"
@@ -230,6 +243,33 @@ export function StudioConfigurationDrawer({
                 onChange={(event) => updateDraft({ sourceCheckIntervalInput: event.target.value })}
               />
             </label>
+            {draft.sourceCheckMode === "adaptive" ? (
+              <label htmlFor="source-check-max-interval-input" className="studio-timezone-field">
+                Idle interval (seconds)
+                <input
+                  id="source-check-max-interval-input"
+                  type="number"
+                  min={draft.sourceCheckIntervalInput || "5"}
+                  max="3600"
+                  step="1"
+                  value={draft.sourceCheckMaxIntervalInput}
+                  onChange={(event) => updateDraft({ sourceCheckMaxIntervalInput: event.target.value })}
+                />
+                <span className="settings-field-hint">
+                  Periodic cadence: {draft.sourceCheckIntervalInput || "—"}s → {
+                    Number.isFinite(Number(draft.sourceCheckIntervalInput))
+                      ? Math.min(
+                        Number(draft.sourceCheckMaxIntervalInput) || 3600,
+                        Math.max(60, Number(draft.sourceCheckIntervalInput) * 2),
+                      )
+                      : "—"
+                  }s → {draft.sourceCheckMaxIntervalInput || "—"}s while unchanged.
+                </span>
+              </label>
+            ) : null}
+            <span className="settings-field-hint">
+              Cloud metadata/code changes sync automatically. Local metadata/code are checked on navigation or foreground. Log sources are observed periodically and sync only through manual action or their schedule.
+            </span>
             <div className="settings-timezone-drawer-actions">
               <button type="submit" disabled={saving || !valid || !hasChanges}>
                 {saving ? "Saving…" : "Save changes"}

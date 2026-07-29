@@ -3,21 +3,25 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../shared/api/client";
 import type {
   StudioCacheFeature,
+  StudioCacheMutation,
   StudioCacheScope,
   StudioCacheStatus,
 } from "../../../shared/api/domainTypes";
 import { toErrorMessage } from "../../../shared/lib/errors";
 import { cacheInvalidationBranches, matchesDerivedQuery } from "../cacheInvalidation";
 
+export type StudioCacheAction =
+  | { type: "clear"; scope: StudioCacheScope }
+  | { type: "compact"; result: StudioCacheMutation };
+
 export interface StudioCacheState {
   status: StudioCacheStatus | null;
   loading: boolean;
   busyAction: string | null;
   error: string | null;
-  lastAction: string | null;
+  lastAction: StudioCacheAction | null;
   reload: () => Promise<void>;
   clear: (scope: StudioCacheScope, features?: StudioCacheFeature[]) => Promise<void>;
-  prune: () => Promise<void>;
   compact: () => Promise<void>;
   dismissFeedback: () => void;
 }
@@ -28,7 +32,7 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastAction, setLastAction] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState<StudioCacheAction | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -68,7 +72,7 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
         refetchType: "active",
       });
       await refreshDiagnostics();
-      setLastAction(`clear:${scope}`);
+      setLastAction({ type: "clear", scope });
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -77,30 +81,14 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
     }
   }, [queryClient, refreshDiagnostics]);
 
-  const prune = useCallback(async () => {
-    setBusyAction("prune");
-    setError(null);
-    setLastAction(null);
-    try {
-      await api.pruneStudioCache();
-      await refreshDiagnostics();
-      setLastAction("prune");
-    } catch (err) {
-      setError(toErrorMessage(err));
-      throw err;
-    } finally {
-      setBusyAction(null);
-    }
-  }, [refreshDiagnostics]);
-
   const compact = useCallback(async () => {
     setBusyAction("compact");
     setError(null);
     setLastAction(null);
     try {
-      await api.compactStudioCache();
+      const result = await api.compactStudioCache();
       await refreshDiagnostics();
-      setLastAction("compact");
+      setLastAction({ type: "compact", result });
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -114,5 +102,5 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
     setLastAction(null);
   }, []);
 
-  return { status, loading, busyAction, error, lastAction, reload, clear, prune, compact, dismissFeedback };
+  return { status, loading, busyAction, error, lastAction, reload, clear, compact, dismissFeedback };
 }

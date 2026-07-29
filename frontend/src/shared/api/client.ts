@@ -1,11 +1,18 @@
 import type {
+  CredentialCapabilities,
+  CredentialProfile,
+  CredentialProfileDetail,
   JobRecord,
   LatestStatusResponse,
+  LocalSourceObservation,
   MonitoringFilterOptionsResponse,
   MonitoringRecord,
   MonitoringRecordsResponse,
   MonitoringPageResponse,
   SourcePath,
+  SourcesWorkspace,
+  StorageBinding,
+  StorageConnectionValidation,
   SystemLogResponse,
 } from "./domainTypes";
 import type {
@@ -98,6 +105,42 @@ function environmentSourcePath(
 }
 
 export const api = {
+  listCredentialProfiles: () =>
+    request<CredentialProfile[]>(`${API_PREFIX}/credential-profiles`),
+  getCredentialProfile: (profileId: string) =>
+    request<CredentialProfileDetail>(`${API_PREFIX}/credential-profiles/${profileId}`),
+  getCredentialCapabilities: () =>
+    request<CredentialCapabilities>(`${API_PREFIX}/credential-profiles/capabilities`),
+  createCredentialProfile: (payload: {
+    name: string;
+    provider: Exclude<StorageBinding["provider"], "local">;
+    auth_type: string;
+    config: Record<string, unknown>;
+    secret?: Record<string, unknown>;
+  }) =>
+    request<CredentialProfile>(`${API_PREFIX}/credential-profiles`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateCredentialProfile: (
+    profileId: string,
+    payload: { name?: string; config?: Record<string, unknown>; secret?: Record<string, unknown> }
+  ) =>
+    request<CredentialProfile>(`${API_PREFIX}/credential-profiles/${profileId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteCredentialProfile: (profileId: string) =>
+    request<void>(`${API_PREFIX}/credential-profiles/${profileId}`, { method: "DELETE" }),
+  validateStorageConnection: (payload: {
+    uri: string;
+    storage?: StorageBinding;
+    source_config?: Record<string, unknown>;
+  }) =>
+    request<StorageConnectionValidation>(`${API_PREFIX}/storage-connections/validate`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   getStudioSettings: () => request<StudioSettings>(`${API_PREFIX}/studio/settings`),
   getStudioDiagnostics: () => request<StudioDiagnostics>(`${API_PREFIX}/studio/diagnostics`),
   compactWorkspaceDatabase: () => request<StudioPathInfo>(`${API_PREFIX}/studio/workspace-database/compact`, {
@@ -113,15 +156,16 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ ...payload, confirm: true }),
   }),
-  pruneStudioCache: () => request<StudioCacheMutation>(`${API_PREFIX}/studio/cache/prune`, {
-    method: "POST",
-    body: JSON.stringify({ confirm: true }),
-  }),
   compactStudioCache: () => request<StudioCacheMutation>(`${API_PREFIX}/studio/cache/compact`, {
     method: "POST",
     body: JSON.stringify({ confirm: true }),
   }),
-  updateStudioSettings: (payload: { timezone?: string | null; source_check_interval_seconds?: number }) =>
+  updateStudioSettings: (payload: {
+    timezone?: string | null;
+    source_check_mode?: "fixed" | "adaptive";
+    source_check_interval_seconds?: number;
+    source_check_max_interval_seconds?: number;
+  }) =>
     request<StudioSettings>(`${API_PREFIX}/studio/settings`, {
       method: "PATCH",
       body: JSON.stringify(payload)
@@ -178,16 +222,25 @@ export const api = {
     request<Environment>(`${API_PREFIX}/projects/${projectId}/environments`, { method: "POST", body: JSON.stringify(payload) }),
   deleteEnvironment: (environmentId: number) =>
     request<void>(`${API_PREFIX}/environments/${environmentId}`, { method: "DELETE" }),
+  observeLocalSources: (environmentId: number) =>
+    request<LocalSourceObservation>(
+      `${API_PREFIX}/environments/${environmentId}/sources/observe-local`,
+      { method: "POST" },
+    ),
+  getSourcesWorkspace: (environmentId: number) =>
+    request<SourcesWorkspace>(
+      `${API_PREFIX}/environments/${environmentId}/sources/workspace`,
+    ),
   getEnvironmentContext: (environmentId: number) =>
     request<EnvironmentContext>(`${API_PREFIX}/environments/${environmentId}/context`),
   listMetadataSources: (environmentId: number) =>
     request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/metadata-sources`),
-  addMetadataSource: (environmentId: number, payload: { uri: string; label?: string; enabled?: boolean }) =>
+  addMetadataSource: (environmentId: number, payload: { uri: string; label?: string; enabled?: boolean; source_config?: Record<string, unknown>; storage?: StorageBinding }) =>
     request<SourcePath>(`${API_PREFIX}/environments/${environmentId}/metadata-sources`, {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  importMetadataSources: (environmentId: number, payload: { uri: string; label?: string; enabled?: boolean }) =>
+  importMetadataSources: (environmentId: number, payload: { uri: string; label?: string; enabled?: boolean; storage?: StorageBinding }) =>
     request<SourceImportResponse>(`${API_PREFIX}/environments/${environmentId}/metadata-sources/import`, {
       method: "POST",
       body: JSON.stringify(payload)
@@ -203,13 +256,14 @@ export const api = {
       include_metadata?: boolean;
       include_code?: boolean;
       enabled?: boolean;
+      storage?: StorageBinding;
     }
   ) =>
     request<SourceImportResponse>(`${API_PREFIX}/environments/${environmentId}/datacoolie-project-sources`, {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  updateMetadataSource: (environmentId: number, sourceId: number, payload: { uri?: string; label?: string | null; enabled?: boolean; sync_schedule_enabled?: boolean; sync_interval_minutes?: number | null }) =>
+  updateMetadataSource: (environmentId: number, sourceId: number, payload: { uri?: string; label?: string | null; enabled?: boolean; source_config?: Record<string, unknown>; storage?: StorageBinding; sync_schedule_enabled?: boolean; sync_interval_minutes?: number | null }) =>
     request<SourcePath>(environmentSourcePath(environmentId, "metadata-sources", sourceId), {
       method: "PATCH",
       body: JSON.stringify(payload)
@@ -224,8 +278,6 @@ export const api = {
     request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/validate`, {
       method: "POST"
     }),
-  getMetadataSourceSyncStatus: (environmentId: number, sourceId: number) =>
-    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/sync-status`),
   refreshMetadataSource: (environmentId: number, sourceId: number) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/refresh`, {
       method: "POST"
@@ -233,7 +285,7 @@ export const api = {
   listLogSources: (environmentId: number) => request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/log-sources`),
   addLogSource: (
     environmentId: number,
-    payload: { uri: string; label?: string; enabled?: boolean; source_config?: Record<string, unknown> }
+    payload: { uri: string; label?: string; enabled?: boolean; source_config?: Record<string, unknown>; storage?: StorageBinding }
   ) =>
     request<SourcePath>(`${API_PREFIX}/environments/${environmentId}/log-sources`, {
       method: "POST",
@@ -247,6 +299,7 @@ export const api = {
       label?: string | null;
       enabled?: boolean;
       source_config?: Record<string, unknown>;
+      storage?: StorageBinding;
       sync_schedule_enabled?: boolean;
       sync_interval_minutes?: number | null;
     }
@@ -265,8 +318,6 @@ export const api = {
     request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/validate`, {
       method: "POST"
     }),
-  getLogSourceSyncStatus: (environmentId: number, pathId: number) =>
-    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/sync-status`),
   refreshLogSource: (environmentId: number, pathId: number, payload: LogSyncRequest) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/refresh`, {
       method: "POST",
@@ -276,7 +327,7 @@ export const api = {
     request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/code-artifacts`),
   addCodeArtifact: (
     environmentId: number,
-    payload: { uri: string; label?: string; enabled?: boolean; source_config?: Record<string, unknown> }
+    payload: { uri: string; label?: string; enabled?: boolean; source_config?: Record<string, unknown>; storage?: StorageBinding }
   ) =>
     request<SourcePath>(`${API_PREFIX}/environments/${environmentId}/code-artifacts`, {
       method: "POST",
@@ -290,6 +341,7 @@ export const api = {
       label?: string | null;
       enabled?: boolean;
       source_config?: Record<string, unknown>;
+      storage?: StorageBinding;
       sync_schedule_enabled?: boolean;
       sync_interval_minutes?: number | null;
     }
@@ -306,8 +358,6 @@ export const api = {
     request<SourceReadCheckResult>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/validate`, {
       method: "POST"
     }),
-  getCodeArtifactSyncStatus: (environmentId: number, sourceId: number) =>
-    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/sync-status`),
   refreshCodeArtifact: (environmentId: number, sourceId: number) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/refresh`, {
       method: "POST"

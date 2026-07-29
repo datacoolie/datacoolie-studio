@@ -7,16 +7,44 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from datacoolie_studio.api.v1.contracts.workspace import EnvironmentDependencyVersionsResponse
 
 class SourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     uri: str
     label: str | None = None
     enabled: bool = True
     source_config: dict[str, Any] | None = None
+    storage: StorageBindingRequest | None = None
+
+
+class StorageBindingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal[
+        "local", "s3", "minio", "adls", "onelake", "gcs", "dbfs"
+    ]
+    auth_mode: Literal["none", "ambient", "anonymous", "credential_profile"]
+    credential_profile_id: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class StorageBindingResponse(StorageBindingRequest):
+    pass
+
+
+class ConfiguredSourceLocationResponse(BaseModel):
+    registration_id: int
+    purpose: Literal["project", "metadata", "code", "logs"]
+    input_uri: str
+    canonical_uri: str
+    input_locations: dict[str, str] = Field(default_factory=dict)
+    canonical_locations: dict[str, str] = Field(default_factory=dict)
 
 
 class MetadataSourceImportRequest(BaseModel):
     uri: str
     label: str | None = None
     enabled: bool = True
+    storage: StorageBindingRequest | None = None
 
 
 class DatacoolieProjectSourceImportRequest(BaseModel):
@@ -28,6 +56,7 @@ class DatacoolieProjectSourceImportRequest(BaseModel):
     include_metadata: bool = True
     include_code: bool = True
     enabled: bool = True
+    storage: StorageBindingRequest | None = None
 
 
 class SourceImportItemResponse(BaseModel):
@@ -38,6 +67,7 @@ class SourceImportItemResponse(BaseModel):
     label: str | None = None
     record_counts: dict[str, int] = Field(default_factory=dict)
     source_config: dict[str, Any] = Field(default_factory=dict)
+    configured_location: ConfiguredSourceLocationResponse | None = None
 
 
 class SourceImportResponse(BaseModel):
@@ -54,6 +84,7 @@ class SourceUpdate(BaseModel):
     sync_schedule_enabled: bool | None = None
     sync_interval_minutes: int | None = None
     source_config: dict[str, Any] | None = None
+    storage: StorageBindingRequest | None = None
 
     @field_validator("sync_interval_minutes")
     @classmethod
@@ -97,7 +128,33 @@ class SourceSyncStatusResponse(BaseModel):
     revision: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     checked_at: datetime | None = None
+    last_observed_at: datetime | None = None
+    next_check_at: datetime | None = None
+    pending_changes: bool | None = None
+    active_operation: Literal["validate", "sync"] | None = None
     latest_job: SourceSyncJobResponse | None = None
+
+
+class SourceObservationOutcomeResponse(BaseModel):
+    source_id: int
+    source_kind: str
+    outcome: Literal["changed", "unchanged", "error", "skipped"]
+    pending_changes: bool | None = None
+    error: dict[str, Any] | None = None
+    started_at: datetime
+    completed_at: datetime
+    status: SourceSyncStatusResponse
+
+
+class LocalSourceObservationResponse(BaseModel):
+    environment_id: int
+    total: int
+    observed: int
+    changed: int
+    skipped: int
+    failed: int
+    observed_at: datetime
+    outcomes: list[SourceObservationOutcomeResponse]
 
 
 class LogSyncLookbackRequest(BaseModel):
@@ -216,7 +273,29 @@ class MetadataSourceRead(BaseModel):
     enabled: bool
     created_at: datetime
     source_config: dict[str, Any] | None = None
+    storage: StorageBindingResponse
+    configured_location: ConfiguredSourceLocationResponse | None = None
     latest_validation: SourceValidationResponse | None = None
+
+
+class StorageConnectionValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    uri: str
+    storage: StorageBindingRequest | None = None
+    source_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class StorageConnectionValidationResponse(BaseModel):
+    status: Literal["ok", "error"]
+    provider: str
+    canonical_uri: str | None = None
+    object_type: Literal["file", "directory"] | None = None
+    objects_scanned: int = 0
+    provider_revision: str | None = None
+    metadata_write_back_supported: bool = False
+    message: str
+    error: dict[str, Any] | None = None
 
 
 class LogSourceRead(MetadataSourceRead):
@@ -227,6 +306,17 @@ class LogSourceRead(MetadataSourceRead):
 
 class CodeArtifactRead(MetadataSourceRead):
     pass
+
+
+class SourcesWorkspaceResponse(BaseModel):
+    schema_version: Literal["sources-workspace.v1"]
+    environment_id: int
+    metadata_sources: list[MetadataSourceRead]
+    log_sources: list[LogSourceRead]
+    code_artifacts: list[CodeArtifactRead]
+    statuses: list[SourceSyncStatusResponse]
+    earliest_cloud_due_at: datetime | None = None
+    dependency_version: str
 
 
 class SourceDeleteImpactItem(BaseModel):

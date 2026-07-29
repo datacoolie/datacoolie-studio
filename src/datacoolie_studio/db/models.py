@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -69,6 +69,32 @@ class Environment(Base):
         back_populates="environment",
         cascade="all, delete-orphan",
     )
+    source_registrations: Mapped[list[SourceRegistration]] = relationship(
+        back_populates="environment",
+        cascade="all, delete-orphan",
+    )
+
+
+class CredentialProfile(Base):
+    __tablename__ = "credential_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    secret_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    secret_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    masked_summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    sources: Mapped[list[EnvironmentSource]] = relationship(
+        back_populates="credential_profile"
+    )
 
 
 class ProjectReferenceMapping(Base):
@@ -89,14 +115,61 @@ class ProjectReferenceMapping(Base):
     project: Mapped[Project] = relationship(back_populates="reference_mappings")
 
 
+class SourceRegistration(Base):
+    __tablename__ = "source_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "purpose",
+            "identity_key",
+            name="uq_source_registration_identity",
+        ),
+        Index("ix_source_registrations_environment", "environment_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    environment_id: Mapped[int] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(String(50), nullable=False)
+    input_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    input_locations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    canonical_locations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    environment: Mapped[Environment] = relationship(back_populates="source_registrations")
+    sources: Mapped[list[EnvironmentSource]] = relationship(back_populates="registration")
+
+
 class EnvironmentSource(Base):
     __tablename__ = "environment_sources"
+    __table_args__ = (
+        Index("ix_environment_sources_storage_provider", "storage_provider"),
+        Index("ix_environment_sources_credential_profile", "credential_profile_id"),
+        Index("ix_environment_sources_registration", "registration_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    registration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_registrations.id", ondelete="SET NULL"), nullable=True
+    )
     source_kind: Mapped[str] = mapped_column(String(50), nullable=False)
     uri: Mapped[str] = mapped_column(Text, nullable=False)
     source_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_provider: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="local", server_default="local"
+    )
+    storage_auth_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="none", server_default="none"
+    )
+    credential_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("credential_profiles.id", ondelete="RESTRICT"), nullable=True
+    )
+    storage_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     read_check_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -109,6 +182,10 @@ class EnvironmentSource(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
     environment: Mapped[Environment] = relationship(back_populates="sources")
+    registration: Mapped[SourceRegistration | None] = relationship(back_populates="sources")
+    credential_profile: Mapped[CredentialProfile | None] = relationship(
+        back_populates="sources"
+    )
 
 
 class MetadataMaterialization(Base):
@@ -140,24 +217,66 @@ class CodeArtifactMaterialization(Base):
     materialized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class SourceRevision(Base):
-    __tablename__ = "source_revisions"
+class SourceObservation(Base):
+    __tablename__ = "source_observations"
+    __table_args__ = (
+        Index(
+            "ix_source_observations_due",
+            "next_observation_at",
+            "lease_expires_at",
+        ),
+    )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False, unique=True)
-    source_kind: Mapped[str] = mapped_column(String(50), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False)
-    revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("environment_sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_outcome: Mapped[str] = mapped_column(
+        String(30), default="never", nullable=False
+    )
+    pending_changes: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
+    observed_revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inventory_metrics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unchanged_streak: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    failure_streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_observation_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
     __table_args__ = (
         Index("ix_sync_jobs_retention", "source_id", "status", "completed_at", "started_at", "id"),
+        Index(
+            "uq_sync_jobs_running_source",
+            "source_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -174,11 +293,21 @@ class SyncJob(Base):
 
 class LogFileManifest(Base):
     __tablename__ = "log_file_manifest"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "file_kind",
+            "file_uri",
+            name="uq_log_file_manifest_source_kind_uri",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
     file_uri: Mapped[str] = mapped_column(Text, nullable=False)
     file_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    partition_value: Mapped[date | None] = mapped_column(Date, nullable=True)
+    partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
     revision_json: Mapped[str] = mapped_column(Text, nullable=False)
     row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     job_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -187,6 +316,48 @@ class LogFileManifest(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class LogStreamState(Base):
+    __tablename__ = "log_stream_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stream_kind",
+            name="uq_log_stream_states_source_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("environment_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    stream_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    root_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    partition_granularity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    checkpoint_partition_value: Mapped[date | None] = mapped_column(Date, nullable=True)
+    boundary_last_modified: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_scanned_partition_value: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+    )
+    layout_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
 
 
 class MetadataEditorDraft(Base):

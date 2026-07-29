@@ -250,6 +250,7 @@ class SqliteResultCacheStore:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
             connection.execute(text("VACUUM"))
+            connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
         after = path.stat().st_size if path is not None and path.exists() else 0
         return {"file_bytes_before": before, "file_bytes_after": after}
 

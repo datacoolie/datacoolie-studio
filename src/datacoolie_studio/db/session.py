@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Generator
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import create_engine
 from sqlalchemy import inspect, text
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from datacoolie_studio.core.config import database_url
 from datacoolie_studio.db.models import Base
+from datacoolie_studio.domains.storage.errors import StorageConfigurationError
 
 _engine = None
 _engine_url = None
@@ -30,15 +32,33 @@ def get_engine():
 def init_db() -> None:
     engine = get_engine()
     _migrate_project_reference_mappings(engine)
+    _replace_source_observation_schema(engine)
     Base.metadata.create_all(bind=engine)
+    _ensure_sync_job_running_index(engine)
     _migrate_current_materializations(engine)
     _drop_legacy_derived_cache_tables(engine)
     _ensure_scan_run_columns(engine)
     _ensure_environment_source_columns(engine)
     _ensure_log_file_manifest_columns(engine)
     _migrate_environment_sources(engine)
+    _migrate_storage_settings(engine)
+    _migrate_adls_discovered_source_uris(engine)
+    _migrate_source_registrations(engine)
     _migrate_log_sources(engine)
     _migrate_log_file_manifest(engine)
+    _ensure_log_file_manifest_unique_index(engine)
+
+
+def _replace_source_observation_schema(engine) -> None:
+    """Discard superseded operational observation state during hard cutover."""
+
+    replaced_tables = {"source_revisions", "source_check_states"}
+    existing = replaced_tables.intersection(inspect(engine).get_table_names())
+    if not existing:
+        return
+    with engine.begin() as connection:
+        for table_name in sorted(existing):
+            connection.execute(text(f"DROP TABLE {table_name}"))
 
 
 def _drop_legacy_derived_cache_tables(engine) -> None:
@@ -54,6 +74,63 @@ def _drop_legacy_derived_cache_tables(engine) -> None:
     with engine.begin() as connection:
         for table_name in sorted(existing):
             connection.execute(text(f"DROP TABLE {table_name}"))
+
+
+def _ensure_sync_job_running_index(engine) -> None:
+    """Enforce at most one running sync job per source on supported databases."""
+    inspector = inspect(engine)
+    if "sync_jobs" not in inspector.get_table_names():
+        return
+    index_name = "uq_sync_jobs_running_source"
+    if any(index["name"] == index_name for index in inspector.get_indexes("sync_jobs")):
+        return
+    if engine.dialect.name not in {"sqlite", "postgresql"}:
+        raise RuntimeError(
+            f"Database dialect {engine.dialect.name} cannot enforce non-overlapping sync jobs"
+        )
+    with engine.begin() as connection:
+        duplicate_ids = list(
+            connection.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY source_id
+                                   ORDER BY started_at DESC, id DESC
+                               ) AS running_rank
+                        FROM sync_jobs
+                        WHERE status = 'running'
+                    ) ranked
+                    WHERE running_rank > 1
+                    """
+                )
+            ).scalars()
+        )
+        for job_id in duplicate_ids:
+            connection.execute(
+                text(
+                    """
+                    UPDATE sync_jobs
+                    SET status = 'failed',
+                        message = 'Closed while enabling non-overlapping sync jobs',
+                        result_json = '{"status":"error","message":"Superseded duplicate running job"}',
+                        completed_at = CURRENT_TIMESTAMP
+                    WHERE id = :job_id
+                    """
+                ),
+                {"job_id": job_id},
+            )
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX uq_sync_jobs_running_source
+                ON sync_jobs (source_id)
+                WHERE status = 'running'
+                """
+            )
+        )
 
 
 def _migrate_current_materializations(engine) -> None:
@@ -252,17 +329,218 @@ def _ensure_environment_source_columns(engine) -> None:
     statements = []
     if "source_config_json" not in columns:
         statements.append("ALTER TABLE environment_sources ADD COLUMN source_config_json TEXT")
+    if "storage_provider" not in columns:
+        statements.append(
+            "ALTER TABLE environment_sources "
+            "ADD COLUMN storage_provider VARCHAR(20) NOT NULL DEFAULT 'local'"
+        )
+    if "storage_auth_mode" not in columns:
+        statements.append(
+            "ALTER TABLE environment_sources "
+            "ADD COLUMN storage_auth_mode VARCHAR(30) NOT NULL DEFAULT 'none'"
+        )
+    if "credential_profile_id" not in columns:
+        statements.append(
+            "ALTER TABLE environment_sources ADD COLUMN credential_profile_id VARCHAR(36)"
+        )
+    if "storage_config_json" not in columns:
+        statements.append(
+            "ALTER TABLE environment_sources ADD COLUMN storage_config_json TEXT"
+        )
+    if "registration_id" not in columns:
+        statements.append(
+            "ALTER TABLE environment_sources ADD COLUMN registration_id INTEGER"
+        )
     if "sync_schedule_enabled" not in columns:
         statements.append("ALTER TABLE environment_sources ADD COLUMN sync_schedule_enabled BOOLEAN NOT NULL DEFAULT 0")
     if "sync_interval_minutes" not in columns:
         statements.append("ALTER TABLE environment_sources ADD COLUMN sync_interval_minutes INTEGER")
     if "last_scheduled_sync_at" not in columns:
         statements.append("ALTER TABLE environment_sources ADD COLUMN last_scheduled_sync_at DATETIME")
-    if not statements:
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    _ensure_environment_source_storage_indexes(engine)
+
+
+def _ensure_environment_source_storage_indexes(engine) -> None:
+    inspector = inspect(engine)
+    if "environment_sources" not in inspector.get_table_names():
         return
+    existing = {
+        index["name"] for index in inspector.get_indexes("environment_sources")
+    }
+    statements = []
+    if "ix_environment_sources_storage_provider" not in existing:
+        statements.append(
+            "CREATE INDEX ix_environment_sources_storage_provider "
+            "ON environment_sources (storage_provider)"
+        )
+    if "ix_environment_sources_credential_profile" not in existing:
+        statements.append(
+            "CREATE INDEX ix_environment_sources_credential_profile "
+            "ON environment_sources (credential_profile_id)"
+        )
+    if "ix_environment_sources_registration" not in existing:
+        statements.append(
+            "CREATE INDEX ix_environment_sources_registration "
+            "ON environment_sources (registration_id)"
+        )
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))
+
+
+def _migrate_storage_settings(engine) -> None:
+    """Backfill normalized storage fields without requiring cloud connectivity."""
+    inspector = inspect(engine)
+    if "environment_sources" not in inspector.get_table_names():
+        return
+    required = {
+        "id",
+        "uri",
+        "source_config_json",
+        "storage_provider",
+        "storage_auth_mode",
+        "storage_config_json",
+    }
+    columns = {
+        column["name"] for column in inspector.get_columns("environment_sources")
+    }
+    if not required.issubset(columns):
+        return
+
+    from datacoolie_studio.domains.storage.uri import parse_storage_uri
+
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, uri, source_config_json, storage_provider,
+                       storage_auth_mode, storage_config_json
+                FROM environment_sources
+                """
+            )
+        ).mappings()
+        for row in rows:
+            try:
+                source_config = json.loads(row["source_config_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                source_config = {}
+            if not isinstance(source_config, dict):
+                source_config = {}
+            embedded = source_config.get("storage")
+            if not isinstance(embedded, dict):
+                embedded = {}
+
+            inferred_provider = parse_storage_uri(str(row["uri"])).provider
+            provider = str(
+                embedded.get("provider")
+                or row["storage_provider"]
+                or inferred_provider
+            ).lower()
+            if provider == "local" and inferred_provider != "local":
+                provider = inferred_provider
+            auth_mode = str(
+                embedded.get("auth_mode")
+                or row["storage_auth_mode"]
+                or ("none" if provider == "local" else "ambient")
+            ).lower()
+            if provider != "local" and auth_mode == "none":
+                auth_mode = "ambient"
+
+            options = embedded.get("options")
+            if options is None and row["storage_config_json"]:
+                try:
+                    options = json.loads(row["storage_config_json"])
+                except (json.JSONDecodeError, TypeError):
+                    options = {}
+            if not isinstance(options, dict):
+                options = {}
+
+            if "storage" in source_config:
+                source_config = dict(source_config)
+                source_config.pop("storage", None)
+            connection.execute(
+                text(
+                    """
+                    UPDATE environment_sources
+                    SET storage_provider = :provider,
+                        storage_auth_mode = :auth_mode,
+                        storage_config_json = :storage_config_json,
+                        source_config_json = :source_config_json
+                    WHERE id = :source_id
+                    """
+                ),
+                {
+                    "provider": provider,
+                    "auth_mode": auth_mode,
+                    "storage_config_json": (
+                        json.dumps(options, sort_keys=True) if options else None
+                    ),
+                    "source_config_json": (
+                        json.dumps(source_config, sort_keys=True)
+                        if source_config
+                        else None
+                    ),
+                    "source_id": row["id"],
+                },
+            )
+
+
+def _migrate_adls_discovered_source_uris(engine) -> None:
+    """Repair metadata URIs created from protocol-less adlfs object names."""
+    inspector = inspect(engine)
+    if "environment_sources" not in inspector.get_table_names():
+        return
+    required = {"id", "uri", "source_config_json", "storage_provider", "source_kind"}
+    columns = {column["name"] for column in inspector.get_columns("environment_sources")}
+    if not required.issubset(columns):
+        return
+
+    from datacoolie_studio.domains.storage.uri import canonical_cloud_uri
+
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, uri, source_config_json
+                FROM environment_sources
+                WHERE source_kind = 'metadata' AND storage_provider = 'adls'
+                """
+            )
+        ).mappings()
+        for row in rows:
+            try:
+                config = json.loads(row["source_config_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            metadata_root_uri = config.get("metadata_root_uri") if isinstance(config, dict) else None
+            if not isinstance(metadata_root_uri, str) or not metadata_root_uri.strip():
+                continue
+            try:
+                source = urlsplit(str(row["uri"]))
+                root = urlsplit(canonical_cloud_uri(metadata_root_uri, "adls"))
+            except StorageConfigurationError:
+                continue
+            if "@" in source.netloc or "@" not in root.netloc:
+                continue
+            if source.netloc.lower() != root.netloc.split("@", 1)[0].lower():
+                continue
+            repaired = canonical_cloud_uri(
+                urlunsplit(("abfs", root.netloc, source.path, "", "")), "adls"
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE environment_sources
+                    SET uri = :uri, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :source_id
+                    """
+                ),
+                {"uri": repaired, "source_id": row["id"]},
+            )
 
 
 def _ensure_log_file_manifest_columns(engine) -> None:
@@ -277,6 +555,14 @@ def _ensure_log_file_manifest_columns(engine) -> None:
         statements.append("ALTER TABLE log_file_manifest ADD COLUMN log_timestamp DATETIME")
     if "run_date" not in columns:
         statements.append("ALTER TABLE log_file_manifest ADD COLUMN run_date DATE")
+    if "partition_value" not in columns:
+        statements.append(
+            "ALTER TABLE log_file_manifest ADD COLUMN partition_value DATE"
+        )
+    if "partition_format" not in columns:
+        statements.append(
+            "ALTER TABLE log_file_manifest ADD COLUMN partition_format VARCHAR(100)"
+        )
     if not statements:
         return
     with engine.begin() as connection:
@@ -326,6 +612,96 @@ def _migrate_environment_sources(engine) -> None:
             _migrate_scan_run_read_checks(connection, tables)
 
 
+def _migrate_source_registrations(engine) -> None:
+    """Backfill the additive raw/canonical registration contract."""
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if not {"environment_sources", "source_registrations"}.issubset(tables):
+        return
+    columns = {column["name"] for column in inspector.get_columns("environment_sources")}
+    if "registration_id" not in columns:
+        return
+
+    from datacoolie_studio.domains.sources.registration import (
+        source_registration_identity,
+    )
+
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, environment_id, source_kind, uri,
+                       storage_provider, storage_config_json
+                FROM environment_sources
+                WHERE registration_id IS NULL
+                ORDER BY id
+                """
+            )
+        ).mappings()
+        for row in rows:
+            try:
+                options = json.loads(row["storage_config_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                options = {}
+            if not isinstance(options, dict):
+                options = {}
+            identity_key = source_registration_identity(
+                provider=str(row["storage_provider"] or "local"),
+                canonical_uri=str(row["uri"]),
+                storage_options=options,
+            )
+            registration_id = connection.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM source_registrations
+                    WHERE environment_id = :environment_id
+                      AND purpose = :purpose
+                      AND identity_key = :identity_key
+                    """
+                ),
+                {
+                    "environment_id": row["environment_id"],
+                    "purpose": row["source_kind"],
+                    "identity_key": identity_key,
+                },
+            ).scalar_one_or_none()
+            if registration_id is None:
+                result = connection.execute(
+                    text(
+                        """
+                        INSERT INTO source_registrations (
+                            environment_id, purpose, input_uri, canonical_uri,
+                            identity_key, created_at, updated_at
+                        ) VALUES (
+                            :environment_id, :purpose, :uri, :uri,
+                            :identity_key, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        )
+                        """
+                    ),
+                    {
+                        "environment_id": row["environment_id"],
+                        "purpose": row["source_kind"],
+                        "uri": row["uri"],
+                        "identity_key": identity_key,
+                    },
+                )
+                registration_id = result.lastrowid
+            connection.execute(
+                text(
+                    """
+                    UPDATE environment_sources
+                    SET registration_id = :registration_id
+                    WHERE id = :source_id
+                    """
+                ),
+                {
+                    "registration_id": registration_id,
+                    "source_id": row["id"],
+                },
+            )
+
+
 def _migrate_log_sources(engine) -> None:
     inspector = inspect(engine)
     if "environment_sources" not in inspector.get_table_names():
@@ -335,15 +711,6 @@ def _migrate_log_sources(engine) -> None:
             text(
                 """
                 UPDATE environment_sources
-                SET source_kind = 'logs'
-                WHERE source_kind = 'etl_logs'
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                UPDATE source_revisions
                 SET source_kind = 'logs'
                 WHERE source_kind = 'etl_logs'
                 """
@@ -401,6 +768,49 @@ def _migrate_log_file_manifest(engine) -> None:
             )
         )
         connection.execute(text("DROP TABLE etl_log_file_manifest"))
+
+
+def _ensure_log_file_manifest_unique_index(engine) -> None:
+    inspector = inspect(engine)
+    table_name = "log_file_manifest"
+    if table_name not in inspector.get_table_names():
+        return
+    index_name = "uq_log_file_manifest_source_kind_uri"
+    existing_names = {
+        item.get("name")
+        for item in (
+            *inspector.get_indexes(table_name),
+            *inspector.get_unique_constraints(table_name),
+        )
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"""
+                DELETE FROM {table_name}
+                WHERE id IN (
+                    SELECT id
+                    FROM (
+                        SELECT
+                            id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY source_id, file_kind, file_uri
+                                ORDER BY last_seen_at DESC, id DESC
+                            ) AS duplicate_rank
+                        FROM {table_name}
+                    ) ranked
+                    WHERE duplicate_rank > 1
+                )
+                """
+            )
+        )
+        if index_name not in existing_names:
+            connection.execute(
+                text(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                    f"ON {table_name} (source_id, file_kind, file_uri)"
+                )
+            )
 
 
 def _migrate_project_reference_mappings(engine) -> None:

@@ -40,14 +40,11 @@ export function formatRelativeTime(value?: string | null, now = Date.now()) {
   return `${formatUnit(elapsedDays, "day")} ago`;
 }
 
-export function formatAbsoluteTime(value?: string | null) {
+export function formatAbsoluteTime(value?: string | null, timezoneName?: string | null) {
   const timestamp = parseTimestamp(value);
   if (timestamp === null) return null;
 
-  return new Date(timestamp).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "long"
-  });
+  return formatTimestampInTimezone(timestamp, resolveIntlTimezone(timezoneName));
 }
 
 export function isTimestampFieldName(key: string) {

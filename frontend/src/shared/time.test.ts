@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTimestampForDisplay, resolveIntlTimezone } from "./time";
+import { formatAbsoluteTime, formatRelativeTime, formatTimestampForDisplay, resolveIntlTimezone } from "./time";
 
 describe("timezone display", () => {
   it("keeps supported IANA timezone names", () => {
@@ -14,5 +14,20 @@ describe("timezone display", () => {
     expect(() =>
       formatTimestampForDisplay("2026-07-23T06:00:00Z", "SE Asia Standard Time")
     ).not.toThrow();
+  });
+
+  it("treats API timestamps without a suffix as UTC instants", () => {
+    expect(
+      formatRelativeTime(
+        "2026-07-28T14:40:00",
+        Date.parse("2026-07-28T14:40:30Z"),
+      ),
+    ).toBe("just now");
+  });
+
+  it("formats API timestamps in the configured Studio timezone", () => {
+    expect(
+      formatAbsoluteTime("2026-07-28T14:40:00", "Asia/Ho_Chi_Minh"),
+    ).toContain("2026-07-28 21:40:00");
   });
 });

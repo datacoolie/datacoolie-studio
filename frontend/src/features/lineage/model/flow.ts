@@ -97,10 +97,10 @@ export function buildLineageFlow(
         status: statusOverlay ? status : "unknown",
         selectionState,
         labelSegment: (fanOut.get(dataflow.source_asset_id) ?? 0) > 1
-          && (fanIn.get(dataflow.destination_asset_id) ?? 0) > 1 ? "longest"
-          : (fanOut.get(dataflow.source_asset_id) ?? 0) > 1 ? "target"
-            : (fanIn.get(dataflow.destination_asset_id) ?? 0) > 1 ? "source"
-              : "longest"
+          ? "target"
+          : (fanIn.get(dataflow.destination_asset_id) ?? 0) > 1
+            ? "source"
+            : "longest"
       }
     };
   });

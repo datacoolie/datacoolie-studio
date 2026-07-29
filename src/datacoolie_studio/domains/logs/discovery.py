@@ -6,7 +6,18 @@ from datetime import date, datetime
 from enum import Enum
 
 from datacoolie_studio.domains.logs.partition import ParsedPartition, PartitionGranularity, parse_partition_path
-from datacoolie_studio.domains.storage.adapters import FileRevision, StorageAdapter
+from datacoolie_studio.domains.storage.adapters import (
+    StorageRevision,
+    StorageAdapter,
+    StorageObject,
+    StorageRevision,
+)
+from datacoolie_studio.domains.storage.errors import StorageNotFoundError
+from datacoolie_studio.domains.storage.concurrency import map_storage_io
+from datacoolie_studio.domains.storage.inventory import (
+    StorageInventoryRequest,
+    inventory,
+)
 
 
 class PartitionFormatError(ValueError):
@@ -63,7 +74,7 @@ class DiscoveredPartition:
 @dataclass(frozen=True)
 class DiscoveredLogFile:
     partition: ParsedPartition
-    revision: FileRevision
+    revision: StorageRevision
 
     @property
     def canonical_uri(self) -> str:
@@ -79,7 +90,11 @@ def discover_partitions(
     """Discover partition leaves with at most three shallow directory listings."""
 
     leaves: list[DiscoveredPartition] = []
-    for child_uri in adapter.list_partition_children(root_uri):
+    try:
+        children = _partition_children(adapter, root_uri)
+    except (FileNotFoundError, StorageNotFoundError):
+        children = []
+    for child_uri in children:
         relative = _relative_child_name(root_uri, child_uri)
         leaves.extend(_discover_partition_branch(adapter, child_uri, relative, depth=1))
     formats = {item.partition.partition_format for item in leaves}
@@ -115,15 +130,44 @@ def discover_partition_files(
     *,
     suffix: str,
 ) -> list[DiscoveredLogFile]:
-    files: list[DiscoveredLogFile] = []
-    for discovered_partition in partitions:
-        for file_uri in adapter.list_files(discovered_partition.uri, suffix):
+    def discover_one(
+        discovered_partition: DiscoveredPartition,
+    ) -> list[DiscoveredLogFile]:
+        files: list[DiscoveredLogFile] = []
+        try:
+            file_items = inventory(
+                adapter,
+                StorageInventoryRequest(
+                    uri=discovered_partition.uri,
+                    purpose="logs",
+                    object_types=frozenset({"file"}),
+                    suffixes=frozenset({suffix}),
+                ),
+            ).files
+        except (FileNotFoundError, StorageNotFoundError):
+            file_items = []
+        for file_item in file_items:
+            file_uri = file_item.canonical_uri
+            revision = StorageRevision(
+                canonical_uri=file_item.canonical_uri,
+                size=int(file_item.size or 0),
+                last_modified=file_item.last_modified
+                or adapter.stat(file_uri).last_modified,
+                provider_revision=file_item.provider_revision,
+            )
             files.append(
                 DiscoveredLogFile(
                     partition=discovered_partition.partition,
-                    revision=adapter.stat(file_uri),
+                    revision=revision,
                 )
             )
+        return files
+
+    files = [
+        file
+        for group in map_storage_io(adapter, discover_one, list(partitions))
+        for file in group
+    ]
     return sorted(files, key=lambda item: (item.partition.partition_value, item.canonical_uri))
 
 
@@ -139,7 +183,7 @@ def plan_incremental_candidates(
 def plan_lookback_candidates(
     files: Sequence[DiscoveredLogFile],
     lookback: LookbackRange,
-    manifest_revisions: Mapping[str, FileRevision],
+    manifest_revisions: Mapping[str, StorageRevision],
 ) -> list[DiscoveredLogFile]:
     candidates: list[DiscoveredLogFile] = []
     for item in files:
@@ -171,7 +215,7 @@ def discover_lookback_candidates(
     *,
     suffix: str,
     lookback: LookbackRange,
-    manifest_revisions: Mapping[str, FileRevision],
+    manifest_revisions: Mapping[str, StorageRevision],
     expected_format: str | None = None,
 ) -> list[DiscoveredLogFile]:
     partitions = discover_partitions(adapter, root_uri, expected_format=expected_format)
@@ -201,7 +245,11 @@ def _discover_partition_branch(
 
     descendants: list[DiscoveredPartition] = []
     if depth < 3 and (parsed is None or parsed.partition_granularity is not PartitionGranularity.DAY):
-        for child_uri in adapter.list_partition_children(uri):
+        try:
+            children = _partition_children(adapter, uri)
+        except (FileNotFoundError, StorageNotFoundError):
+            children = []
+        for child_uri in children:
             child_name = _relative_child_name(uri, child_uri)
             descendants.extend(
                 _discover_partition_branch(
@@ -233,3 +281,18 @@ def _relative_child_name(parent_uri: str, child_uri: str) -> str:
             return relative
     normalized = child.replace("\\", "/")
     return normalized.rsplit("/", 1)[-1]
+
+
+def _partition_children(
+    adapter: StorageAdapter,
+    root_uri: str,
+) -> list[str]:
+    observed = inventory(
+        adapter,
+        StorageInventoryRequest(
+            uri=root_uri,
+            purpose="logs",
+            object_types=frozenset({"directory"}),
+        ),
+    )
+    return [item.canonical_uri for item in observed.directories]
