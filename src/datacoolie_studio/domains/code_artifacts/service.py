@@ -54,8 +54,7 @@ def validate_code_artifact(
         )
     except Exception as exc:
         result = _error_result(source, str(exc))
-    record_source_validation(session, source, result)
-    return result
+    return record_source_validation(session, source, result)
 
 
 def refresh_code_artifact(

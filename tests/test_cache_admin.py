@@ -11,8 +11,8 @@ from datacoolie_studio.domains.read_models.database import reset_result_cache_en
 from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCacheStore
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_LOGS = ROOT / "datacoolie" / "usecase-sim" / "logs" / "etl_logs" / "analyst"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "datacoolie"
+SAMPLE_LOGS = FIXTURE_ROOT / "usecase-sim" / "logs" / "etl_logs" / "analyst"
 
 
 def _key(environment_id: int, namespace: str) -> ResultCacheKey:

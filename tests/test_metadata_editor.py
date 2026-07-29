@@ -5,8 +5,8 @@ import sqlite3
 import uuid
 import json
 
-ROOT = Path(__file__).resolve().parents[2]
-METADATA_DIR = ROOT / "datacoolie" / "usecase-sim" / "metadata" / "file"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "datacoolie"
+METADATA_DIR = FIXTURE_ROOT / "usecase-sim" / "metadata" / "file"
 SAMPLE_JSON = METADATA_DIR / "local_use_cases.json"
 SAMPLE_YAML = METADATA_DIR / "local_use_cases.yaml"
 SAMPLE_XLSX = METADATA_DIR / "local_use_cases.xlsx"

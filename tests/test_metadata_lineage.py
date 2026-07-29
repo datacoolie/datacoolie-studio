@@ -13,8 +13,8 @@ from datacoolie_studio.domains.metadata.normalizer import (
 from datacoolie_studio.domains.metadata.reader import read_metadata_file
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_METADATA = ROOT / "datacoolie" / "usecase-sim" / "metadata" / "file" / "local_use_cases.json"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "datacoolie"
+SAMPLE_METADATA = FIXTURE_ROOT / "usecase-sim" / "metadata" / "file" / "local_use_cases.json"
 
 
 def test_reads_datacoolie_usecase_metadata():

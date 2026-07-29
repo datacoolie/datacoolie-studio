@@ -34,8 +34,8 @@ from datacoolie_studio.domains.monitoring.query_service import dataflow_logs, jo
 from datacoolie_studio.domains.monitoring.page_service import monitoring_page, public_monitoring_page
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_LOGS = ROOT / "datacoolie" / "usecase-sim" / "logs" / "etl_logs" / "analyst"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "datacoolie"
+SAMPLE_LOGS = FIXTURE_ROOT / "usecase-sim" / "logs" / "etl_logs" / "analyst"
 
 
 class PathRecord:

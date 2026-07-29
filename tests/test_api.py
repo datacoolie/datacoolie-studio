@@ -11,10 +11,10 @@ from pathlib import Path
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 
-ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_LOGS = ROOT / "datacoolie" / "usecase-sim" / "logs" / "etl_logs" / "analyst"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "datacoolie"
+SAMPLE_LOGS = FIXTURE_ROOT / "usecase-sim" / "logs" / "etl_logs" / "analyst"
 SAMPLE_METADATA = (
-    ROOT / "datacoolie" / "usecase-sim" / "metadata" / "file" / "local_use_cases.json"
+    FIXTURE_ROOT / "usecase-sim" / "metadata" / "file" / "local_use_cases.json"
 )
 
 
