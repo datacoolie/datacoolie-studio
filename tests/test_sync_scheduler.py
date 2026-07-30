@@ -14,17 +14,24 @@ from datacoolie_studio.db.models import (
     SourceObservation,
     SyncJob,
 )
-from datacoolie_studio.db.session import _ensure_sync_job_running_index
+from datacoolie_studio.db.session import (
+    _ensure_source_observation_pause_column,
+    _ensure_sync_job_running_index,
+)
 from datacoolie_studio.domains.sync.scheduler import (
     _is_due,
     observe_environment_local_sources,
+    run_due_schedules_once,
 )
 from datacoolie_studio.domains.source_observation.contracts import ObservationResult
 from datacoolie_studio.domains.source_observation.repository import (
     claim_due_observation_ids,
+    claim_local_observation,
     complete_observation,
+    ensure_periodic_observations,
     observation_delay_seconds,
     reset_observation,
+    resume_observation,
 )
 from datacoolie_studio.domains.sync.service import (
     SyncJobOverlapError,
@@ -34,6 +41,9 @@ from datacoolie_studio.domains.sync.service import (
 )
 from datacoolie_studio.domains.sources.initialization import (
     queue_source_initializations,
+)
+from datacoolie_studio.domains.studio_settings.service import (
+    update_studio_settings,
 )
 from datacoolie_studio.domains.workspace import service as workspace
 
@@ -252,6 +262,276 @@ def test_observation_error_preserves_pending_and_skipped_preserves_evidence():
         assert state.pending_changes is True
         assert state.last_outcome == "error"
         assert state.lease_owner is None
+    finally:
+        session.close()
+
+
+def test_third_automatic_failure_hard_pauses_and_cannot_be_reclaimed():
+    session, source = _sync_session(storage_provider="s3")
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    policy = {
+        "source_check_mode": "adaptive",
+        "source_check_interval_seconds": 30,
+        "source_check_max_interval_seconds": 300,
+    }
+    try:
+        reset_observation(session, source.id, due_at=now)
+        session.commit()
+        for attempt in range(1, 4):
+            owner = f"failure-{attempt}"
+            state = session.get(SourceObservation, source.id)
+            state.lease_owner = owner
+            state.lease_expires_at = now + timedelta(minutes=1)
+            session.commit()
+            complete_observation(
+                session,
+                result=ObservationResult(
+                    source_id=source.id,
+                    source_kind=source.source_kind,
+                    outcome="error",
+                    pending_changes=None,
+                    observed_revision=None,
+                    error={"code": "storage_access_failed", "message": "denied"},
+                    inventory_metrics=None,
+                    started_at=now,
+                    completed_at=now + timedelta(seconds=attempt),
+                ),
+                lease_owner=owner,
+                policy=policy,
+            )
+
+        state = session.get(SourceObservation, source.id)
+        assert state.failure_streak == 3
+        assert state.automatic_observation_paused_at is not None
+        assert state.next_observation_at is None
+
+        ensure_periodic_observations(session, now + timedelta(days=1))
+        _, claimed = claim_due_observation_ids(
+            session, now=now + timedelta(days=1)
+        )
+        assert claimed == []
+        assert session.get(SourceObservation, source.id).next_observation_at is None
+    finally:
+        session.close()
+
+
+def test_resume_clears_pause_debt_but_preserves_success_evidence():
+    session, source = _sync_session(storage_provider="s3")
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    try:
+        state = reset_observation(session, source.id, due_at=now)
+        state.last_succeeded_at = now - timedelta(hours=1)
+        state.observed_revision_json = '{"etag":"kept"}'
+        state.last_outcome = "error"
+        state.error_json = '{"message":"denied"}'
+        state.failure_streak = 3
+        state.automatic_observation_paused_at = now
+        state.next_observation_at = None
+        session.commit()
+
+        resume_observation(
+            session, source.id, due_at=now + timedelta(minutes=1)
+        )
+        session.commit()
+
+        state = session.get(SourceObservation, source.id)
+        assert state.failure_streak == 0
+        assert state.automatic_observation_paused_at is None
+        assert state.error_json is None
+        assert state.last_outcome == "unchanged"
+        assert state.observed_revision_json == '{"etag":"kept"}'
+        assert state.last_succeeded_at is not None
+    finally:
+        session.close()
+
+
+def test_automatic_success_before_threshold_clears_failure_streak():
+    session, source = _sync_session(storage_provider="s3")
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    try:
+        state = reset_observation(session, source.id, due_at=now)
+        state.failure_streak = 2
+        state.last_outcome = "error"
+        state.error_json = '{"message":"temporary"}'
+        state.lease_owner = "recovered"
+        state.lease_expires_at = now + timedelta(minutes=1)
+        session.commit()
+
+        complete_observation(
+            session,
+            result=ObservationResult(
+                source_id=source.id,
+                source_kind=source.source_kind,
+                outcome="unchanged",
+                pending_changes=False,
+                observed_revision={"etag": "same"},
+                error=None,
+                inventory_metrics=None,
+                started_at=now,
+                completed_at=now,
+            ),
+            lease_owner="recovered",
+            policy={
+                "source_check_mode": "adaptive",
+                "source_check_interval_seconds": 30,
+                "source_check_max_interval_seconds": 300,
+            },
+        )
+
+        state = session.get(SourceObservation, source.id)
+        assert state.failure_streak == 0
+        assert state.automatic_observation_paused_at is None
+        assert state.error_json is None
+    finally:
+        session.close()
+
+
+def test_paused_local_source_is_not_claimed():
+    session, source = _sync_session(
+        storage_provider="local", source_kind="metadata"
+    )
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    try:
+        state = reset_observation(session, source.id)
+        state.failure_streak = 3
+        state.automatic_observation_paused_at = now
+        session.commit()
+
+        assert claim_local_observation(
+            session,
+            source_id=source.id,
+            environment_id=source.environment_id,
+            lease_owner="local",
+            now=now + timedelta(days=1),
+        ) is False
+    finally:
+        session.close()
+
+
+def test_paused_log_source_is_excluded_from_scheduled_sync(monkeypatch):
+    session, source = _sync_session()
+    source.sync_schedule_enabled = True
+    state = reset_observation(session, source.id)
+    state.failure_streak = 3
+    state.automatic_observation_paused_at = datetime(
+        2026, 7, 28, 12, 0, tzinfo=timezone.utc
+    )
+    state.next_observation_at = None
+    session.commit()
+    calls = []
+
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.sync.scheduler.create_session",
+        lambda: session,
+    )
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.sync.scheduler._refresh_log_source",
+        lambda *_args: calls.append(True) or True,
+    )
+
+    assert run_due_schedules_once() == 0
+    assert calls == []
+
+
+def test_pause_column_migration_resets_failure_debt_only_once():
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE source_observations "
+                "(source_id INTEGER PRIMARY KEY, failure_streak INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO source_observations (source_id, failure_streak) "
+                "VALUES (1, 8)"
+            )
+        )
+
+    _ensure_source_observation_pause_column(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE source_observations SET failure_streak = 2, "
+                "automatic_observation_paused_at = '2026-07-28 12:00:00'"
+            )
+        )
+    _ensure_source_observation_pause_column(engine)
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT failure_streak, automatic_observation_paused_at "
+                "FROM source_observations"
+            )
+        ).one()
+    assert row[0] == 2
+    assert row[1] is not None
+
+
+def test_disabling_preserves_pause_and_reenabling_resumes():
+    session, source = _sync_session(
+        storage_provider="local", source_kind="metadata"
+    )
+    try:
+        state = reset_observation(session, source.id)
+        state.failure_streak = 3
+        state.last_outcome = "error"
+        state.error_json = '{"message":"denied"}'
+        state.automatic_observation_paused_at = datetime(
+            2026, 7, 28, 12, 0, tzinfo=timezone.utc
+        )
+        state.next_observation_at = None
+        session.commit()
+
+        workspace.update_metadata_source(
+            session,
+            source.environment_id,
+            source.id,
+            enabled=False,
+        )
+        assert (
+            session.get(SourceObservation, source.id)
+            .automatic_observation_paused_at
+            is not None
+        )
+
+        workspace.update_metadata_source(
+            session,
+            source.environment_id,
+            source.id,
+            enabled=True,
+        )
+        resumed = session.get(SourceObservation, source.id)
+        assert resumed.automatic_observation_paused_at is None
+        assert resumed.failure_streak == 0
+        assert resumed.last_outcome == "never"
+        assert resumed.error_json is None
+    finally:
+        session.close()
+
+
+def test_policy_change_does_not_resume_paused_source():
+    session, source = _sync_session(storage_provider="s3")
+    try:
+        state = reset_observation(session, source.id)
+        state.failure_streak = 3
+        state.automatic_observation_paused_at = datetime(
+            2026, 7, 28, 12, 0, tzinfo=timezone.utc
+        )
+        state.next_observation_at = None
+        session.commit()
+
+        update_studio_settings(
+            session,
+            {"source_check_interval_seconds": 45},
+        )
+
+        state = session.get(SourceObservation, source.id)
+        assert state.automatic_observation_paused_at is not None
+        assert state.failure_streak == 3
+        assert state.next_observation_at is None
     finally:
         session.close()
 

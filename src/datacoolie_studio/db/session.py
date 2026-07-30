@@ -34,6 +34,7 @@ def init_db() -> None:
     _migrate_project_reference_mappings(engine)
     _replace_source_observation_schema(engine)
     Base.metadata.create_all(bind=engine)
+    _ensure_source_observation_pause_column(engine)
     _ensure_sync_job_running_index(engine)
     _migrate_current_materializations(engine)
     _drop_legacy_derived_cache_tables(engine)
@@ -59,6 +60,35 @@ def _replace_source_observation_schema(engine) -> None:
     with engine.begin() as connection:
         for table_name in sorted(existing):
             connection.execute(text(f"DROP TABLE {table_name}"))
+
+
+def _ensure_source_observation_pause_column(engine) -> None:
+    """Add hard-pause state without inheriting pre-policy failure debt."""
+
+    inspector = inspect(engine)
+    if "source_observations" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("source_observations")
+    }
+    if "automatic_observation_paused_at" in columns:
+        return
+    timestamp_type = (
+        "TIMESTAMP WITH TIME ZONE"
+        if engine.dialect.name == "postgresql"
+        else "DATETIME"
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE source_observations "
+                f"ADD COLUMN automatic_observation_paused_at {timestamp_type}"
+            )
+        )
+        connection.execute(
+            text("UPDATE source_observations SET failure_streak = 0")
+        )
 
 
 def _drop_legacy_derived_cache_tables(engine) -> None:

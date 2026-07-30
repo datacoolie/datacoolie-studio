@@ -81,11 +81,13 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
             section={route.projectSection ?? "overview"}
             busy={workspace.busy}
             routeSearch={route.search}
+            onRenameProject={workspace.renameProject}
             onDeleteProject={workspace.deleteProject}
             onSectionChange={router.navigateProjectSection}
             onOpenEnvironment={router.openProjectEnvironment}
             onConfigureSources={router.openEnvironmentSources}
             onCreateEnvironment={workspace.createEnvironment}
+            onRenameEnvironment={workspace.renameEnvironment}
             onDeleteEnvironment={workspace.deleteEnvironment}
             onQuickCreateEnvironment={async (projectId, name) => {
               const envId = await workspace.createEnvironment(name, projectId);
@@ -165,6 +167,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           onGetDeleteImpact={workspace.getSourceDeleteImpact}
           onValidateSource={workspace.validateSource}
           onSyncSource={workspace.syncSource}
+          onRetrySourceObservation={workspace.retrySourceObservation}
           onRunSourceBatch={workspace.runSourceBatch}
           syncStatuses={workspace.sourceSyncStatuses}
           sourceOperations={workspace.sourceOperations}
@@ -183,6 +186,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           onFocusInLineage={(target) => router.navigate("lineage", lineageDataflowFocusSearch(target))}
           loading={workspace.loading}
           busy={workspace.busy}
+          savingDraft={workspace.metadataEditorSavingDraft}
           onValidate={workspace.validateMetadataEditorDocument}
           onSaveDraft={workspace.saveMetadataEditorDraft}
           onDiscardDraft={workspace.discardMetadataEditorDraft}

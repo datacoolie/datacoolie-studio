@@ -138,6 +138,7 @@ export function SettingsPage({
                 ) : null}
                 <StatRow label="Local metadata/code" value="On navigation / foreground" />
                 <StatRow label="Log sources" value="Observed periodically; synced by schedule" />
+                <StatRow label="Failure policy" value="Pause after 3 consecutive failures" />
               </dl>
             </div>
           </div>

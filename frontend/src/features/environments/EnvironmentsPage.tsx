@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, Code2, Database, FolderOpen, Plus, Settings2, Trash2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Code2, Database, FolderOpen, Pencil, Plus, Settings2, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ProjectSummary } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
@@ -9,6 +9,7 @@ interface EnvironmentsPageProps {
   project: ProjectSummary | null;
   busy: boolean;
   onCreateEnvironment: (name: string) => Promise<number>;
+  onRenameEnvironment: (environmentId: number, name: string) => Promise<void>;
   onDeleteEnvironment: (environmentId: number) => Promise<void>;
   onOpenEnvironment: (projectId: number, environmentId: number) => void;
   onConfigureSources: (projectId: number, environmentId: number) => void;
@@ -18,12 +19,15 @@ export function EnvironmentsPage({
   project,
   busy,
   onCreateEnvironment,
+  onRenameEnvironment,
   onDeleteEnvironment,
   onOpenEnvironment,
   onConfigureSources,
 }: EnvironmentsPageProps) {
   const [customName, setCustomName] = useState("");
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const existingNames = useMemo(
     () => new Set((project?.environments ?? []).map((environment) => environment.name.toLowerCase())),
@@ -58,6 +62,18 @@ export function EnvironmentsPage({
       setDeletingId(null);
     } catch {
       // The workspace renders the mutation error and the confirmation stays open.
+    }
+  }
+
+  async function handleRename(environmentId: number, currentName: string) {
+    const name = normalizeName(renameDraft);
+    if (!isValidEnvironmentName(name) || name === currentName) return;
+    try {
+      await onRenameEnvironment(environmentId, name);
+      setRenamingId(null);
+      setRenameDraft("");
+    } catch {
+      // The workspace renders the mutation error and the rename form stays open.
     }
   }
 
@@ -123,8 +139,12 @@ export function EnvironmentsPage({
             const status = environmentReadiness(env);
             const needsMetadata = status === "needs-metadata";
             const isConfirming = deletingId === env.id;
+            const isRenaming = renamingId === env.id;
             return (
-              <div key={env.id} className={`env-row${isConfirming ? " env-row-confirming" : ""}`}>
+              <div
+                key={env.id}
+                className={`env-row${isConfirming ? " env-row-confirming" : ""}${isRenaming ? " env-row-renaming" : ""}`}
+              >
                 {isConfirming ? (
                   <div className="env-row-confirm">
                     <div className="env-row-confirm-copy">
@@ -140,6 +160,50 @@ export function EnvironmentsPage({
                       </button>
                     </div>
                   </div>
+                ) : isRenaming ? (
+                  <form
+                    className="env-row-rename"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void handleRename(env.id, env.name);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      setRenamingId(null);
+                      setRenameDraft("");
+                    }}
+                  >
+                    <label htmlFor={`environment-rename-${env.id}`}>Environment name</label>
+                    <input
+                      id={`environment-rename-${env.id}`}
+                      autoFocus
+                      value={renameDraft}
+                      maxLength={50}
+                      onChange={(event) => setRenameDraft(event.target.value)}
+                    />
+                    <button
+                      type="submit"
+                      className="env-rename-save"
+                      disabled={
+                        busy
+                        || !isValidEnvironmentName(renameDraft)
+                        || normalizeName(renameDraft) === env.name
+                      }
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="env-confirm-no"
+                      onClick={() => {
+                        setRenamingId(null);
+                        setRenameDraft("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </form>
                 ) : (
                   <>
                     <button
@@ -165,6 +229,18 @@ export function EnvironmentsPage({
                     </button>
                     <div className="env-row-actions">
                       <button
+                        className="env-action-rename"
+                        onClick={() => {
+                          setDeletingId(null);
+                          setRenamingId(env.id);
+                          setRenameDraft(env.name);
+                        }}
+                        aria-label={`Rename ${env.name} environment`}
+                      >
+                        <Pencil size={13} aria-hidden="true" />
+                        <span>Rename</span>
+                      </button>
+                      <button
                         className="env-action-configure"
                         onClick={() => onConfigureSources(project.id, env.id)}
                         aria-label={`Manage ${env.name} sources`}
@@ -174,7 +250,10 @@ export function EnvironmentsPage({
                       </button>
                       <button
                         className="env-action-delete"
-                        onClick={() => setDeletingId(env.id)}
+                        onClick={() => {
+                          setRenamingId(null);
+                          setDeletingId(env.id);
+                        }}
                         aria-label={`Delete ${env.name} environment`}
                       >
                         <Trash2 size={13} aria-hidden="true" />
@@ -193,4 +272,8 @@ export function EnvironmentsPage({
 
 function normalizeName(value: string) {
   return value.trim();
+}
+
+function isValidEnvironmentName(value: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$/.test(normalizeName(value));
 }

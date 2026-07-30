@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleAlert, Database, FolderOpen, GitBranch, Layers3, LayoutDashboard, MoreHorizontal, Settings2, Trash2 } from "lucide-react";
+import { CheckCircle2, CircleAlert, Database, FolderOpen, GitBranch, Layers3, LayoutDashboard, MoreHorizontal, Pencil, Settings2, Trash2 } from "lucide-react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ProjectSummary } from "../../shared/api/domainTypes";
@@ -22,11 +22,13 @@ interface ProjectDetailPageProps {
   section: ProjectSectionKey;
   busy: boolean;
   routeSearch?: string;
+  onRenameProject: (projectId: number, name: string) => Promise<void>;
   onDeleteProject: (projectId: number) => Promise<void>;
   onSectionChange: (section: ProjectSectionKey) => void;
   onOpenEnvironment: (projectId: number, environmentId: number) => void;
   onConfigureSources: (projectId: number, environmentId: number) => void;
   onCreateEnvironment: (name: string) => Promise<number>;
+  onRenameEnvironment: (environmentId: number, name: string) => Promise<void>;
   onDeleteEnvironment: (environmentId: number) => Promise<void>;
   onQuickCreateEnvironment: (projectId: number, name: string) => Promise<void>;
   onCreateMapping: ProjectReferenceMappingsPageProps["onCreate"];
@@ -51,11 +53,13 @@ export function ProjectDetailPage({
   section,
   busy,
   routeSearch,
+  onRenameProject,
   onDeleteProject,
   onSectionChange,
   onOpenEnvironment,
   onConfigureSources,
   onCreateEnvironment,
+  onRenameEnvironment,
   onDeleteEnvironment,
   onQuickCreateEnvironment,
   onCreateMapping,
@@ -63,6 +67,8 @@ export function ProjectDetailPage({
   onDeleteMapping,
 }: ProjectDetailPageProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const referenceRegistry = useProjectReferenceRegistry(projectId, section === "reference-mappings");
@@ -74,12 +80,14 @@ export function ProjectDetailPage({
       if (target instanceof Node && actionsMenuRef.current?.contains(target)) return;
       setActionsOpen(false);
       setConfirmDelete(false);
+      setRenamingProject(false);
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       setActionsOpen(false);
       setConfirmDelete(false);
+      setRenamingProject(false);
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -94,6 +102,7 @@ export function ProjectDetailPage({
     return <EmptyState title={busy ? "Loading project" : "Project not found"} />;
   }
   const currentProjectId = project.id;
+  const currentProjectName = project.name;
 
   async function handleDeleteProject() {
     try {
@@ -102,6 +111,19 @@ export function ProjectDetailPage({
       setActionsOpen(false);
     } catch {
       // The workspace renders the mutation error and the confirmation stays open.
+    }
+  }
+
+  async function handleRenameProject(event: React.FormEvent) {
+    event.preventDefault();
+    const name = projectNameDraft.trim();
+    if (!name || name === currentProjectName || name.length > 255) return;
+    try {
+      await onRenameProject(currentProjectId, name);
+      setRenamingProject(false);
+      setActionsOpen(false);
+    } catch {
+      // The workspace renders the mutation error and the rename form stays open.
     }
   }
 
@@ -128,6 +150,7 @@ export function ProjectDetailPage({
                 onClick={() => {
                   setActionsOpen((value) => !value);
                   setConfirmDelete(false);
+                  setRenamingProject(false);
                 }}
                 title="Project actions"
                 aria-label="Project actions"
@@ -146,11 +169,60 @@ export function ProjectDetailPage({
                       <button type="button" className="text-action danger" disabled={busy} onClick={handleDeleteProject}>Delete</button>
                       <button type="button" className="text-action" onClick={() => setConfirmDelete(false)}>Cancel</button>
                     </div>
+                  ) : renamingProject ? (
+                    <form
+                      className="project-rename-form"
+                      onSubmit={handleRenameProject}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape") return;
+                        event.preventDefault();
+                        setRenamingProject(false);
+                      }}
+                    >
+                      <label htmlFor="project-rename-input">Project name</label>
+                      <input
+                        id="project-rename-input"
+                        autoFocus
+                        value={projectNameDraft}
+                        maxLength={255}
+                        onChange={(event) => setProjectNameDraft(event.target.value)}
+                      />
+                      <div>
+                        <button
+                          type="submit"
+                          className="text-action"
+                          disabled={
+                            busy
+                            || !projectNameDraft.trim()
+                            || projectNameDraft.trim() === project.name
+                          }
+                        >
+                          Save
+                        </button>
+                        <button type="button" className="text-action" onClick={() => setRenamingProject(false)}>
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
                   ) : (
-                    <button className="project-action-danger" type="button" onClick={() => setConfirmDelete(true)} role="menuitem">
-                      <Trash2 size={13} />
-                      <span>Delete project</span>
-                    </button>
+                    <>
+                      <button
+                        className="project-action-secondary"
+                        type="button"
+                        onClick={() => {
+                          setProjectNameDraft(project.name);
+                          setRenamingProject(true);
+                        }}
+                        role="menuitem"
+                      >
+                        <Pencil size={13} />
+                        <span>Rename project</span>
+                      </button>
+                      <button className="project-action-danger" type="button" onClick={() => setConfirmDelete(true)} role="menuitem">
+                        <Trash2 size={13} />
+                        <span>Delete project</span>
+                      </button>
+                    </>
                   )}
                 </div>
               ) : null}
@@ -197,6 +269,7 @@ export function ProjectDetailPage({
             project={project}
             busy={busy}
             onCreateEnvironment={onCreateEnvironment}
+            onRenameEnvironment={onRenameEnvironment}
             onDeleteEnvironment={onDeleteEnvironment}
             onOpenEnvironment={onOpenEnvironment}
             onConfigureSources={onConfigureSources}

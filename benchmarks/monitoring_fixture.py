@@ -83,7 +83,7 @@ def build_analytics_fixture(
               destination_rows_deleted, destination_bytes_added,
               destination_bytes_removed, destination_bytes_saved,
               destination_files_added, destination_files_removed,
-              overhead_duration_seconds, error_message, __run_date
+              overhead_duration_seconds, error_message, __event_time, __run_date
             )
             SELECT
               source_ids[(index % {len(source_ids)}) + 1],
@@ -113,6 +113,7 @@ def build_analytics_fixture(
               4096 + index % 100000, index % 2048, index % 1024,
               1 + index % 8, index % 3, 1 + index % 20,
               CASE WHEN index % 20 = 0 THEN 'schema mismatch' ELSE NULL END,
+              TIMESTAMPTZ '2026-07-21 00:00:00+00' - index * INTERVAL 12 SECOND,
               CAST(TIMESTAMPTZ '2026-07-21 00:00:00+00' - index * INTERVAL 12 SECOND AS DATE)
             FROM range({dataflow_rows}) generated(index)
             CROSS JOIN (SELECT list(source_id ORDER BY source_id) AS source_ids FROM (VALUES {source_values}) sources(source_id)) ids

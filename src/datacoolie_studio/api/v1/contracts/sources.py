@@ -131,6 +131,9 @@ class SourceSyncStatusResponse(BaseModel):
     last_observed_at: datetime | None = None
     next_check_at: datetime | None = None
     pending_changes: bool | None = None
+    observation_state: Literal["active", "retrying", "paused"] = "active"
+    observation_failure_count: int = 0
+    observation_paused_at: datetime | None = None
     active_operation: Literal["validate", "sync"] | None = None
     latest_job: SourceSyncJobResponse | None = None
 

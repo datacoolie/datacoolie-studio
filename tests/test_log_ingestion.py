@@ -5,10 +5,47 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
+
+
+def test_cache_rebuild_reuses_manifest_revisions_without_provider_stat() -> None:
+    from datacoolie_studio.domains.logs.ingestion import (
+        _merge_rebuild_candidates,
+    )
+
+    revision_json = json.dumps(
+        {
+            "size": 17,
+            "last_modified": "2026-07-22T00:00:00+00:00",
+            "provider_revision": "revision-7",
+        }
+    )
+    manifest = SimpleNamespace(
+        file_kind="job_jsonl",
+        file_uri="dbfs:/Volumes/catalog/schema/volume/jobs.jsonl",
+        revision_json=revision_json,
+        partition_value=None,
+        run_date=None,
+        partition_format=None,
+    )
+
+    class Adapter:
+        def stat(self, _uri: str):
+            raise AssertionError("valid manifest revisions must avoid provider stat")
+
+    candidates = _merge_rebuild_candidates(
+        Adapter(),
+        [],
+        [manifest],
+        {},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0][0].revision.provider_revision == "revision-7"
 
 
 def _write_job_file(path: Path, job_ids: list[str]) -> None:
@@ -149,6 +186,60 @@ def _test_client(tmp_path: Path, monkeypatch):
     return TestClient(app), analytics_path
 
 
+def test_dataflow_parquet_explicit_event_time_precedes_end_and_start(tmp_path: Path) -> None:
+    parquet_path = tmp_path / "explicit-event.parquet"
+    source = duckdb.connect()
+    try:
+        source.execute(
+            """
+            CREATE TABLE fixture (
+              dataflow_run_id VARCHAR,
+              __event_time VARCHAR,
+              start_time TIMESTAMPTZ,
+              end_time TIMESTAMPTZ
+            )
+            """
+        )
+        source.execute(
+            """
+            INSERT INTO fixture VALUES (
+              'run-explicit',
+              '2026-07-22T03:00:00Z',
+              '2026-07-22T01:00:00Z',
+              '2026-07-22T02:00:00Z'
+            )
+            """
+        )
+        escaped_path = str(parquet_path).replace("'", "''")
+        source.execute(f"COPY fixture TO '{escaped_path}' (FORMAT PARQUET)")
+    finally:
+        source.close()
+
+    from datacoolie_studio.domains.analytics import schema as analytics_schema
+    from datacoolie_studio.domains.analytics import store as analytics_store
+
+    target = duckdb.connect()
+    try:
+        analytics_store.ensure_tables(target)
+        analytics_store.insert_dataflow_file(
+            target,
+            1,
+            str(parquet_path),
+            "dataflow_parquet",
+            "{}",
+        )
+        assert target.execute(
+            f"""
+            SELECT
+              typeof(__event_time),
+              epoch(__event_time)
+            FROM {analytics_schema.DATAFLOW_TABLE}
+            """
+        ).fetchone() == ("TIMESTAMP WITH TIME ZONE", 1784689200.0)
+    finally:
+        target.close()
+
+
 def test_incremental_replaces_same_job_and_dataflow_file_paths(tmp_path: Path, monkeypatch) -> None:
     log_root = tmp_path / "logs"
     job_file = log_root / "etl_logs" / "analyst" / "job_run_log" / "2026-07-22" / "jobs.jsonl"
@@ -174,6 +265,19 @@ def test_incremental_replaces_same_job_and_dataflow_file_paths(tmp_path: Path, m
         _refresh(client, environment_id, source_id)
         assert _raw_ids(analytics_path, "etl_job_runs", "job_id") == ["job-old"]
         assert _raw_ids(analytics_path, "etl_dataflow_runs", "dataflow_run_id") == ["run-old"]
+        assert _query_rows(
+            analytics_path,
+            """
+            SELECT
+              d.dataflow_run_id,
+              d.__event_time = d.end_time AS raw_event_time_matches,
+              f.event_time = d.__event_time AS serving_event_time_matches
+            FROM etl_dataflow_runs d
+            JOIN monitoring_dataflow_facts f
+              ON f._source_id = d._source_id
+             AND f.dataflow_run_id = d.dataflow_run_id
+            """,
+        ) == [("run-old", True, True)]
         assert _workspace_rows(
             tmp_path / "studio.db",
             """

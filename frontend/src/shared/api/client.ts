@@ -180,6 +180,11 @@ export const api = {
   listProjectSummaries: () => request<ProjectSummary[]>(`${API_PREFIX}/projects/summary`),
   createProject: (payload: { name: string; description?: string }) =>
     request<Project>(`${API_PREFIX}/projects`, { method: "POST", body: JSON.stringify(payload) }),
+  renameProject: (projectId: number, payload: { name: string }) =>
+    request<Project>(`${API_PREFIX}/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   deleteProject: (projectId: number) =>
     request<void>(`${API_PREFIX}/projects/${projectId}`, { method: "DELETE" }),
   getProjectReferenceRegistry: (projectId: number) =>
@@ -220,6 +225,11 @@ export const api = {
   listEnvironments: (projectId: number) => request<Environment[]>(`${API_PREFIX}/projects/${projectId}/environments`),
   createEnvironment: (projectId: number, payload: { name: string }) =>
     request<Environment>(`${API_PREFIX}/projects/${projectId}/environments`, { method: "POST", body: JSON.stringify(payload) }),
+  renameEnvironment: (environmentId: number, payload: { name: string }) =>
+    request<Environment>(`${API_PREFIX}/environments/${environmentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   deleteEnvironment: (environmentId: number) =>
     request<void>(`${API_PREFIX}/environments/${environmentId}`, { method: "DELETE" }),
   observeLocalSources: (environmentId: number) =>
@@ -282,6 +292,10 @@ export const api = {
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/refresh`, {
       method: "POST"
     }),
+  retryMetadataSourceObservation: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "metadata-sources", sourceId)}/retry-observation`, {
+      method: "POST"
+    }),
   listLogSources: (environmentId: number) => request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/log-sources`),
   addLogSource: (
     environmentId: number,
@@ -323,6 +337,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  retryLogSourceObservation: (environmentId: number, pathId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "log-sources", pathId)}/retry-observation`, {
+      method: "POST"
+    }),
   listCodeArtifacts: (environmentId: number) =>
     request<SourcePath[]>(`${API_PREFIX}/environments/${environmentId}/code-artifacts`),
   addCodeArtifact: (
@@ -360,6 +378,10 @@ export const api = {
     }),
   refreshCodeArtifact: (environmentId: number, sourceId: number) =>
     request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/refresh`, {
+      method: "POST"
+    }),
+  retryCodeArtifactObservation: (environmentId: number, sourceId: number) =>
+    request<SourceSyncStatus>(`${environmentSourcePath(environmentId, "code-artifacts", sourceId)}/retry-observation`, {
       method: "POST"
     }),
   getMetadata: (environmentId: number) => request<MetadataResponse>(`${API_PREFIX}/environments/${environmentId}/metadata`),

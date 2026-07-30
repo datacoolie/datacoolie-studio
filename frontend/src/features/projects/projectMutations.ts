@@ -2,7 +2,11 @@ import type { Dispatch, SetStateAction } from "react";
 
 import { projectDefaultSection } from "../../app/moduleRegistry";
 import type { StudioRouter } from "../../app/useStudioRouter";
-import { addProjectSummary, changeProjectReferenceMappingCount } from "../../app/projectSummaryMutations";
+import {
+  addProjectSummary,
+  changeProjectReferenceMappingCount,
+  renameProjectSummary,
+} from "../../app/projectSummaryMutations";
 import { api } from "../../shared/api/client";
 import type { Environment, Project, ProjectSummary, ReferenceType, TargetIdentifierKind } from "../../shared/api/domainTypes";
 import { toErrorMessage } from "../../shared/lib/errors";
@@ -64,6 +68,24 @@ export function createProjectMutations(context: ProjectMutationContext) {
       updateProjectSummaries((current) => current.filter((project) => project.id !== projectId));
       setEnvironments([]);
       clearEnvironmentSources();
+    } catch (err) {
+      setError(toErrorMessage(err));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameProject(projectId: number, name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const project = await api.renameProject(projectId, { name });
+      setProjects((current) => current
+        .map((item) => item.id === project.id ? project : item)
+        .sort((left, right) => left.name.localeCompare(right.name)));
+      updateProjectSummaries((current) => renameProjectSummary(current, project));
+      if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -143,6 +165,7 @@ export function createProjectMutations(context: ProjectMutationContext) {
 
   return {
     createProject,
+    renameProject,
     deleteProject,
     createProjectReferenceMapping,
     updateProjectReferenceMapping,

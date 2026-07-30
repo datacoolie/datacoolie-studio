@@ -23,6 +23,24 @@ export function metadataDraftState(
   };
 }
 
+export function metadataServerUpdateConflicts(
+  previousSourceDocument: MetadataEditorDocument | null,
+  previousServerDraft: MetadataEditorDocument | null,
+  workingDocument: MetadataEditorDocument | null,
+  incomingSourceDocument: MetadataEditorDocument | null,
+  incomingServerDraft: MetadataEditorDocument | null
+) {
+  const previousBase = previousServerDraft ?? previousSourceDocument;
+  const incomingBase = incomingServerDraft ?? incomingSourceDocument;
+  const hasLocalChanges = Boolean(
+    workingDocument
+    && previousBase
+    && metadataSheetsDiffer(workingDocument, previousBase)
+  );
+  if (!hasLocalChanges || !workingDocument) return false;
+  return !incomingBase || metadataSheetsDiffer(workingDocument, incomingBase);
+}
+
 export function metadataSheetsDiffer(left: MetadataEditorDocument, right: MetadataEditorDocument) {
   if (left === right || left.sheets === right.sheets) return false;
   const sheetNames = new Set([...Object.keys(left.sheets), ...Object.keys(right.sheets)]);

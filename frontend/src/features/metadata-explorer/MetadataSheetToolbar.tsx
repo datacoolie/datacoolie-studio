@@ -1,10 +1,11 @@
-import { History, Save, Search, Upload, X } from "lucide-react";
+import { History, Loader2, Save, Search, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { SheetKey } from "./metadataSheetTypes";
 
 interface MetadataSheetToolbarProps {
   activeSheet: SheetKey;
   busy: boolean;
+  savingDraft: boolean;
   hasLocalChanges: boolean;
   hasSourceChanges: boolean;
   hasStoredDraft: boolean;
@@ -35,6 +36,7 @@ const sheets = [
 export function MetadataSheetToolbar({
   activeSheet,
   busy,
+  savingDraft,
   hasLocalChanges,
   hasSourceChanges,
   hasStoredDraft,
@@ -108,8 +110,15 @@ export function MetadataSheetToolbar({
                     <Save size={14} />
                     Save to source
                   </button>
-                  <button className="text-action" type="button" onClick={() => onSaveDraft()} disabled={!hasLocalChanges || busy}>
-                    Save draft
+                  <button
+                    aria-busy={savingDraft}
+                    className="text-action"
+                    type="button"
+                    onClick={() => onSaveDraft()}
+                    disabled={!hasLocalChanges || busy}
+                  >
+                    {savingDraft ? <Loader2 className="is-spinning" size={14} /> : null}
+                    {savingDraft ? "Saving draft…" : "Save draft"}
                   </button>
                 </>
               ) : null}

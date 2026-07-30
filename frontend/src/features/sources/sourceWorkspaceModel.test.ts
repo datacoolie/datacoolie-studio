@@ -122,6 +122,23 @@ describe("source workspace model", () => {
     )).toBe(SOURCE_IDLE_STATUS_POLL_MIN_MS);
   });
 
+  it("does not poll a hard-paused source with no next check", () => {
+    const status = {
+      source_id: 1,
+      source_kind: "metadata",
+      status: "error",
+      message: "Source checks paused",
+      next_check_at: null,
+      observation_state: "paused",
+      observation_failure_count: 3,
+      latest_job: null,
+    } as SourceSyncStatus;
+
+    expect(sourceSyncStatusPollInterval({
+      [sourceKey("metadata", 1)]: status,
+    })).toBe(false);
+  });
+
   it("tracks source operations by environment and preserves unrelated work", () => {
     const running = beginSourceOperations(
       {},

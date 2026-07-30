@@ -86,6 +86,10 @@ class FsspecStorageAdapter:
                             name.lower().endswith(suffix)
                             for suffix in request.suffixes
                         )
+                    ) or (
+                        object_type == "file"
+                        and request.name_prefix is not None
+                        and not name.startswith(request.name_prefix)
                     ):
                         continue
                     matching_objects += 1
@@ -103,6 +107,14 @@ class FsspecStorageAdapter:
                             source_uri=request.uri,
                         )
                     )
+                    if (
+                        request.stop_after_match
+                        and request.object_limit is not None
+                        and matching_objects >= request.object_limit
+                    ):
+                        partial = True
+                        pending.clear()
+                        break
                 if not request.recursive or partial:
                     break
         except FileNotFoundError as exc:

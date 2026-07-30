@@ -2,6 +2,7 @@ import type { SourceDeleteImpact, SourceDeleteImpactItem, SourcePath, SourceSync
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 
 export type SourceBatchAction = "validate" | "sync" | "delete";
+export type SourceOperationAction = SourceBatchAction | "retry";
 
 export type SourceBatchEntry = {
   kind: SourceKind;
@@ -20,7 +21,7 @@ export type SourceOperation = {
   environmentId: number;
   kind: SourceKind;
   sourceId: number;
-  action: SourceBatchAction;
+  action: SourceOperationAction;
   startedAt: string;
 };
 
@@ -84,7 +85,7 @@ export function beginSourceOperations(
   current: SourceOperations,
   environmentId: number,
   entries: SourceBatchEntry[],
-  action: SourceBatchAction,
+  action: SourceOperationAction,
   startedAt = new Date().toISOString(),
 ): SourceOperations {
   if (!entries.length) return current;

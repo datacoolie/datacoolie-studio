@@ -194,6 +194,7 @@ export function useEnvironmentMetadataEditor(
     workspace: workspaceQuery.data ?? null,
     loading: workspaceQuery.isFetching,
     busy: mutations.some((mutation) => mutation.isPending),
+    savingDraft: saveDraftMutation.isPending,
     error: workspaceQuery.error ?? mutationError,
     ensureContext,
     validateDocument,

@@ -60,6 +60,117 @@ def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 
 
+def test_source_observation_pause_recovery_api(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "studio.db"
+    readable_metadata = tmp_path / "metadata.json"
+    readable_metadata.write_text(
+        '{"connections": [], "dataflows": [], "schema_hints": []}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects", json={"name": "pause-recovery"}
+        ).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        other_environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "test"},
+        ).json()
+        readable = client.post(
+            f"/api/v1/environments/{environment['id']}/metadata-sources",
+            json={"uri": str(readable_metadata), "label": "readable"},
+        ).json()
+        missing = client.post(
+            f"/api/v1/environments/{environment['id']}/metadata-sources",
+            json={"uri": str(tmp_path / 'missing.json'), "label": "missing"},
+        ).json()
+
+        def pause(source_id: int) -> None:
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    """
+                    UPDATE source_observations
+                    SET failure_streak = 3,
+                        last_outcome = 'error',
+                        error_json = '{"code":"not_found","message":"missing"}',
+                        automatic_observation_paused_at = ?,
+                        next_observation_at = NULL,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE source_id = ?
+                    """,
+                    ("2026-07-30 12:00:00", source_id),
+                )
+
+        pause(readable["id"])
+        paused = _source_status(client, environment["id"], readable["id"])
+        assert paused["observation_state"] == "paused"
+        assert paused["observation_failure_count"] == 3
+        assert paused["next_check_at"] is None
+
+        wrong_environment = client.post(
+            f"/api/v1/environments/{other_environment['id']}/"
+            f"metadata-sources/{readable['id']}/retry-observation"
+        )
+        assert wrong_environment.status_code == 404
+
+        retried = client.post(
+            f"/api/v1/environments/{environment['id']}/"
+            f"metadata-sources/{readable['id']}/retry-observation"
+        )
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["observation_state"] == "active"
+        assert retried.json()["observation_failure_count"] == 0
+
+        pause(missing["id"])
+        failed_retry = client.post(
+            f"/api/v1/environments/{environment['id']}/"
+            f"metadata-sources/{missing['id']}/retry-observation"
+        )
+        assert failed_retry.status_code == 200, failed_retry.text
+        assert failed_retry.json()["observation_state"] == "retrying"
+        assert failed_retry.json()["observation_failure_count"] == 1
+
+        pause(readable["id"])
+        validated = client.post(
+            f"/api/v1/environments/{environment['id']}/"
+            f"metadata-sources/{readable['id']}/validate"
+        )
+        assert validated.status_code == 200
+        assert validated.json()["status"] == "ok"
+        assert (
+            _source_status(client, environment["id"], readable["id"])[
+                "observation_state"
+            ]
+            == "active"
+        )
+
+        pause(missing["id"])
+        failed_validation = client.post(
+            f"/api/v1/environments/{environment['id']}/"
+            f"metadata-sources/{missing['id']}/validate"
+        )
+        assert failed_validation.status_code == 200
+        assert failed_validation.json()["status"] == "error"
+        assert (
+            _source_status(client, environment["id"], missing["id"])[
+                "observation_state"
+            ]
+            == "paused"
+        )
+
+    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+
+
 def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
@@ -2220,6 +2331,37 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert child_page["summary"]["offset"] == 0
         assert len(child_page["records"]) <= 2
         assert child_page["summary"]["total_records"] >= len(child_page["records"])
+        assert child_page["records"]
+        first_child = child_page["records"][0]
+        assert first_child["stage"]
+        assert first_child["operation_type"]
+        filtered_job = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/jobs",
+            params={
+                "range": "all",
+                "stage": first_child["stage"],
+                "operationType": first_child["operation_type"],
+                "investigateKind": "job_id",
+                "investigateValue": first_job["job_id"],
+                "limit": 1,
+                "offset": 0,
+            },
+        ).json()
+        assert filtered_job["summary"]["total_records"] == 1
+        assert filtered_job["records"][0]["job_id"] == first_job["job_id"]
+        mismatched_job = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/jobs",
+            params={
+                "range": "all",
+                "stage": first_child["stage"],
+                "operationType": "__no_matching_operation__",
+                "investigateKind": "job_id",
+                "investigateValue": first_job["job_id"],
+                "limit": 1,
+                "offset": 0,
+            },
+        ).json()
+        assert mismatched_job["summary"]["total_records"] == 0
         if child_page["summary"]["total_records"] > 2:
             next_child_page = client.get(
                 f"/api/v1/environments/{env['id']}/monitoring/dataflows",

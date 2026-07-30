@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "duckdb>=1.1",
+  "databricks-sdk>=0.121,<0.122",
   "fastapi>=0.115",
   "keyring>=25.0",
   "libcst>=1.8",
@@ -63,9 +64,6 @@ gcs = [
   "gcsfs>=2025.3",
   "google-cloud-storage>=3.0",
 ]
-dbfs = [
-  "databricks-sdk>=0.57",
-]
 cloud = [
   "adlfs>=2024.12",
   "azure-identity>=1.19",
@@ -75,7 +73,6 @@ cloud = [
   "gcsfs>=2025.3",
   "google-cloud-storage>=3.0",
   "s3fs>=2025.3",
-  "databricks-sdk>=0.57",
 ]
 dev = [
   "build>=1.2",

@@ -6,7 +6,7 @@ import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../shared/time";
 import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../shared/statusPresentation";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableSort } from "./MonitoringCharts";
+import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableColumn, type TableSort } from "./MonitoringCharts";
 import {
   diagnosticsCategoryLabel,
   diagnosticsEvidenceItems,
@@ -18,7 +18,7 @@ import {
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
 import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
 import { SystemLogViewer } from "./SystemLogViewer";
-import { FreshnessDrawerHealthTone, IssueCell, MaintenanceHealthChip, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
+import { FreshnessDrawerHealthTone, FreshnessRunTimeCell, IssueCell, MaintenanceHealthChip, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, freshnessRunTimeLines, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
 import { lazy } from "react";
 const JobDetailSections = lazy(() => import("./details/JobDetails").then((module) => ({ default: module.JobDetailSections })));
 const DataflowDetailSections = lazy(() => import("./details/DataflowDetails").then((module) => ({ default: module.DataflowDetailSections })));
@@ -380,16 +380,7 @@ export function MonitoringDetailDrawer({
               </div>
               <DataTable
                 rows={sortableRelatedDataflows}
-                columns={[
-                  { key: "dataflow_name", label: "Dataflow", sortable: true, width: 160 },
-                  { key: "stage", label: "Stage", sortable: true, autoFit: true, minWidth: 64, maxWidth: 132 },
-                  { key: "operation_type", label: "Operation", sortable: true, autoFit: true, minWidth: 72, maxWidth: 116 },
-                  { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (child) => <StatusCell row={child} /> },
-                  { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (child) => formatSeconds(num(child, "duration_seconds")) },
-                  { key: "source_rows_read", label: "Rows read", sortable: true, autoFit: true, minWidth: 82, maxWidth: 128 },
-                  { key: "destination_rows_written", label: "Rows written", sortable: true, autoFit: true, minWidth: 98, maxWidth: 144 },
-                  { key: "error_preview", label: "Issue", sortable: true, width: 240, className: "monitoring-child-issue-column", render: (child) => <IssueCell row={child} /> },
-                ]}
+                columns={jobChildDataflowColumns(timezoneName)}
                 maxRows={relatedDataflowsLimit}
                 offset={0}
                 onRowClick={onOpenDataflow}
@@ -431,6 +422,78 @@ export function MonitoringDetailDrawer({
       ) : null}
     </div>,
     document.body
+  );
+}
+
+export function jobChildDataflowColumns(timezoneName?: string | null): TableColumn<MonitoringRecord>[] {
+  return [
+    { key: "dataflow_name", label: "Dataflow", sortable: true, width: 160 },
+    {
+      key: "stage_operation",
+      label: "Stage / operation",
+      sortable: true,
+      sortKey: "stage",
+      autoFit: true,
+      minWidth: 112,
+      maxWidth: 180,
+      render: (child) => <ChildDataflowStageOperationCell row={child} />,
+      measureValue: childDataflowStageOperationLines,
+    },
+    {
+      key: "start_time",
+      label: "Time",
+      sortable: true,
+      autoFit: true,
+      minWidth: 144,
+      maxWidth: 216,
+      render: (child) => <FreshnessRunTimeCell row={child} timezoneName={timezoneName} />,
+      measureValue: (child, activeTimezone) => freshnessRunTimeLines(child, activeTimezone),
+    },
+    { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (child) => <StatusCell row={child} /> },
+    { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (child) => formatSeconds(num(child, "duration_seconds")) },
+    {
+      key: "row_counts",
+      label: "Rows",
+      sortable: true,
+      sortKey: "source_rows_read",
+      autoFit: true,
+      minWidth: 118,
+      maxWidth: 180,
+      render: (child) => <ChildDataflowRowsCell row={child} />,
+      measureValue: childDataflowRowLines,
+    },
+    { key: "error_preview", label: "Issue", sortable: true, width: 240, className: "monitoring-child-issue-column", render: (child) => <IssueCell row={child} /> },
+  ];
+}
+
+export function childDataflowStageOperationLines(row: MonitoringRecord) {
+  return [String(row.stage || "-"), String(row.operation_type || "-")];
+}
+
+export function childDataflowRowLines(row: MonitoringRecord) {
+  return [
+    `${formatNumber(num(row, "source_rows_read"))} read`,
+    `${formatNumber(num(row, "destination_rows_written"))} written`,
+  ];
+}
+
+function ChildDataflowStageOperationCell({ row }: { row: MonitoringRecord }) {
+  const [stage, operation] = childDataflowStageOperationLines(row);
+  return (
+    <span className="freshness-run-stack-cell" title={`Stage: ${stage}\nOperation: ${operation}`}>
+      <strong>{stage}</strong>
+      <small>{operation}</small>
+    </span>
+  );
+}
+
+function ChildDataflowRowsCell({ row }: { row: MonitoringRecord }) {
+  const [rowsRead, rowsWritten] = childDataflowRowLines(row);
+  return (
+    <span className="freshness-run-stack-cell" title={`Rows read: ${rowsRead.replace(/ read$/u, "")}\nRows written: ${rowsWritten.replace(/ written$/u, "")}`}>
+      <strong>{rowsRead}</strong>
+      <small>{rowsWritten}</small>
+    </span>
   );
 }
 

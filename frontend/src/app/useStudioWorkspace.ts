@@ -60,12 +60,14 @@ export interface StudioWorkspace {
   sourceOperations: SourceOperations;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
+  metadataEditorSavingDraft: boolean;
   loading: boolean;
   busy: boolean;
   error: string | null;
   refreshCurrentEnvironment: () => Promise<void>;
   reloadProjectSummaries: () => Promise<void>;
   createProject: (name: string) => Promise<void>;
+  renameProject: (projectId: number, name: string) => Promise<void>;
   deleteProject: (projectId: number) => Promise<void>;
   createProjectReferenceMapping: (payload: {
     reference_type: ReferenceType;
@@ -85,6 +87,7 @@ export interface StudioWorkspace {
   }) => Promise<ProjectReferenceMapping>;
   deleteProjectReferenceMapping: (mappingId: number) => Promise<void>;
   createEnvironment: (name: string, projectIdOverride?: number) => Promise<number>;
+  renameEnvironment: (environmentId: number, name: string) => Promise<void>;
   deleteEnvironment: (environmentId: number) => Promise<void>;
   addMetadataSource: (uri: string, label?: string) => Promise<void>;
   importMetadataSources: (uri: string, label?: string, storage?: StorageBinding) => Promise<SourceImportResponse | null>;
@@ -117,6 +120,7 @@ export interface StudioWorkspace {
   getSourceDeleteImpact: (kind: SourceKind, id: number) => Promise<SourceDeleteImpact>;
   validateSource: (kind: SourceKind, id: number) => Promise<SourceReadCheckResult>;
   syncSource: (kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest) => Promise<SourceSyncStatus>;
+  retrySourceObservation: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
   runSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest) => Promise<SourceBatchResult>;
   ensureMetadataEditorContext: () => Promise<void>;
   validateMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
@@ -372,6 +376,7 @@ export function useStudioWorkspace(
 
   const {
     createProject,
+    renameProject,
     deleteProject,
     createProjectReferenceMapping,
     updateProjectReferenceMapping,
@@ -389,7 +394,7 @@ export function useStudioWorkspace(
     onEnvironmentChanged: options?.onEnvironmentChanged,
   });
 
-  const { createEnvironment, deleteEnvironment } = createEnvironmentMutations({
+  const { createEnvironment, renameEnvironment, deleteEnvironment } = createEnvironmentMutations({
     projectId: route.projectId,
     queryClient,
     setEnvironments,
@@ -408,6 +413,7 @@ export function useStudioWorkspace(
     deleteSource,
     validateSource,
     syncSource,
+    retrySourceObservation,
     runSourceBatch,
     getSourceDeleteImpact,
   } = createEnvironmentSourceMutations({
@@ -480,6 +486,7 @@ export function useStudioWorkspace(
     sourceOperations,
     metadataEditorDocument: metadataEditor.workspace?.document ?? null,
     metadataEditorDraft: metadataEditor.workspace?.draft ?? null,
+    metadataEditorSavingDraft: metadataEditor.savingDraft,
     loading: loading || sourcesQuery.isPending || metadataEditor.loading,
     busy: busy || metadataEditor.busy,
     error: error
@@ -488,11 +495,13 @@ export function useStudioWorkspace(
     refreshCurrentEnvironment: () => refreshEnvironment(route.environmentId, route.module, { forceHeader: true, forceModule: true }),
     reloadProjectSummaries: () => loadProjectSummaries(true),
     createProject,
+    renameProject,
     deleteProject,
     createProjectReferenceMapping,
     updateProjectReferenceMapping,
     deleteProjectReferenceMapping,
     createEnvironment,
+    renameEnvironment,
     deleteEnvironment,
     addMetadataSource,
     importMetadataSources,
@@ -504,6 +513,7 @@ export function useStudioWorkspace(
     getSourceDeleteImpact,
     validateSource,
     syncSource,
+    retrySourceObservation,
     runSourceBatch,
     ensureMetadataEditorContext: async () => { await metadataEditor.ensureContext(); },
     validateMetadataEditorDocument: metadataEditor.validateDocument,

@@ -46,7 +46,7 @@ import {
   writeClipboard
 } from "./metadataSheetOperations";
 import type { SelectionState, SheetKey, SheetRow } from "./metadataSheetTypes";
-import { metadataDraftState } from "./metadataDraftState";
+import { metadataDraftState, metadataServerUpdateConflicts } from "./metadataDraftState";
 import { metadataSaveConfirmation } from "./metadataSaveConfirmation";
 import { MetadataSourceSaveConfirmationDialog } from "./MetadataSourceSaveConfirmationDialog";
 
@@ -59,6 +59,7 @@ interface MetadataExplorerProps {
   onFocusInLineage: (target: LineageDataflowFocusTarget) => void;
   loading: boolean;
   busy: boolean;
+  savingDraft: boolean;
   onValidate: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onDiscardDraft: () => Promise<void>;
@@ -84,6 +85,7 @@ export function MetadataExplorer({
   onFocusInLineage,
   loading,
   busy,
+  savingDraft,
   onValidate,
   onSaveDraft,
   onDiscardDraft,
@@ -105,6 +107,7 @@ export function MetadataExplorer({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [mode, setMode] = useState<"view" | "edit">("view");
   const [draft, setDraft] = useState<MetadataEditorDocument | null>(null);
+  const [sourceBaseline, setSourceBaseline] = useState<MetadataEditorDocument | null>(editorDocument);
   const [serverConflict, setServerConflict] = useState(false);
   const [pendingSourceSave, setPendingSourceSave] = useState<MetadataEditorDocument | null>(null);
   const [selection, setSelection] = useState<SelectionState>(null);
@@ -116,7 +119,6 @@ export function MetadataExplorer({
   const suppressNextDataflowDrawerPopRef = useRef(false);
   const serverBaseRef = useRef({ document: editorDocument, draft: serverDraft });
   const workingDocumentRef = useRef<MetadataEditorDocument | null>(draft);
-  const busyRef = useRef(busy);
   const acceptingServerUpdateRef = useRef(false);
   const [pendingFocus, setPendingFocus] = useState<{ sheet: SheetKey; row: number; col: number } | null>(null);
   const [columnWidthsBySheet, setColumnWidthsBySheet] = useState<Record<SheetKey, Record<string, number>>>({
@@ -127,25 +129,27 @@ export function MetadataExplorer({
   const activeColumnWidths = columnWidthsBySheet[activeSheet];
   const activeDocument = draft ?? editorDocument;
   workingDocumentRef.current = draft;
-  busyRef.current = busy;
   const hasActiveDocument = Boolean(activeDocument);
   const activeStudioRouting = useMemo(() => studioRoutingValues(activeDocument), [activeDocument]);
   const readOnlyDocument = Boolean(activeDocument?.source.read_only);
   const draftState = useMemo(
-    () => metadataDraftState(editorDocument, serverDraft, activeDocument),
-    [activeDocument, editorDocument, serverDraft],
+    () => metadataDraftState(sourceBaseline, serverDraft, activeDocument),
+    [activeDocument, serverDraft, sourceBaseline],
   );
 
   useEffect(() => {
     const previous = serverBaseRef.current;
-    const hadLocalChanges = metadataDraftState(
+    const serverUpdateConflicts = metadataServerUpdateConflicts(
       previous.document,
       previous.draft,
       workingDocumentRef.current,
-    ).hasLocalChanges;
+      editorDocument,
+      serverDraft
+    );
     const documentChanged = previous.document !== editorDocument;
     serverBaseRef.current = { document: editorDocument, draft: serverDraft };
-    if (hadLocalChanges && !busyRef.current && !acceptingServerUpdateRef.current) {
+    setSourceBaseline(editorDocument);
+    if (serverUpdateConflicts && !acceptingServerUpdateRef.current) {
       setServerConflict(true);
       return;
     }
@@ -211,7 +215,7 @@ export function MetadataExplorer({
     () => issues.filter((issue) => issue.sheet === activeSheet),
     [activeSheet, issues]
   );
-  const editable = mode === "edit";
+  const editable = mode === "edit" && !savingDraft;
   const connectionOptions = useMemo(() => connectionNameOptions(activeDocument), [activeDocument]);
   const metadataSourceOptions = useMemo(
     () => environmentMetadataSourceOptionsForSheet(activeDocument, activeSheet),
@@ -584,6 +588,7 @@ export function MetadataExplorer({
     acceptingServerUpdateRef.current = true;
     try {
       const saved = await onSave(document);
+      setSourceBaseline(saved);
       setDraft(saved);
       setMode("view");
       setServerConflict(false);
@@ -614,6 +619,7 @@ export function MetadataExplorer({
     acceptingServerUpdateRef.current = true;
     try {
       const restored = await onRestoreBackup(backup, activeDocument);
+      setSourceBaseline(restored);
       setDraft(restored);
       setMode("view");
       setServerConflict(false);
@@ -751,6 +757,7 @@ export function MetadataExplorer({
         <MetadataSheetToolbar
           activeSheet={activeSheet}
           busy={busy}
+          savingDraft={savingDraft}
           hasLocalChanges={draftState.hasLocalChanges}
           hasSourceChanges={draftState.hasSourceChanges}
           hasStoredDraft={draftState.hasStoredDraft}

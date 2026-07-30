@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
-import { metadataDraftState } from "./metadataDraftState";
+import {
+  metadataDraftState,
+  metadataServerUpdateConflicts
+} from "./metadataDraftState";
 
 function document(description = "source"): MetadataEditorDocument {
   return {
@@ -44,5 +47,43 @@ describe("metadataDraftState", () => {
       hasSourceChanges: false,
       hasStoredDraft: true
     });
+  });
+});
+
+describe("metadataServerUpdateConflicts", () => {
+  it("accepts the stored draft returned for the current local edits", () => {
+    const source = document();
+    const localDraft = document("edited locally");
+
+    expect(metadataServerUpdateConflicts(
+      source,
+      null,
+      localDraft,
+      source,
+      document("edited locally")
+    )).toBe(false);
+  });
+
+  it("accepts the source document returned after saving the current local edits", () => {
+    const source = document();
+    const localDraft = document("edited locally");
+
+    expect(metadataServerUpdateConflicts(
+      source,
+      null,
+      localDraft,
+      document("edited locally"),
+      null
+    )).toBe(false);
+  });
+
+  it("preserves local edits when the incoming server content is different", () => {
+    expect(metadataServerUpdateConflicts(
+      document(),
+      null,
+      document("edited locally"),
+      document("changed elsewhere"),
+      null
+    )).toBe(true);
   });
 });

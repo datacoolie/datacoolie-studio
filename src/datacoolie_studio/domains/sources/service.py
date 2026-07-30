@@ -29,7 +29,9 @@ from datacoolie_studio.domains.storage.redaction import redact_storage_error
 
 
 EMPTY_LOG_SOURCE_MESSAGE = "No ETL or system log files found"
-METADATA_WRITE_BACK_PROVIDERS = frozenset({"local", "s3", "minio", "adls", "gcs"})
+METADATA_WRITE_BACK_PROVIDERS = frozenset(
+    {"local", "s3", "minio", "adls", "onelake", "gcs", "dbfs"}
+)
 
 
 def validate_storage_connection(
@@ -74,7 +76,10 @@ def validate_storage_connection(
             StorageInventoryRequest(
                 uri=canonical_uri,
                 purpose="probe",
-                object_limit=1 if binding.provider == "onelake" else 100,
+                object_limit=(
+                    1 if binding.provider in {"onelake", "dbfs"} else 100
+                ),
+                stop_after_match=binding.provider in {"onelake", "dbfs"},
             ),
         )
         return {
@@ -153,8 +158,7 @@ def validate_metadata_source(
                 session=session,
                 secret_store=secret_store,
             )
-            with adapter.open_read(source.uri) as handle:
-                handle.read(1)
+            adapter.stat(source.uri)
         except Exception:
             return record_source_validation(
                 session,
@@ -224,6 +228,7 @@ def validate_log_source(
 ) -> dict:
     log_paths = resolve_log_source_paths(source)
     etl_uri = log_paths.etl_logs_uri or source.uri
+    bounded_probe = source.storage_provider == "dbfs"
     try:
         adapter = create_storage_adapter(
             binding_from_source(source),
@@ -232,34 +237,33 @@ def validate_log_source(
             secret_store=secret_store,
         )
         scan_specs = [
-            (_stream_uri(etl_uri, "dataflow_run_log"), ".parquet"),
-            (_stream_uri(etl_uri, "job_run_log"), ".jsonl"),
+            (_stream_uri(etl_uri, "dataflow_run_log"), ".parquet", None),
+            (_stream_uri(etl_uri, "job_run_log"), ".jsonl", None),
         ]
         if log_paths.system_logs_uri:
-            scan_specs.append((log_paths.system_logs_uri, ".jsonl"))
+            scan_specs.append(
+                (log_paths.system_logs_uri, ".jsonl", "system_log_")
+            )
         listings = map_storage_io(
             adapter,
-            lambda spec: list(
-                inventory(
-                    adapter,
-                    StorageInventoryRequest(
-                        uri=spec[0],
-                        purpose="validate",
-                        recursive=True,
-                        object_types=frozenset({"file"}),
-                        suffixes=frozenset({spec[1]}),
-                    ),
-                ).files
+            lambda spec: inventory(
+                adapter,
+                StorageInventoryRequest(
+                    uri=spec[0],
+                    purpose="validate",
+                    recursive=True,
+                    object_types=frozenset({"file"}),
+                    suffixes=frozenset({spec[1]}),
+                    name_prefix=spec[2],
+                    object_limit=1 if bounded_probe else None,
+                    stop_after_match=bounded_probe,
+                ),
             ),
             scan_specs,
         )
-        dataflow_files = listings[0]
-        job_files = listings[1]
-        system_files = (
-            [item for item in listings[2] if item.name.startswith("system_log_")]
-            if len(listings) > 2
-            else []
-        )
+        dataflow_files = list(listings[0].files)
+        job_files = list(listings[1].files)
+        system_files = list(listings[2].files) if len(listings) > 2 else []
     except Exception:
         message = "Log storage is not accessible"
         return record_source_validation(
@@ -285,7 +289,11 @@ def validate_log_source(
         "source_id": source.id,
         "source_kind": "logs",
         "status": "ok",
-        "message": "Log source is readable",
+        "message": (
+            "Log source is readable (bounded probe)"
+            if bounded_probe
+            else "Log source is readable"
+        ),
         "detected_provider": source.storage_provider,
         "detected_format": "logs",
         "record_counts": counts,

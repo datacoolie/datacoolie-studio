@@ -12,7 +12,11 @@ from datacoolie_studio.domains.analytics.serving_facts import (
     MONITORING_JOB_FACTS_TABLE,
 )
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
-from datacoolie_studio.domains.monitoring.log_repository import monitoring_filter_sql
+from datacoolie_studio.domains.monitoring.log_repository import (
+    monitoring_filter_sql,
+    monitoring_has_dataflow_scope,
+    monitoring_job_direct_filters,
+)
 
 
 AnalyticsContext: TypeAlias = tuple[Any, list[int], str]
@@ -51,7 +55,7 @@ def filtered_ctes(
         dataflow_event_time_column="event_time",
     )
     job_where, job_params = monitoring_filter_sql(
-        filters,
+        monitoring_job_direct_filters(filters),
         "j",
         "j",
         include_dataflow_filters=False,
@@ -62,7 +66,7 @@ def filtered_ctes(
         "SELECT 1 FROM filtered_dataflows df "
         "WHERE df._source_id = j._source_id AND df.job_id = j.job_id"
         ")"
-        if has_dataflow_scope(filters)
+        if monitoring_has_dataflow_scope(filters)
         else ""
     )
     sql = f"""
@@ -89,18 +93,6 @@ def filtered_ctes(
         )
     """
     return sql, [*source_ids, *dataflow_params, *source_ids, *job_params]
-
-
-def has_dataflow_scope(filters: dict[str, str]) -> bool:
-    connection = str(filters.get("connection") or "").strip()
-    if connection and connection != "all":
-        return True
-    kind = str(filters.get("investigateKind") or "").strip()
-    value = str(filters.get("investigateValue") or "").strip()
-    return bool(kind and value and kind != "job_id") or any(
-        str(filters.get(name) or "").strip()
-        for name in ("stage", "sourceType", "destinationType", "loadType", "operationType")
-    )
 
 
 def rows(result: Any) -> list[dict[str, Any]]:

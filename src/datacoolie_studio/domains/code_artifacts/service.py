@@ -415,7 +415,12 @@ def _validation_result(
         "source_id": source.id,
         "source_kind": "code",
         "status": "ok",
-        "message": "Code artifact inventory scanned",
+        "message": (
+            "Code artifact is readable (bounded probe)"
+            if _storage_provider(source) == "dbfs"
+            and artifact_type == "directory"
+            else "Code artifact inventory scanned"
+        ),
         "detected_provider": (
             "installed"
             if artifact_type == "installed_distribution"
@@ -477,6 +482,7 @@ def _code_validation_statistics(
         secret_store=secret_store,
     )
     if artifact_type == "directory":
+        bounded_probe = _storage_provider(source) == "dbfs"
         observed = inventory(
             adapter,
             StorageInventoryRequest(
@@ -485,12 +491,13 @@ def _code_validation_statistics(
                 recursive=True,
                 object_types=frozenset({"file"}),
                 suffixes=frozenset({".py"}),
+                object_limit=1 if bounded_probe else None,
+                stop_after_match=bounded_probe,
             ),
         )
         return {"python_files": len(observed.files)}
 
-    with adapter.open_read(source.uri) as handle:
-        handle.read(1)
+    adapter.stat(source.uri)
     return {
         "python_files" if artifact_type == "python_file" else "artifact_files": 1,
     }

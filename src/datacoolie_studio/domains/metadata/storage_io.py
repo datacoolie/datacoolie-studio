@@ -140,10 +140,16 @@ def conditional_replace(
     source: EnvironmentSource,
     content: bytes,
     expected_revision: dict[str, object],
+    *,
+    verified_revision: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if storage.writer is None:
         raise MetadataReadError("Metadata storage is not writable")
-    actual = current_revision(storage, source, include_content_hash=True)
+    actual = (
+        verified_revision
+        if verified_revision is not None
+        else current_revision(storage, source, include_content_hash=True)
+    )
     if not same_revision(actual, expected_revision):
         raise StorageConflictError(source.uri)
     token = storage_revision_from_dict(actual)

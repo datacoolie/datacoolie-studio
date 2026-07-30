@@ -267,7 +267,20 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         original_text = metadata_path.read_text(encoding="utf-8")
 
         document["sheets"]["dataflows"]["rows"][0]["description"] = "draft only"
-        draft = client.put(f"/api/v1/environments/{env['id']}/metadata-editor-document/draft", json=document).json()
+        with monkeypatch.context() as draft_patch:
+            draft_patch.setattr(
+                editor_service,
+                "storage_for_source",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("draft save must not access source storage")
+                ),
+            )
+            draft_response = client.put(
+                f"/api/v1/environments/{env['id']}/metadata-editor-document/draft",
+                json=document,
+            )
+        assert draft_response.status_code == 200
+        draft = draft_response.json()
         assert draft["sheets"]["dataflows"]["rows"][0]["description"] == "draft only"
         assert metadata_path.read_text(encoding="utf-8") == original_text
 
@@ -448,14 +461,28 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
         assert "draft in merge view" not in first_path.read_text(encoding="utf-8")
 
         flow_a["description"] = "saved from merge view"
-        saved = client.put(
-            f"/api/v1/environments/{env['id']}/metadata-editor-document",
-            json={
-                "expected_revision": document["source"]["revision"],
-                "editor_document": document,
-                "confirm_overwrite": True,
-            },
-        ).json()["document"]
+        opened_for_write: list[str] = []
+        original_storage_for_source = editor_service.storage_for_source
+        with monkeypatch.context() as save_patch:
+            def tracked_storage_for_source(*args, **kwargs):
+                source = args[1]
+                opened_for_write.append(source.uri)
+                return original_storage_for_source(*args, **kwargs)
+
+            save_patch.setattr(
+                editor_service,
+                "storage_for_source",
+                tracked_storage_for_source,
+            )
+            saved = client.put(
+                f"/api/v1/environments/{env['id']}/metadata-editor-document",
+                json={
+                    "expected_revision": document["source"]["revision"],
+                    "editor_document": document,
+                    "confirm_overwrite": True,
+                },
+            ).json()["document"]
+        assert opened_for_write == [str(first_path)]
         assert saved["source"]["scope"] == "environment"
         assert "saved from merge view" in first_path.read_text(encoding="utf-8")
         assert "saved from merge view" not in second_path.read_text(encoding="utf-8")
@@ -516,6 +543,98 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
         dataflow_row = next(row for row in saved_with_new_source["sheets"]["dataflows"]["rows"] if row["name"] == "flow_c")
         assert dataflow_row["__metadata_source_id"] == dataflow_source["id"]
         assert dataflow_row["__metadata_source_name"] == "dataflows/source2bronze_v2.json"
+
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+
+
+def test_environment_save_allows_preexisting_errors_but_rejects_new_errors(
+    tmp_path: Path,
+    monkeypatch,
+):
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    duplicated_metadata = {
+        "connections": [
+            {"name": "shared_lake", "connection_type": "file", "format": "json"}
+        ],
+        "dataflows": [
+            {
+                "name": "shared_flow",
+                "source": {"connection_name": "shared_lake", "table": "source"},
+                "destination": {
+                    "connection_name": "shared_lake",
+                    "table": "target",
+                },
+            }
+        ],
+        "schema_hints": [],
+    }
+    first_path.write_text(json.dumps(duplicated_metadata), encoding="utf-8")
+    second_path.write_text(json.dumps(duplicated_metadata), encoding="utf-8")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        env = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        first = client.post(
+            f"/api/v1/environments/{env['id']}/metadata-sources",
+            json={"uri": str(first_path), "label": "first"},
+        ).json()
+        client.post(
+            f"/api/v1/environments/{env['id']}/metadata-sources",
+            json={"uri": str(second_path), "label": "second"},
+        )
+
+        document = _editor_document(client, env["id"])
+        assert any(
+            issue["message"] == "Duplicate connection name: shared_lake"
+            for issue in document["issues"]
+        )
+        first_flow = next(
+            row
+            for row in document["sheets"]["dataflows"]["rows"]
+            if row["__metadata_source_id"] == first["id"]
+        )
+        first_flow["description"] = "safe edit"
+
+        response = client.put(
+            f"/api/v1/environments/{env['id']}/metadata-editor-document",
+            json={
+                "expected_revision": document["source"]["revision"],
+                "editor_document": document,
+                "confirm_overwrite": True,
+            },
+        )
+        assert response.status_code == 200
+        saved = response.json()["document"]
+        assert "safe edit" in first_path.read_text(encoding="utf-8")
+
+        saved_first_flow = next(
+            row
+            for row in saved["sheets"]["dataflows"]["rows"]
+            if row["__metadata_source_id"] == first["id"]
+        )
+        saved_first_flow["source_connection_name"] = "missing_connection"
+        invalid_response = client.put(
+            f"/api/v1/environments/{env['id']}/metadata-editor-document",
+            json={
+                "expected_revision": saved["source"]["revision"],
+                "editor_document": saved,
+                "confirm_overwrite": True,
+            },
+        )
+        assert invalid_response.status_code == 422
+        assert any(
+            issue["message"] == "Unknown connection: missing_connection"
+            for issue in invalid_response.json()["detail"]["issues"]
+        )
 
     monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
 

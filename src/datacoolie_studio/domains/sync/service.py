@@ -336,6 +336,9 @@ def _source_sync_status(
         "last_observed_at": observed["last_observed_at"],
         "next_check_at": observed["next_check_at"],
         "pending_changes": observed["pending_changes"],
+        "observation_state": observed["observation_state"],
+        "observation_failure_count": observed["observation_failure_count"],
+        "observation_paused_at": observed["observation_paused_at"],
         "active_operation": active_operation,
         "latest_job": _job_to_dict(latest_job) if latest_job else None,
     }

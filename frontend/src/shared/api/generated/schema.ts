@@ -30,6 +30,8 @@ export interface paths {
   "/api/v1/environments/{environment_id}": {
     /** Delete Environment */
     delete: operations["delete_environment_api_v1_environments__environment_id__delete"];
+    /** Patch Environment */
+    patch: operations["patch_environment_api_v1_environments__environment_id__patch"];
   };
   "/api/v1/environments/{environment_id}/asset-references": {
     /** Get Asset References */
@@ -71,6 +73,10 @@ export interface paths {
     /** Refresh Code Artifact Source */
     post: operations["refresh_code_artifact_source_api_v1_environments__environment_id__code_artifacts__source_id__refresh_post"];
   };
+  "/api/v1/environments/{environment_id}/code-artifacts/{source_id}/retry-observation": {
+    /** Retry Code Artifact Observation */
+    post: operations["retry_code_artifact_observation_api_v1_environments__environment_id__code_artifacts__source_id__retry_observation_post"];
+  };
   "/api/v1/environments/{environment_id}/code-artifacts/{source_id}/validate": {
     /** Validate Code Artifact Source */
     post: operations["validate_code_artifact_source_api_v1_environments__environment_id__code_artifacts__source_id__validate_post"];
@@ -110,6 +116,10 @@ export interface paths {
   "/api/v1/environments/{environment_id}/log-sources/{source_id}/refresh": {
     /** Refresh Log Source */
     post: operations["refresh_log_source_api_v1_environments__environment_id__log_sources__source_id__refresh_post"];
+  };
+  "/api/v1/environments/{environment_id}/log-sources/{source_id}/retry-observation": {
+    /** Retry Log Source Observation */
+    post: operations["retry_log_source_observation_api_v1_environments__environment_id__log_sources__source_id__retry_observation_post"];
   };
   "/api/v1/environments/{environment_id}/log-sources/{source_id}/validate": {
     /** Validate Log Source */
@@ -166,6 +176,10 @@ export interface paths {
   "/api/v1/environments/{environment_id}/metadata-sources/{source_id}/refresh": {
     /** Refresh Metadata Source */
     post: operations["refresh_metadata_source_api_v1_environments__environment_id__metadata_sources__source_id__refresh_post"];
+  };
+  "/api/v1/environments/{environment_id}/metadata-sources/{source_id}/retry-observation": {
+    /** Retry Metadata Source Observation */
+    post: operations["retry_metadata_source_observation_api_v1_environments__environment_id__metadata_sources__source_id__retry_observation_post"];
   };
   "/api/v1/environments/{environment_id}/metadata-sources/{source_id}/validate": {
     /** Validate Metadata Source */
@@ -240,6 +254,8 @@ export interface paths {
   "/api/v1/projects/{project_id}": {
     /** Delete Project */
     delete: operations["delete_project_api_v1_projects__project_id__delete"];
+    /** Patch Project */
+    patch: operations["patch_project_api_v1_projects__project_id__patch"];
   };
   "/api/v1/projects/{project_id}/environments": {
     /** Get Environments */
@@ -1144,6 +1160,11 @@ export interface components {
        * Format: date-time
        */
       updated_at: string;
+    };
+    /** EnvironmentRename */
+    EnvironmentRename: {
+      /** Name */
+      name: string;
     };
     /** FreshnessGroupResponse */
     FreshnessGroupResponse: {
@@ -2415,6 +2436,11 @@ export interface components {
       /** Value */
       value: string;
     };
+    /** ProjectRename */
+    ProjectRename: {
+      /** Name */
+      name: string;
+    };
     /** ProjectSummaryResponse */
     ProjectSummaryResponse: {
       /**
@@ -2707,6 +2733,19 @@ export interface components {
       message: string;
       /** Next Check At */
       next_check_at?: string | null;
+      /**
+       * Observation Failure Count
+       * @default 0
+       */
+      observation_failure_count?: number;
+      /** Observation Paused At */
+      observation_paused_at?: string | null;
+      /**
+       * Observation State
+       * @default active
+       * @enum {string}
+       */
+      observation_state?: "active" | "retrying" | "paused";
       /** Pending Changes */
       pending_changes?: boolean | null;
       /** Revision */
@@ -3240,6 +3279,33 @@ export interface operations {
       };
     };
   };
+  /** Patch Environment */
+  patch_environment_api_v1_environments__environment_id__patch: {
+    parameters: {
+      path: {
+        environment_id: number;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["EnvironmentRename"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["EnvironmentRead"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   /** Get Asset References */
   get_asset_references_api_v1_environments__environment_id__asset_references_get: {
     parameters: {
@@ -3517,6 +3583,29 @@ export interface operations {
       };
     };
   };
+  /** Retry Code Artifact Observation */
+  retry_code_artifact_observation_api_v1_environments__environment_id__code_artifacts__source_id__retry_observation_post: {
+    parameters: {
+      path: {
+        environment_id: number;
+        source_id: number;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["SourceSyncStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   /** Validate Code Artifact Source */
   validate_code_artifact_source_api_v1_environments__environment_id__code_artifacts__source_id__validate_post: {
     parameters: {
@@ -3765,6 +3854,29 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["LogSyncRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["SourceSyncStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Retry Log Source Observation */
+  retry_log_source_observation_api_v1_environments__environment_id__log_sources__source_id__retry_observation_post: {
+    parameters: {
+      path: {
+        environment_id: number;
+        source_id: number;
       };
     };
     responses: {
@@ -4163,6 +4275,29 @@ export interface operations {
       };
     };
   };
+  /** Retry Metadata Source Observation */
+  retry_metadata_source_observation_api_v1_environments__environment_id__metadata_sources__source_id__retry_observation_post: {
+    parameters: {
+      path: {
+        environment_id: number;
+        source_id: number;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["SourceSyncStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   /** Validate Metadata Source */
   validate_metadata_source_api_v1_environments__environment_id__metadata_sources__source_id__validate_post: {
     parameters: {
@@ -4263,9 +4398,14 @@ export interface operations {
         startTime?: string;
         endTime?: string;
         status?: string;
+        stage?: string;
         connection?: string;
         engine?: string;
         provider?: string;
+        sourceType?: string;
+        destinationType?: string;
+        loadType?: string;
+        operationType?: string;
         search?: string;
         investigateKind?: string;
         investigateValue?: string;
@@ -4641,6 +4781,33 @@ export interface operations {
       /** @description Successful Response */
       204: {
         content: never;
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Patch Project */
+  patch_project_api_v1_projects__project_id__patch: {
+    parameters: {
+      path: {
+        project_id: number;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ProjectRename"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ProjectRead"];
+        };
       };
       /** @description Validation Error */
       422: {

@@ -33,10 +33,13 @@ from datacoolie_studio.domains.metadata.service import ensure_metadata_materiali
 from datacoolie_studio.domains.sources import service as sources
 from datacoolie_studio.domains.sync import service as sync
 from datacoolie_studio.domains.sync.scheduler import (
+    ObservationRetryUnavailableError,
     observe_environment_local_sources,
+    retry_source_observation,
 )
 from datacoolie_studio.domains.source_observation.repository import (
     reset_observation,
+    resume_observation,
 )
 from datacoolie_studio.domains.studio_settings.service import (
     source_check_interval_seconds,
@@ -118,8 +121,25 @@ def validate_metadata_source(
     if source is None:
         raise HTTPException(status_code=404, detail="Metadata source not found")
     _guard_source_profile(request, source)
-    return sources.validate_metadata_source(
+    result = sources.validate_metadata_source(
         session, source, secret_store=secret_store
+    )
+    _resume_after_successful_validation(session, source.id, result)
+    return result
+
+
+@router.post(
+    "/environments/{environment_id}/metadata-sources/{source_id}/retry-observation",
+    response_model=SourceSyncStatusResponse,
+)
+def retry_metadata_source_observation(
+    environment_id: int,
+    source_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return _retry_observation(
+        session, environment_id, source_id, "metadata", request
     )
 
 
@@ -223,7 +243,26 @@ def validate_log_source(
     if path is None:
         raise HTTPException(status_code=404, detail="Log source not found")
     _guard_source_profile(request, path)
-    return sources.validate_log_source(session, path, secret_store=secret_store)
+    result = sources.validate_log_source(
+        session, path, secret_store=secret_store
+    )
+    _resume_after_successful_validation(session, path.id, result)
+    return result
+
+
+@router.post(
+    "/environments/{environment_id}/log-sources/{source_id}/retry-observation",
+    response_model=SourceSyncStatusResponse,
+)
+def retry_log_source_observation(
+    environment_id: int,
+    source_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return _retry_observation(
+        session, environment_id, source_id, "logs", request
+    )
 
 
 @router.post("/environments/{environment_id}/log-sources/{source_id}/refresh", response_model=SourceSyncStatusResponse)
@@ -321,8 +360,25 @@ def validate_code_artifact_source(
     if source is None:
         raise HTTPException(status_code=404, detail="Code artifact not found")
     _guard_source_profile(request, source)
-    return validate_code_artifact(
+    result = validate_code_artifact(
         session, source, secret_store=secret_store
+    )
+    _resume_after_successful_validation(session, source.id, result)
+    return result
+
+
+@router.post(
+    "/environments/{environment_id}/code-artifacts/{source_id}/retry-observation",
+    response_model=SourceSyncStatusResponse,
+)
+def retry_code_artifact_observation(
+    environment_id: int,
+    source_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return _retry_observation(
+        session, environment_id, source_id, "code", request
     )
 
 
@@ -360,6 +416,55 @@ def refresh_code_artifact_source(
 def _reject_non_log_schedule(payload: SourceUpdate) -> None:
     if payload.sync_schedule_enabled is not None or payload.sync_interval_minutes is not None:
         raise HTTPException(status_code=422, detail="Only Log sources support scheduled refresh")
+
+
+def _resume_after_successful_validation(
+    session: Session,
+    source_id: int,
+    result: dict,
+) -> None:
+    if result.get("status") not in {"ok", "warning"}:
+        return
+    resume_observation(
+        session,
+        source_id,
+        due_at=utc_now()
+        + timedelta(seconds=source_check_interval_seconds(session)),
+    )
+    session.commit()
+
+
+def _retry_observation(
+    session: Session,
+    environment_id: int,
+    source_id: int,
+    source_kind: str,
+    request: Request,
+) -> dict:
+    source = workspace.environment_source_by_id(
+        session, environment_id, source_id, source_kind
+    )
+    if source is None:
+        labels = {
+            "metadata": "Metadata source",
+            "logs": "Log source",
+            "code": "Code artifact",
+        }
+        raise HTTPException(
+            status_code=404,
+            detail=f"{labels[source_kind]} not found",
+        )
+    _guard_source_profile(request, source)
+    if not source.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Enable the source before retrying automatic checks",
+        )
+    try:
+        retry_source_observation(session, source)
+    except ObservationRetryUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return sync.source_sync_status(session, source)
 
 
 @router.post(

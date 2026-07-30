@@ -7,7 +7,11 @@ from typing import Any
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics.schema import DATAFLOW_TABLE, JOB_TABLE
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
-from datacoolie_studio.domains.monitoring.log_repository import monitoring_filter_sql
+from datacoolie_studio.domains.monitoring.log_repository import (
+    monitoring_filter_sql,
+    monitoring_has_dataflow_scope,
+    monitoring_job_direct_filters,
+)
 
 
 _FIELD_GROUPS = (
@@ -204,11 +208,16 @@ def _empty_read_model(generation: str) -> dict[str, Any]:
 def _diagnostics_ctes(source_ids: list[int], filters: dict[str, str]) -> tuple[str, list[Any]]:
     placeholders = ", ".join("?" for _ in source_ids)
     dataflow_where, dataflow_params = monitoring_filter_sql(filters, "d", "jl")
-    job_where, job_params = monitoring_filter_sql(filters, "j", "j", include_dataflow_filters=False)
+    job_where, job_params = monitoring_filter_sql(
+        monitoring_job_direct_filters(filters),
+        "j",
+        "j",
+        include_dataflow_filters=False,
+    )
     job_scope = (
         " AND EXISTS (SELECT 1 FROM filtered_dataflows df "
         "WHERE df._source_id = j._source_id AND df.raw_job_id = j.job_id)"
-        if _has_dataflow_scope(filters)
+        if monitoring_has_dataflow_scope(filters)
         else ""
     )
     normalized_job_id = """
@@ -235,8 +244,8 @@ def _diagnostics_ctes(source_ids: list[int], filters: dict[str, str]) -> tuple[s
             d.dataflow_id, d.dataflow_run_id, d.dataflow_name,
             lower(COALESCE(NULLIF(CAST(d.status AS VARCHAR), ''), 'unknown')) AS status,
             d.start_time, d.end_time,
-            COALESCE(d.end_time, d.start_time) AS event_time,
-            COALESCE(d.__run_date, CAST(timezone('UTC', COALESCE(d.end_time, d.start_time)) AS DATE)) AS run_date,
+            d.__event_time AS event_time,
+            COALESCE(d.__run_date, CAST(timezone('UTC', d.__event_time) AS DATE)) AS run_date,
             d.duration_seconds, d.source_duration_seconds, d.transform_duration_seconds,
             d.destination_duration_seconds, d.source_name, d.source_connection_type,
             d.source_rows_read, d.destination_name, d.destination_connection_type,
@@ -685,15 +694,6 @@ def _queue_row(
         "latest_time": latest_time,
         "action_hint": action_hint,
     }
-
-
-def _has_dataflow_scope(filters: dict[str, str]) -> bool:
-    connection = str(filters.get("connection") or "").strip()
-    if connection and connection != "all":
-        return True
-    kind = str(filters.get("investigateKind") or "").strip()
-    value = str(filters.get("investigateValue") or "").strip()
-    return bool(kind and value and kind != "job_id")
 
 
 def _effective_grain(filters: dict[str, str], summary: dict[str, Any], fallback: str) -> str:

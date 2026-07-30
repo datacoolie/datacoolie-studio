@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datacoolie_studio.api.v1.routes.credentials import (
@@ -11,6 +13,121 @@ from datacoolie_studio.api.v1.routes.credentials import (
 from datacoolie_studio.main import app
 
 from test_credentials_service import MemorySecretStore
+
+
+class _ValidationSession:
+    def commit(self) -> None:
+        pass
+
+    def refresh(self, _source) -> None:
+        pass
+
+
+def _remote_source(source_kind: str, uri: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=7,
+        source_kind=source_kind,
+        uri=uri,
+        storage_provider="dbfs",
+        storage_auth_mode="ambient",
+        credential_profile_id=None,
+        storage_config_json=None,
+        source_config_json=None,
+        read_check_status=None,
+        read_checked_at=None,
+        read_check_result_json=None,
+    )
+
+
+def test_databricks_metadata_validation_uses_stat_without_downloading(monkeypatch):
+    from datacoolie_studio.domains.sources import service
+
+    calls: list[str] = []
+
+    class Adapter:
+        def stat(self, uri: str):
+            calls.append(uri)
+            return object()
+
+        def open_read(self, _uri: str):
+            raise AssertionError("metadata validation must not download content")
+
+    monkeypatch.setattr(
+        service,
+        "create_storage_adapter",
+        lambda *_args, **_kwargs: Adapter(),
+    )
+    source = _remote_source(
+        "metadata",
+        "dbfs:/Volumes/catalog/schema/volume/metadata/assets.json",
+    )
+
+    result = service.validate_metadata_source(_ValidationSession(), source)
+
+    assert result["status"] == "ok"
+    assert calls == [source.uri]
+
+
+def test_databricks_log_validation_uses_three_first_match_probes(monkeypatch):
+    from datacoolie_studio.domains.sources import service
+    from datacoolie_studio.domains.storage.adapters import StorageObject
+    from datacoolie_studio.domains.storage.inventory import StorageInventory
+
+    requests = []
+
+    class Adapter:
+        provider = "dbfs"
+
+        def inventory(self, request):
+            requests.append(request)
+            name = (
+                "dataflow.parquet"
+                if request.suffixes == frozenset({".parquet"})
+                else (
+                    "system_log_20260729.jsonl"
+                    if request.name_prefix == "system_log_"
+                    else "job.jsonl"
+                )
+            )
+            return StorageInventory(
+                objects=(
+                    StorageObject(
+                        canonical_uri=f"{request.uri}/{name}",
+                        name=name,
+                        object_type="file",
+                    ),
+                ),
+                completeness="partial",
+                requests=1,
+                pages=1,
+                directories_visited=1,
+                objects_inspected=1,
+                matching_objects=1,
+                retries=0,
+                throttles=0,
+                bytes_read=0,
+                duration_ms=1,
+                early_stop_reason="object_limit",
+            )
+
+    monkeypatch.setattr(
+        service,
+        "create_storage_adapter",
+        lambda *_args, **_kwargs: Adapter(),
+    )
+    source = _remote_source(
+        "logs",
+        "dbfs:/Volumes/catalog/schema/volume/logs",
+    )
+
+    result = service.validate_log_source(_ValidationSession(), source)
+
+    assert result["status"] == "ok"
+    assert result["records_scanned"] == 3
+    assert len(requests) == 3
+    assert all(request.object_limit == 1 for request in requests)
+    assert all(request.stop_after_match is True for request in requests)
+    assert requests[2].name_prefix == "system_log_"
 
 
 def test_local_source_defaults_to_typed_local_binding(
@@ -251,8 +368,24 @@ def test_storage_connection_validation_is_read_only_and_bounded(
     assert response.json()["metadata_write_back_supported"] is True
 
 
-def test_onelake_connection_probe_stops_after_one_matching_object(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    ("provider", "uri", "expected_limit"),
+    [
+        (
+            "onelake",
+            "https://onelake.dfs.fabric.microsoft.com/Analytics/"
+            "Telemetry.Lakehouse/Files/project",
+            1,
+        ),
+        ("dbfs", "dbfs:/Volumes/catalog/schema/volume/project", 1),
+    ],
+)
+def test_cloud_connection_probe_supports_write_back_and_is_bounded(
+    tmp_path: Path,
+    monkeypatch,
+    provider: str,
+    uri: str,
+    expected_limit: int,
 ):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
     from datacoolie_studio.domains.storage.adapters import StorageObject
@@ -295,12 +428,9 @@ def test_onelake_connection_probe_stops_after_one_matching_object(
         response = client.post(
             "/api/v1/storage-connections/validate",
             json={
-                "uri": (
-                    "https://onelake.dfs.fabric.microsoft.com/Analytics/"
-                    "Telemetry.Lakehouse/Files/project"
-                ),
+                "uri": uri,
                 "storage": {
-                    "provider": "onelake",
+                    "provider": provider,
                     "auth_mode": "ambient",
                 },
             },
@@ -309,8 +439,9 @@ def test_onelake_connection_probe_stops_after_one_matching_object(
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "ok"
     assert response.json()["objects_scanned"] == 1
-    assert response.json()["metadata_write_back_supported"] is False
-    assert observed_requests[0].object_limit == 1
+    assert response.json()["metadata_write_back_supported"] is True
+    assert observed_requests[0].object_limit == expected_limit
+    assert observed_requests[0].stop_after_match is True
     assert observed_requests[0].recursive is False
 
 

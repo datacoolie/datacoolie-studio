@@ -96,6 +96,7 @@ interface SourcesPageProps {
   onGetDeleteImpact: (kind: SourceKind, id: number) => Promise<SourceDeleteImpact>;
   onValidateSource: (kind: SourceKind, id: number) => Promise<SourceReadCheckResult>;
   onSyncSource: (kind: SourceKind, id: number, logSyncRequest?: LogSyncRequest) => Promise<SourceSyncStatus>;
+  onRetrySourceObservation: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
   onRunSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest) => Promise<SourceBatchResult>;
   syncStatuses: Record<string, SourceSyncStatus>;
   sourceOperations: SourceOperations;
@@ -136,6 +137,7 @@ export function SourcesPage({
   onGetDeleteImpact,
   onValidateSource,
   onSyncSource,
+  onRetrySourceObservation,
   onRunSourceBatch,
   syncStatuses,
   sourceOperations,
@@ -299,7 +301,9 @@ export function SourcesPage({
         entry.kind,
         entry.source.id,
       );
-      if (operation) actions.add(operation.action);
+      if (operation && operation.action !== "retry") {
+        actions.add(operation.action);
+      }
       const backendStatus = syncStatuses[sourceKey(entry.kind, entry.source.id)];
       if (isSourceSyncRunning(backendStatus)) {
         actions.add(backendStatus?.active_operation ?? "sync");
@@ -419,6 +423,7 @@ export function SourcesPage({
                 onDelete={requestSourceDelete}
                 onValidate={onValidateSource}
                 onSync={onSyncSource}
+                onRetryObservation={onRetrySourceObservation}
                 syncStatuses={syncStatuses}
                 sourceOperations={sourceOperations}
                 environmentId={selectedEnvironmentId}
@@ -437,6 +442,7 @@ export function SourcesPage({
                 onDelete={requestSourceDelete}
                 onValidate={onValidateSource}
                 onSync={onSyncSource}
+                onRetryObservation={onRetrySourceObservation}
                 syncStatuses={syncStatuses}
                 sourceOperations={sourceOperations}
                 environmentId={selectedEnvironmentId}
@@ -502,6 +508,7 @@ export function SourcesPage({
               onDelete={requestSourceDelete}
               onValidate={onValidateSource}
               onSync={onSyncSource}
+              onRetryObservation={onRetrySourceObservation}
               onRequestLogSync={(id) => {
                 const source = logPaths.find((item) => item.id === id);
                 if (source) setLogSyncPrompt({ entries: [{ source, kind: "logs" }] });
@@ -894,6 +901,7 @@ function SourceGroup({
   onDelete,
   onValidate,
   onSync,
+  onRetryObservation,
   onRequestLogSync,
   syncStatuses,
   sourceOperations,
@@ -913,6 +921,7 @@ function SourceGroup({
   onDelete: SourcesPageProps["onDeleteSource"];
   onValidate: SourcesPageProps["onValidateSource"];
   onSync: SourcesPageProps["onSyncSource"];
+  onRetryObservation: SourcesPageProps["onRetrySourceObservation"];
   onRequestLogSync?: (id: number) => void;
   syncStatuses: Record<string, SourceSyncStatus>;
   sourceOperations: SourceOperations;
@@ -968,6 +977,7 @@ function SourceGroup({
             onDelete={onDelete}
             onValidate={validate}
             onSync={sync}
+            onRetryObservation={onRetryObservation}
             timezoneName={timezoneName}
           />
         ))}
@@ -997,6 +1007,7 @@ function SourceCard({
   onDelete,
   onValidate,
   onSync,
+  onRetryObservation,
   timezoneName
 }: {
   item: SourcePath;
@@ -1010,6 +1021,7 @@ function SourceCard({
   onDelete: SourcesPageProps["onDeleteSource"];
   onValidate: (id: number) => Promise<void>;
   onSync: (id: number) => Promise<void>;
+  onRetryObservation: SourcesPageProps["onRetrySourceObservation"];
   timezoneName: string | null;
 }) {
   const secondaryPath = kind === "logs" && typeof item.source_config?.system_logs_uri === "string" ? item.source_config.system_logs_uri : null;
@@ -1048,6 +1060,7 @@ function SourceCard({
       : syncing
         ? { icon: <SourceOperationIcon />, label: "Syncing" }
         : { icon: <RefreshCw size={13} />, label: "Sync" };
+  const pauseError = observationErrorMessage(syncStatus);
 
   return (
     <article
@@ -1171,6 +1184,33 @@ function SourceCard({
           )}
         </div>
       </div>
+      {syncStatus?.observation_state === "paused" ? (
+        <div className="source-observation-pause" role="status">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <div className="source-observation-pause-copy">
+            <strong>Source checks paused</strong>
+            <span>
+              {syncStatus.observation_failure_count} consecutive automatic checks failed.
+              Successful Validate or Sync also restores automatic checks.
+            </span>
+            {pauseError ? (
+              <span className="source-observation-pause-error">
+                Last error: {pauseError}
+              </span>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="source-action-btn source-observation-retry"
+            onClick={() => void onRetryObservation(kind, item.id)}
+            disabled={busy || working || !item.enabled}
+            aria-busy={activeAction === "retry"}
+          >
+            {activeAction === "retry" ? <SourceOperationIcon /> : <RefreshCw size={13} />}
+            <span>{activeAction === "retry" ? "Retrying..." : "Retry now"}</span>
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -1359,6 +1399,20 @@ function SyncBadge({ status, timezoneName }: { status: SourceSyncStatus | null; 
       </span>
     );
   }
+  if (status.observation_state === "paused") {
+    return (
+      <span className="source-status-pill warn" title={syncTooltip(status)}>
+        <AlertTriangle size={12} />
+        <span>paused</span>
+        {status.observation_paused_at ? (
+          <StatusTimestamp
+            value={status.observation_paused_at}
+            timezoneName={timezoneName}
+          />
+        ) : null}
+      </span>
+    );
+  }
   const ok = status.status === "ok";
   const failed = status.status === "error";
   const running = isSourceSyncRunning(status);
@@ -1470,6 +1524,11 @@ function syncTooltip(status: SourceSyncStatus) {
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+function observationErrorMessage(status: SourceSyncStatus | null) {
+  const message = status?.error?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
 }
 
 function readCheckTooltip(validation: SourceReadCheckResult) {

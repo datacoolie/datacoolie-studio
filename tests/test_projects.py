@@ -111,6 +111,105 @@ def test_project_create_normalizes_and_rejects_invalid_names(tmp_path: Path, mon
     monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
 
 
+def test_project_and_environment_rename_preserve_identity_and_validate_conflicts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={"name": "alpha", "description": "Stable project"},
+        ).json()
+        other_project = client.post("/api/v1/projects", json={"name": "beta"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        other_environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "prod"},
+        ).json()
+
+        renamed_project = client.patch(
+            f"/api/v1/projects/{project['id']}",
+            json={"name": "  sales analytics  "},
+        )
+        assert renamed_project.status_code == 200
+        assert renamed_project.json()["id"] == project["id"]
+        assert renamed_project.json()["name"] == "sales analytics"
+        assert renamed_project.json()["description"] == "Stable project"
+
+        idempotent_project = client.patch(
+            f"/api/v1/projects/{project['id']}",
+            json={"name": "sales analytics"},
+        )
+        assert idempotent_project.status_code == 200
+        assert idempotent_project.json()["id"] == project["id"]
+
+        project_conflict = client.patch(
+            f"/api/v1/projects/{project['id']}",
+            json={"name": other_project["name"]},
+        )
+        assert project_conflict.status_code == 409
+        assert project_conflict.json()["detail"] == "Project already exists: beta"
+        assert client.patch(
+            f"/api/v1/projects/{project['id']}",
+            json={"name": "   "},
+        ).status_code == 422
+        assert client.patch(
+            "/api/v1/projects/999999",
+            json={"name": "missing"},
+        ).status_code == 404
+
+        renamed_environment = client.patch(
+            f"/api/v1/environments/{environment['id']}",
+            json={"name": "  UAT_1  "},
+        )
+        assert renamed_environment.status_code == 200
+        assert renamed_environment.json()["id"] == environment["id"]
+        assert renamed_environment.json()["project_id"] == project["id"]
+        assert renamed_environment.json()["name"] == "UAT_1"
+
+        idempotent_environment = client.patch(
+            f"/api/v1/environments/{environment['id']}",
+            json={"name": "UAT_1"},
+        )
+        assert idempotent_environment.status_code == 200
+        assert idempotent_environment.json()["id"] == environment["id"]
+
+        environment_conflict = client.patch(
+            f"/api/v1/environments/{environment['id']}",
+            json={"name": other_environment["name"].upper()},
+        )
+        assert environment_conflict.status_code == 409
+        assert environment_conflict.json()["detail"] == "Environment already exists: PROD"
+        assert client.patch(
+            f"/api/v1/environments/{environment['id']}",
+            json={"name": "uat environment"},
+        ).status_code == 422
+        assert client.patch(
+            "/api/v1/environments/999999",
+            json={"name": "uat"},
+        ).status_code == 404
+
+        environments = client.get(
+            f"/api/v1/projects/{project['id']}/environments"
+        ).json()
+        renamed_from_list = next(
+            item for item in environments if item["id"] == environment["id"]
+        )
+        assert renamed_from_list["name"] == "UAT_1"
+        assert renamed_from_list["project_id"] == project["id"]
+
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+
+
 def test_project_reference_registry_loads_each_catalog_once_and_isolates_failures(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

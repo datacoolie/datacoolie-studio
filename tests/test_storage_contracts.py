@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import threading
 import time
@@ -22,7 +23,6 @@ from datacoolie_studio.domains.storage.errors import (
     StorageConfigurationError,
     StorageConflictError,
     StorageNotFoundError,
-    StorageWriteUnsupported,
 )
 from datacoolie_studio.domains.storage.factory import (
     _cached_dbfs_client,
@@ -36,6 +36,7 @@ from datacoolie_studio.domains.storage.fsspec_adapter import FsspecStorageAdapte
 from datacoolie_studio.domains.storage.inventory import (
     StorageInventoryRequest,
     inventory,
+    storage_diagnostics,
 )
 from datacoolie_studio.domains.storage.onelake_adapter import OneLakeStorageAdapter
 from datacoolie_studio.domains.storage.uri import (
@@ -45,8 +46,10 @@ from datacoolie_studio.domains.storage.uri import (
     validate_storage_uri,
 )
 from datacoolie_studio.domains.storage.writers import (
+    DatabricksVerifiedStorageWriter,
     GcsConditionalStorageWriter,
     LocalConditionalStorageWriter,
+    OneLakeConditionalStorageWriter,
     S3ConditionalStorageWriter,
 )
 
@@ -564,18 +567,142 @@ def test_onelake_factory_routes_service_principal_to_entra_credential(
     assert credentials == {}
 
 
-def test_onelake_metadata_writer_fails_closed_before_credential_resolution():
-    with pytest.raises(StorageWriteUnsupported) as captured:
-        create_storage_writer(
-            StorageBinding(provider="onelake", auth_mode="ambient"),
-            uri=(
-                "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
-                "lake.Lakehouse/Files/metadata/assets.json"
+def test_onelake_metadata_writer_uses_etag_conditional_upload(monkeypatch):
+    uploads: list[tuple[bytes, dict[str, object]]] = []
+
+    class FileClient:
+        def upload_data(self, content: bytes, **kwargs):
+            uploads.append((content, kwargs))
+            return {"etag": '"etag-8"'}
+
+    service = SimpleNamespace(
+        get_file_system_client=lambda workspace: SimpleNamespace(
+            get_file_client=lambda path: (
+                FileClient()
+                if (workspace, path)
+                == ("workspace", "lake.Lakehouse/Files/metadata/assets.json")
+                else None
+            )
+        )
+    )
+    modules = {
+        "azure.identity": SimpleNamespace(),
+        "azure.storage.filedatalake": SimpleNamespace(),
+        "azure.core": SimpleNamespace(
+            MatchConditions=SimpleNamespace(IfNotModified="if-not-modified")
+        ),
+    }
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory._module_available",
+        lambda _name: True,
+    )
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory._cached_onelake_service_client",
+        lambda *_args, **_kwargs: service,
+    )
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory.importlib.import_module",
+        lambda name: modules[name],
+    )
+    uri = (
+        "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+        "lake.Lakehouse/Files/metadata/assets.json"
+    )
+
+    writer = create_storage_writer(
+        StorageBinding(provider="onelake", auth_mode="ambient"),
+        uri=uri,
+    )
+    revision = writer.replace(
+        uri,
+        b'{"version":2}',
+        StorageRevision(
+            canonical_uri=uri,
+            size=13,
+            last_modified=datetime.now(timezone.utc),
+            provider_revision="etag-7",
+        ),
+    )
+    created_revision = writer.create(uri, b"new")
+
+    assert isinstance(writer, OneLakeConditionalStorageWriter)
+    assert revision == "etag-8"
+    assert created_revision == "etag-8"
+    assert uploads == [
+        (
+            b'{"version":2}',
+            {
+                "length": 13,
+                "overwrite": True,
+                "etag": "etag-7",
+                "match_condition": "if-not-modified",
+            },
+        ),
+        (b"new", {"length": 3, "overwrite": False}),
+    ]
+
+
+def test_onelake_metadata_writer_maps_stale_etag_to_conflict():
+    class PreconditionFailed(RuntimeError):
+        status_code = 412
+
+    file_client = SimpleNamespace(
+        upload_data=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PreconditionFailed()
+        )
+    )
+    service = SimpleNamespace(
+        get_file_system_client=lambda _workspace: SimpleNamespace(
+            get_file_client=lambda _path: file_client
+        )
+    )
+    uri = (
+        "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+        "lake.Lakehouse/Files/metadata/assets.json"
+    )
+    writer = OneLakeConditionalStorageWriter(service, if_not_modified="if-not-modified")
+
+    with pytest.raises(StorageConflictError):
+        writer.replace(
+            uri,
+            b"new",
+            StorageRevision(
+                canonical_uri=uri,
+                size=3,
+                last_modified=datetime.now(timezone.utc),
+                provider_revision="stale",
             ),
         )
 
-    assert captured.value.provider == "onelake"
-    assert "conditional-write gate" in str(captured.value)
+
+def test_onelake_metadata_writer_rejects_ignored_condition_headers():
+    file_client = SimpleNamespace(
+        upload_data=lambda *_args, **_kwargs: {
+            "x-ms-rejected-headers": "If-Match"
+        }
+    )
+    service = SimpleNamespace(
+        get_file_system_client=lambda _workspace: SimpleNamespace(
+            get_file_client=lambda _path: file_client
+        )
+    )
+    uri = (
+        "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+        "lake.Lakehouse/Files/metadata/assets.json"
+    )
+    writer = OneLakeConditionalStorageWriter(service, if_not_modified="if-not-modified")
+
+    with pytest.raises(StorageConflictError, match="rejected"):
+        writer.replace(
+            uri,
+            b"new",
+            StorageRevision(
+                canonical_uri=uri,
+                size=3,
+                last_modified=datetime.now(timezone.utc),
+                provider_revision="etag-7",
+            ),
+        )
 
 
 def test_onelake_sdk_errors_are_typed_and_redacted():
@@ -694,12 +821,117 @@ def test_missing_provider_extra_has_actionable_typed_error(monkeypatch):
     assert 'datacoolie-studio[s3]' in captured.value.install_command
 
 
-def test_dbfs_metadata_writer_fails_closed_without_atomic_precondition():
-    with pytest.raises(StorageWriteUnsupported) as captured:
-        create_storage_writer(StorageBinding(provider="dbfs", auth_mode="ambient"))
+def test_dbfs_requires_databricks_sdk(monkeypatch):
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory._module_available",
+        lambda _name: False,
+    )
+    binding = StorageBinding(provider="dbfs", auth_mode="ambient")
 
-    assert captured.value.code == "storage_write_unsupported"
-    assert captured.value.provider == "dbfs"
+    with pytest.raises(ProviderDependencyMissing) as adapter_error:
+        create_storage_adapter(binding)
+    with pytest.raises(ProviderDependencyMissing) as writer_error:
+        create_storage_writer(binding)
+
+    assert adapter_error.value.install_command == (
+        'pip install "databricks-sdk>=0.121,<0.122"'
+    )
+    assert writer_error.value.install_command == (
+        'pip install "databricks-sdk>=0.121,<0.122"'
+    )
+
+
+def test_dbfs_metadata_writer_is_available_from_factory(monkeypatch):
+    client = SimpleNamespace(files=SimpleNamespace(), dbfs=SimpleNamespace())
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory._module_available",
+        lambda _name: True,
+    )
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.factory._create_dbfs_client",
+        lambda *_args, **_kwargs: client,
+    )
+
+    writer = create_storage_writer(StorageBinding(provider="dbfs", auth_mode="ambient"))
+
+    assert isinstance(writer, DatabricksVerifiedStorageWriter)
+
+
+def test_dbfs_metadata_writer_routes_volumes_and_legacy_dbfs():
+    uploads: list[tuple[str, str, bytes, bool]] = []
+
+    class Endpoint:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def upload(self, path: str, stream, *, overwrite: bool) -> None:
+            uploads.append((self.name, path, stream.read(), overwrite))
+
+    current = b'{"version":1}'
+    writer = DatabricksVerifiedStorageWriter(
+        SimpleNamespace(files=Endpoint("files"), dbfs=Endpoint("dbfs")),
+        lambda _uri: io.BytesIO(current),
+    )
+    expected = StorageRevision(
+        canonical_uri="dbfs:/metadata/assets.json",
+        size=len(current),
+        last_modified=datetime.now(timezone.utc),
+        content_hash=hashlib.sha256(current).hexdigest(),
+    )
+
+    writer.replace(
+        "dbfs:/Volumes/catalog/schema/volume/assets.json", b"volume", expected
+    )
+    writer.replace("dbfs:/metadata/assets.json", b"legacy", expected)
+    writer.create("dbfs:/Volumes/catalog/schema/volume/new.json", b"new")
+
+    assert uploads == [
+        ("files", "/Volumes/catalog/schema/volume/assets.json", b"volume", True),
+        ("dbfs", "/metadata/assets.json", b"legacy", True),
+        ("files", "/Volumes/catalog/schema/volume/new.json", b"new", False),
+    ]
+
+
+def test_dbfs_metadata_writer_rejects_changed_content_before_upload():
+    uploads: list[object] = []
+    endpoint = SimpleNamespace(upload=lambda *args, **kwargs: uploads.append(args))
+    uri = "dbfs:/metadata/assets.json"
+    writer = DatabricksVerifiedStorageWriter(
+        SimpleNamespace(files=endpoint, dbfs=endpoint),
+        lambda _uri: io.BytesIO(b"changed"),
+    )
+
+    with pytest.raises(StorageConflictError):
+        writer.replace(
+            uri,
+            b"replacement",
+            StorageRevision(
+                canonical_uri=uri,
+                size=8,
+                last_modified=datetime.now(timezone.utc),
+                content_hash=hashlib.sha256(b"original").hexdigest(),
+            ),
+        )
+
+    assert uploads == []
+
+
+def test_dbfs_metadata_writer_maps_create_collision_to_conflict():
+    class ResourceAlreadyExists(RuntimeError):
+        error_code = "RESOURCE_ALREADY_EXISTS"
+
+    endpoint = SimpleNamespace(
+        upload=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ResourceAlreadyExists()
+        )
+    )
+    writer = DatabricksVerifiedStorageWriter(
+        SimpleNamespace(files=endpoint, dbfs=endpoint),
+        lambda _uri: io.BytesIO(b""),
+    )
+
+    with pytest.raises(StorageConflictError, match="already exists"):
+        writer.create("dbfs:/metadata/assets.json", b"new")
 
 
 def test_fake_provider_revision_survives_list_stat_and_materialize(tmp_path: Path):
@@ -863,6 +1095,77 @@ def test_dbfs_volume_materialization_uses_download_revision_without_stat(
 
     assert materialized.same_content_as(expected)
     assert client.dbfs.status_paths == []
+
+
+def test_dbfs_bounded_probe_and_io_diagnostics_stop_after_first_match():
+    client = _FakeDatabricksClient()
+    adapter = DbfsStorageAdapter(client)
+
+    observed = inventory(
+        adapter,
+        StorageInventoryRequest(
+            uri="dbfs:/Volumes/catalog/schema/volume/project",
+            purpose="validate",
+            recursive=True,
+            object_types=frozenset({"file"}),
+            suffixes=frozenset({".json"}),
+            object_limit=1,
+            stop_after_match=True,
+        ),
+    )
+    with adapter.open_read(observed.files[0].canonical_uri) as stream:
+        assert stream.read() == b'{"ok":true}'
+
+    assert observed.completeness == "partial"
+    assert observed.matching_objects == 1
+    assert client.files.listed == [
+        "/Volumes/catalog/schema/volume/project",
+        "/Volumes/catalog/schema/volume/project/metadata",
+    ]
+    assert storage_diagnostics(adapter) == {
+        "transport": "databricks_sdk",
+        "provider_requests": 3,
+        "bytes_read": 11,
+        "objects_inspected": 3,
+    }
+
+
+def test_dbfs_bounded_probe_stops_on_matching_name_prefix():
+    class Files:
+        def list_directory_contents(self, path: str):
+            return [
+                {
+                    "path": f"{path}/debug.jsonl",
+                    "name": "debug.jsonl",
+                    "is_directory": False,
+                },
+                {
+                    "path": f"{path}/system_log_20260729.jsonl",
+                    "name": "system_log_20260729.jsonl",
+                    "is_directory": False,
+                },
+            ]
+
+    adapter = DbfsStorageAdapter(type("Client", (), {"files": Files()})())
+
+    observed = inventory(
+        adapter,
+        StorageInventoryRequest(
+            uri="dbfs:/Volumes/catalog/schema/volume/system_logs",
+            purpose="validate",
+            object_types=frozenset({"file"}),
+            suffixes=frozenset({".jsonl"}),
+            name_prefix="system_log_",
+            object_limit=1,
+            stop_after_match=True,
+        ),
+    )
+
+    assert [item.name for item in observed.files] == [
+        "system_log_20260729.jsonl"
+    ]
+    assert observed.matching_objects == 1
+    assert observed.objects_inspected == 2
 
 
 def test_dbfs_recursive_listing_prunes_excluded_directories():

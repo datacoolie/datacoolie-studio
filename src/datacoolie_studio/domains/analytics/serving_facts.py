@@ -88,6 +88,7 @@ DATAFLOW_FACT_COLUMNS = (
     "destination_bytes_saved",
     "overhead_duration_seconds",
     "error_message",
+    "__event_time",
     "__run_date",
 )
 
@@ -192,10 +193,10 @@ def rebuild_monitoring_serving_facts(
           COALESCE(j.platform_name, 'unknown') AS platform_name,
           LOWER(COALESCE(NULLIF(TRIM(CAST(d.status AS VARCHAR)), ''), 'unknown'))
             AS normalized_status,
-          COALESCE(d.end_time, d.start_time) AS event_time,
+          d.__event_time AS event_time,
           COALESCE(
             d.__run_date,
-            CAST(timezone('UTC', COALESCE(d.end_time, d.start_time)) AS DATE)
+            CAST(timezone('UTC', d.__event_time) AS DATE)
           ) AS run_date
         FROM dataflow_source d
         LEFT JOIN job_context j
@@ -230,10 +231,10 @@ def validate_monitoring_serving_facts(
         FROM {MONITORING_DATAFLOW_FACTS_TABLE}
         WHERE normalized_status IS DISTINCT FROM
               LOWER(COALESCE(NULLIF(TRIM(CAST(status AS VARCHAR)), ''), 'unknown'))
-           OR event_time IS DISTINCT FROM COALESCE(end_time, start_time)
+           OR event_time IS DISTINCT FROM __event_time
            OR run_date IS DISTINCT FROM COALESCE(
                 __run_date,
-                CAST(timezone('UTC', COALESCE(end_time, start_time)) AS DATE)
+                CAST(timezone('UTC', __event_time) AS DATE)
               )
         """
     ).fetchone()[0]

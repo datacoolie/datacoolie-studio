@@ -1,7 +1,11 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
-import { addEnvironmentToProject, removeEnvironmentFromProject } from "../../app/projectSummaryMutations";
+import {
+  addEnvironmentToProject,
+  removeEnvironmentFromProject,
+  renameEnvironmentInProject,
+} from "../../app/projectSummaryMutations";
 import { api } from "../../shared/api/client";
 import type { Environment, ProjectSummary } from "../../shared/api/domainTypes";
 import { toErrorMessage } from "../../shared/lib/errors";
@@ -55,5 +59,22 @@ export function createEnvironmentMutations(context: EnvironmentMutationContext) 
     }
   }
 
-  return { createEnvironment, deleteEnvironment };
+  async function renameEnvironment(environmentId: number, name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const environment = await api.renameEnvironment(environmentId, { name });
+      setEnvironments((current) => current
+        .map((item) => item.id === environment.id ? environment : item)
+        .sort((left, right) => left.name.localeCompare(right.name)));
+      updateProjectSummaries((current) => renameEnvironmentInProject(current, environment));
+    } catch (err) {
+      setError(toErrorMessage(err));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return { createEnvironment, renameEnvironment, deleteEnvironment };
 }

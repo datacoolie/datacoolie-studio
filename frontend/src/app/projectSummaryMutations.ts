@@ -11,6 +11,18 @@ export function addProjectSummary(items: ProjectSummary[], project: Project) {
   }].sort(compareProjects);
 }
 
+export function renameProjectSummary(items: ProjectSummary[], project: Project) {
+  return items
+    .map((summary) => summary.id === project.id
+      ? {
+          ...summary,
+          name: project.name,
+          updated_at: project.updated_at,
+        }
+      : summary)
+    .sort(compareProjects);
+}
+
 export function addEnvironmentToProject(items: ProjectSummary[], projectId: number, environment: Environment) {
   const summary: ProjectEnvironmentSummary = {
     id: environment.id,
@@ -41,6 +53,27 @@ export function removeEnvironmentFromProject(items: ProjectSummary[], projectId:
       metadata_source_count: Math.max(0, project.metadata_source_count - removed.metadata_source_count),
       etl_log_path_count: Math.max(0, project.etl_log_path_count - removed.etl_log_path_count),
       environments: project.environments.filter((environment) => environment.id !== environmentId),
+    };
+  });
+}
+
+export function renameEnvironmentInProject(
+  items: ProjectSummary[],
+  environment: Environment,
+) {
+  return items.map((project) => {
+    if (project.id !== environment.project_id) return project;
+    return {
+      ...project,
+      environments: project.environments
+        .map((summary) => summary.id === environment.id
+          ? {
+              ...summary,
+              name: environment.name,
+              updated_at: environment.updated_at,
+            }
+          : summary)
+        .sort(compareEnvironments),
     };
   });
 }

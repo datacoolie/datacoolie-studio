@@ -1,4 +1,4 @@
-import { AlertTriangle, Save } from "lucide-react";
+import { AlertTriangle, Loader2, Save } from "lucide-react";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
 import type { MetadataSaveConfirmation } from "./metadataSaveConfirmation";
 
@@ -18,8 +18,8 @@ export function MetadataSourceSaveConfirmationDialog({
   return (
     <OperationConfirmationDialog
       busy={busy}
-      confirmIcon={<Save size={14} />}
-      confirmLabel="Save"
+      confirmIcon={busy ? <Loader2 className="is-spinning" size={14} /> : <Save size={14} />}
+      confirmLabel={busy ? "Saving…" : "Save"}
       description={confirmation.description}
       icon={<AlertTriangle size={18} />}
       onCancel={onCancel}

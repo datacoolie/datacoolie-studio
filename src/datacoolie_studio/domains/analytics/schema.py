@@ -107,6 +107,7 @@ DATAFLOW_COLUMN_TYPES = {
     "destination_bytes_saved": "BIGINT",
     "destination_operation_details": "VARCHAR",
     "overhead_duration_seconds": "DOUBLE",
+    "__event_time": "TIMESTAMPTZ",
     "__run_date": "DATE",
 }
 
@@ -158,7 +159,7 @@ JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
 CACHE_SOURCES_TABLE = "etl_cache_sources"
 ANALYTICS_META_TABLE = "etl_analytics_meta"
-ANALYTICS_SCHEMA_VERSION = 6
+ANALYTICS_SCHEMA_VERSION = 7
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 

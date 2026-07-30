@@ -136,6 +136,9 @@ class LocalStorageAdapter:
                     if "file" not in request.object_types or (
                         request.suffixes
                         and Path(child.name).suffix.lower() not in request.suffixes
+                    ) or (
+                        request.name_prefix is not None
+                        and not child.name.startswith(request.name_prefix)
                     ):
                         continue
                     item = self._file_object(Path(child.path))
@@ -150,6 +153,14 @@ class LocalStorageAdapter:
                     pending.clear()
                     break
                 result.append(item)
+                if (
+                    request.stop_after_match
+                    and request.object_limit is not None
+                    and matching_objects >= request.object_limit
+                ):
+                    partial = True
+                    pending.clear()
+                    break
             if not request.recursive or partial:
                 break
         result.sort(key=lambda item: item.canonical_uri)

@@ -5,6 +5,7 @@ import hashlib
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -68,6 +69,7 @@ from datacoolie_studio.domains.storage.adapters import (
 from datacoolie_studio.domains.storage.concurrency import map_storage_io
 from datacoolie_studio.domains.sources.storage_binding import binding_from_source
 from datacoolie_studio.domains.storage.factory import create_storage_adapter
+from datacoolie_studio.domains.storage.inventory import storage_diagnostics
 from datacoolie_studio.domains.credentials.store import (
     CredentialSecretStore,
     KeyringCredentialSecretStore,
@@ -197,7 +199,12 @@ def _merge_rebuild_candidates(
     for row in manifest_rows:
         if row.file_kind not in {"dataflow_parquet", "job_jsonl"}:
             continue
-        revision = adapter.stat(row.file_uri)
+        revision = _file_revision_from_json(
+            row.file_uri,
+            row.revision_json,
+        )
+        if revision is None:
+            revision = adapter.stat(row.file_uri)
         state = states.get(row.file_kind)
         granularity = (
             PartitionGranularity(state.partition_granularity)
@@ -500,8 +507,10 @@ def _refresh_log_source_cache_impl(
             manifests_by_kind.setdefault(row.file_kind, {})[
                 row.file_uri
             ] = parsed_revision
-    stream_plans = [
-        plan_stream_sync(
+    definitions = _stream_definitions(etl_uri, system_uri)
+
+    def plan_stream(definition: StreamDefinition) -> StreamPlan:
+        return plan_stream_sync(
             adapter,
             definition,
             state=_planner_state_from_row(
@@ -510,8 +519,15 @@ def _refresh_log_source_cache_impl(
             manifest=manifests_by_kind.get(definition.stream_kind, {}),
             spec=spec,
         )
-        for definition in _stream_definitions(etl_uri, system_uri)
-    ]
+
+    if getattr(adapter, "provider", None) == "dbfs" and len(definitions) > 1:
+        with ThreadPoolExecutor(
+            max_workers=len(definitions),
+            thread_name_prefix="dbfs-log-plan",
+        ) as executor:
+            stream_plans = list(executor.map(plan_stream, definitions))
+    else:
+        stream_plans = [plan_stream(definition) for definition in definitions]
     plans_by_kind = {
         plan.definition.stream_kind: plan
         for plan in stream_plans
@@ -716,6 +732,7 @@ def _refresh_log_source_cache_impl(
             "sync_mode": spec.mode.value,
             "errors": errors,
             "timings_ms": timings_ms,
+            "storage_io": storage_diagnostics(adapter),
         },
         completed_at=completed_at,
     )

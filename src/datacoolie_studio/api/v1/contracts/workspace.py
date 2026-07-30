@@ -7,6 +7,26 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datacoolie_studio.api.v1.contracts.shared import ReferenceType, TargetIdentifierKind
 
+
+def _normalize_project_name(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Project name cannot be blank")
+    if len(normalized) > 255:
+        raise ValueError("Project name cannot exceed 255 characters")
+    return normalized
+
+
+def _normalize_environment_name(value: str) -> str:
+    display_name = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,49}", display_name):
+        raise ValueError(
+            "Environment must start with a letter or number and contain only "
+            "letters, numbers, hyphens, or underscores"
+        )
+    return display_name
+
+
 class ProjectCreate(BaseModel):
     name: str
     description: str | None = None
@@ -14,12 +34,16 @@ class ProjectCreate(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_project_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("Project name cannot be blank")
-        if len(normalized) > 255:
-            raise ValueError("Project name cannot exceed 255 characters")
-        return normalized
+        return _normalize_project_name(value)
+
+
+class ProjectRename(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_project_name(cls, value: str) -> str:
+        return _normalize_project_name(value)
 
 
 class ProjectRead(BaseModel):
@@ -116,10 +140,16 @@ class EnvironmentCreate(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_environment_name(cls, value: str) -> str:
-        display_name = value.strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,49}", display_name):
-            raise ValueError("Environment must start with a letter or number and contain only letters, numbers, hyphens, or underscores")
-        return display_name
+        return _normalize_environment_name(value)
+
+
+class EnvironmentRename(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_environment_name(cls, value: str) -> str:
+        return _normalize_environment_name(value)
 
 
 class EnvironmentRead(BaseModel):

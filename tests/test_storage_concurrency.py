@@ -13,7 +13,9 @@ from datacoolie_studio.domains.logs.partition import (
     PartitionGranularity,
 )
 from datacoolie_studio.domains.storage.adapters import StorageObject
+from datacoolie_studio.domains.storage.dbfs_adapter import DbfsStorageAdapter
 from datacoolie_studio.domains.storage.inventory import StorageInventory
+from datacoolie_studio.domains.storage.inventory import StorageInventoryRequest
 from datacoolie_studio.domains.storage.concurrency import (
     map_storage_io,
     storage_io_limit,
@@ -97,3 +99,42 @@ def test_partition_file_discovery_uses_bounded_concurrency_and_sorts_results() -
     assert [item.canonical_uri for item in files] == sorted(
         item.canonical_uri for item in files
     )
+
+
+def test_dbfs_inventory_does_not_reenter_provider_semaphore(
+    monkeypatch,
+) -> None:
+    class Files:
+        def list_directory_contents(self, path: str):
+            return [
+                {
+                    "path": f"{path}/item.jsonl",
+                    "name": "item.jsonl",
+                    "is_directory": False,
+                    "file_size": 1,
+                    "last_modified": "2026-07-29T00:00:00Z",
+                }
+            ]
+
+    adapter = DbfsStorageAdapter(type("Client", (), {"files": Files()})())
+
+    def fail_nested_map(*_args, **_kwargs):
+        raise AssertionError("nested DBFS inventory must reuse the active I/O slot")
+
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.storage.dbfs_adapter.map_storage_io",
+        fail_nested_map,
+    )
+    request = StorageInventoryRequest(
+        uri="dbfs:/Volumes/catalog/schema/volume/logs",
+        purpose="logs",
+        object_types=frozenset({"file"}),
+    )
+
+    observed = map_storage_io(
+        adapter,
+        lambda _value: adapter.inventory(request),
+        [None],
+    )[0]
+
+    assert [item.name for item in observed.files] == ["item.jsonl"]

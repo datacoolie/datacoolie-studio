@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -17,6 +18,7 @@ from datacoolie_studio.domains.storage.adapters import (
 )
 from datacoolie_studio.domains.storage.concurrency import (
     map_storage_io,
+    storage_io_context_active,
     storage_io_limit,
 )
 from datacoolie_studio.domains.storage.errors import (
@@ -39,6 +41,22 @@ class DbfsStorageAdapter:
     def __init__(self, workspace_client) -> None:
         self._client = workspace_client
         self.provider = "dbfs"
+        self.transport = str(
+            getattr(workspace_client, "transport", "databricks_sdk")
+        )
+        self._metrics_lock = threading.Lock()
+        self._provider_requests = 0
+        self._bytes_read = 0
+        self._objects_inspected = 0
+
+    def storage_diagnostics(self) -> dict[str, int | str]:
+        with self._metrics_lock:
+            return {
+                "transport": self.transport,
+                "provider_requests": self._provider_requests,
+                "bytes_read": self._bytes_read,
+                "objects_inspected": self._objects_inspected,
+            }
 
     def inventory(
         self,
@@ -57,15 +75,20 @@ class DbfsStorageAdapter:
         objects_inspected = 0
         matching_objects = 0
         partial = False
-        batch_size = storage_io_limit(self)
         try:
             while pending and not partial:
+                nested_io = storage_io_context_active(self)
+                batch_size = 1 if nested_io else storage_io_limit(self)
                 frontier = pending[:batch_size]
                 pending = pending[batch_size:]
-                listings = map_storage_io(
-                    self,
-                    self._list_directory,
-                    frontier,
+                listings = (
+                    [self._list_directory(frontier[0])]
+                    if nested_io
+                    else map_storage_io(
+                        self,
+                        self._list_directory,
+                        frontier,
+                    )
                 )
                 requests += len(frontier)
                 pages += len(frontier)
@@ -97,6 +120,10 @@ class DbfsStorageAdapter:
                                 item.name.lower().endswith(suffix)
                                 for suffix in request.suffixes
                             )
+                        ) or (
+                            item.object_type == "file"
+                            and request.name_prefix is not None
+                            and not item.name.startswith(request.name_prefix)
                         ):
                             continue
                         matching_objects += 1
@@ -107,6 +134,14 @@ class DbfsStorageAdapter:
                             partial = True
                             break
                         result.append(item)
+                        if (
+                            request.stop_after_match
+                            and request.object_limit is not None
+                            and matching_objects >= request.object_limit
+                        ):
+                            partial = True
+                            pending.clear()
+                            break
                     if partial:
                         break
                 if request.recursive and not partial:
@@ -121,6 +156,10 @@ class DbfsStorageAdapter:
             raise StorageAccessError(
                 "DBFS list failed", provider="dbfs"
             ) from exc
+        self._record_io(
+            provider_requests=requests,
+            objects_inspected=objects_inspected,
+        )
         result.sort(key=lambda item: item.canonical_uri)
         return StorageInventory(
             objects=tuple(result),
@@ -154,6 +193,7 @@ class DbfsStorageAdapter:
                 "DBFS stat failed", provider="dbfs"
             ) from exc
         item = self._object(entry, fallback_path=path)
+        self._record_io(provider_requests=1, objects_inspected=1)
         return StorageRevision(
             canonical_uri=item.canonical_uri,
             size=int(item.size or 0),
@@ -189,6 +229,11 @@ class DbfsStorageAdapter:
             )
             if revision is None:
                 revision = self.stat(uri)
+            self._record_io(
+                provider_requests=1,
+                bytes_read=revision.size,
+                objects_inspected=1,
+            )
             return response, revision
         except Exception as exc:
             raise StorageAccessError(
@@ -280,6 +325,18 @@ class DbfsStorageAdapter:
             last_modified=modified,
             provider_revision=revision,
         )
+
+    def _record_io(
+        self,
+        *,
+        provider_requests: int = 0,
+        bytes_read: int = 0,
+        objects_inspected: int = 0,
+    ) -> None:
+        with self._metrics_lock:
+            self._provider_requests += provider_requests
+            self._bytes_read += bytes_read
+            self._objects_inspected += objects_inspected
 
 
 def _field(value, *names: str):

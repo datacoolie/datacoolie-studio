@@ -30,7 +30,6 @@ from datacoolie_studio.domains.storage.errors import (
     ProviderDependencyMissing,
     StorageAuthenticationError,
     StorageConfigurationError,
-    StorageWriteUnsupported,
 )
 from datacoolie_studio.domains.storage.fsspec_adapter import FsspecStorageAdapter
 from datacoolie_studio.domains.storage.onelake_adapter import OneLakeStorageAdapter
@@ -38,8 +37,10 @@ from datacoolie_studio.domains.storage.uri import validate_storage_uri
 from datacoolie_studio.domains.storage.writers import (
     AdlsConditionalStorageWriter,
     ConditionalStorageWriter,
+    DatabricksVerifiedStorageWriter,
     GcsConditionalStorageWriter,
     LocalConditionalStorageWriter,
+    OneLakeConditionalStorageWriter,
     S3ConditionalStorageWriter,
 )
 
@@ -53,7 +54,10 @@ PROVIDER_DEPENDENCIES = {
         'pip install "datacoolie-studio[onelake]"',
     ),
     "gcs": ("gcsfs", 'pip install "datacoolie-studio[gcs]"'),
-    "dbfs": ("databricks.sdk", 'pip install "datacoolie-studio[dbfs]"'),
+    "dbfs": (
+        "databricks.sdk",
+        'pip install "databricks-sdk>=0.121,<0.122"',
+    ),
 }
 
 _DBFS_CLIENT_CACHE_TTL_SECONDS = 60 * 60
@@ -86,8 +90,9 @@ def provider_capabilities() -> dict[str, dict[str, object]]:
         "local": {"available": True, "install_command": None}
     }
     for provider, (module_name, install_command) in PROVIDER_DEPENDENCIES.items():
+        available = _module_available(module_name)
         result[provider] = {
-            "available": _module_available(module_name),
+            "available": available,
             "install_command": install_command,
         }
     return result
@@ -112,36 +117,11 @@ def create_storage_adapter(
     )
 
     if binding.provider == "dbfs":
-        sdk = importlib.import_module("databricks.sdk")
-        client_kwargs: dict[str, object] = {}
-        if binding.options.get("host"):
-            client_kwargs["host"] = binding.options["host"]
-        if binding.options.get("profile"):
-            client_kwargs["profile"] = binding.options["profile"]
-        if auth_type == "databricks_profile":
-            client_kwargs["profile"] = credentials.get("profile")
-            if credentials.get("host"):
-                client_kwargs["host"] = credentials["host"]
-        elif auth_type == "pat":
-            client_kwargs.update(
-                {"host": credentials.get("host"), "token": credentials.get("token")}
-            )
-        elif auth_type == "oauth_m2m":
-            client_kwargs.update(
-                {
-                    "host": credentials.get("host"),
-                    "client_id": credentials.get("client_id"),
-                    "client_secret": credentials.get("client_secret"),
-                }
-            )
         try:
-            client = _cached_dbfs_client(
-                sdk,
-                {
-                    key: value
-                    for key, value in client_kwargs.items()
-                    if value
-                },
+            client = _create_dbfs_client(
+                binding,
+                auth_type=auth_type,
+                credentials=credentials,
             )
         finally:
             credentials.clear()
@@ -183,20 +163,44 @@ def create_storage_writer(
     _validate_provider_configuration(binding, uri)
     if binding.provider == "local":
         return LocalConditionalStorageWriter()
-    if binding.provider == "dbfs":
-        raise StorageWriteUnsupported(
-            "Databricks DBFS metadata write-back is unavailable because the file APIs do not expose an atomic conditional replace",
-            provider="dbfs",
-        )
-    if binding.provider == "onelake":
-        raise StorageWriteUnsupported(
-            "OneLake metadata write-back is disabled until the live conditional-write gate passes",
-            provider="onelake",
-        )
     auth_type, credentials = _resolve_credentials(
         binding, session=session, secret_store=secret_store
     )
     try:
+        if binding.provider == "dbfs":
+            _require_module(
+                "databricks.sdk",
+                "dbfs",
+                PROVIDER_DEPENDENCIES["dbfs"][1],
+            )
+            client = _create_dbfs_client(
+                binding,
+                auth_type=auth_type,
+                credentials=credentials,
+            )
+            adapter = DbfsStorageAdapter(client)
+            return DatabricksVerifiedStorageWriter(client, adapter.open_read)
+
+        if binding.provider == "onelake":
+            _require_module(
+                "azure.storage.filedatalake",
+                "onelake",
+                PROVIDER_DEPENDENCIES["onelake"][1],
+            )
+            identity = importlib.import_module("azure.identity")
+            data_lake = importlib.import_module("azure.storage.filedatalake")
+            core = importlib.import_module("azure.core")
+            service_client = _cached_onelake_service_client(
+                identity,
+                data_lake,
+                auth_type=auth_type,
+                credentials=credentials,
+            )
+            return OneLakeConditionalStorageWriter(
+                service_client,
+                if_not_modified=core.MatchConditions.IfNotModified,
+            )
+
         if binding.provider in {"s3", "minio"}:
             _require_module(
                 "boto3",
@@ -368,6 +372,40 @@ def _module_available(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except ModuleNotFoundError:
         return False
+
+
+def _create_dbfs_client(
+    binding: StorageBinding,
+    *,
+    auth_type: str | None,
+    credentials: dict[str, object],
+):
+    sdk = importlib.import_module("databricks.sdk")
+    client_kwargs: dict[str, object] = {}
+    if binding.options.get("host"):
+        client_kwargs["host"] = binding.options["host"]
+    if binding.options.get("profile"):
+        client_kwargs["profile"] = binding.options["profile"]
+    if auth_type == "databricks_profile":
+        client_kwargs["profile"] = credentials.get("profile")
+        if credentials.get("host"):
+            client_kwargs["host"] = credentials["host"]
+    elif auth_type == "pat":
+        client_kwargs.update(
+            {"host": credentials.get("host"), "token": credentials.get("token")}
+        )
+    elif auth_type == "oauth_m2m":
+        client_kwargs.update(
+            {
+                "host": credentials.get("host"),
+                "client_id": credentials.get("client_id"),
+                "client_secret": credentials.get("client_secret"),
+            }
+        )
+    return _cached_dbfs_client(
+        sdk,
+        {key: value for key, value in client_kwargs.items() if value},
+    )
 
 
 def _cached_dbfs_client(sdk, client_kwargs: dict[str, object]):

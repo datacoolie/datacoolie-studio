@@ -1251,6 +1251,52 @@ select:focus {
   white-space: nowrap;
 }
 
+.monitoring-data-table {
+  --monitoring-table-cell-padding-y: 4px;
+  --monitoring-table-cell-padding-x: 8px;
+  --monitoring-table-font-size: 12px;
+  --monitoring-table-header-font-size: 11px;
+  --monitoring-table-sort-font-size: var(--monitoring-table-header-font-size);
+  --monitoring-table-row-height: 42px;
+}
+
+.monitoring-data-table table {
+  width: 100%;
+}
+
+.monitoring-data-table th,
+.monitoring-data-table td {
+  padding: var(--monitoring-table-cell-padding-y) var(--monitoring-table-cell-padding-x);
+  font-size: var(--monitoring-table-font-size);
+}
+
+.monitoring-data-table th {
+  font-size: var(--monitoring-table-header-font-size);
+}
+
+.monitoring-data-table tbody tr {
+  height: var(--monitoring-table-row-height);
+}
+
+.monitoring-data-table tbody td {
+  box-sizing: border-box;
+  height: var(--monitoring-table-row-height);
+}
+
+.monitoring-data-table .table-sort-button {
+  font-size: var(--monitoring-table-sort-font-size);
+}
+
+.monitoring-data-table.monitoring-table-one-line {
+  --monitoring-table-cell-padding-y: 2px;
+  --monitoring-table-row-height: 30px;
+}
+
+.monitoring-data-table.monitoring-table-one-line th,
+.monitoring-data-table.monitoring-table-one-line td {
+  line-height: 1.15;
+}
+
 
 
 
@@ -3945,6 +3991,7 @@ button.assets-metric-chip:hover,
 .assets-asset-copy small {
   min-width: 0;
   overflow: hidden;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4114,6 +4161,7 @@ button.assets-metric-chip:hover,
 .assets-evidence-cell strong {
   min-width: 0;
   overflow: hidden;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #2e3848;
@@ -4125,6 +4173,7 @@ button.assets-metric-chip:hover,
 .assets-evidence-cell small {
   min-width: 0;
   overflow: hidden;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #667487;
@@ -4519,6 +4568,10 @@ button.assets-metadata-action:hover:not(:disabled) {
   font-size: 10px;
   font-weight: 820;
   white-space: nowrap;
+}
+
+.assets-lineage-cell .assets-status-chip {
+  min-height: 19px;
 }
 
 .assets-status-chip.status-automatic {

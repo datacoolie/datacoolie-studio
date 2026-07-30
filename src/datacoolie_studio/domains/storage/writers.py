@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import os
+from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Callable, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from datacoolie_studio.domains.storage.adapters import StorageRevision
 from datacoolie_studio.domains.storage.errors import StorageConflictError
-from datacoolie_studio.domains.storage.uri import require_local_path, validate_storage_uri
+from datacoolie_studio.domains.storage.uri import (
+    canonical_cloud_uri,
+    parse_onelake_location,
+    require_local_path,
+    validate_storage_uri,
+)
 
 
 class ConditionalStorageWriter(Protocol):
@@ -138,6 +146,102 @@ class GcsConditionalStorageWriter:
         return _gcs_blob_revision(blob)
 
 
+class OneLakeConditionalStorageWriter:
+    def __init__(self, service_client, *, if_not_modified) -> None:
+        self._service_client = service_client
+        self._if_not_modified = if_not_modified
+
+    def replace(
+        self, uri: str, content: bytes, expected_revision: StorageRevision
+    ) -> str | None:
+        if not expected_revision.provider_revision:
+            raise ValueError("OneLake conditional writes require an ETag")
+        client = self._file_client(uri)
+        try:
+            response = client.upload_data(
+                content,
+                length=len(content),
+                overwrite=True,
+                etag=expected_revision.provider_revision,
+                match_condition=self._if_not_modified,
+            )
+        except Exception as exc:
+            if _is_precondition_failure(exc):
+                raise StorageConflictError(uri) from exc
+            raise
+        _reject_ignored_conditions(response, uri=uri)
+        return _response_value(response, "etag")
+
+    def create(self, uri: str, content: bytes) -> str | None:
+        client = self._file_client(uri)
+        try:
+            response = client.upload_data(
+                content,
+                length=len(content),
+                overwrite=False,
+            )
+        except Exception as exc:
+            if _is_precondition_failure(exc):
+                raise StorageConflictError(
+                    uri, "Storage object already exists"
+                ) from exc
+            raise
+        _reject_ignored_conditions(response, uri=uri)
+        return _response_value(response, "etag")
+
+    def _file_client(self, uri: str):
+        location = parse_onelake_location(uri)
+        filesystem = self._service_client.get_file_system_client(location.workspace)
+        return filesystem.get_file_client(location.sdk_path)
+
+
+class DatabricksVerifiedStorageWriter:
+    def __init__(
+        self,
+        client,
+        open_read: Callable[[str], AbstractContextManager[BinaryIO]],
+    ) -> None:
+        self._client = client
+        self._open_read = open_read
+
+    def replace(
+        self, uri: str, content: bytes, expected_revision: StorageRevision
+    ) -> str | None:
+        if not expected_revision.content_hash:
+            raise ValueError("Databricks verified writes require a content hash")
+        if self._content_hash(uri) != expected_revision.content_hash:
+            raise StorageConflictError(uri)
+        self._upload(uri, content, overwrite=True)
+        return None
+
+    def create(self, uri: str, content: bytes) -> str | None:
+        try:
+            self._upload(uri, content, overwrite=False)
+        except Exception as exc:
+            if _is_precondition_failure(exc):
+                raise StorageConflictError(
+                    uri, "Storage object already exists"
+                ) from exc
+            raise
+        return None
+
+    def _content_hash(self, uri: str) -> str:
+        digest = hashlib.sha256()
+        with self._open_read(uri) as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _upload(self, uri: str, content: bytes, *, overwrite: bool) -> None:
+        canonical = canonical_cloud_uri(uri, "dbfs")
+        path = "/" + canonical.removeprefix("dbfs:").lstrip("/")
+        payload = io.BytesIO(content)
+        if path == "/Volumes" or path.startswith("/Volumes/"):
+            self._client.files.upload(path, payload, overwrite=overwrite)
+        else:
+            self._client.dbfs.upload(path, payload, overwrite=overwrite)
+
+
 def _atomic_write(path: Path, content: bytes, *, must_not_exist: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -189,6 +293,20 @@ def _response_value(response: object, key: str) -> str | None:
     return str(value).strip('"') if value else None
 
 
+def _reject_ignored_conditions(response: object, *, uri: str) -> None:
+    if not isinstance(response, dict):
+        return
+    rejected = response.get("x-ms-rejected-headers") or response.get(
+        "X-Ms-Rejected-Headers"
+    )
+    values = str(rejected or "").lower()
+    if "if-match" in values or "if-none-match" in values:
+        raise StorageConflictError(
+            uri,
+            "Storage service rejected the conditional write headers",
+        )
+
+
 def _is_precondition_failure(exc: Exception) -> bool:
     status = (
         getattr(exc, "status_code", None)
@@ -200,8 +318,19 @@ def _is_precondition_failure(exc: Exception) -> bool:
     response = getattr(exc, "response", None)
     if isinstance(response, dict):
         code = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return code in {409, 412}
+        if code in {409, 412}:
+            return True
+    error_code = str(
+        getattr(exc, "error_code", None) or getattr(exc, "code", None) or ""
+    ).lower()
+    if error_code in {
+        "already_exists",
+        "resource_already_exists",
+        "resource_exists",
+    }:
+        return True
     return exc.__class__.__name__ in {
         "PreconditionFailed",
+        "ResourceAlreadyExists",
         "ResourceExistsError",
     }

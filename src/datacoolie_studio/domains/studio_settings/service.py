@@ -201,7 +201,8 @@ def update_studio_settings(session: Session, changes: Mapping[str, Any]) -> dict
             EnvironmentSource.storage_provider != "local"
         )
         session.query(SourceObservation).filter(
-            SourceObservation.source_id.in_(cloud_source_ids)
+            SourceObservation.source_id.in_(cloud_source_ids),
+            SourceObservation.automatic_observation_paused_at.is_(None),
         ).update(
             {
                 SourceObservation.next_observation_at: utc_now(),

@@ -1,19 +1,20 @@
 import { LoaderCircle } from "lucide-react";
 
-import type { SourceBatchAction } from "./sourceWorkspaceModel";
+import type { SourceOperationAction } from "./sourceWorkspaceModel";
 
-const LABELS: Record<SourceBatchAction, string> = {
+const LABELS: Record<SourceOperationAction, string> = {
   validate: "Validating",
   sync: "Syncing",
   delete: "Deleting",
+  retry: "Retrying",
 };
 
-export function sourceOperationLabel(action: SourceBatchAction) {
+export function sourceOperationLabel(action: SourceOperationAction) {
   return LABELS[action];
 }
 
 export function sourceOperationStatusSlot(
-  action: SourceBatchAction,
+  action: SourceOperationAction,
 ): "read" | "cache" | "all" {
   if (action === "validate") return "read";
   if (action === "sync") return "cache";
@@ -33,7 +34,7 @@ export function SourceOperationIcon({ size = 13 }: { size?: number }) {
 export function SourceOperationPill({
   action,
 }: {
-  action: SourceBatchAction;
+  action: SourceOperationAction;
 }) {
   const label = sourceOperationLabel(action);
   return (

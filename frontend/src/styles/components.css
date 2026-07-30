@@ -550,8 +550,11 @@ select:focus {
 .env-custom-input:focus-visible,
 .env-custom-btn:focus-visible,
 .env-row-main:focus-visible,
+.env-action-rename:focus-visible,
 .env-action-configure:focus-visible,
 .env-action-delete:focus-visible,
+.env-row-rename input:focus-visible,
+.env-rename-save:focus-visible,
 .env-empty-create:focus-visible,
 .env-confirm-yes:focus-visible,
 .env-confirm-no:focus-visible {
@@ -632,6 +635,7 @@ select:focus {
   border-left: 1px solid var(--color-border);
 }
 
+.env-action-rename,
 .env-action-configure {
   display: flex;
   align-items: center;
@@ -649,6 +653,10 @@ select:focus {
   white-space: nowrap;
   transition: color 0.12s, background 0.12s;
 }
+.env-action-rename {
+  border-right: 1px solid var(--color-border);
+}
+.env-action-rename:hover { color: var(--color-accent); background: var(--color-accent-soft); }
 .env-action-configure:hover { color: var(--color-accent); background: var(--color-accent-soft); }
 
 .env-action-delete {
@@ -718,6 +726,51 @@ select:focus {
 }
 .env-confirm-no:hover { background: var(--color-surface-muted); }
 
+.env-row-renaming {
+  height: 42px;
+  background: var(--color-accent-soft);
+}
+
+.env-row-rename {
+  flex: 1;
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 5px 12px;
+}
+
+.env-row-rename label {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.env-row-rename input {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.env-rename-save {
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.env-rename-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .env-empty-state {
   display: flex;
   align-items: center;
@@ -781,11 +834,13 @@ select:focus {
     min-height: 34px;
   }
 
+  .env-action-rename,
   .env-action-configure {
     min-width: auto;
     border-right: none;
     padding: 0 12px;
   }
+  .env-action-rename span,
   .env-action-configure span { display: inline; }
   .env-action-delete { padding: 0 14px; }
 
@@ -794,6 +849,11 @@ select:focus {
     flex-direction: column;
   }
   .env-row-confirm-actions { width: 100%; justify-content: flex-end; }
+  .env-row-rename {
+    grid-template-columns: 1fr auto auto;
+  }
+  .env-row-renaming { height: auto; }
+  .env-row-rename label { grid-column: 1 / -1; }
   .env-empty-state { align-items: flex-start; flex-direction: column; }
 }
 
@@ -3502,6 +3562,7 @@ body,
   color: var(--color-text-muted);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .operation-confirmation-close {
@@ -3626,6 +3687,7 @@ body,
   display: grid;
   gap: 2px;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .metadata-save-impact-list li small {
@@ -3676,6 +3738,11 @@ body,
 .operation-confirmation-note svg {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.operation-confirmation-note > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .operation-confirmation-dialog > footer {
@@ -5080,6 +5147,15 @@ td,
   position: relative;
 }
 
+.project-detail-header-panel {
+  position: relative;
+}
+
+.project-detail-header-panel:has(.project-actions-popover) {
+  z-index: 40;
+  overflow: visible;
+}
+
 .project-actions-trigger {
   width: 34px;
   min-width: 34px;
@@ -5113,6 +5189,7 @@ td,
   letter-spacing: 0.04em;
 }
 
+.project-action-secondary,
 .project-action-danger {
   display: flex;
   align-items: center;
@@ -5127,6 +5204,15 @@ td,
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
   text-align: left;
+}
+
+.project-action-secondary {
+  color: var(--color-text);
+}
+
+.project-action-secondary:hover {
+  background: var(--color-surface-muted);
+  color: var(--color-accent-strong);
 }
 
 .project-action-danger:hover {
@@ -5171,6 +5257,46 @@ td,
 .project-delete-confirm .text-action {
   min-height: 26px;
   padding: 0 8px;
+}
+
+.project-rename-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-soft);
+}
+
+.project-rename-form label {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.project-rename-form input {
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+}
+
+.project-rename-form > div {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-rename-form input:focus-visible,
+.project-action-secondary:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 .project-detail-metrics {
@@ -5311,4 +5437,53 @@ td,
   font-weight: var(--font-weight-semibold);
   letter-spacing: 0.045em;
   text-transform: uppercase;
+}
+
+.source-observation-pause {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-text-muted);
+}
+
+.source-observation-pause > svg {
+  color: var(--color-warning);
+}
+
+.source-observation-pause-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: var(--font-size-xs);
+}
+
+.source-observation-pause-copy strong {
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+}
+
+.source-observation-pause-error {
+  overflow: hidden;
+  color: var(--color-danger);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-observation-retry {
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .source-observation-pause {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .source-observation-retry {
+    grid-column: 2;
+    justify-self: start;
+  }
 }

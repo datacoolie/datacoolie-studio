@@ -29,5 +29,15 @@ describe("SourceOperationFeedback", () => {
     expect(sourceOperationStatusSlot("validate")).toBe("read");
     expect(sourceOperationStatusSlot("sync")).toBe("cache");
     expect(sourceOperationStatusSlot("delete")).toBe("all");
+    expect(sourceOperationStatusSlot("retry")).toBe("all");
+  });
+
+  it("renders retry progress with an accessible status", () => {
+    const markup = renderToStaticMarkup(
+      <SourceOperationPill action="retry" />,
+    );
+
+    expect(markup).toContain("Retrying");
+    expect(markup).toContain("is-retry");
   });
 });

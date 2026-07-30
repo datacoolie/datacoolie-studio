@@ -20,6 +20,7 @@ from datacoolie_studio.domains.source_observation.contracts import (
 
 OBSERVATION_LEASE_SECONDS = 15 * 60
 OBSERVATION_BATCH_SIZE = 100
+MAX_CONSECUTIVE_OBSERVATION_FAILURES = 3
 
 
 def is_periodically_observed(source: EnvironmentSource) -> bool:
@@ -63,6 +64,7 @@ def ensure_periodic_observations(
         .where(
             SourceObservation.source_id.in_(eligible_ids),
             SourceObservation.next_observation_at.is_(None),
+            SourceObservation.automatic_observation_paused_at.is_(None),
         )
         .values(next_observation_at=observed_at)
     )
@@ -92,6 +94,7 @@ def claim_due_observation_ids(
             )
             .where(
                 EnvironmentSource.id.in_(_periodic_source_ids()),
+                SourceObservation.automatic_observation_paused_at.is_(None),
                 SourceObservation.next_observation_at <= observed_at,
                 or_(
                     SourceObservation.lease_expires_at.is_(None),
@@ -116,6 +119,7 @@ def claim_due_observation_ids(
             .where(
                 SourceObservation.source_id == source_id,
                 SourceObservation.source_id.in_(eligible_source_ids),
+                SourceObservation.automatic_observation_paused_at.is_(None),
                 SourceObservation.next_observation_at <= observed_at,
                 or_(
                     SourceObservation.lease_expires_at.is_(None),
@@ -169,6 +173,37 @@ def claim_local_observation(
         .where(
             SourceObservation.source_id == source_id,
             SourceObservation.source_id.in_(eligible_source_ids),
+            SourceObservation.automatic_observation_paused_at.is_(None),
+            or_(
+                SourceObservation.lease_expires_at.is_(None),
+                SourceObservation.lease_expires_at <= observed_at,
+            ),
+        )
+        .values(
+            lease_owner=lease_owner,
+            lease_expires_at=observed_at
+            + timedelta(seconds=OBSERVATION_LEASE_SECONDS),
+        )
+    )
+    session.commit()
+    return result.rowcount == 1
+
+
+def claim_paused_observation(
+    session: Session,
+    *,
+    source_id: int,
+    lease_owner: str,
+    now: datetime | None = None,
+) -> bool:
+    """Claim a paused source for one explicit retry attempt."""
+
+    observed_at = _as_utc(now or utc_now())
+    result = session.execute(
+        update(SourceObservation)
+        .where(
+            SourceObservation.source_id == source_id,
+            SourceObservation.automatic_observation_paused_at.is_not(None),
             or_(
                 SourceObservation.lease_expires_at.is_(None),
                 SourceObservation.lease_expires_at <= observed_at,
@@ -210,6 +245,7 @@ def complete_observation(
         state.unchanged_streak = 0
     else:
         state.failure_streak = 0
+        state.automatic_observation_paused_at = None
         state.unchanged_streak = (
             0 if result.outcome == "changed" else state.unchanged_streak + 1
         )
@@ -225,28 +261,35 @@ def complete_observation(
         state.error_json = _dump(result.error)
     if result.pending_changes is not None:
         state.pending_changes = result.pending_changes
-    state.next_observation_at = (
-        result.completed_at
-        + timedelta(
-            seconds=observation_delay_seconds(
-                policy,
-                unchanged_streak=state.unchanged_streak,
-                failure_streak=state.failure_streak,
-                permanent_error=permanent_error,
-            )
-            + _jitter_seconds(
-                result.source_id,
-                observation_delay_seconds(
+    if (
+        result.outcome == "error"
+        and state.failure_streak >= MAX_CONSECUTIVE_OBSERVATION_FAILURES
+    ):
+        state.automatic_observation_paused_at = result.completed_at
+        state.next_observation_at = None
+    else:
+        state.next_observation_at = (
+            result.completed_at
+            + timedelta(
+                seconds=observation_delay_seconds(
                     policy,
                     unchanged_streak=state.unchanged_streak,
                     failure_streak=state.failure_streak,
                     permanent_error=permanent_error,
-                ),
+                )
+                + _jitter_seconds(
+                    result.source_id,
+                    observation_delay_seconds(
+                        policy,
+                        unchanged_streak=state.unchanged_streak,
+                        failure_streak=state.failure_streak,
+                        permanent_error=permanent_error,
+                    ),
+                )
             )
+            if is_periodically_observed(source)
+            else None
         )
-        if is_periodically_observed(source)
-        else None
-    )
     state.lease_owner = None
     state.lease_expires_at = None
     state.updated_at = result.completed_at
@@ -328,6 +371,7 @@ def reset_observation(
     )
     state.unchanged_streak = 0
     state.failure_streak = 0
+    state.automatic_observation_paused_at = None
     state.lease_owner = None
     state.lease_expires_at = None
     if pending_changes is not None:
@@ -341,6 +385,32 @@ def reset_observation(
         state.last_succeeded_at = None
         state.last_duration_ms = None
         state.inventory_metrics_json = None
+    return state
+
+
+def resume_observation(
+    session: Session,
+    source_id: int,
+    *,
+    due_at: datetime | None = None,
+    pending_changes: bool | None = None,
+    lease_owner: str | None = None,
+) -> SourceObservation:
+    """Restart automatic observation while retaining successful source evidence."""
+
+    state = reset_observation(
+        session,
+        source_id,
+        due_at=due_at,
+        pending_changes=pending_changes,
+    )
+    state.error_json = None
+    state.last_outcome = "unchanged" if state.last_succeeded_at else "never"
+    if lease_owner is not None:
+        state.lease_owner = lease_owner
+        state.lease_expires_at = _as_utc(utc_now()) + timedelta(
+            seconds=OBSERVATION_LEASE_SECONDS
+        )
     return state
 
 
@@ -391,7 +461,17 @@ def observation_payload(state: SourceObservation | None) -> dict[str, object]:
             "last_observed_at": None,
             "next_check_at": None,
             "pending_changes": None,
+            "observation_state": "active",
+            "observation_failure_count": 0,
+            "observation_paused_at": None,
         }
+    observation_state = (
+        "paused"
+        if state.automatic_observation_paused_at is not None
+        else "retrying"
+        if state.failure_streak > 0
+        else "active"
+    )
     return {
         "status": state.last_outcome,
         "revision": _load(state.observed_revision_json),
@@ -400,6 +480,9 @@ def observation_payload(state: SourceObservation | None) -> dict[str, object]:
         "last_observed_at": state.last_attempted_at,
         "next_check_at": state.next_observation_at,
         "pending_changes": state.pending_changes,
+        "observation_state": observation_state,
+        "observation_failure_count": state.failure_streak,
+        "observation_paused_at": state.automatic_observation_paused_at,
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from datacoolie_studio.db.models import (
     Environment,
     EnvironmentSource,
     Project,
+    SourceObservation,
 )
 from datacoolie_studio.db.session import create_session, init_db
 from datacoolie_studio.domains.credentials import service
@@ -91,7 +93,7 @@ def test_databricks_profiles_support_unified_auth_pat_and_oauth(session):
 
     unified = service.create_profile(
         session,
-        name="Databricks CLI",
+        name="Databricks profile",
         provider="dbfs",
         auth_type="databricks_profile",
         config={"profile": "analytics"},
@@ -201,6 +203,19 @@ def test_rotation_invalidates_referencing_source_validation(session):
     )
     session.add(source)
     session.commit()
+    session.add(
+        SourceObservation(
+            source_id=source.id,
+            last_outcome="error",
+            error_json='{"message":"denied"}',
+            failure_streak=3,
+            automatic_observation_paused_at=datetime(
+                2026, 7, 30, 12, 0, tzinfo=timezone.utc
+            ),
+            next_observation_at=None,
+        )
+    )
+    session.commit()
 
     updated = service.update_profile(
         session,
@@ -215,6 +230,11 @@ def test_rotation_invalidates_referencing_source_validation(session):
     assert updated["version"] == 2
     assert source.read_check_status is None
     assert source.read_check_result_json is None
+    observation = session.get(SourceObservation, source.id)
+    assert observation.automatic_observation_paused_at is None
+    assert observation.failure_streak == 0
+    assert observation.last_outcome == "never"
+    assert observation.error_json is None
     assert store.values[str(profile["id"])]["secret_access_key"] == "new-secret"
 
 

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
-import uuid
 import tempfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,7 +30,6 @@ from datacoolie_studio.domains.metadata.storage_io import (
     create_local_backup,
     current_revision as storage_current_revision,
     read_source_bytes,
-    same_revision as storage_same_revision,
     storage_for_source,
 )
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
@@ -389,6 +387,24 @@ def validate_editor_document(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _has_new_validation_errors(
+    validation: dict[str, Any],
+    baseline_validation: dict[str, Any],
+) -> bool:
+    def signatures(result: dict[str, Any]) -> Counter[tuple[str, str, str]]:
+        return Counter(
+            (
+                str(issue.get("sheet") or ""),
+                str(issue.get("column") or ""),
+                str(issue.get("message") or ""),
+            )
+            for issue in result.get("issues") or []
+            if issue.get("severity") == "error"
+        )
+
+    return bool(signatures(validation) - signatures(baseline_validation))
+
+
 def load_editor_draft(session: Session, source: EnvironmentSource) -> dict[str, Any] | None:
     draft = _latest_draft(session, source.id)
     if draft is None:
@@ -446,9 +462,6 @@ def save_environment_editor_draft(
     *,
     secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
-    _assert_environment_revision_current(
-        session, document, expected_revision, secret_store=secret_store
-    )
     _materialize_generated_ids(_document_sheets_as_rows(document))
     document["issues"] = validate_editor_document(document)["issues"]
     payload = json.dumps(document, ensure_ascii=False)
@@ -570,13 +583,19 @@ def save_editor_document(
     *,
     validate_document: bool = True,
     secret_store: CredentialSecretStore | None = None,
+    prepared_source: tuple[Any, bytes, dict[str, Any], Path] | None = None,
+    serialized_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     if not confirm_overwrite:
         raise MetadataReadError("Saving metadata requires overwrite confirmation")
-    storage = storage_for_source(
-        session, source, secret_store=secret_store, writable=True
-    )
-    current_bytes, current_revision = read_source_bytes(storage, source)
+    if prepared_source is None:
+        storage = storage_for_source(
+            session, source, secret_store=secret_store, writable=True
+        )
+        current_bytes, current_revision = read_source_bytes(storage, source)
+        backup_path: Path | None = None
+    else:
+        storage, current_bytes, current_revision, backup_path = prepared_source
     if not _same_revision(current_revision, expected_revision):
         _record_save_event(session, source, "conflict", "Source file changed before save", current_revision, None, None)
         raise MetadataConflictError("Source file changed before save")
@@ -588,12 +607,19 @@ def save_editor_document(
             document["issues"] = validation["issues"]
             raise MetadataValidationError("Metadata document has validation errors", validation)
 
-    path = Path(source.uri)
-    backup_path = create_local_backup(source, current_bytes, current_revision)
-    serialized_bytes = _serialize_editor_document_bytes(document, source.uri)
+    backup_path = backup_path or create_local_backup(
+        source, current_bytes, current_revision
+    )
+    serialized_bytes = serialized_bytes or _serialize_editor_document_bytes(
+        document, source.uri
+    )
     try:
         saved_revision = conditional_replace(
-            storage, source, serialized_bytes, current_revision
+            storage,
+            source,
+            serialized_bytes,
+            current_revision,
+            verified_revision=current_revision,
         )
     except StorageConflictError as exc:
         _record_save_event(
@@ -645,15 +671,42 @@ def save_environment_editor_document(
     if not enabled_sources:
         raise MetadataReadError("No enabled metadata sources found")
 
+    from datacoolie_studio.domains.metadata import service as metadata_service
+
     _materialize_generated_ids(_document_sheets_as_rows(document))
+    source_revision_map = _environment_revision_sources(expected_revision)
+    base_documents: dict[int, dict[str, Any]] = {}
+    for source in enabled_sources:
+        source_expected_revision = source_revision_map.get(source.id)
+        if source_expected_revision is None:
+            raise MetadataConflictError(
+                f"Metadata source revision missing for source id: {source.id}"
+            )
+        try:
+            base_documents[source.id] = (
+                metadata_service.load_materialized_editor_document(
+                    session,
+                    source,
+                    source_expected_revision,
+                )
+            )
+        except MetadataReadError as exc:
+            raise MetadataConflictError(str(exc)) from exc
+
     validation = validate_editor_document(document)
     if validation["status"] == "error":
-        document["issues"] = validation["issues"]
-        raise MetadataValidationError("Metadata document has validation errors", validation)
+        baseline_document = metadata_service.merge_environment_editor_documents(
+            enabled_sources,
+            list(base_documents.values()),
+        )
+        baseline_validation = validate_editor_document(baseline_document)
+        if _has_new_validation_errors(validation, baseline_validation):
+            document["issues"] = validation["issues"]
+            raise MetadataValidationError(
+                "Metadata document has validation errors",
+                validation,
+            )
 
-    _assert_environment_revision_current(
-        session, document, expected_revision, secret_store=secret_store
-    )
     enabled_sources = _resolve_environment_document_sources(
         session,
         environment_id,
@@ -662,20 +715,40 @@ def save_environment_editor_document(
         secret_store=secret_store,
     )
 
-    source_documents: list[tuple[EnvironmentSource, dict[str, Any], dict[str, Any]]] = []
+    source_documents: list[
+        tuple[EnvironmentSource, dict[str, Any], dict[str, Any], bytes]
+    ] = []
     for source in enabled_sources:
-        base_document = _load_source_document_from_environment_revision(
+        base_document = base_documents.get(source.id)
+        if base_document is None:
+            base_document = _load_source_document_from_environment_revision(
+                session,
+                source,
+                expected_revision,
+                secret_store=secret_store,
+            )
+            base_documents[source.id] = base_document
+        source_document = _environment_document_for_source(document, base_document, source)
+        if _source_document_changed(base_document, source_document):
+            source_documents.append(
+                (
+                    source,
+                    source_document,
+                    base_document.get("source", {}).get("revision") or {},
+                    _serialize_editor_document_bytes(source_document, source.uri),
+                )
+            )
+
+    if not source_documents:
+        _assert_environment_revision_current(
             session,
-            source,
+            document,
             expected_revision,
             secret_store=secret_store,
         )
-        source_document = _environment_document_for_source(document, base_document, source)
-        if _source_document_changed(base_document, source_document):
-            source_documents.append((source, source_document, base_document.get("source", {}).get("revision") or {}))
 
     originals: dict[int, tuple[Any, bytes, dict[str, Any], Path]] = {}
-    for source, _, source_expected_revision in source_documents:
+    for source, _, source_expected_revision, _ in source_documents:
         storage = storage_for_source(
             session, source, secret_store=secret_store, writable=True
         )
@@ -692,9 +765,10 @@ def save_environment_editor_document(
         )
 
     saved_source_ids: list[int] = []
+    saved_documents: dict[int, dict[str, Any]] = {}
     try:
-        for source, source_document, source_expected_revision in source_documents:
-            save_editor_document(
+        for source, source_document, source_expected_revision, serialized in source_documents:
+            saved_documents[source.id] = save_editor_document(
                 session,
                 source,
                 source_document,
@@ -702,12 +776,16 @@ def save_environment_editor_document(
                 confirm_overwrite=True,
                 validate_document=False,
                 secret_store=secret_store,
+                prepared_source=originals[source.id],
+                serialized_bytes=serialized,
             )
             saved_source_ids.append(source.id)
     except Exception:
         compensation_errors: list[int] = []
         for source_id in reversed(saved_source_ids):
-            source = next(item for item, _, _ in source_documents if item.id == source_id)
+            source = next(
+                item for item, _, _, _ in source_documents if item.id == source_id
+            )
             storage, original_bytes, _, backup_path = originals[source_id]
             try:
                 current = storage_current_revision(
@@ -743,17 +821,24 @@ def save_environment_editor_document(
         raise
 
     delete_environment_editor_draft(session, environment_id)
-    from datacoolie_studio.domains.metadata import service as metadata_service
-
-    for source in enabled_sources:
-        metadata_service.ensure_metadata_materialization(
+    serialized_by_source_id = {
+        source.id: serialized
+        for source, _, _, serialized in source_documents
+    }
+    for source_id, saved_document in saved_documents.items():
+        source = next(item for item in enabled_sources if item.id == source_id)
+        metadata_service.store_metadata_materialization_from_bytes(
             session,
             source,
-            force=source.id in saved_source_ids,
-            secret_store=secret_store,
+            serialized_by_source_id[source_id],
+            saved_document.get("source", {}).get("revision") or {},
         )
-    return metadata_service.load_environment_editor_document(
-        session, enabled_sources, secret_store=secret_store
+    response_documents = [
+        saved_documents.get(source.id) or base_documents[source.id]
+        for source in enabled_sources
+    ]
+    return metadata_service.merge_environment_editor_documents(
+        enabled_sources, response_documents
     )
 
 
@@ -1146,7 +1231,7 @@ def _environment_document_for_source(
     source: EnvironmentSource,
 ) -> dict[str, Any]:
     source_document = {
-        "source": base_document.get("source") or {
+        "source": dict(base_document.get("source") or {
             "source_id": source.id,
             "environment_id": source.environment_id,
             "project_id": source.environment.project_id if source.environment else None,
@@ -1154,7 +1239,7 @@ def _environment_document_for_source(
             "name": _metadata_source_name(source),
             "format": _metadata_format(Path(source.uri).expanduser()),
             "revision": source_revision(source.uri),
-        },
+        }),
         "sheets": {},
         "issues": [],
     }

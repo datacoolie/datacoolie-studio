@@ -349,6 +349,9 @@ export interface SourceSyncStatus {
   last_observed_at?: string | null;
   next_check_at?: string | null;
   pending_changes?: boolean | null;
+  observation_state: "active" | "retrying" | "paused";
+  observation_failure_count: number;
+  observation_paused_at?: string | null;
   active_operation?: "validate" | "sync" | null;
   latest_job?: SourceSyncJob | null;
 }

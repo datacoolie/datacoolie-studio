@@ -498,6 +498,7 @@ def insert_dataflow_file(
     source_read_uri = read_uri or file_uri
     _ensure_dataflow_table_for_parquet(conn, source_read_uri)
     escaped = source_read_uri.replace("'", "''")
+    source_projection = _dataflow_parquet_source_projection(conn, source_read_uri)
     row_count = conn.execute(f"SELECT count(*) FROM read_parquet('{escaped}', union_by_name=true)").fetchone()[0]
     conn.execute(
         f"""
@@ -510,7 +511,7 @@ def insert_dataflow_file(
           {_sql_number(_revision_value(revision_json, "size"))}::BIGINT AS _source_size,
           {_sql_number(_revision_value(revision_json, "mtime_ns"))}::BIGINT AS _source_mtime_ns,
           {_sql_string(utc_now().isoformat())}::TIMESTAMPTZ AS _ingested_at,
-          *
+          {source_projection}
         FROM read_parquet('{escaped}', union_by_name=true)
         """
     )
@@ -588,12 +589,7 @@ def _ensure_source_columns(
 
 
 def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
-    described = _describe_parquet_columns(conn, file_uri)
-    parquet_column_types = {
-        name: data_type
-        for name, data_type in described
-        if name not in schema.STUDIO_CACHE_COLUMNS
-    }
+    parquet_column_types = _dataflow_parquet_target_types(conn, file_uri)
     if not schema.table_exists(conn, schema.DATAFLOW_TABLE):
         definitions = [
             f"{_quote_identifier(column)} {data_type}"
@@ -625,10 +621,11 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
     candidate_types: dict[str, str] = {}
     for file_uri in file_uris:
         for column, source_type in _describe_parquet_columns(conn, file_uri):
-            if column in schema.STUDIO_CACHE_COLUMNS:
+            if column in schema.STUDIO_CACHE_COLUMNS or column == "__event_time":
                 continue
             previous = candidate_types.get(column)
             candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
+    candidate_types["__event_time"] = "TIMESTAMPTZ"
     existing = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
     actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
     for column, source_type in candidate_types.items():
@@ -671,6 +668,40 @@ def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
     escaped = file_uri.replace("'", "''")
     described = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{escaped}', union_by_name=true)").fetchall()
     return [(str(row[0]), str(row[1])) for row in described]
+
+
+def _dataflow_parquet_target_types(conn, file_uri: str) -> dict[str, str]:
+    target_types = {
+        name: data_type
+        for name, data_type in _describe_parquet_columns(conn, file_uri)
+        if name not in schema.STUDIO_CACHE_COLUMNS and name != "__event_time"
+    }
+    target_types["__event_time"] = "TIMESTAMPTZ"
+    return target_types
+
+
+def _dataflow_parquet_source_projection(conn, file_uri: str) -> str:
+    source_columns = {
+        name for name, _data_type in _describe_parquet_columns(conn, file_uri)
+    }
+    passthrough = (
+        '* EXCLUDE ("__event_time")'
+        if "__event_time" in source_columns
+        else "*"
+    )
+
+    def timestamp_value(column: str) -> str:
+        return (
+            f"TRY_CAST({_quote_identifier(column)} AS TIMESTAMPTZ)"
+            if column in source_columns
+            else "NULL::TIMESTAMPTZ"
+        )
+
+    event_time = ", ".join(
+        timestamp_value(column)
+        for column in ("__event_time", "end_time", "start_time")
+    )
+    return f"{passthrough}, COALESCE({event_time}) AS __event_time"
 
 
 def _ensure_columns(conn, table_name: str, column_types: dict[str, str], existing: set[str]) -> None:

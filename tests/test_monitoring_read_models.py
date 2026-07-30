@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import duckdb
 import pytest
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics import store as analytics_store
 from datacoolie_studio.domains.monitoring import page_service, query_service
+from datacoolie_studio.domains.monitoring import log_repository
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
 from datacoolie_studio.domains.monitoring.read_models.jobs import jobs_read_model
 from datacoolie_studio.domains.monitoring.read_models.failures import failures_read_model
@@ -55,6 +57,7 @@ def test_filtered_ctes_apply_dataflow_scope_to_jobs() -> None:
           stage VARCHAR,
           start_time TIMESTAMPTZ,
           end_time TIMESTAMPTZ,
+          __event_time TIMESTAMPTZ,
           __run_date DATE
         );
         CREATE TABLE etl_job_runs (
@@ -68,8 +71,8 @@ def test_filtered_ctes_apply_dataflow_scope_to_jobs() -> None:
           __run_date DATE
         );
         INSERT INTO etl_dataflow_runs VALUES
-          (1, 'job-1', 'failed', 'silver', '2026-07-20', '2026-07-20 00:01:00+00', '2026-07-20'),
-          (1, 'job-2', 'failed', 'bronze', '2026-07-20', '2026-07-20 00:02:00+00', '2026-07-20');
+          (1, 'job-1', 'failed', 'silver', '2026-07-20', '2026-07-20 00:01:00+00', '2026-07-20 00:01:00+00', '2026-07-20'),
+          (1, 'job-2', 'failed', 'bronze', '2026-07-20', '2026-07-20 00:02:00+00', '2026-07-20 00:02:00+00', '2026-07-20');
         INSERT INTO etl_job_runs VALUES
           (1, 'job-1', 'failed', 'duckdb', 'file', 'local', '2026-07-20 00:01:00+00', '2026-07-20'),
           (1, 'job-2', 'failed', 'duckdb', 'file', 'local', '2026-07-20 00:02:00+00', '2026-07-20');
@@ -104,6 +107,180 @@ def test_filtered_ctes_reject_unknown_projection_columns() -> None:
             dataflow_columns=("not_a_column",),
             job_columns=("job_id",),
         )
+
+
+def test_dataflow_event_time_is_materialized_and_reconciled() -> None:
+    connection = duckdb.connect(":memory:")
+    analytics_store.ensure_typed_table(
+        connection,
+        analytics_schema.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
+    )
+    analytics_store.ensure_typed_table(
+        connection,
+        analytics_schema.JOB_TABLE,
+        analytics_schema.JOB_COLUMN_TYPES,
+    )
+    analytics_store.insert_typed_rows(
+        connection,
+        analytics_schema.DATAFLOW_TABLE,
+        1,
+        [
+            (
+                "explicit.parquet",
+                "dataflow_parquet",
+                "{}",
+                {
+                    "dataflow_run_id": "run-explicit",
+                    "__event_time": "2026-07-20T03:00:00Z",
+                    "start_time": "2026-07-20T01:00:00Z",
+                    "end_time": "2026-07-20T02:00:00Z",
+                },
+            ),
+            (
+                "start-only.parquet",
+                "dataflow_parquet",
+                "{}",
+                {
+                    "dataflow_run_id": "run-start",
+                    "start_time": "2026-07-20T04:00:00Z",
+                },
+            ),
+        ],
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
+    )
+    _rebuild_serving_facts(connection)
+
+    assert connection.execute(
+        """
+        SELECT
+          dataflow_run_id,
+          epoch(__event_time),
+          event_time = __event_time
+        FROM monitoring_dataflow_facts
+        ORDER BY dataflow_run_id
+        """
+    ).fetchall() == [
+        ("run-explicit", 1784516400.0, True),
+        ("run-start", 1784520000.0, True),
+    ]
+
+
+def test_job_log_query_preserves_correlated_stage_operation_scope(monkeypatch) -> None:
+    connection = duckdb.connect(":memory:")
+    analytics_store.ensure_typed_table(
+        connection,
+        analytics_schema.DATAFLOW_TABLE,
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
+    )
+    analytics_store.ensure_typed_table(
+        connection,
+        analytics_schema.JOB_TABLE,
+        analytics_schema.JOB_COLUMN_TYPES,
+    )
+    analytics_store.insert_typed_rows(
+        connection,
+        analytics_schema.JOB_TABLE,
+        1,
+        [
+            (
+                "jobs.jsonl",
+                "job_jsonl",
+                "{}",
+                {
+                    "job_id": "job-crossed",
+                    "status": "succeeded",
+                    "start_time": "2026-07-20T00:00:00Z",
+                    "end_time": "2026-07-20T00:10:00Z",
+                    "stages": '["bronze", "silver"]',
+                    "operation_types": '["etl", "maintenance"]',
+                },
+            ),
+            (
+                "jobs.jsonl",
+                "job_jsonl",
+                "{}",
+                {
+                    "job_id": "job-match",
+                    "status": "succeeded",
+                    "start_time": "2026-07-20T01:00:00Z",
+                    "end_time": "2026-07-20T01:10:00Z",
+                    "stages": '["silver"]',
+                    "operation_types": '["etl"]',
+                },
+            ),
+        ],
+        analytics_schema.JOB_COLUMN_TYPES,
+    )
+    dataflow_rows = [
+        {
+            "job_id": "job-crossed",
+            "dataflow_run_id": "run-bronze-etl",
+            "stage": "bronze",
+            "operation_type": "etl",
+            "status": "succeeded",
+            "start_time": "2026-07-20T00:00:00Z",
+            "end_time": "2026-07-20T00:01:00Z",
+        },
+        {
+            "job_id": "job-crossed",
+            "dataflow_run_id": "run-silver-maintenance",
+            "stage": "silver",
+            "operation_type": "maintenance",
+            "status": "succeeded",
+            "start_time": "2026-07-20T00:01:00Z",
+            "end_time": "2026-07-20T00:02:00Z",
+        },
+        {
+            "job_id": "job-match",
+            "dataflow_run_id": "run-silver-etl",
+            "stage": "silver",
+            "operation_type": "etl",
+            "status": "succeeded",
+            "start_time": "2026-07-20T01:00:00Z",
+            "end_time": "2026-07-20T01:01:00Z",
+        },
+    ]
+    analytics_store.insert_typed_rows(
+        connection,
+        analytics_schema.DATAFLOW_TABLE,
+        1,
+        [
+            (f"{row['dataflow_run_id']}.parquet", "dataflow_parquet", "{}", row)
+            for row in dataflow_rows
+        ],
+        analytics_schema.DATAFLOW_COLUMN_TYPES,
+    )
+    _rebuild_serving_facts(connection)
+    monkeypatch.setattr(
+        log_repository,
+        "reader",
+        lambda _paths: nullcontext((connection, [1], "generation-1")),
+    )
+
+    records, total, errors = log_repository.query_cached_job_logs(
+        object(),
+        [],
+        {"range": "all", "stage": "silver", "operationType": "etl"},
+    )
+
+    assert errors == []
+    assert total == 1
+    assert [row["job_id"] for row in records] == ["job-match"]
+    assert records[0]["child_dataflow_count"] == 1
+
+
+def test_default_all_dataflow_filters_do_not_exclude_jobs_without_children() -> None:
+    assert not log_repository.monitoring_has_dataflow_scope(
+        {
+            "stage": "all",
+            "connection": "all",
+            "sourceType": "all",
+            "destinationType": "all",
+            "loadType": "all",
+            "operationType": "all",
+        }
+    )
 
 
 def test_dataflows_read_model_aggregates_bounded_metric_contracts() -> None:

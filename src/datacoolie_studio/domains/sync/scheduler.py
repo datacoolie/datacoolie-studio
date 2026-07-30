@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -32,8 +33,10 @@ from datacoolie_studio.domains.source_observation.contracts import (
 from datacoolie_studio.domains.source_observation.repository import (
     claim_due_observation_ids,
     claim_local_observation,
+    claim_paused_observation,
     complete_observation,
     release_observation,
+    resume_observation,
 )
 from datacoolie_studio.domains.sources.initialization import (
     requeue_interrupted_source_initializations,
@@ -47,6 +50,10 @@ from datacoolie_studio.domains.sync import service as sync
 
 SCHEDULER_INTERVAL_SECONDS = 60
 logger = logging.getLogger(__name__)
+
+
+class ObservationRetryUnavailableError(RuntimeError):
+    pass
 
 
 async def scheduler_loop(stop_event: asyncio.Event) -> None:
@@ -160,36 +167,15 @@ def _observe_source_outcome(
     session: Session,
     source: EnvironmentSource,
     owner: str,
+    *,
+    refresh_guard_acquired: bool = False,
 ) -> ObservationResult:
     started_at = utc_now()
     try:
-        if source.source_kind == "logs":
-            from datacoolie_studio.domains.logs.ingestion import (
-                log_source_has_pending_changes,
+        if refresh_guard_acquired:
+            result = _observe_source_with_refresh_guard(
+                session, source, owner, started_at
             )
-
-            with sync.source_refresh_guard(source.id) as acquired:
-                if not acquired or sync.has_running_sync_job(session, source.id):
-                    release_observation(
-                        session, source_id=source.id, lease_owner=owner
-                    )
-                    return _skipped_result(source, started_at)
-                pending = log_source_has_pending_changes(
-                    session, source, ttl_seconds=0
-                )
-                state = session.get(SourceObservation, source.id)
-                changed = state is None or pending != state.pending_changes
-                result = ObservationResult(
-                    source_id=source.id,
-                    source_kind=source.source_kind,
-                    outcome="changed" if changed else "unchanged",
-                    pending_changes=pending,
-                    observed_revision=None,
-                    error=None,
-                    inventory_metrics=None,
-                    started_at=started_at,
-                    completed_at=utc_now(),
-                )
         else:
             with sync.source_refresh_guard(source.id) as acquired:
                 if not acquired or sync.has_running_sync_job(session, source.id):
@@ -197,10 +183,8 @@ def _observe_source_outcome(
                         session, source_id=source.id, lease_owner=owner
                     )
                     return _skipped_result(source, started_at)
-                result = _refresh_automatic_source_result(
-                    session,
-                    source,
-                    started_at=started_at,
+                result = _observe_source_with_refresh_guard(
+                    session, source, owner, started_at
                 )
         complete_observation(
             session,
@@ -239,16 +223,92 @@ def _observe_source_outcome(
         return result
 
 
+def _observe_source_with_refresh_guard(
+    session: Session,
+    source: EnvironmentSource,
+    owner: str,
+    started_at: datetime,
+) -> ObservationResult:
+    if sync.has_running_sync_job(session, source.id):
+        release_observation(
+            session, source_id=source.id, lease_owner=owner
+        )
+        return _skipped_result(source, started_at)
+    if source.source_kind == "logs":
+        pending = log_source_has_pending_changes(
+            session, source, ttl_seconds=0
+        )
+        state = session.get(SourceObservation, source.id)
+        changed = state is None or pending != state.pending_changes
+        return ObservationResult(
+            source_id=source.id,
+            source_kind=source.source_kind,
+            outcome="changed" if changed else "unchanged",
+            pending_changes=pending,
+            observed_revision=None,
+            error=None,
+            inventory_metrics=None,
+            started_at=started_at,
+            completed_at=utc_now(),
+        )
+    return _refresh_automatic_source_result(
+        session,
+        source,
+        started_at=started_at,
+    )
+
+
+def retry_source_observation(
+    session: Session,
+    source: EnvironmentSource,
+) -> ObservationResult:
+    """Run one explicit check after atomically restarting a paused lifecycle."""
+
+    owner = f"retry-{source.id}-{uuid4().hex}"
+    with sync.source_refresh_guard(source.id) as acquired:
+        if not acquired or sync.has_running_sync_job(session, source.id):
+            raise ObservationRetryUnavailableError(
+                "A source operation is already running"
+            )
+        if not claim_paused_observation(
+            session,
+            source_id=source.id,
+            lease_owner=owner,
+        ):
+            raise ObservationRetryUnavailableError(
+                "Source checks are not paused or another retry is already running"
+            )
+        resume_observation(
+            session,
+            source.id,
+            due_at=utc_now(),
+            lease_owner=owner,
+        )
+        session.commit()
+        return _observe_source_outcome(
+            session,
+            source,
+            owner,
+            refresh_guard_acquired=True,
+        )
+
+
 def run_due_schedules_once() -> int:
     session = create_session()
     refreshed = 0
     try:
         sources = list(
             session.scalars(
-                select(EnvironmentSource).where(
+                select(EnvironmentSource)
+                .outerjoin(
+                    SourceObservation,
+                    SourceObservation.source_id == EnvironmentSource.id,
+                )
+                .where(
                     EnvironmentSource.enabled.is_(True),
                     EnvironmentSource.source_kind == "logs",
                     EnvironmentSource.sync_schedule_enabled.is_(True),
+                    SourceObservation.automatic_observation_paused_at.is_(None),
                 )
             )
         )

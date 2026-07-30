@@ -51,7 +51,6 @@ from datacoolie_studio.domains.sources.discovery import (
     discover_datacoolie_project_sources,
     discover_metadata_sources,
 )
-from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import (
     join_uri,
     normalized_source_uri,
@@ -62,6 +61,7 @@ from datacoolie_studio.domains.storage.binding import StorageBinding
 from datacoolie_studio.domains.storage.errors import StorageConfigurationError
 from datacoolie_studio.domains.source_observation.repository import (
     reset_observation,
+    resume_observation,
 )
 from datacoolie_studio.domains.studio_settings.service import (
     source_check_interval_seconds,
@@ -338,6 +338,31 @@ def create_project(session: Session, name: str, description: str | None = None) 
     return project
 
 
+def rename_project(session: Session, project_id: int, name: str) -> Project:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise LookupError("Project not found")
+    normalized = name.strip()
+    if project.name == normalized:
+        return project
+    existing = session.scalar(
+        select(Project).where(
+            Project.id != project_id,
+            Project.name == normalized,
+        )
+    )
+    if existing is not None:
+        raise ValueError(f"Project already exists: {normalized}")
+    project.name = normalized
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise ValueError(f"Project already exists: {normalized}") from exc
+    session.refresh(project)
+    return project
+
+
 def delete_project(session: Session, project_id: int) -> bool:
     project = session.get(Project, project_id)
     if project is None:
@@ -373,6 +398,32 @@ def create_environment(session: Session, project_id: int, name: str) -> Environm
         raise ValueError(f"Environment already exists: {display_name}")
     session.refresh(env)
     return env
+
+
+def rename_environment(session: Session, environment_id: int, name: str) -> Environment:
+    environment = session.get(Environment, environment_id)
+    if environment is None:
+        raise LookupError("Environment not found")
+    display_name = name.strip()
+    if environment.name == display_name:
+        return environment
+    existing = session.scalar(
+        select(Environment).where(
+            Environment.project_id == environment.project_id,
+            Environment.id != environment_id,
+            func.lower(Environment.name) == display_name.lower(),
+        )
+    )
+    if existing is not None:
+        raise ValueError(f"Environment already exists: {display_name}")
+    environment.name = display_name
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise ValueError(f"Environment already exists: {display_name}") from exc
+    session.refresh(environment)
+    return environment
 
 
 def delete_environment(session: Session, environment_id: int) -> bool:
@@ -1075,6 +1126,8 @@ def update_code_artifact(
     if source is None:
         return None
     structural_changed = False
+    enabled_changed = enabled is not None and source.enabled != enabled
+    reenabled = enabled is True and not source.enabled
     if uri is not None or source_config is not None or storage is not None:
         candidate_config = (
             source_config
@@ -1132,10 +1185,12 @@ def update_code_artifact(
     if label is not None:
         source.label = label
     if enabled is not None:
-        structural_changed = structural_changed or source.enabled != enabled
         source.enabled = enabled
-    if structural_changed:
+    if reenabled:
+        resume_observation(session, source.id)
+    elif structural_changed:
         reset_observation(session, source.id)
+    if structural_changed or enabled_changed:
         invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.commit()
     session.refresh(source)
@@ -1207,6 +1262,8 @@ def update_metadata_source(
     if source is None:
         return None
     structural_changed = False
+    enabled_changed = enabled is not None and source.enabled != enabled
+    reenabled = enabled is True and not source.enabled
     if uri is not None or source_config is not None or storage is not None:
         candidate_config = (
             source_config
@@ -1264,10 +1321,12 @@ def update_metadata_source(
     if label is not None:
         source.label = label
     if enabled is not None:
-        structural_changed = structural_changed or source.enabled != enabled
         source.enabled = enabled
-    if structural_changed:
+    if reenabled:
+        resume_observation(session, source.id)
+    elif structural_changed:
         reset_observation(session, source.id)
+    if structural_changed or enabled_changed:
         invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     session.commit()
     session.refresh(source)
@@ -1406,6 +1465,7 @@ def update_log_source(
     changed = False
     material_changed = False
     enabled_changed = enabled is not None and enabled != path.enabled
+    reenabled = enabled is True and not path.enabled
     if uri is not None or source_config is not None or storage is not None:
         current_binding = binding_to_dict(path)
         candidate_config = (
@@ -1478,7 +1538,9 @@ def update_log_source(
         path.label = label
     if enabled is not None:
         path.enabled = enabled
-    if changed or enabled_changed:
+    if reenabled:
+        resume_observation(session, path.id, pending_changes=False)
+    elif changed:
         reset_observation(session, path.id, pending_changes=False)
     _update_schedule(path, sync_schedule_enabled, sync_interval_minutes, default_interval_minutes=1)
     invalidate_environment_derived_caches(session, path.environment_id, structural=False)

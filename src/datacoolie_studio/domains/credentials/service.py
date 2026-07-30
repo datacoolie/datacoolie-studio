@@ -282,12 +282,12 @@ def update_profile(
             invalidate_storage_client_caches,
         )
         from datacoolie_studio.domains.source_observation.repository import (
-            reset_observation,
+            resume_observation,
         )
 
         invalidate_storage_client_caches()
         for source_id in affected_source_ids:
-            reset_observation(session, source_id)
+            resume_observation(session, source_id)
         if affected_source_ids:
             session.commit()
     return _profile_view(session, profile)

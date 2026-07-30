@@ -243,6 +243,8 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
         message,
         error: { message },
         checked_at: new Date().toISOString(),
+        observation_state: "active",
+        observation_failure_count: 0,
         latest_job: null
       };
     }
@@ -273,12 +275,54 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
         message,
         error: { message },
         checked_at: new Date().toISOString(),
+        observation_state: "active",
+        observation_failure_count: 0,
         latest_job: null
       };
       if (activeEnvironmentIdRef.current === environmentId) {
         setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
       }
       return result;
+    } finally {
+      setSourceOperations((current) =>
+        finishSourceOperations(current, environmentId, [entry])
+      );
+    }
+  }
+
+  async function retrySourceObservation(kind: SourceKind, id: number): Promise<SourceSyncStatus> {
+    const environmentId = route.environmentId;
+    if (!environmentId) {
+      throw new Error("Select an environment before retrying source checks");
+    }
+    const entry = { kind, id };
+    setSourceOperations((current) =>
+      beginSourceOperations(current, environmentId, [entry], "retry")
+    );
+    setError(null);
+    try {
+      const result =
+        kind === "metadata"
+          ? await api.retryMetadataSourceObservation(environmentId, id)
+          : kind === "logs"
+            ? await api.retryLogSourceObservation(environmentId, id)
+            : await api.retryCodeArtifactObservation(environmentId, id);
+      if (activeEnvironmentIdRef.current === environmentId) {
+        setSourceSyncStatuses((current) => ({
+          ...current,
+          [sourceKey(kind, id)]: result,
+        }));
+        await refreshEnvironment(
+          environmentId,
+          "sources",
+          { forceHeader: true, forceModule: true },
+        );
+      }
+      return result;
+    } catch (err) {
+      const message = toErrorMessage(err);
+      if (activeEnvironmentIdRef.current === environmentId) setError(message);
+      throw err;
     } finally {
       setSourceOperations((current) =>
         finishSourceOperations(current, environmentId, [entry])
@@ -377,6 +421,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     deleteSource,
     validateSource,
     syncSource,
+    retrySourceObservation,
     runSourceBatch,
     getSourceDeleteImpact,
   };

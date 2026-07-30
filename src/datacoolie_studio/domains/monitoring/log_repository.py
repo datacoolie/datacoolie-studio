@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import schema as analytics_schema
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
+from datacoolie_studio.domains.analytics.serving_facts import (
+    MONITORING_DATAFLOW_FACTS_TABLE,
+)
 from datacoolie_studio.domains.monitoring.context import (
     reader,
     source_ids as monitoring_source_ids,
@@ -15,7 +18,7 @@ from datacoolie_studio.domains.monitoring.context import (
 
 
 DATAFLOW_SORT_COLUMNS = {
-    "end_time": "TRY_CAST(COALESCE(d.end_time, d.start_time) AS TIMESTAMPTZ)",
+    "end_time": "d.__event_time",
     "start_time": "TRY_CAST(d.start_time AS TIMESTAMPTZ)",
     "duration_seconds": "d.duration_seconds",
     "status": "d.status",
@@ -102,11 +105,11 @@ def cached_monitoring_summary(
             WITH dataflows AS (
               SELECT
                 status,
-                COALESCE(end_time, start_time) AS event_time,
-                COALESCE(__run_date, CAST(timezone('UTC', COALESCE(end_time, start_time)) AS DATE)) AS run_date
+                __event_time AS event_time,
+                COALESCE(__run_date, CAST(timezone('UTC', __event_time) AS DATE)) AS run_date
               FROM {analytics_schema.DATAFLOW_TABLE}
               WHERE _source_id IN ({placeholders})
-                AND COALESCE(end_time, start_time) >= ?
+                AND __event_time >= ?
             ),
             jobs AS (
               SELECT
@@ -189,11 +192,7 @@ def query_cached_latest_dataflow_runs(
                     THEN 'id:' || CAST(dataflow_id AS VARCHAR)
                   ELSE 'name:' || COALESCE(CAST(dataflow_name AS VARCHAR), '')
                 END AS identity_key,
-                COALESCE(
-                  TRY_CAST(end_time AS TIMESTAMPTZ),
-                  TRY_CAST(start_time AS TIMESTAMPTZ),
-                  TIMESTAMPTZ '1970-01-01 00:00:00+00'
-                ) AS event_time
+                COALESCE(__event_time, TIMESTAMPTZ '1970-01-01 00:00:00+00') AS event_time
               FROM {analytics_schema.DATAFLOW_TABLE}
               WHERE _source_id IN ({placeholders})
                 AND (NULLIF(CAST(dataflow_id AS VARCHAR), '') IS NOT NULL
@@ -306,7 +305,28 @@ def query_cached_job_logs(
             return [], 0, []
         job_select_sql = _select_alias_columns("j", analytics_schema.table_columns(conn, analytics_schema.JOB_TABLE))
         source_placeholders = ", ".join("?" for _ in source_ids)
-        where_sql, params = _monitoring_filter_sql(filters, "j", "j", include_dataflow_filters=False)
+        child_where_sql, child_params = _monitoring_filter_sql(
+            filters,
+            "d",
+            "d",
+            dataflow_table=MONITORING_DATAFLOW_FACTS_TABLE,
+            dataflow_event_time_column="event_time",
+        )
+        where_sql, params = _monitoring_filter_sql(
+            monitoring_job_direct_filters(filters),
+            "j",
+            "j",
+            include_dataflow_filters=False,
+            dataflow_table=MONITORING_DATAFLOW_FACTS_TABLE,
+        )
+        filtered_children_sql = f"""
+            SELECT
+              d._source_id, d.job_id, d.status, d.duration_seconds,
+              d.source_rows_read, d.destination_rows_written,
+              d.destination_bytes_added, d.destination_bytes_removed
+            FROM {MONITORING_DATAFLOW_FACTS_TABLE} d
+            WHERE d._source_id IN ({source_placeholders}){child_where_sql}
+        """
         child_summary_sql = (
             f"""
             SELECT
@@ -323,18 +343,26 @@ def query_cached_job_logs(
               SUM(destination_rows_written) AS child_total_rows_written,
               SUM(destination_bytes_added) AS child_total_bytes_added,
               SUM(destination_bytes_removed) AS child_total_bytes_removed
-            FROM {analytics_schema.DATAFLOW_TABLE}
-            WHERE _source_id IN ({source_placeholders})
-              AND job_id IS NOT NULL
+            FROM filtered_children
+            WHERE job_id IS NOT NULL
             GROUP BY _source_id, job_id
             """
+        )
+        job_scope_sql = (
+            " AND EXISTS ("
+            "SELECT 1 FROM filtered_children fc "
+            "WHERE fc._source_id = j._source_id AND fc.job_id = j.job_id"
+            ")"
+            if monitoring_has_dataflow_scope(filters)
+            else ""
         )
         from_sql = (
             f"FROM {analytics_schema.JOB_TABLE} j "
             f"LEFT JOIN ({child_summary_sql}) c ON c._source_id = j._source_id AND c.job_id = j.job_id "
-            f"WHERE j._source_id IN ({source_placeholders}){where_sql}"
+            f"WHERE j._source_id IN ({source_placeholders}){where_sql}{job_scope_sql}"
         )
-        query_params = [*source_ids, *source_ids, *params]
+        ctes_sql = f"WITH filtered_children AS ({filtered_children_sql})"
+        query_params = [*source_ids, *child_params, *source_ids, *params]
         order_sql = _monitoring_order_sql(
             sort_by,
             sort_dir,
@@ -343,6 +371,7 @@ def query_cached_job_logs(
         )
         result = conn.execute(
             f"""
+            {ctes_sql}
             SELECT
               {job_select_sql},
               COALESCE(c.child_dataflow_count, 0) AS child_dataflow_count,
@@ -366,7 +395,12 @@ def query_cached_job_logs(
         rows = _result_rows(result)
         total = _window_total(rows)
         if not rows and offset:
-            total = int(conn.execute(f"SELECT count(*) {from_sql}", query_params).fetchone()[0])
+            total = int(
+                conn.execute(
+                    f"{ctes_sql} SELECT count(*) {from_sql}",
+                    query_params,
+                ).fetchone()[0]
+            )
     return rows, total, []
 
 
@@ -377,7 +411,7 @@ def monitoring_filter_sql(
     *,
     include_dataflow_filters: bool = True,
     dataflow_table: str = analytics_schema.DATAFLOW_TABLE,
-    dataflow_event_time_column: str | None = None,
+    dataflow_event_time_column: str = "__event_time",
 ) -> tuple[str, list[Any]]:
     return _monitoring_filter_sql(
         filters,
@@ -395,21 +429,17 @@ def _monitoring_filter_sql(
     job_alias: str,
     include_dataflow_filters: bool = True,
     dataflow_table: str = analytics_schema.DATAFLOW_TABLE,
-    dataflow_event_time_column: str | None = None,
+    dataflow_event_time_column: str = "__event_time",
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
 
     range_value = filters.get("range")
-    if dataflow_event_time_column not in {None, "event_time"}:
+    if dataflow_event_time_column not in {"__event_time", "event_time"}:
         raise ValueError("Unsupported Monitoring event-time column")
     timestamp_expression = f"{row_alias}.__event_time"
     if include_dataflow_filters:
-        timestamp_expression = (
-            f"{row_alias}.{dataflow_event_time_column}"
-            if dataflow_event_time_column
-            else f"TRY_CAST(COALESCE({row_alias}.end_time, {row_alias}.start_time) AS TIMESTAMPTZ)"
-        )
+        timestamp_expression = f"{row_alias}.{dataflow_event_time_column}"
     if range_value in {"24h", "3d", "7d", "30d", "90d"}:
         days = {"24h": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}[range_value]
         clauses.append(f"{timestamp_expression} >= ?")
@@ -605,6 +635,33 @@ def _split_filter_values(value: str | None) -> list[str]:
     return [item.strip() for item in value.split("|") if item.strip()]
 
 
+def monitoring_has_dataflow_scope(filters: dict[str, str]) -> bool:
+    if any(
+        _split_filter_values(filters.get(name))
+        for name in (
+            "stage",
+            "connection",
+            "sourceType",
+            "destinationType",
+            "loadType",
+            "operationType",
+        )
+    ):
+        return True
+    kind = str(filters.get("investigateKind") or "").strip()
+    value = str(filters.get("investigateValue") or "").strip()
+    return bool(kind and value and kind != "job_id")
+
+
+def monitoring_job_direct_filters(filters: dict[str, str]) -> dict[str, str]:
+    direct_filters = dict(filters)
+    direct_filters["connection"] = "all"
+    if str(direct_filters.get("investigateKind") or "").strip() != "job_id":
+        direct_filters["investigateKind"] = ""
+        direct_filters["investigateValue"] = ""
+    return direct_filters
+
+
 def _monitoring_order_sql(
     sort_by: str,
     sort_dir: str,
@@ -613,7 +670,7 @@ def _monitoring_order_sql(
 ) -> str:
     expression = allowed_columns.get(sort_by) or allowed_columns["start_time"]
     direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
-    fallback_time = f"TRY_CAST(COALESCE({default_alias}.end_time, {default_alias}.start_time) AS TIMESTAMPTZ)"
+    fallback_time = f"{default_alias}.__event_time"
     stable_identity = (
         f"COALESCE({default_alias}.dataflow_run_id, {default_alias}.dataflow_id, {default_alias}.job_id)"
         if default_alias == "d"

@@ -18,11 +18,13 @@ from datacoolie_studio.api.v1.contracts.sources import (
 from datacoolie_studio.api.v1.contracts.workspace import (
     EnvironmentCreate,
     EnvironmentRead,
+    EnvironmentRename,
     ProjectReferenceMappingCreate,
     ProjectReferenceMappingRead,
     ProjectReferenceMappingUpdate,
     ProjectCreate,
     ProjectRead,
+    ProjectRename,
     ProjectSummaryResponse,
     StudioDiagnosticsResponse,
     StudioCacheClearRequest,
@@ -131,6 +133,20 @@ def post_project(payload: ProjectCreate, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+def patch_project(
+    project_id: int,
+    payload: ProjectRename,
+    session: Session = Depends(get_session),
+):
+    try:
+        return workspace.rename_project(session, project_id, payload.name)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get(
     "/projects/{project_id}/reference-mappings",
     response_model=list[ProjectReferenceMappingRead],
@@ -225,6 +241,20 @@ def get_environments(project_id: int, session: Session = Depends(get_session)):
 def post_environment(project_id: int, payload: EnvironmentCreate, session: Session = Depends(get_session)):
     try:
         return workspace.create_environment(session, project_id, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.patch("/environments/{environment_id}", response_model=EnvironmentRead)
+def patch_environment(
+    environment_id: int,
+    payload: EnvironmentRename,
+    session: Session = Depends(get_session),
+):
+    try:
+        return workspace.rename_environment(session, environment_id, payload.name)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

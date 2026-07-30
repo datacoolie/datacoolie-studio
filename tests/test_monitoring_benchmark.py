@@ -42,6 +42,7 @@ def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monke
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         assert connection.execute("SELECT COUNT(*) FROM etl_dataflow_runs").fetchone()[0] == 250
         assert connection.execute("SELECT COUNT(*) FROM etl_job_runs").fetchone()[0] == 50
+        assert connection.execute("SELECT COUNT(*) FROM etl_dataflow_runs WHERE __event_time IS NULL").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM etl_job_runs WHERE __event_time IS NULL").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM etl_job_runs WHERE __run_date IS NULL").fetchone()[0] == 0
         assert monitoring_serving_schema_is_ready(connection)

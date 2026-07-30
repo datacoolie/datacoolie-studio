@@ -31,6 +31,7 @@ from datacoolie_studio.domains.metadata.storage_io import (
 )
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
+from datacoolie_studio.domains.storage.inventory import storage_diagnostics
 from datacoolie_studio.domains.sync import service as sync
 
 
@@ -99,6 +100,35 @@ def load_cached_editor_document(
     return _refresh_editor_document_routing(source, json.loads(materialization.editor_document_json))
 
 
+def load_materialized_editor_document(
+    session: Session,
+    source: EnvironmentSource,
+    expected_revision: dict | None = None,
+) -> dict:
+    """Load the editor cache without checking remote storage."""
+    materialization = metadata_materialization(session, source.id)
+    if materialization is None:
+        raise MetadataReadError(
+            f"Metadata cache is unavailable for source: {source.uri}"
+        )
+    if expected_revision is not None and not _same_revision_json(
+        expected_revision, materialization.source_revision_json
+    ):
+        raise MetadataReadError(
+            f"Metadata cache does not match the editor revision: {source.uri}"
+        )
+    if (
+        not _materialization_uses_current_normalizer(materialization)
+        or not _materialization_has_editor_routing(materialization)
+    ):
+        raise MetadataReadError(
+            f"Metadata cache must be refreshed before saving: {source.uri}"
+        )
+    return _refresh_editor_document_routing(
+        source, json.loads(materialization.editor_document_json)
+    )
+
+
 def load_environment_editor_document(
     session: Session,
     sources: list[EnvironmentSource],
@@ -119,6 +149,15 @@ def load_environment_editor_document(
         except MetadataReadError as exc:
             errors.append({"metadata_source_id": source.id, "uri": source.uri, "message": str(exc)})
 
+    return merge_environment_editor_documents(sources, documents, errors=errors)
+
+
+def merge_environment_editor_documents(
+    sources: list[EnvironmentSource],
+    documents: list[dict],
+    *,
+    errors: list[dict] | None = None,
+) -> dict:
     sheets = {
         sheet_name: _merge_editor_sheet_documents(documents, sheet_name)
         for sheet_name in ("connections", "dataflows", "schema_hints")
@@ -138,7 +177,7 @@ def load_environment_editor_document(
                     doc.get("source", {})
                     for doc in documents
                 ],
-                "errors": errors,
+                "errors": errors or [],
             },
         },
         "sheets": sheets,
@@ -146,6 +185,35 @@ def load_environment_editor_document(
     }
     document["issues"] = validate_editor_document(document)["issues"]
     return document
+
+
+def store_metadata_materialization_from_bytes(
+    session: Session,
+    source: EnvironmentSource,
+    content: bytes,
+    revision: dict,
+) -> MetadataMaterialization:
+    """Refresh the materialization from bytes already confirmed by a write."""
+    raw = read_metadata_bytes(source.uri, content)
+    editor_document = load_editor_document_from_raw(source, raw, revision)
+    normalized = normalize_metadata_document(source.id, source.uri, raw)
+    materialization = _upsert_metadata_materialization(
+        session,
+        source,
+        revision,
+        editor_document,
+        normalized,
+    )
+    sync.record_source_observation(
+        session,
+        source=source,
+        status="ok",
+        revision=revision,
+        error=None,
+        checked_at=utc_now(),
+    )
+    session.commit()
+    return materialization
 
 
 def load_environment_editor_workspace(
@@ -301,7 +369,13 @@ def ensure_metadata_materialization_result(
             job,
             status="failed",
             message=error["message"],
-            result={"status": "error", "message": error["message"], "revision": None, "error": error},
+            result={
+                "status": "error",
+                "message": error["message"],
+                "revision": None,
+                "error": error,
+                "storage_io": storage_diagnostics(storage.adapter),
+            },
         )
         if current_materialization is not None:
             return current_materialization, error
@@ -324,38 +398,26 @@ def ensure_metadata_materialization_result(
             job,
             status="failed",
             message=str(exc),
-            result={"status": "error", "message": str(exc), "revision": None, "error": error},
+            result={
+                "status": "error",
+                "message": str(exc),
+                "revision": None,
+                "error": error,
+                "storage_io": storage_diagnostics(storage.adapter),
+            },
         )
         if current_materialization is not None:
             return current_materialization, error
         raise
 
-    revision_json = json.dumps(current, sort_keys=True)
-    fingerprint = _materialization_fingerprint(current)
-    previous_fingerprint = (
-        current_materialization.materialization_fingerprint
-        if current_materialization is not None
-        else None
+    current_materialization = _upsert_metadata_materialization(
+        session,
+        source,
+        current,
+        editor_document,
+        normalized,
+        current_materialization=current_materialization,
     )
-    if current_materialization is None:
-        current_materialization = MetadataMaterialization(
-            source_id=source.id,
-            source_revision_json=revision_json,
-            normalizer_version=METADATA_NORMALIZER_VERSION,
-            materialization_fingerprint=fingerprint,
-            editor_document_json=json.dumps(editor_document, ensure_ascii=False),
-            normalized_metadata_json=json.dumps(normalized, ensure_ascii=False),
-        )
-        session.add(current_materialization)
-    else:
-        current_materialization.source_revision_json = revision_json
-        current_materialization.normalizer_version = METADATA_NORMALIZER_VERSION
-        current_materialization.materialization_fingerprint = fingerprint
-        current_materialization.editor_document_json = json.dumps(editor_document, ensure_ascii=False)
-        current_materialization.normalized_metadata_json = json.dumps(normalized, ensure_ascii=False)
-        current_materialization.materialized_at = utc_now()
-    if previous_fingerprint != fingerprint:
-        invalidate_environment_derived_caches(session, source.environment_id, structural=True)
     sync.record_source_observation(session, source=source, status="ok", revision=current, error=None, checked_at=utc_now())
     sync.finish_sync_job(
         session,
@@ -367,6 +429,7 @@ def ensure_metadata_materialization_result(
             "message": "Metadata source materialization refreshed",
             "revision": current,
             "error": None,
+            "storage_io": storage_diagnostics(storage.adapter),
         },
     )
     return current_materialization, None
@@ -376,6 +439,53 @@ def metadata_materialization(session: Session, source_id: int) -> MetadataMateri
     return session.scalar(
         select(MetadataMaterialization).where(MetadataMaterialization.source_id == source_id)
     )
+
+
+def _upsert_metadata_materialization(
+    session: Session,
+    source: EnvironmentSource,
+    revision: dict,
+    editor_document: dict,
+    normalized: dict,
+    *,
+    current_materialization: MetadataMaterialization | None = None,
+) -> MetadataMaterialization:
+    materialization = current_materialization or metadata_materialization(
+        session, source.id
+    )
+    revision_json = json.dumps(revision, sort_keys=True)
+    fingerprint = _materialization_fingerprint(revision)
+    previous_fingerprint = (
+        materialization.materialization_fingerprint
+        if materialization is not None
+        else None
+    )
+    if materialization is None:
+        materialization = MetadataMaterialization(
+            source_id=source.id,
+            source_revision_json=revision_json,
+            normalizer_version=METADATA_NORMALIZER_VERSION,
+            materialization_fingerprint=fingerprint,
+            editor_document_json=json.dumps(editor_document, ensure_ascii=False),
+            normalized_metadata_json=json.dumps(normalized, ensure_ascii=False),
+        )
+        session.add(materialization)
+    else:
+        materialization.source_revision_json = revision_json
+        materialization.normalizer_version = METADATA_NORMALIZER_VERSION
+        materialization.materialization_fingerprint = fingerprint
+        materialization.editor_document_json = json.dumps(
+            editor_document, ensure_ascii=False
+        )
+        materialization.normalized_metadata_json = json.dumps(
+            normalized, ensure_ascii=False
+        )
+        materialization.materialized_at = utc_now()
+    if previous_fingerprint != fingerprint:
+        invalidate_environment_derived_caches(
+            session, source.environment_id, structural=True
+        )
+    return materialization
 
 
 def _merge_editor_sheet_documents(documents: list[dict], sheet_name: str) -> dict:
