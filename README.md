@@ -13,6 +13,70 @@ DataCoolie Studio is a local web app for exploring DataCoolie projects. Use it t
 
 Studio keeps source files as the source of truth. Metadata saves validate the document and create a backup before replacing the original file. Lineage combines evidence for display without creating a merged metadata file.
 
+## Screenshots
+
+The screenshots below show the main Studio workflow using a populated local DataCoolie environment.
+
+### Projects and Environment
+
+Projects provides a single workspace view for project readiness, environment navigation, and source coverage.
+
+![Projects workspace](docs/screenshots/home-projects.png)
+
+Environment Overview brings Metadata, Lineage, Monitoring, freshness, and next actions together in one screen.
+
+![Environment Overview](docs/screenshots/overview.png)
+
+### Metadata, Assets, Lineage, and Sources
+
+Metadata presents connections, dataflows, schema hints, and ordered source-defined transform configuration in an editable workspace.
+
+![Metadata workspace](docs/screenshots/metadata.png)
+
+Assets provides an inventory of discovered assets and references, including resolution and usage context.
+
+![Assets inventory](docs/screenshots/assets.png)
+
+Lineage connects metadata, SQL, and Python evidence into an interactive graph with filters and run-status context.
+
+![Lineage graph](docs/screenshots/lineage.png)
+
+Sources shows Local and cloud bindings, readable/cache status, scheduled Log refresh, and one-click path copying.
+
+![Sources and storage](docs/screenshots/sources.png)
+
+### Monitoring
+
+Monitoring is split into nine focused pages so operational questions can be answered without leaving the Environment.
+
+<details>
+<summary>Open all 9 Monitoring pages</summary>
+
+<table width="100%">
+<tr>
+<td valign="top" width="50%"><strong>Overview</strong><br><sub>Health KPIs, trends, runtime context, and attention signals.</sub><br><img src="docs/screenshots/monitoring-overview.png" alt="Monitoring Overview" width="100%"></td>
+<td valign="top" width="50%"><strong>Jobs</strong><br><sub>Job status, duration, runtime context, and drill-in evidence.</sub><br><img src="docs/screenshots/monitoring-jobs.png" alt="Monitoring Jobs" width="100%"></td>
+</tr>
+<tr>
+<td valign="top"><strong>Dataflows</strong><br><sub>Dataflow filtering, execution status, timings, and source/destination context.</sub><br><img src="docs/screenshots/monitoring-dataflows.png" alt="Monitoring Dataflows" width="100%"></td>
+<td valign="top"><strong>Failures</strong><br><sub>Failure categories, repeated failures, and investigation entry points.</sub><br><img src="docs/screenshots/monitoring-failures.png" alt="Monitoring Failures" width="100%"></td>
+</tr>
+<tr>
+<td valign="top"><strong>Freshness</strong><br><sub>Source freshness, event time, watermarks, and stale-data signals.</sub><br><img src="docs/screenshots/monitoring-freshness.png" alt="Monitoring Freshness" width="100%"></td>
+<td valign="top"><strong>Performance</strong><br><sub>Duration percentiles, phase contribution, pressure, and candidates.</sub><br><img src="docs/screenshots/monitoring-performance.png" alt="Monitoring Performance" width="100%"></td>
+</tr>
+<tr>
+<td valign="top"><strong>Volume</strong><br><sub>Rows, bytes, files, workload trends, and file-churn candidates.</sub><br><img src="docs/screenshots/monitoring-volume.png" alt="Monitoring Volume" width="100%"></td>
+<td valign="top"><strong>Maintenance</strong><br><sub>Maintenance operations, destination impact, and performance signals.</sub><br><img src="docs/screenshots/monitoring-maintenance.png" alt="Monitoring Maintenance" width="100%"></td>
+</tr>
+<tr>
+<td valign="top"><strong>Diagnostics</strong><br><sub>Bounded diagnostic aggregates and investigation evidence.</sub><br><img src="docs/screenshots/monitoring-diagnostics.png" alt="Monitoring Diagnostics" width="100%"></td>
+<td valign="top"></td>
+</tr>
+</table>
+
+</details>
+
 ## Install and run
 
 DataCoolie Studio requires Python 3.11 or later.

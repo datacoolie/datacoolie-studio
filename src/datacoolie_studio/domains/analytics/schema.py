@@ -51,6 +51,12 @@ DATAFLOW_COLUMN_TYPES = {
     "transform_filter_expression": "VARCHAR",
     "transform_additional_columns": "VARCHAR",
     "transform_schema_hints": "VARCHAR",
+    "transform_select_columns": "VARCHAR",
+    "transform_drop_columns": "VARCHAR",
+    "transform_rename_columns": "VARCHAR",
+    "transform_value_rules": "VARCHAR",
+    "transform_hash_columns": "VARCHAR",
+    "transform_masking_rules": "VARCHAR",
     "transform_configure": "VARCHAR",
     "destination_id": "VARCHAR",
     "destination_name": "VARCHAR",
@@ -159,7 +165,7 @@ JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
 CACHE_SOURCES_TABLE = "etl_cache_sources"
 ANALYTICS_META_TABLE = "etl_analytics_meta"
-ANALYTICS_SCHEMA_VERSION = 7
+ANALYTICS_SCHEMA_VERSION = 9
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 

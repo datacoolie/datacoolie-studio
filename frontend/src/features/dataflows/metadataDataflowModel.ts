@@ -77,11 +77,17 @@ const SOURCE_KEYS = [
 ];
 
 const TRANSFORM_KEYS = [
-  "transform_filter_expression",
   "transform_deduplicate_columns",
   "transform_latest_data_columns",
+  "transform_filter_expression",
   "transform_additional_columns",
   "transform_schema_hints",
+  "transform_select_columns",
+  "transform_drop_columns",
+  "transform_rename_columns",
+  "transform_value_rules",
+  "transform_hash_columns",
+  "transform_masking_rules",
   "transform_configure",
 ];
 
@@ -311,6 +317,12 @@ export function isStructuredDataflowField(key: string, value: unknown) {
     || key === "transform_filter_expression"
     || key === "transform_additional_columns"
     || key === "transform_schema_hints"
+    || key === "transform_select_columns"
+    || key === "transform_drop_columns"
+    || key === "transform_rename_columns"
+    || key === "transform_value_rules"
+    || key === "transform_hash_columns"
+    || key === "transform_masking_rules"
     || key === "destination_partition_columns"
     || Boolean(parseStructuredValue(value));
 }
@@ -356,6 +368,12 @@ const DATAFLOW_FIELD_LABELS: Record<string, string> = {
   transform_latest_data_columns: "Latest data",
   transform_additional_columns: "Additional columns",
   transform_schema_hints: "Schema hints",
+  transform_select_columns: "Select columns",
+  transform_drop_columns: "Drop columns",
+  transform_rename_columns: "Rename columns",
+  transform_value_rules: "Value rules",
+  transform_hash_columns: "Hash columns",
+  transform_masking_rules: "Masking rules",
   transform_configure: "Configure",
   destination_id: "Destination ID",
   destination_name: "Destination name",

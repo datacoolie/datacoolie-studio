@@ -76,6 +76,12 @@ DATAFLOW_COLUMNS = [
     "transform_filter_expression",
     "transform_additional_columns",
     "transform_schema_hints",
+    "transform_select_columns",
+    "transform_drop_columns",
+    "transform_rename_columns",
+    "transform_value_rules",
+    "transform_hash_columns",
+    "transform_masking_rules",
     "transform_configure",
     "destination_connection_name",
     "destination_schema_name",
@@ -357,6 +363,12 @@ def validate_editor_document(document: dict[str, Any]) -> dict[str, Any]:
                 "source_configure",
                 "transform_additional_columns",
                 "transform_schema_hints",
+                "transform_select_columns",
+                "transform_drop_columns",
+                "transform_rename_columns",
+                "transform_value_rules",
+                "transform_hash_columns",
+                "transform_masking_rules",
                 "transform_configure",
                 "destination_partition_columns",
                 "destination_configure",
@@ -1254,14 +1266,24 @@ def _environment_document_for_source(
             if _row_source_id(row) == source.id
         ]
         source_document["sheets"][sheet_name] = {
-            "columns": _merge_source_columns(base_sheet.get("columns") or [], env_sheet.get("columns") or [], rows),
+            "columns": _merge_source_columns(
+                sheet_name,
+                base_sheet.get("columns") or [],
+                env_sheet.get("columns") or [],
+                rows,
+            ),
             "rows": rows,
         }
     source_document["issues"] = validate_editor_document(source_document)["issues"]
     return source_document
 
 
-def _merge_source_columns(base_columns: list[dict[str, Any]], env_columns: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_source_columns(
+    sheet_name: str,
+    base_columns: list[dict[str, Any]],
+    env_columns: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     columns: list[dict[str, Any]] = []
     seen: set[str] = set()
     row_keys = {key for row in rows for key in row}
@@ -1279,7 +1301,7 @@ def _merge_source_columns(base_columns: list[dict[str, Any]], env_columns: list[
         columns.append({"key": key, "name": _column_display_name(key)})
     if VISIBLE_STUDIO_ROUTING_COLUMN not in seen:
         columns.append({"key": VISIBLE_STUDIO_ROUTING_COLUMN, "name": _column_display_name(VISIBLE_STUDIO_ROUTING_COLUMN)})
-    return columns
+    return _canonical_editor_columns(sheet_name, columns, rows)
 
 
 def _is_preferred_column(key: str) -> bool:
@@ -1693,6 +1715,24 @@ def _ordered_columns(sheet_name: str, rows: list[dict[str, Any]]) -> list[dict[s
     if VISIBLE_STUDIO_ROUTING_COLUMN not in keys:
         keys.append(VISIBLE_STUDIO_ROUTING_COLUMN)
     return [{"key": key, "name": _column_display_name(key)} for key in keys]
+
+
+def _canonical_editor_columns(
+    sheet_name: str,
+    columns: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    existing = {
+        str(column["key"]): dict(column)
+        for column in columns
+        if isinstance(column, dict) and column.get("key")
+    }
+    key_sentinel = {key: None for key in existing}
+    ordered = _ordered_columns(sheet_name, [*rows, key_sentinel])
+    return [
+        {**column, **existing.get(column["key"], {}), "key": column["key"]}
+        for column in ordered
+    ]
 
 
 def _ordered_dataflow_columns(preferred: list[str], seen: set[str]) -> list[str]:

@@ -133,7 +133,17 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
                     {
                         "name": "flow",
                         "source": {"connection_name": "lake", "table": "a", "custom_option": {"enabled": True}},
-                        "transform": {"additional_columns": [{"column": "x", "expression": "1"}], "custom_rule": ["a", "b"]},
+                        "transform": {
+                            "additional_columns": [{"column": "x", "expression": "1"}],
+                            "select_columns": ["id", "email"],
+                            "drop_columns": [],
+                            "rename_columns": {"email": "contact_email"},
+                            "value_rules": [{"operation": "trim", "columns": ["email"]}],
+                            "hash_columns": [{"target_column": "email_hash", "columns": ["email"]}],
+                            "masking_rules": [{"method": "redact", "columns": ["email"], "value": "[PRIVATE]"}],
+                            "configure": {"missing_column_policy": "ignore"},
+                            "custom_rule": ["a", "b"],
+                        },
                         "destination": {"connection_name": "lake", "table": "b", "load_type": "append", "custom_sink": {"mode": "fast"}},
                     }
                 ],
@@ -155,17 +165,129 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
             json={"uri": str(metadata_path), "label": "json"},
         ).json()
         document = _editor_document(client, env["id"])
+        invalid_document = json.loads(json.dumps(document))
+        invalid_document["sheets"]["dataflows"]["rows"][0]["transform_value_rules"] = "[{"
+        invalid_validation = client.post(
+            f"/api/v1/environments/{env['id']}/metadata-editor-document/validate",
+            json=invalid_document,
+        ).json()
+        save_response = client.put(
+            f"/api/v1/environments/{env['id']}/metadata-editor-document",
+            json={
+                "expected_revision": document["source"]["revision"],
+                "editor_document": document,
+                "confirm_overwrite": True,
+            },
+        )
+        assert save_response.status_code == 200
 
     columns = _column_keys(document, "dataflows")
     row = document["sheets"]["dataflows"]["rows"][0]
     assert columns.index("source_custom_option") > columns.index("source_configure")
     assert columns.index("transform_custom_rule") > columns.index("transform_configure")
     assert columns.index("destination_custom_sink") > columns.index("destination_configure")
+    assert [column for column in columns if column.startswith("transform_")] == [
+        "transform_deduplicate_columns",
+        "transform_latest_data_columns",
+        "transform_filter_expression",
+        "transform_additional_columns",
+        "transform_schema_hints",
+        "transform_select_columns",
+        "transform_drop_columns",
+        "transform_rename_columns",
+        "transform_value_rules",
+        "transform_hash_columns",
+        "transform_masking_rules",
+        "transform_configure",
+        "transform_custom_rule",
+    ]
     assert row["source_custom_option"] == '{"enabled": true}'
     assert row["transform_additional_columns"].startswith("[")
+    assert json.loads(row["transform_select_columns"]) == ["id", "email"]
+    assert json.loads(row["transform_drop_columns"]) == []
+    assert json.loads(row["transform_rename_columns"]) == {"email": "contact_email"}
+    assert json.loads(row["transform_value_rules"])[0]["operation"] == "trim"
+    assert json.loads(row["transform_hash_columns"])[0]["target_column"] == "email_hash"
+    assert json.loads(row["transform_masking_rules"])[0]["value"] == "[PRIVATE]"
+    assert json.loads(row["transform_configure"])["missing_column_policy"] == "ignore"
     assert row["destination_custom_sink"] == '{"mode": "fast"}'
+    assert any(
+        issue["column"] == "transform_value_rules" and issue["severity"] == "error"
+        for issue in invalid_validation["issues"]
+    )
+    saved_transform = json.loads(metadata_path.read_text(encoding="utf-8"))["dataflows"][0]["transform"]
+    assert saved_transform["select_columns"] == ["id", "email"]
+    assert saved_transform["drop_columns"] == []
+    assert saved_transform["rename_columns"] == {"email": "contact_email"}
+    assert saved_transform["value_rules"][0]["operation"] == "trim"
+    assert saved_transform["hash_columns"][0]["target_column"] == "email_hash"
+    assert saved_transform["masking_rules"][0]["value"] == "[PRIVATE]"
 
     monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+
+
+def test_environment_metadata_merge_reorders_columns_from_stale_materializations():
+    from datacoolie_studio.domains.metadata.service import _merge_editor_sheet_documents
+
+    canonical_before_expansion = [
+        "transform_deduplicate_columns",
+        "transform_latest_data_columns",
+        "transform_filter_expression",
+        "transform_additional_columns",
+        "transform_schema_hints",
+        "transform_configure",
+        "destination_connection_name",
+        "__metadata_source_name",
+    ]
+    expanded_columns = [
+        "transform_select_columns",
+        "transform_drop_columns",
+        "transform_rename_columns",
+        "transform_value_rules",
+        "transform_hash_columns",
+        "transform_masking_rules",
+    ]
+    documents = [
+        {
+            "sheets": {
+                "dataflows": {
+                    "columns": [{"key": key, "name": key} for key in canonical_before_expansion],
+                    "rows": [{"name": "old_materialization"}],
+                }
+            }
+        },
+        {
+            "sheets": {
+                "dataflows": {
+                    "columns": [{"key": key, "name": key} for key in expanded_columns],
+                    "rows": [{"name": "new_materialization"}],
+                }
+            }
+        },
+    ]
+
+    merged = _merge_editor_sheet_documents(documents, "dataflows")
+    transform_columns = [
+        column["key"]
+        for column in merged["columns"]
+        if column["key"].startswith("transform_")
+    ]
+
+    assert transform_columns == [
+        "transform_deduplicate_columns",
+        "transform_latest_data_columns",
+        "transform_filter_expression",
+        "transform_additional_columns",
+        "transform_schema_hints",
+        "transform_select_columns",
+        "transform_drop_columns",
+        "transform_rename_columns",
+        "transform_value_rules",
+        "transform_hash_columns",
+        "transform_masking_rules",
+        "transform_configure",
+    ]
+    assert merged["columns"][-1]["key"] == "__metadata_source_name"
 
 
 def test_metadata_editor_materializes_default_is_active_for_studio(tmp_path: Path, monkeypatch):

@@ -163,6 +163,21 @@ export interface StudioResultCacheStatus {
   memory: { entries: number; bytes: number };
 }
 
+export interface AnalyticsUpgradeStatus {
+  state: "not_required" | "current" | "pending" | "building" | "validating" | "publishing" | "succeeded" | "failed";
+  source_schema_version?: number | null;
+  target_schema_version?: number | null;
+  source_ids?: number[];
+  completed_source_ids?: number[];
+  attempt_count?: number;
+  error_code?: string | null;
+  error_message?: string | null;
+  next_retry_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface StudioCacheStatus {
   result_cache: StudioResultCacheStatus;
   analytics_cache: {
@@ -177,6 +192,7 @@ export interface StudioCacheStatus {
     dataflow_rows: number;
     job_rows: number;
     filter_values: number;
+    upgrade?: AnalyticsUpgradeStatus | null;
   };
   sync_job_retention?: Record<string, unknown> | null;
 }

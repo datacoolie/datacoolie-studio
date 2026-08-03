@@ -54,7 +54,9 @@ interface MonitoringViewProps {
   reportLoading: boolean;
   reportError: string | null;
   reportErrorCode: string | null;
+  reportErrorReason: string | null;
   onRetryReport: () => void;
+  onRetryUpgrade: () => void;
   onOpenSources: () => void;
   filterOptions: MonitoringFilterOptionsResponse | null;
 }
@@ -87,7 +89,9 @@ export function MonitoringView({
   reportLoading,
   reportError,
   reportErrorCode,
+  reportErrorReason,
   onRetryReport,
+  onRetryUpgrade,
   onOpenSources,
   filterOptions,
 }: MonitoringViewProps) {
@@ -290,12 +294,22 @@ export function MonitoringView({
   if (!reportForView && !reportLoading) {
     if (reportError) {
       if (reportErrorCode === "analytics_rebuild_required") {
+        const upgradeInProgress = reportErrorReason === "analytics_upgrade_in_progress";
+        const upgradeFailed = reportErrorReason === "analytics_upgrade_failed";
         return (
           <EmptyState
             icon={<AlertTriangle size={24} />}
-            title="Monitoring analytics need to be rebuilt"
-            detail="Sync the Log sources to recreate the disposable analytics cache. Source configuration and sync history are preserved."
-            action={<button onClick={onOpenSources}>Open Sources</button>}
+            title={upgradeInProgress ? "Updating Monitoring analytics" : upgradeFailed ? "Analytics upgrade needs retry" : "Monitoring analytics need to be rebuilt"}
+            detail={upgradeInProgress
+              ? "Studio is rebuilding every Log source into a validated DuckDB candidate. This page refreshes automatically."
+              : upgradeFailed
+                ? "The previous cache is still intact. Studio will retry automatically, or you can retry now."
+                : "Sync the Log sources to recreate the disposable analytics cache. Source configuration and sync history are preserved."}
+            action={upgradeFailed
+              ? <button onClick={onRetryUpgrade}>Retry upgrade</button>
+              : upgradeInProgress
+                ? <button onClick={onRetryReport}>Check status</button>
+                : <button onClick={onOpenSources}>Open Sources</button>}
           />
         );
       }
@@ -446,8 +460,8 @@ export function MonitoringView({
             Could not load {pages.find((page) => page.key === activePage)?.label ?? "page"}; showing{" "}
             {pages.find((page) => page.key === displayedPage)?.label ?? "previous page"}.
           </span>
-          <button onClick={reportErrorCode === "analytics_rebuild_required" ? onOpenSources : onRetryReport}>
-            {reportErrorCode === "analytics_rebuild_required" ? "Open Sources" : "Retry"}
+          <button onClick={reportErrorReason === "analytics_upgrade_failed" ? onRetryUpgrade : reportErrorReason === "analytics_upgrade_in_progress" ? onRetryReport : reportErrorCode === "analytics_rebuild_required" ? onOpenSources : onRetryReport}>
+            {reportErrorReason === "analytics_upgrade_failed" ? "Retry upgrade" : reportErrorReason === "analytics_upgrade_in_progress" ? "Check status" : reportErrorCode === "analytics_rebuild_required" ? "Open Sources" : "Retry"}
           </button>
         </div>
       ) : null}

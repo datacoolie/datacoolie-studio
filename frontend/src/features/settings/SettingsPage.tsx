@@ -56,6 +56,7 @@ export function SettingsPage({
   const closeConfigurationDrawer = useCallback(() => setConfigurationDrawerOpen(false), []);
   const workspaceDatabase = diagnostics?.workspace_database;
   const analyticsCache = cache.status?.analytics_cache;
+  const analyticsUpgrade = analyticsCache?.upgrade;
   const resultCache = cache.status?.result_cache;
 
   const maintenanceBusy = cache.busyAction !== null || workspaceMaintenanceBusy;
@@ -250,6 +251,14 @@ export function SettingsPage({
             <div className="settings-stat-card">
               <div className="settings-stat-card-header">
                 <p className="settings-stat-label">Analytics cache</p>
+                {analyticsUpgrade?.state === "failed" ? (
+                  <button
+                    type="button"
+                    className="settings-section-action"
+                    disabled={maintenanceBusy}
+                    onClick={() => { void cache.retryUpgrade().catch(() => undefined); }}
+                  >{cache.busyAction === "analytics-upgrade:retry" ? "Retrying…" : "Retry upgrade"}</button>
+                ) : null}
                 <button
                   type="button"
                   className="settings-section-action"
@@ -267,6 +276,18 @@ export function SettingsPage({
                 <StatRow label="Backend" value={analyticsCache?.backend ?? loadingValue(cache.loading)} />
                 <StatRow label="Path" value={analyticsCache?.path ?? loadingValue(cache.loading)} code />
                 <StatRow label="File" value={analyticsCache ? formatBytes(analyticsCache.file_bytes) : loadingValue(cache.loading)} />
+                {analyticsUpgrade ? (
+                  <StatRow label="Upgrade" value={analyticsUpgradeLabel(analyticsUpgrade.state)} />
+                ) : null}
+                {analyticsUpgrade?.source_ids?.length ? (
+                  <StatRow
+                    label="Progress"
+                    value={`${analyticsUpgrade.completed_source_ids?.length ?? 0} / ${analyticsUpgrade.source_ids.length} sources`}
+                  />
+                ) : null}
+                {analyticsUpgrade?.state === "failed" && analyticsUpgrade.error_message ? (
+                  <StatRow label="Upgrade error" value={analyticsUpgrade.error_message} />
+                ) : null}
                 <StatRow
                   label="Rows"
                   value={analyticsCache
@@ -358,6 +379,20 @@ function StatRow({ label, value, code = false }: { label: string; value: string;
 
 function loadingValue(loading: boolean): string {
   return loading ? "Loading…" : "—";
+}
+
+function analyticsUpgradeLabel(state: string): string {
+  const labels: Record<string, string> = {
+    pending: "Waiting to upgrade",
+    building: "Rebuilding from Log sources",
+    validating: "Validating candidate",
+    publishing: "Publishing atomically",
+    succeeded: "Current",
+    current: "Current",
+    failed: "Retry scheduled",
+    not_required: "Not required",
+  };
+  return labels[state] ?? state;
 }
 
 function cacheMutationMessage(action: StudioCacheAction): string {

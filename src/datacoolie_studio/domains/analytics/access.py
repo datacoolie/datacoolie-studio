@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import Any, Iterator
 
 import duckdb
@@ -14,7 +14,7 @@ from datacoolie_studio.domains.analytics.connections import analytics_connection
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 
 
-analytics_maintenance_lock = Lock()
+analytics_maintenance_lock = RLock()
 
 
 def connect(path: Path, *, read_only: bool = False):
@@ -97,6 +97,9 @@ def reader(source_ids: list[int]) -> Iterator[tuple[Any, list[int], str]]:
         try:
             token = materialization_token_from_connection(conn, source_ids)
         except AnalyticsRebuildRequired as exc:
+            upgrade_error = _upgrade_error(source_ids)
+            if upgrade_error is not None:
+                raise upgrade_error from exc
             yield None, [], unavailable_token(source_ids, exc.reason)
         else:
             yield conn, source_ids, token
@@ -140,9 +143,45 @@ def materialization_token_from_connection(
     )
 
 
+def validate_source_complete_candidate(conn, expected_source_ids: list[int]) -> None:
+    materialization_token_from_connection(conn, expected_source_ids)
+    cached_source_ids = store.cache_source_ids(conn)
+    if cached_source_ids != set(expected_source_ids):
+        raise AnalyticsRebuildRequired(
+            "Monitoring analytics candidate has unexpected source coverage",
+            source_ids=expected_source_ids,
+            missing_source_ids=sorted(set(expected_source_ids) - cached_source_ids),
+            reason="source_scope_changed",
+        )
+
+
 def unavailable_token(source_ids: list[int], reason: str) -> str:
     source_key = ",".join(str(source_id) for source_id in source_ids)
     return (
         f"analytics-v{schema.ANALYTICS_SCHEMA_VERSION}:"
         f"unavailable:{reason}:{source_key}"
+    )
+
+
+def _upgrade_error(source_ids: list[int]) -> AnalyticsRebuildRequired | None:
+    from datacoolie_studio.domains.analytics_upgrade.service import (
+        current_upgrade_status,
+    )
+
+    status = current_upgrade_status()
+    if status is None:
+        return None
+    state = str(status.get("state") or "")
+    if state not in {"pending", "building", "validating", "publishing", "failed"}:
+        return None
+    failed = state == "failed"
+    return AnalyticsRebuildRequired(
+        (
+            "Monitoring analytics upgrade failed and will be retried"
+            if failed
+            else "Monitoring analytics are being upgraded"
+        ),
+        source_ids=source_ids,
+        missing_source_ids=source_ids,
+        reason="analytics_upgrade_failed" if failed else "analytics_upgrade_in_progress",
     )

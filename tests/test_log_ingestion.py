@@ -3,13 +3,61 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
+
+
+def test_cache_rebuild_keeps_fresh_planned_revision_over_stale_manifest() -> None:
+    from datacoolie_studio.domains.logs.ingestion import (
+        _merge_rebuild_candidates,
+    )
+    from datacoolie_studio.domains.storage.adapters import StorageRevision
+
+    uri = "s3://bucket/logs/jobs.jsonl"
+    fresh_revision = StorageRevision(
+        canonical_uri=uri,
+        size=21,
+        last_modified=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        provider_revision="etag-fresh",
+    )
+    planned = SimpleNamespace(
+        canonical_uri=uri,
+        revision=fresh_revision,
+        partition=SimpleNamespace(partition_value=datetime(2026, 8, 2).date()),
+    )
+    manifest = SimpleNamespace(
+        file_kind="job_jsonl",
+        file_uri=uri,
+        revision_json=json.dumps(
+            {
+                "size": 17,
+                "last_modified": "2026-07-22T00:00:00+00:00",
+                "provider_revision": "etag-stale",
+            }
+        ),
+        partition_value=None,
+        run_date=None,
+        partition_format=None,
+    )
+
+    class Adapter:
+        def stat(self, _uri: str):
+            raise AssertionError("a currently planned object must not be restatted")
+
+    candidates = _merge_rebuild_candidates(
+        Adapter(),
+        [(planned, "job_jsonl")],
+        [manifest],
+        {},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0][0].revision == fresh_revision
 
 
 def test_cache_rebuild_reuses_manifest_revisions_without_provider_stat() -> None:

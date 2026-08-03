@@ -3432,10 +3432,35 @@ body,
 }
 
 .source-card-path-inline code {
+  flex: 1 1 auto;
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
   white-space: normal;
+}
+
+.source-card-path-copy {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  min-height: 28px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-subtle);
+  cursor: pointer;
+}
+
+.source-card-path-copy:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.source-card-path-copy.is-copied {
+  background: var(--color-success-soft);
+  color: var(--color-success);
 }
 
 .source-card-status {

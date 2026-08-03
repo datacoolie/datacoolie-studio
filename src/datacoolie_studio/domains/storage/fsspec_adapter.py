@@ -182,8 +182,8 @@ class FsspecStorageAdapter:
         target: Path,
         expected_revision: StorageRevision | None = None,
     ) -> StorageRevision:
-        before = expected_revision or self.stat(uri)
-        if expected_revision and not before.same_content_as(expected_revision):
+        before = self.stat(uri)
+        if expected_revision and not before.same_object_state_as(expected_revision):
             raise StorageConflictError(uri, "Source revision changed before materialization")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
@@ -194,7 +194,7 @@ class FsspecStorageAdapter:
                     digest.update(chunk)
                     output.write(chunk)
             after = self.stat(uri)
-            if not before.same_content_as(after):
+            if not before.same_object_state_as(after):
                 raise StorageConflictError(uri, "Source revision changed during materialization")
             os.replace(temporary, target)
         finally:

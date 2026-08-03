@@ -43,6 +43,10 @@ DATAFLOW_SORT_COLUMNS = {
     "engine_name": "COALESCE(j.engine_name, 'unknown')",
 }
 
+DATAFLOW_CONFIGURE_DERIVED_COLUMNS = {
+    "transform_missing_column_policy",
+}
+
 
 JOB_SORT_COLUMNS = {
     "end_time": "j.__event_time",
@@ -242,6 +246,11 @@ def query_cached_dataflow_logs(
     with reader(paths) as (conn, source_ids, _generation):
         if conn is None or not source_ids:
             return [], 0, []
+        dataflow_select_sql = _select_alias_columns(
+            "d",
+            analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE),
+            exclude=DATAFLOW_CONFIGURE_DERIVED_COLUMNS,
+        )
         source_placeholders = ", ".join("?" for _ in source_ids)
         where_sql, params = _monitoring_filter_sql(filters, "d", "j")
         job_lookup_sql = (
@@ -270,7 +279,7 @@ def query_cached_dataflow_logs(
         result = conn.execute(
             f"""
             SELECT
-              d.*,
+              {dataflow_select_sql},
               COALESCE(j.engine_name, 'unknown') AS engine_name,
               COALESCE(j.metadata_provider_name, 'unknown') AS metadata_provider_name,
               COALESCE(j.platform_name, 'unknown') AS platform_name,

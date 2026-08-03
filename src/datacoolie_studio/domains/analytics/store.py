@@ -126,35 +126,71 @@ def publish_rows(
 ) -> dict[str, Any]:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
+    with analytics_access.analytics_maintenance_lock:
+        return _publish_rows_locked(
+            source_id,
+            dataflow_files,
+            job_rows,
+            removed_files,
+            changed_files,
+            database_path=database_path,
+            source_files=source_files,
+        )
+
+
+def _publish_rows_locked(
+    source_id: int,
+    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
+    job_rows: list[tuple[str, str, str, dict[str, Any]]],
+    removed_files: list[str],
+    changed_files: list[str],
+    *,
+    database_path: Path,
+    source_files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    from datacoolie_studio.domains.analytics import access as analytics_access
+
     path = database_path
+    blocked_status = _blocking_upgrade_status(path)
+    if blocked_status is not None:
+        return {
+            "parsed_dataflow_records": 0,
+            "file_row_counts": {},
+            "errors": [
+                {
+                    "uri": str(path),
+                    "message": "A complete analytics cache upgrade is in progress",
+                    "code": "analytics_upgrade_in_progress",
+                }
+            ],
+            "published": False,
+        }
     if analytics_access.schema_rebuild_required(path):
-        with analytics_access.analytics_maintenance_lock:
-            if analytics_access.schema_rebuild_required(path):
-                candidate_path = analytics_access.candidate_path(path)
-                analytics_access.discard_candidate(candidate_path)
-                result = _write_duckdb_rows(
-                    candidate_path,
-                    source_id,
-                    dataflow_files,
-                    job_rows,
-                    removed_files,
-                    changed_files,
-                    source_files=source_files,
+        candidate_path = analytics_access.candidate_path(path)
+        analytics_access.discard_candidate(candidate_path)
+        result = _write_duckdb_rows(
+            candidate_path,
+            source_id,
+            dataflow_files,
+            job_rows,
+            removed_files,
+            changed_files,
+            source_files=source_files,
+        )
+        if result["published"]:
+            try:
+                _validate_analytics_candidate(candidate_path, [source_id])
+                analytics_access.swap_candidate(candidate_path, path)
+            except Exception as exc:
+                result["errors"].append(
+                    {
+                        "uri": str(candidate_path),
+                        "message": str(exc),
+                        "code": getattr(exc, "code", "publish_failed"),
+                    }
                 )
-                if result["published"]:
-                    try:
-                        _validate_analytics_candidate(candidate_path, source_id)
-                        analytics_access.swap_candidate(candidate_path, path)
-                    except Exception as exc:
-                        result["errors"].append(
-                            {
-                                "uri": str(candidate_path),
-                                "message": str(exc),
-                                "code": getattr(exc, "code", "publish_failed"),
-                            }
-                        )
-                        result["published"] = False
-                return result
+                result["published"] = False
+        return result
     return _write_duckdb_rows(
         path,
         source_id,
@@ -164,6 +200,24 @@ def publish_rows(
         changed_files,
         source_files=source_files,
     )
+
+
+def _blocking_upgrade_status(path: Path) -> dict[str, Any] | None:
+    from datacoolie_studio.domains.analytics_upgrade.service import (
+        current_upgrade_status,
+    )
+
+    status = current_upgrade_status()
+    if status is None or status.get("state") not in {
+        "pending",
+        "building",
+        "validating",
+        "publishing",
+        "failed",
+    }:
+        return None
+    candidate = status.get("candidate_path")
+    return None if candidate and Path(str(candidate)) == path else status
 
 
 def _write_duckdb_rows(
@@ -291,16 +345,26 @@ def ensure_tables(conn) -> None:
     _migrate_legacy_cache(conn)
 
 
-def _validate_analytics_candidate(candidate_path: Path, source_id: int) -> None:
+def _validate_analytics_candidate(
+    candidate_path: Path,
+    source_ids: list[int],
+) -> None:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
     if not analytics_access.cache_is_ready(candidate_path):
         raise RuntimeError("Analytics rebuild candidate did not create the current typed schema")
     conn = analytics_access.connect(candidate_path, read_only=True)
     try:
-        analytics_access.materialization_token_from_connection(conn, [source_id])
+        analytics_access.validate_source_complete_candidate(conn, source_ids)
     finally:
         conn.close()
+
+
+def validate_analytics_candidate(
+    candidate_path: Path,
+    source_ids: list[int],
+) -> None:
+    _validate_analytics_candidate(candidate_path, source_ids)
 
 
 def refresh_filter_values(conn, source_id: int) -> None:

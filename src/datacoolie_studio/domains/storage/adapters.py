@@ -53,15 +53,16 @@ class StorageRevision:
 
     def same_object_state_as(self, other: StorageRevision) -> bool:
         """Compare observable state when one response omits a version token."""
+        revisions_match = (
+            self.provider_revision == other.provider_revision
+            if self.provider_revision is not None
+            and other.provider_revision is not None
+            else self.last_modified == other.last_modified
+        )
         return (
             self.canonical_uri == other.canonical_uri
             and self.size == other.size
-            and self.last_modified == other.last_modified
-            and (
-                self.provider_revision is None
-                or other.provider_revision is None
-                or self.provider_revision == other.provider_revision
-            )
+            and revisions_match
         )
 
 

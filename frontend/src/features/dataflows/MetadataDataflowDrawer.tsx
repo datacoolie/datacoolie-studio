@@ -642,6 +642,10 @@ function structuredFieldPlaceholder(fieldKey: string) {
   if (fieldKey === "configure" || fieldKey.endsWith("_configure")) return '{ "option": "value" }';
   if (fieldKey === "transform_additional_columns") return '{ "new_column": "expression" }';
   if (fieldKey === "transform_schema_hints") return '{ "column_name": "string" }';
+  if (fieldKey === "transform_rename_columns") return '{ "old_name": "new_name" }';
+  if (fieldKey === "transform_value_rules") return '[{ "operation": "trim", "columns": ["column_name"] }]';
+  if (fieldKey === "transform_hash_columns") return '[{ "target_column": "column_hash", "columns": ["column_name"] }]';
+  if (fieldKey === "transform_masking_rules") return '[{ "method": "redact", "columns": ["column_name"], "value": "[PRIVATE]" }]';
   if (fieldKey === "destination_partition_columns") return '["partition_column"]';
   if (fieldKey.endsWith("_columns")) return '["column_name"]';
   return '{ "key": "value" }';

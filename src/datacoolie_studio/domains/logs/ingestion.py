@@ -199,6 +199,11 @@ def _merge_rebuild_candidates(
     for row in manifest_rows:
         if row.file_kind not in {"dataflow_parquet", "job_jsonl"}:
             continue
+        identity = (row.file_kind, row.file_uri)
+        if identity in by_identity:
+            # The planner observed this object during the current sync. Keep that
+            # fresh revision instead of replacing it with a stale manifest value.
+            continue
         revision = _file_revision_from_json(
             row.file_uri,
             row.revision_json,
@@ -221,7 +226,7 @@ def _merge_rebuild_candidates(
             or (state.partition_format if state is not None else None)
             or ""
         )
-        by_identity[(row.file_kind, row.file_uri)] = (
+        by_identity[identity] = (
             DiscoveredLogFile(
                 partition=ParsedPartition(
                     partition_value=partition_value,
@@ -361,6 +366,8 @@ def refresh_log_source_cache(
     job_type: str = "force_refresh",
     sync_spec: LogSyncSpec | None = None,
     secret_store: CredentialSecretStore | None = None,
+    database_path_override: Path | None = None,
+    force_analytics_replay: bool = False,
 ) -> dict[str, Any]:
     operation_started = time.perf_counter()
     try:
@@ -370,8 +377,12 @@ def refresh_log_source_cache(
             job_type=job_type,
             sync_spec=sync_spec,
             secret_store=secret_store,
+            database_path_override=database_path_override,
+            force_analytics_replay=force_analytics_replay,
             operation_started=operation_started,
         )
+    except sync.SyncJobOverlapError:
+        return sync.source_sync_status(session, source)
     except Exception as exc:
         checked_at = utc_now()
         error = {
@@ -424,6 +435,8 @@ def _refresh_log_source_cache_impl(
     job_type: str = "force_refresh",
     sync_spec: LogSyncSpec | None = None,
     secret_store: CredentialSecretStore | None = None,
+    database_path_override: Path | None = None,
+    force_analytics_replay: bool = False,
     operation_started: float | None = None,
 ) -> dict[str, Any]:
     if source.source_kind != "logs":
@@ -532,7 +545,15 @@ def _refresh_log_source_cache_impl(
         plan.definition.stream_kind: plan
         for plan in stream_plans
     }
-    cache_has_source = _analytics_cache_has_source(source.id)
+    target_analytics_path = database_path_override or analytics_database_path()
+    cache_has_source = (
+        False
+        if force_analytics_replay
+        else _analytics_cache_has_source(
+            source.id,
+            database_path=target_analytics_path,
+        )
+    )
     analytic_candidates = [
         (candidate, plan.definition.stream_kind)
         for plan in stream_plans
@@ -648,7 +669,7 @@ def _refresh_log_source_cache_impl(
             parsed_job_rows,
             [],
             changed_file_uris,
-            database_path=analytics_database_path(),
+            database_path=target_analytics_path,
             source_files=changed_files,
         )
     else:
@@ -1062,8 +1083,12 @@ def _cached_analytics_source_ids(source_ids: list[int]) -> set[int]:
         conn.close()
 
 
-def _analytics_cache_has_source(source_id: int) -> bool:
-    path = analytics_database_path()
+def _analytics_cache_has_source(
+    source_id: int,
+    *,
+    database_path: Path | None = None,
+) -> bool:
+    path = database_path or analytics_database_path()
     if not path.exists() or not analytics_access.cache_is_ready(path):
         return False
     conn = analytics_access.connect(path, read_only=True)

@@ -287,6 +287,10 @@ export interface paths {
     /** Get Studio Cache */
     get: operations["get_studio_cache_api_v1_studio_cache_get"];
   };
+  "/api/v1/studio/cache/analytics-upgrade/retry": {
+    /** Retry Analytics Upgrade */
+    post: operations["retry_analytics_upgrade_api_v1_studio_cache_analytics_upgrade_retry_post"];
+  };
   "/api/v1/studio/cache/clear": {
     /** Clear Studio Cache */
     post: operations["clear_studio_cache_api_v1_studio_cache_clear_post"];
@@ -335,6 +339,36 @@ export type webhooks = Record<string, never>;
 
 export interface components {
   schemas: {
+    /** AnalyticsUpgradeStatusResponse */
+    AnalyticsUpgradeStatusResponse: {
+      /**
+       * Attempt Count
+       * @default 0
+       */
+      attempt_count?: number;
+      /** Completed At */
+      completed_at?: string | null;
+      /** Completed Source Ids */
+      completed_source_ids?: number[];
+      /** Error Code */
+      error_code?: string | null;
+      /** Error Message */
+      error_message?: string | null;
+      /** Next Retry At */
+      next_retry_at?: string | null;
+      /** Source Ids */
+      source_ids?: number[];
+      /** Source Schema Version */
+      source_schema_version?: number | null;
+      /** Started At */
+      started_at?: string | null;
+      /** State */
+      state: string;
+      /** Target Schema Version */
+      target_schema_version?: number | null;
+      /** Updated At */
+      updated_at?: string | null;
+    };
     /** AssetAttentionResponse */
     AssetAttentionResponse: {
       /** Code */
@@ -5015,6 +5049,17 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["StudioCacheStatusResponse"];
+        };
+      };
+    };
+  };
+  /** Retry Analytics Upgrade */
+  retry_analytics_upgrade_api_v1_studio_cache_analytics_upgrade_retry_post: {
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["AnalyticsUpgradeStatusResponse"];
         };
       };
     };

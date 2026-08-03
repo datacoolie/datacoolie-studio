@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.db.models import EnvironmentSource, MetadataMaterialization, utc_now
 from datacoolie_studio.domains.freshness.service import metadata_catalog_version
 from datacoolie_studio.domains.metadata.editor import (
+    _canonical_editor_columns,
     _metadata_source_name,
     load_editor_document_from_raw,
     load_environment_editor_draft,
@@ -503,7 +504,10 @@ def _merge_editor_sheet_documents(documents: list[dict], sheet_name: str) -> dic
             seen_columns.add(str(key))
             columns.append(column)
         rows.extend(row for row in sheet.get("rows") or [] if isinstance(row, dict))
-    return {"columns": columns, "rows": rows}
+    return {
+        "columns": _canonical_editor_columns(sheet_name, columns, rows),
+        "rows": rows,
+    }
 
 
 def _same_revision_json(current: dict, stored_json: str | None) -> bool:

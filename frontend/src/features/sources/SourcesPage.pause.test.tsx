@@ -78,6 +78,7 @@ describe("SourcesPage paused observation", () => {
     expect(markup).toContain("Last error: access denied");
     expect(markup).toContain("Retry now");
     expect(markup).toContain("Successful Validate or Sync");
+    expect(markup).toContain('aria-label="Copy path"');
   });
 
   it("shows retry progress and disables the retry action", () => {

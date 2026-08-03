@@ -23,6 +23,7 @@ export interface StudioCacheState {
   reload: () => Promise<void>;
   clear: (scope: StudioCacheScope, features?: StudioCacheFeature[]) => Promise<void>;
   compact: () => Promise<void>;
+  retryUpgrade: () => Promise<void>;
   dismissFeedback: () => void;
 }
 
@@ -34,8 +35,8 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
   const [error, setError] = useState<string | null>(null);
   const [lastAction, setLastAction] = useState<StudioCacheAction | null>(null);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
+  const fetchStatus = useCallback(async (showLoading: boolean) => {
+    if (showLoading) setLoading(true);
     setError(null);
     try {
       setStatus(await api.getStudioCache());
@@ -43,13 +44,26 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
       setError(toErrorMessage(err));
       throw err;
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, []);
+
+  const reload = useCallback(() => fetchStatus(true), [fetchStatus]);
 
   useEffect(() => {
     void reload().catch(() => undefined);
   }, [reload]);
+
+  const upgradeState = status?.analytics_cache.upgrade?.state;
+  useEffect(() => {
+    if (!upgradeState || !["pending", "building", "validating", "publishing"].includes(upgradeState)) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      void fetchStatus(false).catch(() => undefined);
+    }, 2_000);
+    return () => window.clearTimeout(timer);
+  }, [fetchStatus, upgradeState]);
 
   const refreshDiagnostics = useCallback(async () => {
     const tasks: Array<Promise<unknown>> = [reload()];
@@ -97,10 +111,25 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
     }
   }, [refreshDiagnostics]);
 
+  const retryUpgrade = useCallback(async () => {
+    setBusyAction("analytics-upgrade:retry");
+    setError(null);
+    setLastAction(null);
+    try {
+      await api.retryAnalyticsUpgrade();
+      await fetchStatus(false);
+    } catch (err) {
+      setError(toErrorMessage(err));
+      throw err;
+    } finally {
+      setBusyAction(null);
+    }
+  }, [fetchStatus]);
+
   const dismissFeedback = useCallback(() => {
     setError(null);
     setLastAction(null);
   }, []);
 
-  return { status, loading, busyAction, error, lastAction, reload, clear, compact, dismissFeedback };
+  return { status, loading, busyAction, error, lastAction, reload, clear, compact, retryUpgrade, dismissFeedback };
 }

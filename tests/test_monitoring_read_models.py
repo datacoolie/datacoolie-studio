@@ -698,6 +698,9 @@ def test_freshness_read_model_aggregates_at_dataflow_grain() -> None:
     assert row["destination_table"] == "curated.orders"
     assert row["destination_path"] == "/lakehouse/curated/orders"
     assert row["dataflow_description"] == "Load orders"
+    assert row["transform_select_columns"] == '["id", "email"]'
+    assert row["transform_rename_columns"] == '{"email": "contact_email"}'
+    assert row["transform_configure"] == '{"missing_column_policy": "ignore"}'
 
 
 def test_freshness_read_model_tracks_the_actual_consecutive_skipped_streak() -> None:
@@ -939,6 +942,13 @@ def _dataflow_metric_connection(*, include_asset_metadata: bool = False):
             "destination_format": "delta",
             "destination_table": "curated.orders",
             "destination_path": "/lakehouse/curated/orders",
+            "transform_select_columns": '["id", "email"]',
+            "transform_drop_columns": "[]",
+            "transform_rename_columns": '{"email": "contact_email"}',
+            "transform_value_rules": '[{"operation": "trim", "columns": ["email"]}]',
+            "transform_hash_columns": '[{"target_column": "email_hash", "columns": ["email"]}]',
+            "transform_masking_rules": '[{"method": "redact", "columns": ["email"]}]',
+            "transform_configure": '{"missing_column_policy": "ignore"}',
         })
     analytics_store.insert_typed_rows(
         connection,

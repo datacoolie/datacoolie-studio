@@ -16,6 +16,7 @@ from datacoolie_studio.api.v1.contracts.sources import (
     SourcesWorkspaceResponse,
 )
 from datacoolie_studio.api.v1.contracts.workspace import (
+    AnalyticsUpgradeStatusResponse,
     EnvironmentCreate,
     EnvironmentRead,
     EnvironmentRename,
@@ -48,6 +49,10 @@ from datacoolie_studio.domains.sources.initialization import (
     run_source_initialization_jobs,
 )
 from datacoolie_studio.domains.cache_admin import service as cache_admin
+from datacoolie_studio.domains.analytics_upgrade.service import (
+    request_analytics_upgrade_retry,
+    run_analytics_upgrade_once,
+)
 from datacoolie_studio.domains.studio_settings import service as studio_settings
 from datacoolie_studio.domains.workspace import service as workspace
 from datacoolie_studio.domains.storage.errors import (
@@ -79,6 +84,19 @@ def compact_workspace_database(_payload: StudioWorkspaceDatabaseMaintenanceReque
 @router.get("/studio/cache", response_model=StudioCacheStatusResponse)
 def get_studio_cache(session: Session = Depends(get_session)):
     return cache_admin.cache_status(session)
+
+
+@router.post(
+    "/studio/cache/analytics-upgrade/retry",
+    response_model=AnalyticsUpgradeStatusResponse,
+)
+def retry_analytics_upgrade(
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    status = request_analytics_upgrade_retry(session)
+    background_tasks.add_task(run_analytics_upgrade_once)
+    return status
 
 
 @router.post("/studio/cache/clear", response_model=StudioCacheMutationResponse)

@@ -134,34 +134,33 @@ def purge_source_ids(source_ids: list[int]) -> dict[str, int]:
             "job_rows_deleted": 0,
             "filter_values_deleted": 0,
         }
-    conn = access.connect(path)
-    try:
-        dataflow_rows = store.delete_rows_by_source_ids(
-            conn,
-            schema.DATAFLOW_TABLE,
-            unique_ids,
-        )
-        job_rows = store.delete_rows_by_source_ids(
-            conn,
-            schema.JOB_TABLE,
-            unique_ids,
-        )
-        filter_rows = store.delete_rows_by_source_ids(
-            conn,
-            schema.FILTER_VALUES_TABLE,
-            unique_ids,
-        )
-        for table_name in (
-            schema.CACHE_SOURCES_TABLE,
-        ):
-            store.delete_rows_by_source_ids(
+    with access.analytics_maintenance_lock:
+        conn = access.connect(path)
+        try:
+            dataflow_rows = store.delete_rows_by_source_ids(
                 conn,
-                table_name,
+                schema.DATAFLOW_TABLE,
                 unique_ids,
-                source_column="source_id",
             )
-    finally:
-        conn.close()
+            job_rows = store.delete_rows_by_source_ids(
+                conn,
+                schema.JOB_TABLE,
+                unique_ids,
+            )
+            filter_rows = store.delete_rows_by_source_ids(
+                conn,
+                schema.FILTER_VALUES_TABLE,
+                unique_ids,
+            )
+            for table_name in (schema.CACHE_SOURCES_TABLE,):
+                store.delete_rows_by_source_ids(
+                    conn,
+                    table_name,
+                    unique_ids,
+                    source_column="source_id",
+                )
+        finally:
+            conn.close()
     return {
         "dataflow_rows_deleted": dataflow_rows,
         "job_rows_deleted": job_rows,

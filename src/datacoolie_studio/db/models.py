@@ -294,6 +294,37 @@ class SyncJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AnalyticsUpgrade(Base):
+    """Durable state for the single disposable DuckDB cache upgrade."""
+
+    __tablename__ = "analytics_upgrades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    source_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    completed_source_ids_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class LogFileManifest(Base):
     __tablename__ = "log_file_manifest"
     __table_args__ = (

@@ -42,6 +42,8 @@ export type StudioPathInfo = TransportView<Schemas["StudioPathInfo"], Ui.StudioP
 export type StudioCacheMutation =
   TransportView<Schemas["StudioCacheMutationResponse"], Ui.StudioCacheMutation>;
 export type StudioCacheStatus = TransportView<Schemas["StudioCacheStatusResponse"], Ui.StudioCacheStatus>;
+export type AnalyticsUpgradeStatus =
+  TransportView<Schemas["AnalyticsUpgradeStatusResponse"], Ui.AnalyticsUpgradeStatus>;
 export type StudioSettings = TransportView<Schemas["StudioSettingsResponse"], Ui.StudioSettings>;
 export type ModuleInfo = TransportView<Schemas["ModuleInfo"], Ui.ModuleInfo>;
 

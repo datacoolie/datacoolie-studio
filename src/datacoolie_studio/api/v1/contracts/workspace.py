@@ -203,6 +203,21 @@ class StudioCacheStatusResponse(BaseModel):
     sync_job_retention: dict[str, Any] | None = None
 
 
+class AnalyticsUpgradeStatusResponse(BaseModel):
+    state: str
+    source_schema_version: int | None = None
+    target_schema_version: int | None = None
+    source_ids: list[int] = Field(default_factory=list)
+    completed_source_ids: list[int] = Field(default_factory=list)
+    attempt_count: int = 0
+    error_code: str | None = None
+    error_message: str | None = None
+    next_retry_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class StudioCacheClearRequest(BaseModel):
     scope: Literal["read_models", "analytics", "all_disposable"]
     environment_id: int | None = Field(default=None, ge=1)

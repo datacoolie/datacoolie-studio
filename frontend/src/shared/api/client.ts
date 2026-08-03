@@ -42,6 +42,7 @@ import type {
   SourceReadCheckResult,
   SourceSyncStatus,
   StudioCacheFeature,
+  AnalyticsUpgradeStatus,
   StudioCacheMutation,
   StudioCacheScope,
   StudioCacheStatus,
@@ -148,6 +149,10 @@ export const api = {
     body: JSON.stringify({ confirm: true }),
   }),
   getStudioCache: () => request<StudioCacheStatus>(`${API_PREFIX}/studio/cache`),
+  retryAnalyticsUpgrade: () => request<AnalyticsUpgradeStatus>(
+    `${API_PREFIX}/studio/cache/analytics-upgrade/retry`,
+    { method: "POST", body: JSON.stringify({}) },
+  ),
   clearStudioCache: (payload: {
     scope: StudioCacheScope;
     environment_id?: number;

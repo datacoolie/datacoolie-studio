@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { OperationNotification } from "../../shared/components/OperationNotification";
 import { ApiRequestError } from "../../shared/lib/errors";
+import { api } from "../../shared/api/client";
 import { monitoringFilterOptionsOptions, monitoringReportOptions } from "./monitoringQueries";
 import { filtersFromSearch, type MonitoringTabKey, writeFiltersToSearch } from "./monitoringFilters";
 import { preloadMonitoringPage } from "./monitoringPageModules";
@@ -27,6 +28,11 @@ export function MonitoringRoute({
   const reportError = reportQuery.error;
   const rebuildRequired = reportError instanceof ApiRequestError
     && reportError.code === "analytics_rebuild_required";
+  const rebuildReason = rebuildRequired && typeof reportError.detail === "object"
+    ? String(reportError.detail?.reason ?? "")
+    : "";
+  const upgradeInProgress = rebuildReason === "analytics_upgrade_in_progress";
+  const refetchReport = reportQuery.refetch;
 
   useEffect(() => {
     setNoticeDismissed(false);
@@ -40,14 +46,31 @@ export function MonitoringRoute({
     void preloadMonitoringPage(activePage).catch(() => undefined);
   }, [activePage]);
 
+  useEffect(() => {
+    if (!upgradeInProgress) return undefined;
+    const timer = window.setTimeout(() => {
+      void refetchReport();
+    }, 2_000);
+    return () => window.clearTimeout(timer);
+  }, [refetchReport, upgradeInProgress]);
+
+  const retryUpgrade = async () => {
+    await api.retryAnalyticsUpgrade();
+    await reportQuery.refetch();
+  };
+
   return (
     <>
       {rebuildRequired && !noticeDismissed ? (
         <OperationNotification
           notice={{
             tone: "warning",
-            title: "Monitoring analytics need to be rebuilt",
-            detail: "Open Sources and sync the Log sources before loading Monitoring again.",
+            title: upgradeInProgress ? "Monitoring analytics are upgrading" : "Monitoring analytics need attention",
+            detail: upgradeInProgress
+              ? "Studio is rebuilding the DuckDB cache automatically. Monitoring will refresh when publication completes."
+              : rebuildReason === "analytics_upgrade_failed"
+                ? "The previous cache was preserved. Studio will retry automatically, or you can retry now."
+                : "Open Sources and sync the Log sources before loading Monitoring again.",
           }}
           onClose={() => setNoticeDismissed(true)}
         />
@@ -63,7 +86,9 @@ export function MonitoringRoute({
         reportLoading={reportQuery.isFetching}
         reportError={reportError instanceof Error ? reportError.message : reportError ? String(reportError) : null}
         reportErrorCode={rebuildRequired ? reportError.code ?? null : null}
+        reportErrorReason={rebuildReason || null}
         onRetryReport={() => void reportQuery.refetch()}
+        onRetryUpgrade={() => void retryUpgrade().catch(() => undefined)}
         onOpenSources={onOpenSources}
         filterOptions={filterOptionsQuery.data ?? null}
       />

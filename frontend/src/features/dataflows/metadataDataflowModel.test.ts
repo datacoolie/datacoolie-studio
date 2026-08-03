@@ -203,6 +203,55 @@ describe("metadata dataflow model", () => {
     expect(sourceFieldKeys).toContain("source_schema_name");
   });
 
+  it("recognizes expanded transform attributes as structured metadata fields", () => {
+    const transformValues = {
+      transform_select_columns: '["id", "email"]',
+      transform_drop_columns: "[]",
+      transform_rename_columns: '{"email": "contact_email"}',
+      transform_value_rules: '[{"operation": "trim", "columns": ["email"]}]',
+      transform_hash_columns: '[{"target_column": "email_hash", "columns": ["email"]}]',
+      transform_masking_rules: '[{"method": "redact", "columns": ["email"], "value": "[PRIVATE]"}]',
+    };
+    const expandedDocument: MetadataEditorDocument = {
+      ...document,
+      sheets: {
+        ...document.sheets,
+        dataflows: {
+          ...document.sheets.dataflows,
+          rows: [{ ...document.sheets.dataflows.rows[0], ...transformValues }],
+        },
+      },
+    };
+
+    const [record] = buildMetadataDataflowRecords(expandedDocument, metadata);
+    const expandedFields = record.transformRows.filter((field) => field.key in transformValues);
+
+    expect(expandedFields.map((field) => field.key)).toEqual(Object.keys(transformValues));
+    expect(expandedFields.every((field) => field.structured)).toBe(true);
+    expect(expandedFields.map((field) => field.label)).toEqual([
+      "Select columns",
+      "Drop columns",
+      "Rename columns",
+      "Value rules",
+      "Hash columns",
+      "Masking rules",
+    ]);
+    expect(record.transformRows.map((field) => field.key)).toEqual([
+      "transform_deduplicate_columns",
+      "transform_latest_data_columns",
+      "transform_filter_expression",
+      "transform_additional_columns",
+      "transform_schema_hints",
+      "transform_select_columns",
+      "transform_drop_columns",
+      "transform_rename_columns",
+      "transform_value_rules",
+      "transform_hash_columns",
+      "transform_masking_rules",
+      "transform_configure",
+    ]);
+  });
+
   it("places workspace id directly after dataflow id regardless of sheet order", () => {
     const [record] = buildMetadataDataflowRecords(document, metadata);
     expect(dataflowFields(record).map((field) => field.key).slice(0, 2)).toEqual([

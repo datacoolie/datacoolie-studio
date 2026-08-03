@@ -61,6 +61,136 @@ def test_serving_fact_rebuild_is_idempotent(tmp_path: Path):
         assert _serving_digest(connection) == before
 
 
+def test_serving_facts_keep_transform_configure_values_grouped(
+    tmp_path: Path,
+    monkeypatch,
+):
+    analytics_path = tmp_path / "analytics.duckdb"
+    parquet_path = tmp_path / "dataflow.parquet"
+    direct_transform_values = {
+        "transform_select_columns": '["customer_id", "email"]',
+        "transform_drop_columns": None,
+        "transform_rename_columns": '{"email": "contact_email"}',
+        "transform_value_rules": '[{"operation": "trim", "columns": ["email"]}]',
+        "transform_hash_columns": '[{"target_column": "email_hash", "columns": ["email"]}]',
+        "transform_masking_rules": '[{"method": "redact", "columns": ["email"], "value": "[PRIVATE]"}]',
+        "transform_configure": '{"missing_column_policy": "ignore"}',
+    }
+    source_transform_values = {
+        **direct_transform_values,
+        "transform_missing_column_policy": "ignore",
+    }
+    with duckdb.connect() as connection:
+        connection.execute(
+            """
+            CREATE TABLE dataflow_source (
+              job_id VARCHAR,
+              dataflow_id VARCHAR,
+              dataflow_run_id VARCHAR,
+              status VARCHAR,
+              start_time TIMESTAMPTZ,
+              end_time TIMESTAMPTZ,
+              transform_select_columns VARCHAR,
+              transform_drop_columns VARCHAR,
+              transform_rename_columns VARCHAR,
+              transform_value_rules VARCHAR,
+              transform_hash_columns VARCHAR,
+              transform_masking_rules VARCHAR,
+              transform_configure VARCHAR,
+              transform_missing_column_policy VARCHAR
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO dataflow_source VALUES (?, ?, ?, ?, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "job-1",
+                "customers",
+                "run-1",
+                "succeeded",
+                "2026-08-02T10:00:00Z",
+                "2026-08-02T10:01:00Z",
+                *source_transform_values.values(),
+            ],
+        )
+        escaped_path = str(parquet_path).replace("'", "''")
+        connection.execute(
+            f"COPY dataflow_source TO '{escaped_path}' (FORMAT PARQUET)"
+        )
+
+    published = analytics_store.publish_rows(
+        7,
+        [(str(parquet_path), "dataflow_parquet", "{}")],
+        [
+            (
+                "job-1.jsonl",
+                "job_jsonl",
+                "{}",
+                {"job_id": "job-1", "status": "succeeded"},
+            )
+        ],
+        [],
+        [str(parquet_path), "job-1.jsonl"],
+        database_path=analytics_path,
+    )
+
+    assert published["published"] is True
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        cached = connection.execute(
+            f"""
+            SELECT {', '.join(source_transform_values)}
+            FROM {analytics_schema.DATAFLOW_TABLE}
+            WHERE dataflow_run_id = 'run-1'
+            """
+        ).fetchone()
+        projected = connection.execute(
+            f"""
+            SELECT {', '.join(direct_transform_values)}
+            FROM {MONITORING_DATAFLOW_FACTS_TABLE}
+            WHERE dataflow_run_id = 'run-1'
+            """
+        ).fetchone()
+        serving_columns = {
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE {MONITORING_DATAFLOW_FACTS_TABLE}"
+            ).fetchall()
+        }
+    assert cached == tuple(source_transform_values.values())
+    assert projected == tuple(direct_transform_values.values())
+    assert "transform_missing_column_policy" not in serving_columns
+
+    from datacoolie_studio.db.models import EnvironmentSource
+    from datacoolie_studio.domains.analytics import access as analytics_access
+    from datacoolie_studio.domains.monitoring.log_repository import (
+        query_cached_dataflow_logs,
+    )
+
+    monkeypatch.setattr(
+        analytics_access,
+        "analytics_database_path",
+        lambda: analytics_path,
+    )
+    source = EnvironmentSource(
+        id=7,
+        environment_id=1,
+        source_kind="logs",
+        uri=str(tmp_path),
+        enabled=True,
+    )
+    records, total, errors = query_cached_dataflow_logs(
+        None,
+        [source],
+        {},
+        limit=1,
+    )
+
+    assert total == 1
+    assert errors == []
+    assert records[0]["transform_configure"] == direct_transform_values["transform_configure"]
+    assert "transform_missing_column_policy" not in records[0]
+
+
 def test_serving_validation_rejects_row_count_drift(tmp_path: Path):
     analytics_path = tmp_path / "analytics.duckdb"
     build_analytics_fixture(analytics_path, source_ids=[7], dataflow_rows=10)

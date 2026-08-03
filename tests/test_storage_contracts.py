@@ -961,6 +961,28 @@ def test_fake_provider_revision_survives_list_stat_and_materialize(tmp_path: Pat
     assert target.read_bytes() == b'{"ok":true}'
 
 
+def test_fsspec_materialize_prefers_provider_revision_over_timestamp_precision(
+    tmp_path: Path,
+):
+    filesystem = _FakeFilesystem()
+    adapter = FsspecStorageAdapter(filesystem, provider="minio")
+    expected = StorageRevision(
+        canonical_uri="s3://bucket/prefix/data.json",
+        size=len(filesystem.payload),
+        last_modified=datetime(2026, 7, 22, 1, 2, 3, 456000, tzinfo=timezone.utc),
+        provider_revision="version-7",
+    )
+
+    materialized = adapter.materialize(
+        expected.canonical_uri,
+        tmp_path / "data.json",
+        expected_revision=expected,
+    )
+
+    assert materialized.provider_revision == expected.provider_revision
+    assert (tmp_path / "data.json").read_bytes() == filesystem.payload
+
+
 def test_fsspec_missing_path_is_distinct_from_access_failure():
     class MissingFilesystem(_FakeFilesystem):
         def ls(self, path: str, detail: bool = True):

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from datacoolie_studio.db.models import Environment, EnvironmentSource
 from datacoolie_studio.core.config import source_materialization_cache_dir
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
+from datacoolie_studio.domains.analytics_upgrade.service import current_upgrade_status
 from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.read_models.keys import (
     ASSETS_CATALOG,
@@ -45,6 +46,7 @@ def cache_status(session: Session) -> dict[str, Any]:
             "dataflow_rows": analytics.get("dataflow_row_count", 0),
             "job_rows": analytics.get("job_row_count", 0),
             "filter_values": analytics.get("filter_value_count", 0),
+            "upgrade": current_upgrade_status(session),
         },
         "sync_job_retention": sync_job_retention_diagnostics(),
     }

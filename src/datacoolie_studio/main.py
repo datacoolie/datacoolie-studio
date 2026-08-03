@@ -10,9 +10,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from datacoolie_studio import __version__
 from datacoolie_studio.api.v1 import api_router
 from datacoolie_studio.db.session import init_db
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
+from datacoolie_studio.domains.analytics_upgrade.service import analytics_upgrade_loop
 from datacoolie_studio.domains.sync.scheduler import scheduler_loop
 
 
@@ -20,15 +22,16 @@ from datacoolie_studio.domains.sync.scheduler import scheduler_loop
 async def lifespan(_app: FastAPI):
     init_db()
     stop_event = asyncio.Event()
-    task = asyncio.create_task(scheduler_loop(stop_event))
+    scheduler_task = asyncio.create_task(scheduler_loop(stop_event))
+    upgrade_task = asyncio.create_task(analytics_upgrade_loop(stop_event))
     try:
         yield
     finally:
         stop_event.set()
-        await task
+        await asyncio.gather(scheduler_task, upgrade_task)
 
 
-app = FastAPI(title="DataCoolie Studio", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="DataCoolie Studio", version=__version__, lifespan=lifespan)
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=1)
 

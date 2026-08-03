@@ -179,6 +179,12 @@ export function DataflowDetailSections({ row, timezoneName }: { row: Record<stri
               ["Filter", row.transform_filter_expression, "transform_filter_expression"],
               ["Additional columns", row.transform_additional_columns, "transform_additional_columns"],
               ["Schema hints", row.transform_schema_hints, "transform_schema_hints"],
+              ["Select columns", row.transform_select_columns, "transform_select_columns"],
+              ["Drop columns", row.transform_drop_columns, "transform_drop_columns"],
+              ["Rename columns", row.transform_rename_columns, "transform_rename_columns"],
+              ["Value rules", row.transform_value_rules, "transform_value_rules"],
+              ["Hash columns", row.transform_hash_columns, "transform_hash_columns"],
+              ["Masking rules", row.transform_masking_rules, "transform_masking_rules"],
               ["Configure", row.transform_configure, "transform_configure"],
             ]}
             showEmpty

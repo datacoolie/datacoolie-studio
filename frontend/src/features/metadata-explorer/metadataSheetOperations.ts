@@ -121,7 +121,16 @@ const structuredArrayFields = new Set([
   "merge_keys",
   "partition_columns",
   "schema_hints",
-  "source_watermark_columns"
+  "source_watermark_columns",
+  "transform_drop_columns",
+  "transform_hash_columns",
+  "transform_masking_rules",
+  "transform_select_columns",
+  "transform_value_rules"
+]);
+
+const structuredObjectFields = new Set([
+  "transform_rename_columns"
 ]);
 
 const structuredSqlFields = new Set([
@@ -137,6 +146,7 @@ export function structuredCellKind(columnKey: string, value: unknown): Structure
   const parsed = parseStructuredValue(value);
   if (parsed) return Array.isArray(parsed) ? "array" : "object";
   if (structuredArrayFields.has(columnKey)) return "array";
+  if (structuredObjectFields.has(columnKey)) return "object";
   if (columnKey === "configure" || columnKey.endsWith("_configure")) return "object";
   return null;
 }

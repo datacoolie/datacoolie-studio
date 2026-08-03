@@ -17,6 +17,15 @@ class AnalyticsRebuildRequired(RuntimeError):
         self.missing_source_ids = missing_source_ids or []
         self.reason = reason
 
+    def detail(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "reason": self.reason,
+            "source_ids": self.source_ids,
+            "missing_source_ids": self.missing_source_ids,
+        }
+
 
 class AnalyticsSchemaIncompatibleError(RuntimeError):
     code = "schema_incompatible"
