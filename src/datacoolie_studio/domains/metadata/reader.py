@@ -42,9 +42,37 @@ def read_metadata_bytes(uri: str, content: bytes) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise MetadataReadError(f"Cannot parse metadata file: {uri}") from exc
+    if isinstance(data, list):
+        section = _metadata_fragment_section(uri)
+        if section is None:
+            raise MetadataReadError("Metadata root must be an object")
+        return {section: data}
     if not isinstance(data, dict):
         raise MetadataReadError("Metadata root must be an object")
+
+    # Canonical modular projects allow a fragment to contain one dataflow
+    # object instead of wrapping it in a ``dataflows`` list.  Preserve the
+    # existing full-document contract while normalizing that fragment shape
+    # at the storage boundary.
+    if not {"connections", "dataflows", "schema_hints"}.intersection(data):
+        section = _metadata_fragment_section(uri)
+        if section is not None:
+            return {section: [data]}
     return data
+
+
+def _metadata_fragment_section(uri: str) -> str | None:
+    """Infer a section for list/single-record modular metadata fragments."""
+    normalized = uri.split("?", 1)[0].replace("\\", "/").rstrip("/")
+    parts = [part.lower() for part in normalized.split("/") if part]
+    filename = parts[-1] if parts else ""
+    if "dataflows" in parts or filename == "dataflows.json":
+        return "dataflows"
+    if filename == "connections.json":
+        return "connections"
+    if filename in {"schema_hints.json", "schema-hints.json"}:
+        return "schema_hints"
+    return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
