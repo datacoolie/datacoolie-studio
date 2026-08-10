@@ -5,6 +5,7 @@ import io
 import sqlite3
 import json
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -915,11 +916,24 @@ def test_new_log_source_queues_validation_and_sync(tmp_path: Path, monkeypatch):
             json={"uri": str(SAMPLE_LOGS), "label": "sample logs"},
         ).json()
         assert source["latest_validation"] is None
-        persisted = client.get(
-            f"/api/v1/environments/{environment['id']}/log-sources"
-        ).json()[0]
+        persisted = {}
+        status = {}
+        for _ in range(100):
+            persisted = client.get(
+                f"/api/v1/environments/{environment['id']}/log-sources"
+            ).json()[0]
+            status = _source_status(client, environment["id"], source["id"])
+            latest_job = status.get("latest_job") or {}
+            if (
+                persisted.get("latest_validation") is not None
+                and status.get("status") == "ok"
+                and latest_job.get("job_type") == "auto_refresh"
+                and latest_job.get("status") == "succeeded"
+            ):
+                break
+            time.sleep(0.02)
+        assert persisted.get("latest_validation") is not None, persisted
         assert persisted["latest_validation"]["status"] == "ok"
-        status = _source_status(client, environment["id"], source["id"])
         assert status["status"] == "ok"
         assert status["latest_job"]["job_type"] == "auto_refresh"
         assert status["latest_job"]["status"] == "succeeded"
