@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,27 @@ def source_refresh_guard(source_id: int):
     finally:
         if acquired:
             lock.release()
+
+
+def reconcile_orphaned_sync_jobs(session: Session, *, now: datetime | None = None) -> int:
+    """Fail sync jobs left 'running' by a previous process.
+
+    A running job only exists while its in-process worker is alive, so any job still
+    marked running at startup is orphaned (e.g. the server was killed mid-sync). Left
+    alone it blocks that source's next sync via the unique running-job constraint.
+    """
+    completed_at = now or utc_now()
+    result = session.execute(
+        update(SyncJob)
+        .where(SyncJob.status == "running")
+        .values(
+            status="failed",
+            message="Interrupted by a Studio restart",
+            completed_at=completed_at,
+        )
+    )
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def has_running_sync_job(session: Session, source_id: int) -> bool:

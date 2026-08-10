@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -145,6 +145,25 @@ def _write_dataflow_file(path: Path, run_ids: list[str]) -> None:
         connection.execute(f"COPY fixture TO '{escaped_path}' (FORMAT PARQUET)")
     finally:
         connection.close()
+
+
+def test_dataflow_reader_does_not_project_hive_path_columns(tmp_path: Path) -> None:
+    from datacoolie_studio.domains.logs.ingestion import _read_dataflow_file
+
+    path = (
+        tmp_path
+        / "__run_date=2026-08-09"
+        / "__run_hour=10"
+        / "dataflow.parquet"
+    )
+    _write_dataflow_file(path, ["run-1"])
+
+    rows, errors = _read_dataflow_file(str(path))
+
+    assert errors == []
+    assert len(rows) == 1
+    assert "__run_date" not in rows[0]
+    assert "__run_hour" not in rows[0]
 
 
 def _set_revision(path: Path, mtime_ns: int) -> None:
@@ -358,6 +377,97 @@ def test_incremental_replaces_same_job_and_dataflow_file_paths(tmp_path: Path, m
             ORDER BY file_kind
             """,
         ) == [("dataflow_parquet", 2), ("job_jsonl", 2)]
+
+
+def test_hourly_incremental_ingestion_advances_exact_checkpoint_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log_root = tmp_path / "logs"
+    current_hour = datetime.now(timezone.utc).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=None,
+    )
+    previous_hour = current_hour - timedelta(hours=1)
+
+    def hourly_path(stream: str, value: datetime, filename: str) -> Path:
+        return (
+            log_root
+            / "etl_logs"
+            / "analyst"
+            / stream
+            / f"__run_date={value:%Y-%m-%d}"
+            / f"__run_hour={value:%H}"
+            / filename
+        )
+
+    old_job = hourly_path("job_run_log", previous_hour, "job-old.jsonl")
+    old_dataflow = hourly_path("dataflow_run_log", previous_hour, "dataflow-old.parquet")
+    _write_job_file(old_job, ["job-hour-old"])
+    _write_dataflow_file(old_dataflow, ["run-hour-old"])
+
+    client, analytics_path = _test_client(tmp_path, monkeypatch)
+    with client:
+        environment_id, source_id = _create_workspace(client, log_root)
+        _refresh(client, environment_id, source_id)
+
+        new_job = hourly_path("job_run_log", current_hour, "job-new.jsonl")
+        new_dataflow = hourly_path("dataflow_run_log", current_hour, "dataflow-new.parquet")
+        _write_job_file(new_job, ["job-hour-new"])
+        _write_dataflow_file(new_dataflow, ["run-hour-new"])
+
+        result = _refresh(client, environment_id, source_id)
+        assert result["latest_job"]["result"]["record_counts"]["parsed_files"] == 2
+        assert _raw_ids(analytics_path, "etl_job_runs", "job_id") == [
+            "job-hour-new",
+            "job-hour-old",
+        ]
+        assert _raw_ids(analytics_path, "etl_dataflow_runs", "dataflow_run_id") == [
+            "run-hour-new",
+            "run-hour-old",
+        ]
+        with duckdb.connect(str(analytics_path), read_only=True) as connection:
+            cached_run_dates = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT __run_date FROM etl_dataflow_runs"
+                ).fetchall()
+            }
+        assert cached_run_dates == {
+            previous_hour.date().isoformat(),
+            current_hour.date().isoformat(),
+        }
+        assert _workspace_rows(
+            tmp_path / "studio.db",
+            """
+            SELECT
+              stream_kind,
+              partition_granularity,
+              checkpoint_partition_key,
+              last_scanned_partition_key
+            FROM log_stream_states
+            WHERE stream_kind IN ('dataflow_parquet', 'job_jsonl')
+            ORDER BY stream_kind
+            """,
+        ) == [
+            (
+                "dataflow_parquet",
+                "hour",
+                current_hour.isoformat(timespec="seconds"),
+                current_hour.isoformat(timespec="seconds"),
+            ),
+            (
+                "job_jsonl",
+                "hour",
+                current_hour.isoformat(timespec="seconds"),
+                current_hour.isoformat(timespec="seconds"),
+            ),
+        ]
+
+        noop = _refresh(client, environment_id, source_id)
+        assert noop["latest_job"]["result"]["record_counts"]["parsed_files"] == 0
 
 
 def test_incremental_does_not_delete_rows_when_source_files_disappear(tmp_path: Path, monkeypatch) -> None:

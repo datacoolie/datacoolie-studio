@@ -26,6 +26,7 @@ from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.code_artifacts.service import refresh_code_artifact, validate_code_artifact
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.db.models import Environment, utc_now
+from datacoolie_studio.domains.analytics_upgrade.service import analytics_upgrade_is_building
 from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
 from datacoolie_studio.domains.logs.discovery import LogSyncMode, LogSyncSpec, LookbackRange
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
@@ -278,6 +279,11 @@ def refresh_log_source(
     if path is None:
         raise HTTPException(status_code=404, detail="Log source not found")
     _guard_source_profile(request, path)
+    if analytics_upgrade_is_building(session):
+        raise HTTPException(
+            status_code=409,
+            detail="Analytics cache upgrade in progress; try syncing again shortly",
+        )
     with sync.source_refresh_guard(path.id) as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail="Log source refresh is already running")
@@ -430,6 +436,7 @@ def _resume_after_successful_validation(
         source_id,
         due_at=utc_now()
         + timedelta(seconds=source_check_interval_seconds(session)),
+        preserve_outcome=True,
     )
     session.commit()
 

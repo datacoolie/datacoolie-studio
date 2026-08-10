@@ -5,11 +5,15 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 
-from datacoolie_studio.domains.logs.partition import ParsedPartition, PartitionGranularity, parse_partition_path
+from datacoolie_studio.domains.logs.partition import (
+    ParsedPartition,
+    PartitionGranularity,
+    PartitionLayout,
+    PartitionValue,
+    parse_partition_path,
+)
 from datacoolie_studio.domains.storage.adapters import (
-    StorageRevision,
     StorageAdapter,
-    StorageObject,
     StorageRevision,
 )
 from datacoolie_studio.domains.storage.errors import StorageNotFoundError
@@ -38,8 +42,9 @@ class LookbackRange:
         if self.from_partition > self.to_partition:
             raise ValueError("Lookback from_partition must be on or before to_partition")
 
-    def contains(self, partition_value: date) -> bool:
-        return self.from_partition <= partition_value <= self.to_partition
+    def contains(self, partition_value: date | datetime) -> bool:
+        value = partition_value.date() if isinstance(partition_value, datetime) else partition_value
+        return self.from_partition <= value <= self.to_partition
 
 
 @dataclass(frozen=True)
@@ -56,7 +61,7 @@ class LogSyncSpec:
 
 @dataclass(frozen=True)
 class LogStreamCheckpoint:
-    partition_value: date
+    partition_value: PartitionValue
     boundary_last_modified: datetime
     partition_format: str
 
@@ -87,7 +92,7 @@ def discover_partitions(
     *,
     expected_format: str | None = None,
 ) -> list[DiscoveredPartition]:
-    """Discover partition leaves with at most three shallow directory listings."""
+    """Discover partition leaves with at most four shallow directory listings."""
 
     leaves: list[DiscoveredPartition] = []
     try:
@@ -114,7 +119,18 @@ def plan_incremental_partitions(
 ) -> list[DiscoveredPartition]:
     if checkpoint is None:
         return list(partitions)
-    return [item for item in partitions if item.partition.partition_value >= checkpoint.partition_value]
+    if not partitions:
+        return []
+    first = partitions[0].partition
+    checkpoint_value = PartitionLayout(
+        first.partition_format,
+        first.partition_granularity,
+    ).normalize(checkpoint.partition_value)
+    return [
+        item
+        for item in partitions
+        if item.partition.partition_value >= checkpoint_value
+    ]
 
 
 def plan_lookback_partitions(
@@ -244,7 +260,7 @@ def _discover_partition_branch(
         return [DiscoveredPartition(uri=adapter.canonical_uri(uri), partition=parsed)]
 
     descendants: list[DiscoveredPartition] = []
-    if depth < 3 and (parsed is None or parsed.partition_granularity is not PartitionGranularity.DAY):
+    if depth < 4:
         try:
             children = _partition_children(adapter, uri)
         except (FileNotFoundError, StorageNotFoundError):
@@ -267,7 +283,7 @@ def _discover_partition_branch(
 
 
 def _is_partition_leaf(partition: ParsedPartition) -> bool:
-    if partition.partition_granularity is PartitionGranularity.DAY:
+    if partition.partition_granularity is PartitionGranularity.HOUR:
         return True
     return "/" not in partition.raw_partition_path and partition.partition_granularity is PartitionGranularity.MONTH
 

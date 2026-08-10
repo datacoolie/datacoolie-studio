@@ -20,6 +20,12 @@ from datacoolie_studio.domains.analytics.serving_facts import (
     validate_monitoring_serving_facts,
 )
 
+DataflowFile = (
+    tuple[str, str, str]
+    | tuple[str, str, str, str]
+    | tuple[str, str, str, str, str | None]
+)
+
 
 def publish_generation(
     conn,
@@ -116,7 +122,7 @@ def cache_source_generations(conn) -> dict[int, int]:
 
 def publish_rows(
     source_id: int,
-    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
+    dataflow_files: list[DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
@@ -140,7 +146,7 @@ def publish_rows(
 
 def _publish_rows_locked(
     source_id: int,
-    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
+    dataflow_files: list[DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
@@ -208,12 +214,13 @@ def _blocking_upgrade_status(path: Path) -> dict[str, Any] | None:
     )
 
     status = current_upgrade_status()
+    # Only an actively building/validating/publishing upgrade owns the live cache.
+    # A "pending" (queued) or "failed" (awaiting retry) upgrade has no live claim, so
+    # it must never block a manual or scheduled per-source sync.
     if status is None or status.get("state") not in {
-        "pending",
         "building",
         "validating",
         "publishing",
-        "failed",
     }:
         return None
     candidate = status.get("candidate_path")
@@ -223,7 +230,7 @@ def _blocking_upgrade_status(path: Path) -> dict[str, Any] | None:
 def _write_duckdb_rows(
     path: Path,
     source_id: int,
-    dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]],
+    dataflow_files: list[DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
@@ -252,7 +259,7 @@ def _write_duckdb_rows(
                     conn.execute(f"DELETE FROM {schema.JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
             for item in dataflow_files:
                 file_uri, file_kind, revision_json = item[:3]
-                read_uri = item[3] if len(item) == 4 else file_uri
+                read_uri = _dataflow_read_uri(item)
                 row_count = insert_dataflow_file(
                     conn,
                     source_id,
@@ -260,6 +267,7 @@ def _write_duckdb_rows(
                     file_kind,
                     revision_json,
                     read_uri=read_uri,
+                    partition_date=_dataflow_partition_date(item),
                 )
                 parsed_dataflow_records += row_count
                 file_row_counts[file_uri] = row_count
@@ -558,12 +566,20 @@ def insert_dataflow_file(
     revision_json: str,
     *,
     read_uri: str | None = None,
+    partition_date: str | None = None,
 ) -> int:
     source_read_uri = read_uri or file_uri
     _ensure_dataflow_table_for_parquet(conn, source_read_uri)
     escaped = source_read_uri.replace("'", "''")
-    source_projection = _dataflow_parquet_source_projection(conn, source_read_uri)
-    row_count = conn.execute(f"SELECT count(*) FROM read_parquet('{escaped}', union_by_name=true)").fetchone()[0]
+    source_projection = _dataflow_parquet_source_projection(
+        conn,
+        source_read_uri,
+        partition_date=partition_date,
+    )
+    row_count = conn.execute(
+        f"SELECT count(*) FROM read_parquet('{escaped}', "
+        "union_by_name=true, hive_partitioning=false)"
+    ).fetchone()[0]
     conn.execute(
         f"""
         INSERT INTO {schema.DATAFLOW_TABLE} BY NAME
@@ -571,21 +587,29 @@ def insert_dataflow_file(
           {int(source_id)}::BIGINT AS _source_id,
           {_sql_string(file_uri)} AS _file_uri,
           {_sql_string(file_kind)} AS _file_kind,
-          {_sql_date(_file_date(file_uri, {}))} AS _file_date,
+          {_sql_date(partition_date or _file_date(file_uri, {}))} AS _file_date,
           {_sql_number(_revision_value(revision_json, "size"))}::BIGINT AS _source_size,
           {_sql_number(_revision_value(revision_json, "mtime_ns"))}::BIGINT AS _source_mtime_ns,
           {_sql_string(utc_now().isoformat())}::TIMESTAMPTZ AS _ingested_at,
           {source_projection}
-        FROM read_parquet('{escaped}', union_by_name=true)
+        FROM read_parquet(
+          '{escaped}',
+          union_by_name=true,
+          hive_partitioning=false
+        )
         """
     )
     return int(row_count)
 
 
 def _dataflow_read_uri(
-    item: tuple[str, str, str] | tuple[str, str, str, str]
+    item: DataflowFile,
 ) -> str:
-    return item[3] if len(item) == 4 else item[0]
+    return item[3] if len(item) >= 4 else item[0]
+
+
+def _dataflow_partition_date(item: DataflowFile) -> str | None:
+    return item[4] if len(item) >= 5 else None
 
 
 def ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> bool:
@@ -690,6 +714,7 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
             previous = candidate_types.get(column)
             candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
     candidate_types["__event_time"] = "TIMESTAMPTZ"
+    candidate_types["__run_date"] = "DATE"
     existing = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
     actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
     for column, source_type in candidate_types.items():
@@ -730,7 +755,10 @@ def _source_type_fits_target(target_type: str, source_type: str) -> bool:
 
 def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
     escaped = file_uri.replace("'", "''")
-    described = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{escaped}', union_by_name=true)").fetchall()
+    described = conn.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{escaped}', "
+        "union_by_name=true, hive_partitioning=false)"
+    ).fetchall()
     return [(str(row[0]), str(row[1])) for row in described]
 
 
@@ -741,16 +769,29 @@ def _dataflow_parquet_target_types(conn, file_uri: str) -> dict[str, str]:
         if name not in schema.STUDIO_CACHE_COLUMNS and name != "__event_time"
     }
     target_types["__event_time"] = "TIMESTAMPTZ"
+    target_types["__run_date"] = "DATE"
     return target_types
 
 
-def _dataflow_parquet_source_projection(conn, file_uri: str) -> str:
+def _dataflow_parquet_source_projection(
+    conn,
+    file_uri: str,
+    *,
+    partition_date: str | None = None,
+) -> str:
     source_columns = {
         name for name, _data_type in _describe_parquet_columns(conn, file_uri)
     }
+    generated_columns = [
+        column
+        for column in ("__event_time", "__run_date")
+        if column in source_columns
+    ]
     passthrough = (
-        '* EXCLUDE ("__event_time")'
-        if "__event_time" in source_columns
+        "* EXCLUDE ("
+        + ", ".join(_quote_identifier(column) for column in generated_columns)
+        + ")"
+        if generated_columns
         else "*"
     )
 
@@ -761,11 +802,24 @@ def _dataflow_parquet_source_projection(conn, file_uri: str) -> str:
             else "NULL::TIMESTAMPTZ"
         )
 
-    event_time = ", ".join(
+    event_time_values = ", ".join(
         timestamp_value(column)
         for column in ("__event_time", "end_time", "start_time")
     )
-    return f"{passthrough}, COALESCE({event_time}) AS __event_time"
+    event_time = f"COALESCE({event_time_values})"
+    source_run_date = (
+        'TRY_CAST("__run_date" AS DATE)'
+        if "__run_date" in source_columns
+        else "NULL::DATE"
+    )
+    run_date = (
+        f"COALESCE({_sql_date(partition_date)}, {source_run_date}, "
+        f"CAST(timezone('UTC', {event_time}) AS DATE))"
+    )
+    return (
+        f"{passthrough}, {event_time} AS __event_time, "
+        f"{run_date} AS __run_date"
+    )
 
 
 def _ensure_columns(conn, table_name: str, column_types: dict[str, str], existing: set[str]) -> None:

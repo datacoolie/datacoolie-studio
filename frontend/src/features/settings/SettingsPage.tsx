@@ -1,6 +1,7 @@
-import { AlertTriangle, Settings, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, Settings, Trash2 } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ModuleInfo, StudioDiagnostics, StudioSettings } from "../../shared/api/domainTypes";
+import { formatRelativeTime } from "../../shared/time";
 import { Tag } from "../../shared/components/Tag";
 import { Toggle } from "../../shared/components/Toggle";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
@@ -57,6 +58,20 @@ export function SettingsPage({
   const workspaceDatabase = diagnostics?.workspace_database;
   const analyticsCache = cache.status?.analytics_cache;
   const analyticsUpgrade = analyticsCache?.upgrade;
+  const upgradeActive = analyticsUpgrade
+    ? ["pending", "building", "validating", "publishing"].includes(analyticsUpgrade.state)
+    : false;
+  const upgradeFailed = analyticsUpgrade?.state === "failed";
+  const upgradeUpToDate = analyticsUpgrade
+    ? ["succeeded", "current", "not_required"].includes(analyticsUpgrade.state)
+    : false;
+  const upgradeProgress = analyticsUpgrade?.source_ids?.length
+    ? ` · ${analyticsUpgrade.completed_source_ids?.length ?? 0}/${analyticsUpgrade.source_ids.length}`
+    : "";
+  const upgradeVersionText = analyticsUpgrade?.target_schema_version != null
+    ? ` · v${analyticsUpgrade.target_schema_version}`
+    : "";
+  const lastUpgradeAt = analyticsUpgrade?.completed_at ?? analyticsUpgrade?.updated_at ?? null;
   const resultCache = cache.status?.result_cache;
 
   const maintenanceBusy = cache.busyAction !== null || workspaceMaintenanceBusy;
@@ -251,6 +266,17 @@ export function SettingsPage({
             <div className="settings-stat-card">
               <div className="settings-stat-card-header">
                 <p className="settings-stat-label">Analytics cache</p>
+                {upgradeActive ? (
+                  <span className="analytics-upgrade-indicator" role="status" aria-live="polite">
+                    <Loader2 size={13} className="is-spinning" />
+                    <span>{analyticsUpgradeLabel(analyticsUpgrade!.state)}{upgradeProgress}</span>
+                  </span>
+                ) : upgradeUpToDate ? (
+                  <span className="analytics-upgrade-indicator is-current" role="status">
+                    <CheckCircle2 size={13} />
+                    <span>Up to date{upgradeVersionText}</span>
+                  </span>
+                ) : null}
                 {analyticsUpgrade?.state === "failed" ? (
                   <button
                     type="button"
@@ -276,17 +302,35 @@ export function SettingsPage({
                 <StatRow label="Backend" value={analyticsCache?.backend ?? loadingValue(cache.loading)} />
                 <StatRow label="Path" value={analyticsCache?.path ?? loadingValue(cache.loading)} code />
                 <StatRow label="File" value={analyticsCache ? formatBytes(analyticsCache.file_bytes) : loadingValue(cache.loading)} />
-                {analyticsUpgrade ? (
-                  <StatRow label="Upgrade" value={analyticsUpgradeLabel(analyticsUpgrade.state)} />
+                {analyticsUpgrade?.target_schema_version != null ? (
+                  <StatRow label="Schema version" value={`v${analyticsUpgrade.target_schema_version}`} />
                 ) : null}
-                {analyticsUpgrade?.source_ids?.length ? (
-                  <StatRow
-                    label="Progress"
-                    value={`${analyticsUpgrade.completed_source_ids?.length ?? 0} / ${analyticsUpgrade.source_ids.length} sources`}
-                  />
-                ) : null}
-                {analyticsUpgrade?.state === "failed" && analyticsUpgrade.error_message ? (
-                  <StatRow label="Upgrade error" value={analyticsUpgrade.error_message} />
+                {upgradeActive ? (
+                  <>
+                    <StatRow label="Upgrade" value={analyticsUpgradeLabel(analyticsUpgrade!.state)} />
+                    {analyticsUpgrade?.source_ids?.length ? (
+                      <StatRow
+                        label="Progress"
+                        value={`${analyticsUpgrade.completed_source_ids?.length ?? 0} / ${analyticsUpgrade.source_ids.length} sources`}
+                      />
+                    ) : null}
+                    {analyticsUpgrade?.started_at ? (
+                      <StatRow label="Started" value={formatRelativeTime(analyticsUpgrade.started_at) ?? "—"} />
+                    ) : null}
+                  </>
+                ) : upgradeFailed ? (
+                  <>
+                    <StatRow label="Upgrade" value={analyticsUpgradeLabel("failed")} />
+                    {analyticsUpgrade?.error_message ? (
+                      <StatRow label="Upgrade error" value={analyticsUpgrade.error_message} />
+                    ) : null}
+                    <StatRow label="Last attempt" value={formatRelativeTime(lastUpgradeAt) ?? "—"} />
+                    {analyticsUpgrade?.next_retry_at ? (
+                      <StatRow label="Next retry" value={formatRelativeTime(analyticsUpgrade.next_retry_at) ?? "—"} />
+                    ) : null}
+                  </>
+                ) : upgradeUpToDate ? (
+                  <StatRow label="Last upgraded" value={lastUpgradeAt ? (formatRelativeTime(lastUpgradeAt) ?? "—") : "—"} />
                 ) : null}
                 <StatRow
                   label="Rows"

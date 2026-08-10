@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from datacoolie_studio.domains.logs.discovery import (
@@ -16,6 +16,8 @@ from datacoolie_studio.domains.logs.partition import (
     ParsedPartition,
     PartitionGranularity,
     PartitionLayout,
+    PartitionValue,
+    partition_datetime,
 )
 from datacoolie_studio.domains.storage.adapters import (
     StorageRevision,
@@ -42,9 +44,9 @@ class PlannerState:
     layout_status: LayoutStatus
     partition_format: str | None = None
     partition_granularity: PartitionGranularity | None = None
-    checkpoint_partition_value: date | None = None
+    checkpoint_partition_value: PartitionValue | None = None
     boundary_last_modified: datetime | None = None
-    last_scanned_partition_value: date | None = None
+    last_scanned_partition_value: PartitionValue | None = None
 
     @property
     def layout(self) -> PartitionLayout | None:
@@ -66,8 +68,8 @@ class StreamPlan:
     state: PlannerState
     files: tuple[DiscoveredLogFile, ...]
     candidates: tuple[DiscoveredLogFile, ...]
-    incremental_partition_values: tuple[date, ...]
-    lookback_partition_values: tuple[date, ...]
+    incremental_partition_values: tuple[PartitionValue, ...]
+    lookback_partition_values: tuple[PartitionValue, ...]
 
     @property
     def scanned_partition_count(self) -> int:
@@ -86,9 +88,9 @@ def plan_stream_sync(
     state: PlannerState | None,
     manifest: dict[str, StorageRevision],
     spec: LogSyncSpec,
-    today: date | None = None,
+    today: date | datetime | None = None,
 ) -> StreamPlan:
-    current_date = today or datetime.now(timezone.utc).date()
+    current_partition = partition_datetime(today or datetime.now(timezone.utc))
     if state is not None and state.root_uri != definition.root_uri:
         raise ValueError(
             f"Persisted root for {definition.stream_kind} differs from source configuration"
@@ -98,13 +100,13 @@ def plan_stream_sync(
             adapter,
             definition,
             manifest=manifest,
-            current_date=current_date,
+            current_partition=current_partition,
         )
     layout = state.layout
     if layout is None:
         raise ValueError(f"Invalid persisted layout for {definition.stream_kind}")
 
-    incremental_values = _incremental_values(layout, state, current_date)
+    incremental_values = _incremental_values(layout, state, current_partition)
     lookback_values = _lookback_values(layout, spec)
     incremental_files = _files_for_values(
         adapter,
@@ -142,7 +144,7 @@ def _initial_plan(
     definition: StreamDefinition,
     *,
     manifest: dict[str, StorageRevision],
-    current_date: date,
+    current_partition: PartitionValue,
 ) -> StreamPlan:
     partitions = discover_partitions(adapter, definition.root_uri)
     if partitions:
@@ -175,9 +177,9 @@ def _initial_plan(
             adapter,
             definition,
             layout,
-            (current_date,),
+            (current_partition,),
         )
-        incremental_values = (current_date,)
+        incremental_values = (layout.normalize(current_partition),)
         state = PlannerState(
             stream_kind=definition.stream_kind,
             root_uri=definition.root_uri,
@@ -187,16 +189,24 @@ def _initial_plan(
             ),
         )
     if state.layout_status != "pending":
+        scanned_values = tuple(
+            sorted(
+                {
+                    *incremental_values,
+                    layout.normalize(current_partition),
+                }
+            )
+        )
         state = _next_state(
             state,
             definition,
             layout,
             files,
-            incremental_values,
+            scanned_values,
         )
     # The initial bounded learn already covers every discovered partition.
     # Exact lookback rendering starts after the learned state is committed.
-    lookback_values: tuple[date, ...] = ()
+    lookback_values: tuple[PartitionValue, ...] = ()
     all_files = _deduplicate_files(files)
     return StreamPlan(
         definition=definition,
@@ -211,41 +221,51 @@ def _initial_plan(
 def _incremental_values(
     layout: PartitionLayout,
     state: PlannerState,
-    current_date: date,
-) -> tuple[date, ...]:
+    current_partition: PartitionValue,
+) -> tuple[PartitionValue, ...]:
     if layout.granularity is PartitionGranularity.UNPARTITIONED:
-        return (layout.normalize(current_date),)
+        return (layout.normalize(current_partition),)
     # Always revisit the latest partition known to contain files so late writes
     # and in-place replacements remain visible. Scan forward only from the last
     # attempted partition to avoid repeatedly walking every empty partition
     # between the checkpoint and today.
     checkpoint = state.checkpoint_partition_value
-    forward_start = state.last_scanned_partition_value or checkpoint or current_date
-    values = set(layout.values(forward_start, current_date))
+    forward_start = state.last_scanned_partition_value or checkpoint or current_partition
+    values = set(layout.values(forward_start, current_partition))
     if checkpoint is not None:
         values.add(layout.normalize(checkpoint))
+    if layout.granularity is PartitionGranularity.HOUR:
+        # A run can start near an hour boundary and close after the next hour has
+        # already produced files. Revisit one completed hour so that immutable
+        # late arrivals are discovered without turning every sync into a day scan.
+        values.add(
+            layout.normalize(
+                partition_datetime(current_partition) - timedelta(hours=1)
+            )
+        )
     return tuple(sorted(values))
 
 
 def _lookback_values(
     layout: PartitionLayout,
     spec: LogSyncSpec,
-) -> tuple[date, ...]:
+) -> tuple[PartitionValue, ...]:
     if spec.mode is not LogSyncMode.INCREMENTAL_WITH_LOOKBACK:
         return ()
     if spec.lookback is None:
         return ()
-    return layout.values(
-        spec.lookback.from_partition,
-        spec.lookback.to_partition,
-    )
+    from_partition = partition_datetime(spec.lookback.from_partition)
+    to_partition = partition_datetime(spec.lookback.to_partition)
+    if layout.granularity is PartitionGranularity.HOUR:
+        to_partition += timedelta(hours=23)
+    return layout.values(from_partition, to_partition)
 
 
 def _files_for_values(
     adapter: StorageAdapter,
     definition: StreamDefinition,
     layout: PartitionLayout,
-    values: tuple[date, ...],
+    values: tuple[PartitionValue, ...],
 ) -> list[DiscoveredLogFile]:
     partitions: list[DiscoveredPartition] = []
     for value in values:
@@ -322,9 +342,13 @@ def _next_state(
     definition: StreamDefinition,
     layout: PartitionLayout,
     incremental_files: list[DiscoveredLogFile],
-    incremental_values: tuple[date, ...],
+    incremental_values: tuple[PartitionValue, ...],
 ) -> PlannerState:
-    checkpoint = previous.checkpoint_partition_value
+    checkpoint = (
+        layout.normalize(previous.checkpoint_partition_value)
+        if previous.checkpoint_partition_value is not None
+        else None
+    )
     boundary = previous.boundary_last_modified
     if incremental_files:
         checkpoint = max(
@@ -352,7 +376,11 @@ def _next_state(
                 if boundary is not None
                 else candidate_boundary
             )
-    last_scanned = previous.last_scanned_partition_value
+    last_scanned = (
+        layout.normalize(previous.last_scanned_partition_value)
+        if previous.last_scanned_partition_value is not None
+        else None
+    )
     if incremental_values:
         scanned = max(incremental_values)
         last_scanned = (

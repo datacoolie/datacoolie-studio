@@ -43,6 +43,8 @@ from datacoolie_studio.domains.logs.control import StreamStateUpdate
 from datacoolie_studio.domains.logs.partition import (
     ParsedPartition,
     PartitionGranularity,
+    PartitionValue,
+    partition_datetime,
     parse_partition_path,
 )
 from datacoolie_studio.domains.logs.planner import (
@@ -162,9 +164,17 @@ def _planner_state_from_row(row: LogStreamState | None) -> PlannerState | None:
         layout_status=row.layout_status,  # type: ignore[arg-type]
         partition_format=row.partition_format,
         partition_granularity=granularity,
-        checkpoint_partition_value=row.checkpoint_partition_value,
+        checkpoint_partition_value=_stored_partition_key(
+            row.checkpoint_partition_key,
+            row.checkpoint_partition_value,
+            granularity,
+        ),
         boundary_last_modified=_as_aware_utc(row.boundary_last_modified),
-        last_scanned_partition_value=row.last_scanned_partition_value,
+        last_scanned_partition_value=_stored_partition_key(
+            row.last_scanned_partition_key,
+            row.last_scanned_partition_value,
+            granularity,
+        ),
     )
 
 
@@ -216,10 +226,12 @@ def _merge_rebuild_candidates(
             if state is not None and state.partition_granularity
             else PartitionGranularity.DAY
         )
-        partition_value = (
-            row.partition_value
-            or row.run_date
-            or revision.last_modified.date()
+        partition_value = _stored_partition_key(
+            getattr(row, "partition_key", None),
+            row.partition_value or row.run_date,
+            granularity,
+        ) or partition_datetime(
+            revision.last_modified
         )
         partition_format = (
             row.partition_format
@@ -258,6 +270,32 @@ def _as_aware_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _stored_partition_key(
+    key: str | None,
+    fallback: date | None,
+    granularity: PartitionGranularity | None,
+) -> PartitionValue | None:
+    if key:
+        try:
+            parsed = datetime.fromisoformat(key)
+            if granularity is PartitionGranularity.HOUR:
+                return partition_datetime(parsed)
+            return fallback or parsed.date()
+        except ValueError:
+            pass
+    return fallback
+
+
+def _partition_date(value: PartitionValue) -> date:
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _partition_key_text(value: PartitionValue) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return value.isoformat()
 
 
 def _plan_stream_sync(
@@ -347,15 +385,17 @@ def _file_revision_from_json(file_uri: str, revision_json: str) -> StorageRevisi
 
 
 def _ingest_file_state(candidate: DiscoveredLogFile, file_kind: str) -> dict[str, Any]:
+    partition_key = candidate.partition.partition_value
     return {
         "file_uri": candidate.canonical_uri,
         "file_kind": file_kind,
-        "partition_value": candidate.partition.partition_value,
+        "partition_value": _partition_date(partition_key),
+        "partition_key": _partition_key_text(partition_key),
         "partition_format": candidate.partition.partition_format,
         "revision_json": _revision_json(candidate.revision),
         "job_id": None,
         "log_timestamp": None,
-        "run_date": candidate.partition.partition_value,
+        "run_date": _partition_date(partition_key),
     }
 
 
@@ -441,6 +481,17 @@ def _refresh_log_source_cache_impl(
 ) -> dict[str, Any]:
     if source.source_kind != "logs":
         raise ValueError("Source is not a log source")
+
+    if database_path_override is None:
+        # An analytics upgrade owns the live cache while it rebuilds. Skip external
+        # syncs cleanly (no failed job) instead of colliding; the upgrade already
+        # replays every source, and normal sync resumes once it finishes.
+        from datacoolie_studio.domains.analytics_upgrade.service import (
+            analytics_upgrade_is_building,
+        )
+
+        if analytics_upgrade_is_building(session):
+            return sync.source_sync_status(session, source)
 
     started = operation_started or time.perf_counter()
     timings_ms: dict[str, float] = {}
@@ -603,7 +654,7 @@ def _refresh_log_source_cache_impl(
     changed_system_files = system_states
 
     errors: list[dict[str, Any]] = []
-    parsed_dataflow_files: list[tuple[str, str, str] | tuple[str, str, str, str]] = []
+    parsed_dataflow_files: list[analytics_store.DataflowFile] = []
     parsed_job_rows: list[tuple[str, str, str, dict[str, Any]]] = []
     file_row_counts: dict[str, int] = {}
     staging_dir = _log_staging_dir(source.id)
@@ -640,13 +691,23 @@ def _refresh_log_source_cache_impl(
             file_state["staged_path"] = read_uri
         if file_kind == "dataflow_parquet":
             parsed_dataflow_files.append(
-                (file_uri, file_kind, revision_json, read_uri)
-                if read_uri != file_uri
-                else (file_uri, file_kind, revision_json)
+                (
+                    file_uri,
+                    file_kind,
+                    revision_json,
+                    read_uri,
+                    str(file_state["partition_value"])
+                    if file_state.get("partition_value") is not None
+                    else None,
+                )
             )
             read_errors = []
         elif file_kind == "job_jsonl":
             rows, read_errors = _read_job_file(read_uri, display_uri=file_uri)
+            partition_date = file_state.get("partition_value")
+            if partition_date is not None:
+                for row in rows:
+                    row["__run_date"] = str(partition_date)
             parsed_job_rows.extend((file_uri, file_kind, revision_json, row) for row in rows)
             file_row_counts[file_uri] = len(rows)
             file_state["row_count"] = len(rows)
@@ -890,6 +951,7 @@ def _manifest_file_state_from_candidate(
     file_kind: str,
 ) -> dict[str, Any]:
     revision = candidate.revision
+    partition_key = candidate.partition.partition_value
     metadata = (
         parse_system_log_file_metadata(revision.canonical_uri)
         if file_kind == "system_jsonl"
@@ -898,7 +960,8 @@ def _manifest_file_state_from_candidate(
     return {
         "file_uri": revision.canonical_uri,
         "file_kind": file_kind,
-        "partition_value": candidate.partition.partition_value,
+        "partition_value": _partition_date(partition_key),
+        "partition_key": _partition_key_text(partition_key),
         "partition_format": candidate.partition.partition_format,
         "revision_json": _revision_json(revision),
         "job_id": metadata.get("job_id"),
@@ -1004,7 +1067,10 @@ def _read_dataflow_file(file_uri: str) -> tuple[list[dict[str, Any]], list[dict[
     conn = duckdb.connect(database=":memory:")
     try:
         escaped = file_uri.replace("'", "''")
-        result = conn.execute(f"SELECT * FROM read_parquet('{escaped}', union_by_name=true)")
+        result = conn.execute(
+            f"SELECT * FROM read_parquet('{escaped}', "
+            "union_by_name=true, hive_partitioning=false)"
+        )
         names = [desc[0] for desc in result.description]
         return [_json_ready(dict(zip(names, row))) for row in result.fetchall()], []
     except Exception as exc:

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
-import pytest
 
 
 def test_schema_version_has_explicit_replay_path() -> None:
@@ -182,14 +181,77 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
         assert connection.execute("SELECT count(*) FROM etl_job_runs").fetchone()[0] == 2
 
 
-def test_failed_upgrade_preserves_live_cache_and_schedules_retry(
+def test_healthy_sources_publish_when_one_source_is_unbuildable(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """One unreachable source is parked and skipped; the healthy sources still publish."""
+    from datacoolie_studio.db.models import SourceObservation
     from datacoolie_studio.db.session import create_session
-    from datacoolie_studio.domains.analytics import access, store
     from datacoolie_studio.domains.analytics_upgrade import service as upgrade
-    from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    session.close()
+    healthy_id, broken_id = sources[0].id, sources[1].id
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+
+    real_refresh = upgrade.refresh_log_source_cache
+
+    def selective_refresh(session, source, **kwargs):
+        if source.id == broken_id:
+            return {
+                "status": "error",
+                "error": {"code": "storage_access_failed", "message": "Unavailable"},
+            }
+        return real_refresh(session, source, **kwargs)
+
+    monkeypatch.setattr(upgrade, "refresh_log_source_cache", selective_refresh)
+
+    result = upgrade.run_analytics_upgrade_once()
+
+    assert result["state"] == "succeeded"
+    assert result["source_ids"] == [healthy_id]
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        cached_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source_id FROM etl_cache_sources ORDER BY source_id"
+            ).fetchall()
+        ]
+    assert cached_sources == [healthy_id]
+
+    verify_session = create_session()
+    try:
+        broken = verify_session.get(SourceObservation, broken_id)
+        assert broken is not None
+        assert broken.automatic_observation_paused_at is not None
+    finally:
+        verify_session.close()
+
+    # A second run is idempotent: the healthy scope is current, no rebuild loop.
+    second = upgrade.run_analytics_upgrade_once()
+    assert second["state"] == "current"
+    assert second["source_ids"] == [healthy_id]
+
+
+def test_unbuildable_source_is_parked_and_does_not_block_manual_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A source whose storage cannot be read is parked instead of wedging everything.
+
+    The complete-candidate upgrade must not fail forever on one unreachable source and
+    must not block manual/scheduled per-source sync. The broken source is paused (and
+    drops out of Monitoring coverage), the live cache is preserved, and manual publish
+    keeps working.
+    """
+    from datacoolie_studio.db.models import EnvironmentSource, SourceObservation
+    from datacoolie_studio.db.session import create_session
+    from datacoolie_studio.domains.analytics import store
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+    from datacoolie_studio.domains.monitoring import context as monitoring_context
 
     session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=1)
     session.close()
@@ -204,47 +266,59 @@ def test_failed_upgrade_preserves_live_cache_and_schedules_retry(
             "error": {"code": "storage_access_failed", "message": "Unavailable"},
         },
     )
-    failed_at = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    checked_at = datetime(2026, 8, 3, tzinfo=timezone.utc)
 
-    result = upgrade.run_analytics_upgrade_once(now=failed_at)
+    result = upgrade.run_analytics_upgrade_once(now=checked_at)
 
-    assert result["state"] == "failed"
-    assert result["source_ids"] == [sources[0].id]
-    assert result["error_code"] == "storage_access_failed"
-    assert result["next_retry_at"] == "2026-08-03T00:00:30+00:00"
+    # The upgrade settles instead of staying "failed" and retrying forever.
+    assert result["state"] == "succeeded"
+    assert result["source_ids"] == []
+
+    verify_session = create_session()
+    try:
+        observation = verify_session.get(SourceObservation, sources[0].id)
+        assert observation is not None
+        assert observation.automatic_observation_paused_at is not None
+        assert observation.last_outcome == "error"
+        parked_source = verify_session.get(EnvironmentSource, sources[0].id)
+        assert parked_source is not None
+        # A parked source drops out of Monitoring coverage, matching the upgrade scope.
+        assert monitoring_context.source_ids([parked_source]) == []
+    finally:
+        verify_session.close()
+
+    # The live cache is untouched (no swap) and no candidate is left behind.
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
-        assert connection.execute(
-            "SELECT schema_version FROM etl_analytics_meta WHERE singleton_id = 1"
-        ).fetchone()[0] == 7
         assert connection.execute(
             "SELECT job_id FROM etl_job_runs"
         ).fetchall() == [("old-job",)]
     assert not analytics_path.with_name("analytics.candidate.duckdb").exists()
 
+    # Manual per-source publish is no longer blocked by the upgrade state.
     manual_publish = store.publish_rows(
         sources[0].id,
         [],
-        [("new.jsonl", "job_jsonl", "{}", {"job_id": "partial-job"})],
+        [
+            (
+                "new.jsonl",
+                "job_jsonl",
+                "{}",
+                {
+                    "job_id": "partial-job",
+                    "status": "succeeded",
+                    "end_time": "2026-08-03T00:00:00Z",
+                },
+            )
+        ],
         [],
         ["new.jsonl"],
         database_path=analytics_path,
     )
-    assert manual_publish["published"] is False
-    assert manual_publish["errors"][0]["code"] == "analytics_upgrade_in_progress"
-
-    monkeypatch.setattr(access, "analytics_database_path", lambda: analytics_path)
-    with pytest.raises(AnalyticsRebuildRequired) as raised:
-        with access.reader([sources[0].id]):
-            pass
-    assert raised.value.reason == "analytics_upgrade_failed"
-
-    retry_session = create_session()
-    try:
-        retry = upgrade.request_analytics_upgrade_retry(retry_session)
-    finally:
-        retry_session.close()
-    assert retry["state"] == "pending"
-    assert retry["next_retry_at"] is None
+    assert manual_publish["published"] is True
+    assert not any(
+        error.get("code") == "analytics_upgrade_in_progress"
+        for error in manual_publish["errors"]
+    )
 
 
 def test_source_scope_change_discards_candidate_before_swap(
@@ -307,3 +381,176 @@ def test_simultaneous_startup_upgrade_calls_publish_one_generation(
     assert sorted(result["state"] for result in results) == ["current", "succeeded"]
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         assert connection.execute("SELECT count(*) FROM etl_job_runs").fetchone()[0] == 1
+
+
+def test_resumable_candidate_reports_already_built_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A retried upgrade skips sources already published into a compatible candidate."""
+    from datacoolie_studio.domains.analytics import store
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, _sources = _workspace_with_sources(tmp_path, monkeypatch, count=0)
+    session.close()
+    candidate = tmp_path / "analytics.candidate.duckdb"
+    for source_id in (10, 20):
+        store.publish_rows(
+            source_id,
+            [],
+            [
+                (
+                    f"{source_id}.jsonl",
+                    "job_jsonl",
+                    "{}",
+                    {
+                        "job_id": f"job-{source_id}",
+                        "status": "succeeded",
+                        "end_time": "2026-08-03T00:00:00Z",
+                    },
+                )
+            ],
+            [],
+            [f"{source_id}.jsonl"],
+            database_path=candidate,
+        )
+
+    assert upgrade._resumable_candidate_sources(candidate, [10, 20, 30]) == {10, 20}
+    assert upgrade._resumable_candidate_sources(tmp_path / "missing.duckdb", [10]) == set()
+
+
+def test_reconcile_orphaned_sync_jobs_fails_running_jobs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Running jobs left by a killed process are failed on restart so they stop blocking."""
+    from datacoolie_studio.db.models import SyncJob, utc_now
+    from datacoolie_studio.domains.sync.service import reconcile_orphaned_sync_jobs
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=1)
+    job = SyncJob(
+        environment_id=sources[0].environment_id,
+        source_id=sources[0].id,
+        source_kind="logs",
+        job_type="analytics_upgrade",
+        status="running",
+        started_at=utc_now(),
+    )
+    session.add(job)
+    session.commit()
+
+    assert reconcile_orphaned_sync_jobs(session) == 1
+    session.refresh(job)
+    assert job.status == "failed"
+    assert job.completed_at is not None
+    # A second pass is a no-op once nothing is left running.
+    assert reconcile_orphaned_sync_jobs(session) == 0
+    session.close()
+
+
+def test_parallel_build_publishes_every_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The concurrent per-source build publishes exact coverage for many sources."""
+    from datacoolie_studio.domains.analytics import schema
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=5)
+    session.close()
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+
+    result = upgrade.run_analytics_upgrade_once()
+
+    assert result["state"] == "succeeded"
+    assert result["source_ids"] == [source.id for source in sources]
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        meta = connection.execute(
+            "SELECT schema_version, build_state FROM etl_analytics_meta WHERE singleton_id = 1"
+        ).fetchone()
+        cached_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source_id FROM etl_cache_sources ORDER BY source_id"
+            ).fetchall()
+        ]
+    assert meta == (schema.ANALYTICS_SCHEMA_VERSION, "ready")
+    assert cached_sources == [source.id for source in sources]
+
+
+def test_worker_exception_aborts_and_preserves_live_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An unexpected worker failure aborts the upgrade; the live cache is untouched."""
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, _sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    session.close()
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+
+    def boom(_session, _source, **_kwargs):
+        raise RuntimeError("materialization exploded")
+
+    monkeypatch.setattr(upgrade, "refresh_log_source_cache", boom)
+
+    result = upgrade.run_analytics_upgrade_once()
+
+    assert result["state"] == "failed"
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        assert connection.execute(
+            "SELECT schema_version FROM etl_analytics_meta WHERE singleton_id = 1"
+        ).fetchone()[0] == 7
+        assert connection.execute(
+            "SELECT job_id FROM etl_job_runs"
+        ).fetchall() == [("old-job",)]
+
+
+def test_concurrent_sync_job_inserts_do_not_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """WAL + busy_timeout let concurrent worker sessions write without locking errors."""
+    from sqlalchemy import func, select
+
+    from datacoolie_studio.db.models import SyncJob, utc_now
+    from datacoolie_studio.db.session import create_session
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=1)
+    environment_id = sources[0].environment_id
+    source_id = sources[0].id
+    session.close()
+
+    def insert(_index: int) -> None:
+        worker = create_session()
+        try:
+            worker.add(
+                SyncJob(
+                    environment_id=environment_id,
+                    source_id=source_id,
+                    source_kind="logs",
+                    job_type="analytics_upgrade",
+                    status="succeeded",
+                    started_at=utc_now(),
+                    completed_at=utc_now(),
+                )
+            )
+            worker.commit()
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(insert, range(16)))
+
+    verify = create_session()
+    try:
+        count = verify.scalar(
+            select(func.count(SyncJob.id)).where(SyncJob.source_id == source_id)
+        )
+    finally:
+        verify.close()
+    assert count == 16

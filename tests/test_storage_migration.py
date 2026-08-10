@@ -9,6 +9,63 @@ from sqlalchemy import text
 from datacoolie_studio.db.session import get_engine, init_db
 
 
+def test_log_partition_key_columns_are_added_idempotently(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "studio.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE log_file_manifest (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                file_uri TEXT NOT NULL,
+                file_kind VARCHAR(50) NOT NULL,
+                partition_value DATE,
+                partition_format VARCHAR(100),
+                revision_json TEXT NOT NULL,
+                row_count INTEGER NOT NULL DEFAULT 0,
+                status VARCHAR(50) NOT NULL,
+                first_seen_at DATETIME NOT NULL,
+                last_seen_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE log_stream_states (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                stream_kind VARCHAR(50) NOT NULL,
+                root_uri TEXT NOT NULL,
+                partition_format VARCHAR(100),
+                partition_granularity VARCHAR(20),
+                checkpoint_partition_value DATE,
+                boundary_last_modified DATETIME,
+                last_scanned_partition_value DATE,
+                layout_status VARCHAR(20) NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    init_db()
+    init_db()
+
+    with sqlite3.connect(db_path) as connection:
+        manifest_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(log_file_manifest)")
+        }
+        state_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(log_stream_states)")
+        }
+    assert "partition_key" in manifest_columns
+    assert {"checkpoint_partition_key", "last_scanned_partition_key"} <= state_columns
+
+
 def test_source_observation_hard_cutover_drops_only_superseded_state(
     tmp_path: Path, monkeypatch
 ) -> None:

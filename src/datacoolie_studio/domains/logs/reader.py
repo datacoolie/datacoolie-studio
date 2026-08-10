@@ -76,7 +76,11 @@ def read_dataflow_logs(root_uris: list[str], limit: int | None = None) -> tuple[
         files.extend(discovered)
     if not files:
         return [], errors
-    sql = f"SELECT * FROM read_parquet({_duckdb_list(files)}, union_by_name=true) ORDER BY end_time DESC NULLS LAST"
+    sql = (
+        f"SELECT * FROM read_parquet({_duckdb_list(files)}, "
+        "union_by_name=true, hive_partitioning=false) "
+        "ORDER BY end_time DESC NULLS LAST"
+    )
     if limit:
         sql += f" LIMIT {int(limit)}"
     conn = duckdb.connect(database=":memory:")

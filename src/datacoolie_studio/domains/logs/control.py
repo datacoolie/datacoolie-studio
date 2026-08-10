@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import LogFileManifest, LogStreamState, utc_now
+from datacoolie_studio.domains.logs.partition import PartitionValue
 
 
 @dataclass(frozen=True)
@@ -17,9 +18,9 @@ class StreamStateUpdate:
     layout_status: str
     partition_format: str | None
     partition_granularity: str | None
-    checkpoint_partition_value: date | None
+    checkpoint_partition_value: PartitionValue | None
     boundary_last_modified: datetime | None
-    last_scanned_partition_value: date | None
+    last_scanned_partition_value: PartitionValue | None
 
 
 def stream_states(
@@ -70,9 +71,11 @@ def upsert_stream_states(
         row.layout_status = update.layout_status
         row.partition_format = update.partition_format
         row.partition_granularity = update.partition_granularity
-        row.checkpoint_partition_value = update.checkpoint_partition_value
+        row.checkpoint_partition_value = _partition_date(update.checkpoint_partition_value)
+        row.checkpoint_partition_key = _partition_key(update.checkpoint_partition_value)
         row.boundary_last_modified = update.boundary_last_modified
-        row.last_scanned_partition_value = update.last_scanned_partition_value
+        row.last_scanned_partition_value = _partition_date(update.last_scanned_partition_value)
+        row.last_scanned_partition_key = _partition_key(update.last_scanned_partition_value)
         row.updated_at = timestamp
 
 
@@ -104,6 +107,11 @@ def upsert_manifest_rows(
             existing[(file_kind, file_uri)] = row
         row.revision_json = str(state["revision_json"])
         row.partition_value = state.get("partition_value")  # type: ignore[assignment]
+        row.partition_key = (
+            str(state["partition_key"])
+            if state.get("partition_key") is not None
+            else None
+        )
         row.partition_format = (
             str(state["partition_format"])
             if state.get("partition_format") is not None
@@ -115,6 +123,18 @@ def upsert_manifest_rows(
         row.run_date = state.get("run_date")  # type: ignore[assignment]
         row.status = str(state.get("status") or "ok")
         row.last_seen_at = timestamp
+
+
+def _partition_date(value: PartitionValue | None) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _partition_key(value: PartitionValue | None) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return value.isoformat() if value is not None else None
 
 
 def reset_log_control_state(session: Session, source_id: int) -> None:

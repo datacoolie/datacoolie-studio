@@ -12,15 +12,21 @@ from fastapi.staticfiles import StaticFiles
 
 from datacoolie_studio import __version__
 from datacoolie_studio.api.v1 import api_router
-from datacoolie_studio.db.session import init_db
+from datacoolie_studio.db.session import create_session, init_db
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.analytics_upgrade.service import analytics_upgrade_loop
 from datacoolie_studio.domains.sync.scheduler import scheduler_loop
+from datacoolie_studio.domains.sync.service import reconcile_orphaned_sync_jobs
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    reconciliation_session = create_session()
+    try:
+        reconcile_orphaned_sync_jobs(reconciliation_session)
+    finally:
+        reconciliation_session.close()
     stop_event = asyncio.Event()
     scheduler_task = asyncio.create_task(scheduler_loop(stop_event))
     upgrade_task = asyncio.create_task(analytics_upgrade_loop(stop_event))

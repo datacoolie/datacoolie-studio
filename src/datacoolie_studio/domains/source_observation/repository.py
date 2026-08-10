@@ -395,8 +395,15 @@ def resume_observation(
     due_at: datetime | None = None,
     pending_changes: bool | None = None,
     lease_owner: str | None = None,
+    preserve_outcome: bool = False,
 ) -> SourceObservation:
-    """Restart automatic observation while retaining successful source evidence."""
+    """Restart automatic observation while retaining successful source evidence.
+
+    When ``preserve_outcome`` is set, the last recorded outcome and error evidence
+    are left untouched. This is used by manual validation, which only confirms the
+    source is reachable and must not overwrite the real sync/observation result
+    (otherwise a green "synced" pill would mask a genuinely failed sync).
+    """
 
     state = reset_observation(
         session,
@@ -404,14 +411,32 @@ def resume_observation(
         due_at=due_at,
         pending_changes=pending_changes,
     )
-    state.error_json = None
-    state.last_outcome = "unchanged" if state.last_succeeded_at else "never"
+    if not preserve_outcome:
+        state.error_json = None
+        state.last_outcome = "unchanged" if state.last_succeeded_at else "never"
     if lease_owner is not None:
         state.lease_owner = lease_owner
         state.lease_expires_at = _as_utc(utc_now()) + timedelta(
             seconds=OBSERVATION_LEASE_SECONDS
         )
     return state
+
+
+def paused_source_ids(
+    session: Session,
+    source_ids: list[int],
+) -> set[int]:
+    """Return the subset of ``source_ids`` whose automatic observation is paused."""
+    if not source_ids:
+        return set()
+    return set(
+        session.scalars(
+            select(SourceObservation.source_id).where(
+                SourceObservation.source_id.in_(source_ids),
+                SourceObservation.automatic_observation_paused_at.is_not(None),
+            )
+        )
+    )
 
 
 def observation_delay_seconds(

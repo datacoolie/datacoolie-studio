@@ -6,7 +6,7 @@ from collections.abc import Generator
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import create_engine
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from datacoolie_studio.core.config import database_url
@@ -18,12 +18,25 @@ _engine_url = None
 _session_factory: sessionmaker[Session] | None = None
 
 
+def _configure_sqlite_connection(dbapi_connection, _record) -> None:
+    # WAL + a busy timeout let concurrent worker sessions (e.g. the parallel analytics
+    # upgrade) serialize writes instead of failing immediately with "database is locked".
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
 def get_engine():
     global _engine, _engine_url, _session_factory
     url = database_url()
     if _engine is None or _engine_url != url:
         connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         _engine = create_engine(url, connect_args=connect_args)
+        if url.startswith("sqlite"):
+            event.listen(_engine, "connect", _configure_sqlite_connection)
         _engine_url = url
         _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
     return _engine
@@ -41,6 +54,7 @@ def init_db() -> None:
     _ensure_scan_run_columns(engine)
     _ensure_environment_source_columns(engine)
     _ensure_log_file_manifest_columns(engine)
+    _ensure_log_stream_state_columns(engine)
     _migrate_environment_sources(engine)
     _migrate_storage_settings(engine)
     _migrate_adls_discovered_source_uris(engine)
@@ -589,9 +603,34 @@ def _ensure_log_file_manifest_columns(engine) -> None:
         statements.append(
             "ALTER TABLE log_file_manifest ADD COLUMN partition_value DATE"
         )
+    if "partition_key" not in columns:
+        statements.append(
+            "ALTER TABLE log_file_manifest ADD COLUMN partition_key VARCHAR(32)"
+        )
     if "partition_format" not in columns:
         statements.append(
             "ALTER TABLE log_file_manifest ADD COLUMN partition_format VARCHAR(100)"
+        )
+    if not statements:
+        return
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
+def _ensure_log_stream_state_columns(engine) -> None:
+    inspector = inspect(engine)
+    if "log_stream_states" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("log_stream_states")}
+    statements = []
+    if "checkpoint_partition_key" not in columns:
+        statements.append(
+            "ALTER TABLE log_stream_states ADD COLUMN checkpoint_partition_key VARCHAR(32)"
+        )
+    if "last_scanned_partition_key" not in columns:
+        statements.append(
+            "ALTER TABLE log_stream_states ADD COLUMN last_scanned_partition_key VARCHAR(32)"
         )
     if not statements:
         return

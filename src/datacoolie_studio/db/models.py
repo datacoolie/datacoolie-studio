@@ -341,6 +341,7 @@ class LogFileManifest(Base):
     file_uri: Mapped[str] = mapped_column(Text, nullable=False)
     file_kind: Mapped[str] = mapped_column(String(50), nullable=False)
     partition_value: Mapped[date | None] = mapped_column(Date, nullable=True)
+    partition_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
     revision_json: Mapped[str] = mapped_column(Text, nullable=False)
     row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -372,12 +373,17 @@ class LogStreamState(Base):
     partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
     partition_granularity: Mapped[str | None] = mapped_column(String(20), nullable=True)
     checkpoint_partition_value: Mapped[date | None] = mapped_column(Date, nullable=True)
+    checkpoint_partition_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     boundary_last_modified: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
     last_scanned_partition_value: Mapped[date | None] = mapped_column(
         Date,
+        nullable=True,
+    )
+    last_scanned_partition_key: Mapped[str | None] = mapped_column(
+        String(32),
         nullable=True,
     )
     layout_status: Mapped[str] = mapped_column(String(20), nullable=False)

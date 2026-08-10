@@ -66,6 +66,31 @@ def test_reads_usecase_job_logs():
     assert {"job_id", "engine_name", "metadata_provider_name", "status"} <= set(rows[0])
 
 
+def test_job_log_reader_supports_legacy_daily_and_immutable_per_run_files(tmp_path):
+    partition = tmp_path / "job_run_log" / "__run_date=2026-08-09"
+    partition.mkdir(parents=True)
+    records = {
+        "job_run_log_20260809.jsonl": {"job_id": "legacy", "end_time": "2026-08-09T01:00:00Z"},
+        "job_20260809_020000_1_0_new-a.jsonl": {
+            "job_id": "new-a",
+            "end_time": "2026-08-09T02:00:00Z",
+        },
+        "job_20260809_030000_1_0_new-b.jsonl": {
+            "job_id": "new-b",
+            "end_time": "2026-08-09T03:00:00Z",
+        },
+    }
+    for filename, record in records.items():
+        (partition / filename).write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    files = discover_job_jsonl_files(str(tmp_path))
+    rows, errors = read_job_logs([str(tmp_path)])
+
+    assert not errors
+    assert {Path(path).name for path in files} == set(records)
+    assert [row["job_id"] for row in rows] == ["new-b", "new-a", "legacy"]
+
+
 def test_maintenance_upstream_dataflows_preserves_full_aggregate():
     rows = [
         {
