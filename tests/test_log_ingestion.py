@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,7 +182,21 @@ def _create_workspace(client: TestClient, log_root: Path) -> tuple[int, int]:
         json={"uri": str(log_root), "label": "partitioned logs"},
     )
     assert source_response.status_code == 200, source_response.text
-    return int(environment["id"]), int(source_response.json()["id"])
+    environment_id = int(environment["id"])
+    source_id = int(source_response.json()["id"])
+    status: dict[str, object] = {}
+    for _ in range(100):
+        status = _source_status(client, environment_id, source_id)
+        latest_job = status.get("latest_job") or {}
+        if (
+            status.get("active_operation") is None
+            and latest_job.get("job_type") == "initial_refresh"
+            and latest_job.get("status") == "succeeded"
+        ):
+            break
+        time.sleep(0.02)
+    assert status.get("active_operation") is None, status
+    return environment_id, source_id
 
 
 def _refresh(
