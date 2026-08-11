@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "datacoolie-studio"
-version = "0.1.4"
+version = "0.1.5"
 description = "Local web studio for inspecting DataCoolie metadata, lineage, and ETL logs."
 readme = "README.md"
 requires-python = ">=3.11"
