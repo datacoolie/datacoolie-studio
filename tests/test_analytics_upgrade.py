@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -18,6 +18,7 @@ def test_schema_version_has_explicit_replay_path() -> None:
     assert [(step.from_version, step.to_version) for step in migration_path(7)] == [
         (7, 8),
         (8, 9),
+        (9, 10),
     ]
     assert all(step.requires_source_replay for step in migration_path(7))
     assert migration_path(6) == ()
@@ -96,7 +97,13 @@ def _workspace_with_sources(tmp_path: Path, monkeypatch, count: int = 2):
     return session, sources
 
 
-def _write_old_live_cache(path: Path, source_id: int = 999) -> None:
+def _write_old_live_cache(
+    path: Path,
+    source_id: int = 999,
+    *,
+    schema_version: int = 7,
+    include_legacy_transform_policy: bool = False,
+) -> None:
     from datacoolie_studio.domains.analytics import store
 
     result = store.publish_rows(
@@ -120,8 +127,14 @@ def _write_old_live_cache(path: Path, source_id: int = 999) -> None:
     )
     assert result["published"] is True
     with duckdb.connect(str(path)) as connection:
+        if include_legacy_transform_policy:
+            connection.execute(
+                "ALTER TABLE etl_dataflow_runs "
+                "ADD COLUMN transform_missing_column_policy VARCHAR"
+            )
         connection.execute(
-            "UPDATE etl_analytics_meta SET schema_version = 7 WHERE singleton_id = 1"
+            "UPDATE etl_analytics_meta SET schema_version = ? WHERE singleton_id = 1",
+            [schema_version],
         )
 
 
@@ -135,7 +148,11 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
     session, sources = _workspace_with_sources(tmp_path, monkeypatch)
     session.close()
     analytics_path = tmp_path / "analytics.duckdb"
-    _write_old_live_cache(analytics_path)
+    _write_old_live_cache(
+        analytics_path,
+        schema_version=9,
+        include_legacy_transform_policy=True,
+    )
     monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
 
     result = upgrade.run_analytics_upgrade_once()
@@ -166,6 +183,10 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
             WHERE dataflow_run_id = 'run-1'
             """
         ).fetchone()
+        dataflow_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info('etl_dataflow_runs')").fetchall()
+        }
     assert meta == (schema.ANALYTICS_SCHEMA_VERSION, "ready")
     assert cached_sources == [source.id for source in sources]
     assert jobs == ["job-1", "job-2"]
@@ -173,6 +194,7 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
         '["id", "email"]',
         '{"missing_column_policy": "ignore"}',
     )
+    assert "transform_missing_column_policy" not in dataflow_columns
     assert not analytics_path.with_name("analytics.candidate.duckdb").exists()
 
     second = upgrade.run_analytics_upgrade_once()
@@ -445,6 +467,65 @@ def test_reconcile_orphaned_sync_jobs_fails_running_jobs(
     assert job.completed_at is not None
     # A second pass is a no-op once nothing is left running.
     assert reconcile_orphaned_sync_jobs(session) == 0
+    session.close()
+
+
+def test_upgrade_status_projects_per_source_timing(tmp_path: Path, monkeypatch) -> None:
+    from datacoolie_studio.db.models import AnalyticsUpgrade, SyncJob
+    from datacoolie_studio.domains.analytics_upgrade.service import upgrade_status
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    started_at = datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc)
+    completed_at = started_at + timedelta(seconds=12.5)
+    upgrade = AnalyticsUpgrade(
+        id=1,
+        source_schema_version=9,
+        target_schema_version=10,
+        state="building",
+        source_ids_json=json.dumps([source.id for source in sources]),
+        completed_source_ids_json="[]",
+        attempt_count=1,
+        started_at=started_at,
+    )
+    session.add(upgrade)
+    session.add(
+        SyncJob(
+            environment_id=sources[0].environment_id,
+            source_id=sources[0].id,
+            source_kind="logs",
+            job_type="analytics_upgrade",
+            status="succeeded",
+            message="Log source cache refreshed",
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+    )
+    session.commit()
+
+    status = upgrade_status(upgrade, session)
+
+    assert status["duration_seconds"] >= 12.5
+    assert status["completed_source_ids"] == [sources[0].id]
+    assert status["source_progress"] == [
+        {
+            "source_id": sources[0].id,
+            "label": str(sources[0].uri),
+            "status": "succeeded",
+            "message": "Log source cache refreshed",
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": 12.5,
+        },
+        {
+            "source_id": sources[1].id,
+            "label": str(sources[1].uri),
+            "status": "pending",
+            "message": None,
+            "started_at": None,
+            "completed_at": None,
+            "duration_seconds": None,
+        },
+    ]
     session.close()
 
 

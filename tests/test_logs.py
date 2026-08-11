@@ -2018,6 +2018,41 @@ def test_legacy_dataflow_cache_table_is_recreated_in_one_schema_pass(tmp_path: P
     assert "_source_id" in columns
 
 
+def test_typed_dataflow_cache_ignores_legacy_transform_policy(tmp_path: Path):
+    import duckdb
+
+    analytics_path = tmp_path / "analytics.duckdb"
+    with duckdb.connect(str(analytics_path)) as connection:
+        analytics_store.ensure_tables(connection)
+        analytics_store.insert_typed_rows(
+            connection,
+            analytics_schema.DATAFLOW_TABLE,
+            7,
+            [
+                (
+                    "legacy.json",
+                    "legacy_dataflow_json",
+                    "{}",
+                    {
+                        "dataflow_id": "customers",
+                        "transform_configure": '{"missing_column_policy": "ignore"}',
+                        "transform_missing_column_policy": "ignore",
+                    },
+                )
+            ],
+            analytics_schema.DATAFLOW_COLUMN_TYPES,
+        )
+        columns = set(
+            analytics_schema.table_columns(connection, analytics_schema.DATAFLOW_TABLE)
+        )
+        configure = connection.execute(
+            "SELECT transform_configure FROM etl_dataflow_runs"
+        ).fetchone()[0]
+
+    assert configure == '{"missing_column_policy": "ignore"}'
+    assert "transform_missing_column_policy" not in columns
+
+
 def test_duckdb_cache_preserves_job_timestamp_string_and_drops_raw_json(tmp_path: Path, monkeypatch):
     import duckdb
 

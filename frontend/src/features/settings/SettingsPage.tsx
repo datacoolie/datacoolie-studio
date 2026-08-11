@@ -11,6 +11,7 @@ import { toErrorMessage } from "../../shared/lib/errors";
 import type { StudioSettingsChanges } from "./hooks/useStudioSettings";
 import { type StudioCacheAction, useStudioCache } from "./hooks/useStudioCache";
 import { StudioConfigurationDrawer } from "./StudioConfigurationDrawer";
+import { AnalyticsUpgradeDetailsDrawer } from "./AnalyticsUpgradeDetailsDrawer";
 import { CredentialProfilesSection } from "./CredentialProfilesSection";
 import type { TimezoneOption } from "./timezoneOptions";
 import "./settings.css";
@@ -49,6 +50,7 @@ export function SettingsPage({
   onToggleModule,
 }: SettingsPageProps) {
   const [configurationDrawerOpen, setConfigurationDrawerOpen] = useState(false);
+  const [upgradeDetailsOpen, setUpgradeDetailsOpen] = useState(false);
   const [timezoneOptions, setTimezoneOptions] = useState<TimezoneOption[] | null>(null);
   const [pendingMaintenanceAction, setPendingMaintenanceAction] = useState<PendingMaintenanceAction | null>(null);
   const [workspaceMaintenanceBusy, setWorkspaceMaintenanceBusy] = useState(false);
@@ -285,6 +287,13 @@ export function SettingsPage({
                     onClick={() => { void cache.retryUpgrade().catch(() => undefined); }}
                   >{cache.busyAction === "analytics-upgrade:retry" ? "Retrying…" : "Retry upgrade"}</button>
                 ) : null}
+                {analyticsUpgrade ? (
+                  <button
+                    type="button"
+                    className="settings-section-action"
+                    onClick={() => setUpgradeDetailsOpen(true)}
+                  >View details</button>
+                ) : null}
                 <button
                   type="button"
                   className="settings-section-action"
@@ -385,6 +394,12 @@ export function SettingsPage({
           onTimezoneOptionsLoaded={setTimezoneOptions}
           onSave={onSaveSettings}
           onClose={closeConfigurationDrawer}
+        />
+      ) : null}
+      {upgradeDetailsOpen && analyticsUpgrade ? (
+        <AnalyticsUpgradeDetailsDrawer
+          upgrade={analyticsUpgrade}
+          onClose={() => setUpgradeDetailsOpen(false)}
         />
       ) : null}
       {pendingMaintenanceAction ? (

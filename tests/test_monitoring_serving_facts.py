@@ -138,7 +138,7 @@ def test_serving_facts_keep_transform_configure_values_grouped(
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         cached = connection.execute(
             f"""
-            SELECT {', '.join(source_transform_values)}
+            SELECT {', '.join(direct_transform_values)}
             FROM {analytics_schema.DATAFLOW_TABLE}
             WHERE dataflow_run_id = 'run-1'
             """
@@ -156,8 +156,15 @@ def test_serving_facts_keep_transform_configure_values_grouped(
                 f"DESCRIBE {MONITORING_DATAFLOW_FACTS_TABLE}"
             ).fetchall()
         }
-    assert cached == tuple(source_transform_values.values())
+        cache_columns = {
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE {analytics_schema.DATAFLOW_TABLE}"
+            ).fetchall()
+        }
+    assert cached == tuple(direct_transform_values.values())
     assert projected == tuple(direct_transform_values.values())
+    assert "transform_missing_column_policy" not in cache_columns
     assert "transform_missing_column_policy" not in serving_columns
 
     from datacoolie_studio.db.models import EnvironmentSource

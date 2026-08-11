@@ -170,7 +170,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             and upgrade.next_retry_at is not None
             and _as_utc(upgrade.next_retry_at) > checked_at
         ):
-            return upgrade_status(upgrade)
+            return upgrade_status(upgrade, session)
 
         candidate = access.candidate_path(live_path)
         _begin_attempt(upgrade, source_ids, candidate, checked_at)
@@ -179,7 +179,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
         if _cache_is_current(live_path, source_ids):
             _mark_succeeded(upgrade, checked_at)
             session.commit()
-            return upgrade_status(upgrade)
+            return upgrade_status(upgrade, session)
 
         # Resume a compatible partial candidate from a previous attempt instead of
         # rebuilding every already-completed source; only discard an incompatible one.
@@ -252,7 +252,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             upgrade.completed_source_ids_json = json.dumps([])
             _mark_succeeded(upgrade, utc_now())
             session.commit()
-            return upgrade_status(upgrade)
+            return upgrade_status(upgrade, session)
 
         upgrade.state = "validating"
         upgrade.updated_at = utc_now()
@@ -274,7 +274,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
         access.swap_candidate(candidate, live_path)
         _mark_succeeded(upgrade, utc_now())
         session.commit()
-        return upgrade_status(upgrade)
+        return upgrade_status(upgrade, session)
     except Exception as exc:
         session.rollback()
         transient_collision = (
@@ -294,7 +294,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             else:
                 _mark_failed(upgrade, exc, checked_at)
             session.commit()
-            status = upgrade_status(upgrade)
+            status = upgrade_status(upgrade, session)
         else:
             status = {
                 "state": "failed",
@@ -318,7 +318,7 @@ def current_upgrade_status(session: Session | None = None) -> dict[str, Any] | N
         except SQLAlchemyError:
             active_session.rollback()
             return None
-        return upgrade_status(upgrade) if upgrade is not None else None
+        return upgrade_status(upgrade, active_session) if upgrade is not None else None
     finally:
         if owns_session:
             active_session.close()
@@ -356,7 +356,7 @@ def request_analytics_upgrade_retry(session: Session) -> dict[str, Any]:
     if upgrade is None:
         return {"state": "not_required"}
     if upgrade.state in {"building", "validating", "publishing"}:
-        return upgrade_status(upgrade)
+        return upgrade_status(upgrade, session)
     upgrade.state = "pending"
     upgrade.error_code = None
     upgrade.error_message = None
@@ -364,16 +364,32 @@ def request_analytics_upgrade_retry(session: Session) -> dict[str, Any]:
     upgrade.completed_at = None
     upgrade.updated_at = utc_now()
     session.commit()
-    return upgrade_status(upgrade)
+    return upgrade_status(upgrade, session)
 
 
-def upgrade_status(upgrade: AnalyticsUpgrade) -> dict[str, Any]:
+def upgrade_status(
+    upgrade: AnalyticsUpgrade,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    started_at = _as_utc(upgrade.started_at) if upgrade.started_at else None
+    completed_at = _as_utc(upgrade.completed_at) if upgrade.completed_at else None
+    source_progress = _source_progress(session, upgrade, now)
+    completed_source_ids = set(_json_ids(upgrade.completed_source_ids_json))
+    completed_source_ids.update(
+        source["source_id"]
+        for source in source_progress
+        if source["status"] in {"completed", "succeeded"}
+    )
     return {
         "state": upgrade.state,
         "source_schema_version": upgrade.source_schema_version,
         "target_schema_version": upgrade.target_schema_version,
         "source_ids": _json_ids(upgrade.source_ids_json),
-        "completed_source_ids": _json_ids(upgrade.completed_source_ids_json),
+        # Worker sessions commit SyncJobs as each source finishes, before the upgrade
+        # coordinator has collected every future and persisted its own checkpoint.
+        # Project those committed jobs so live progress never lags per-source details.
+        "completed_source_ids": sorted(completed_source_ids),
         "attempt_count": upgrade.attempt_count,
         "error_code": upgrade.error_code,
         "error_message": upgrade.error_message,
@@ -382,7 +398,66 @@ def upgrade_status(upgrade: AnalyticsUpgrade) -> dict[str, Any]:
         "started_at": _iso_or_none(upgrade.started_at),
         "completed_at": _iso_or_none(upgrade.completed_at),
         "updated_at": _iso_or_none(upgrade.updated_at),
+        "duration_seconds": (
+            max(0.0, ((completed_at or now) - started_at).total_seconds())
+            if started_at is not None
+            else None
+        ),
+        "source_progress": source_progress,
     }
+
+
+def _source_progress(
+    session: Session | None,
+    upgrade: AnalyticsUpgrade,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    source_ids = _json_ids(upgrade.source_ids_json)
+    if not source_ids:
+        return []
+    completed_ids = set(_json_ids(upgrade.completed_source_ids_json))
+    if session is None:
+        return [
+            {"source_id": source_id, "status": "completed" if source_id in completed_ids else "pending"}
+            for source_id in source_ids
+        ]
+
+    sources = {
+        source.id: source
+        for source in session.scalars(
+            select(EnvironmentSource).where(EnvironmentSource.id.in_(source_ids))
+        )
+    }
+    statement = select(SyncJob).where(
+        SyncJob.source_id.in_(source_ids),
+        SyncJob.job_type == "analytics_upgrade",
+    )
+    if upgrade.started_at is not None:
+        statement = statement.where(SyncJob.started_at >= upgrade.started_at)
+    jobs: dict[int, SyncJob] = {}
+    for job in session.scalars(statement.order_by(SyncJob.started_at.desc(), SyncJob.id.desc())):
+        jobs.setdefault(job.source_id, job)
+
+    progress = []
+    for source_id in source_ids:
+        source = sources.get(source_id)
+        job = jobs.get(source_id)
+        job_started = _as_utc(job.started_at) if job else None
+        job_completed = _as_utc(job.completed_at) if job and job.completed_at else None
+        progress.append({
+            "source_id": source_id,
+            "label": (source.label or source.uri) if source else None,
+            "status": job.status if job else ("completed" if source_id in completed_ids else "pending"),
+            "message": job.message if job else None,
+            "started_at": _iso_or_none(job.started_at) if job else None,
+            "completed_at": _iso_or_none(job.completed_at) if job else None,
+            "duration_seconds": (
+                max(0.0, ((job_completed or now) - job_started).total_seconds())
+                if job_started is not None
+                else None
+            ),
+        })
+    return progress
 
 
 def _eligible_sources(session: Session) -> list[EnvironmentSource]:

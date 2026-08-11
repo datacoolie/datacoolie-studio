@@ -176,6 +176,18 @@ export interface AnalyticsUpgradeStatus {
   started_at?: string | null;
   completed_at?: string | null;
   updated_at?: string | null;
+  duration_seconds?: number | null;
+  source_progress?: AnalyticsUpgradeSourceProgress[];
+}
+
+export interface AnalyticsUpgradeSourceProgress {
+  source_id: number;
+  label?: string | null;
+  status: string;
+  message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_seconds?: number | null;
 }
 
 export interface StudioCacheStatus {

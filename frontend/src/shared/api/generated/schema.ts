@@ -1267,6 +1267,23 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AnalyticsUpgradeSourceProgressResponse */
+        AnalyticsUpgradeSourceProgressResponse: {
+            /** Completed At */
+            completed_at?: string | null;
+            /** Duration Seconds */
+            duration_seconds?: number | null;
+            /** Label */
+            label?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Source Id */
+            source_id: number;
+            /** Started At */
+            started_at?: string | null;
+            /** Status */
+            status: string;
+        };
         /** AnalyticsUpgradeStatusResponse */
         AnalyticsUpgradeStatusResponse: {
             /**
@@ -1278,6 +1295,8 @@ export interface components {
             completed_at?: string | null;
             /** Completed Source Ids */
             completed_source_ids?: number[];
+            /** Duration Seconds */
+            duration_seconds?: number | null;
             /** Error Code */
             error_code?: string | null;
             /** Error Message */
@@ -1286,6 +1305,8 @@ export interface components {
             next_retry_at?: string | null;
             /** Source Ids */
             source_ids?: number[];
+            /** Source Progress */
+            source_progress?: components["schemas"]["AnalyticsUpgradeSourceProgressResponse"][];
             /** Source Schema Version */
             source_schema_version?: number | null;
             /** Started At */

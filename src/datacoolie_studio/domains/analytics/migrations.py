@@ -18,6 +18,7 @@ class AnalyticsMigration:
 MIGRATIONS: tuple[AnalyticsMigration, ...] = (
     AnalyticsMigration(7, 8, legacy_queryable=False, requires_source_replay=True),
     AnalyticsMigration(8, 9, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(9, 10, legacy_queryable=False, requires_source_replay=True),
 )
 
 

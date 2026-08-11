@@ -203,6 +203,16 @@ class StudioCacheStatusResponse(BaseModel):
     sync_job_retention: dict[str, Any] | None = None
 
 
+class AnalyticsUpgradeSourceProgressResponse(BaseModel):
+    source_id: int
+    label: str | None = None
+    status: str
+    message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: float | None = None
+
+
 class AnalyticsUpgradeStatusResponse(BaseModel):
     state: str
     source_schema_version: int | None = None
@@ -216,6 +226,8 @@ class AnalyticsUpgradeStatusResponse(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime | None = None
+    duration_seconds: float | None = None
+    source_progress: list[AnalyticsUpgradeSourceProgressResponse] = Field(default_factory=list)
 
 
 class StudioCacheClearRequest(BaseModel):

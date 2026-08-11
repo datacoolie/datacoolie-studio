@@ -541,9 +541,12 @@ def insert_typed_rows(
         column
         for column in columns
         if (
-            column in schema.STUDIO_CACHE_COLUMNS
-            or column in schema.GENERATED_CACHE_COLUMNS
-            or any(column in row for _, _, _, row in rows)
+            column not in _ignored_source_columns(table_name)
+            and (
+                column in schema.STUDIO_CACHE_COLUMNS
+                or column in schema.GENERATED_CACHE_COLUMNS
+                or any(column in row for _, _, _, row in rows)
+            )
         )
     ]
     placeholders = ", ".join("?" for _ in insert_columns)
@@ -651,9 +654,14 @@ def _ensure_source_columns(
     existing = set(schema.table_columns(conn, table_name))
     actual_types = schema.table_column_types(conn, table_name)
     inferred: dict[str, set[str]] = {}
+    ignored_columns = _ignored_source_columns(table_name)
     for _, _, _, row in rows:
         for column, value in row.items():
-            if value is None or column in schema.STUDIO_CACHE_COLUMNS:
+            if (
+                value is None
+                or column in schema.STUDIO_CACHE_COLUMNS
+                or column in ignored_columns
+            ):
                 continue
             expected = column_types.get(column) or _infer_duckdb_type(value)
             if column in existing:
@@ -709,7 +717,11 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
     candidate_types: dict[str, str] = {}
     for file_uri in file_uris:
         for column, source_type in _describe_parquet_columns(conn, file_uri):
-            if column in schema.STUDIO_CACHE_COLUMNS or column == "__event_time":
+            if (
+                column in schema.STUDIO_CACHE_COLUMNS
+                or column in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
+                or column == "__event_time"
+            ):
                 continue
             previous = candidate_types.get(column)
             candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
@@ -766,7 +778,9 @@ def _dataflow_parquet_target_types(conn, file_uri: str) -> dict[str, str]:
     target_types = {
         name: data_type
         for name, data_type in _describe_parquet_columns(conn, file_uri)
-        if name not in schema.STUDIO_CACHE_COLUMNS and name != "__event_time"
+        if name not in schema.STUDIO_CACHE_COLUMNS
+        and name not in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
+        and name != "__event_time"
     }
     target_types["__event_time"] = "TIMESTAMPTZ"
     target_types["__run_date"] = "DATE"
@@ -782,16 +796,20 @@ def _dataflow_parquet_source_projection(
     source_columns = {
         name for name, _data_type in _describe_parquet_columns(conn, file_uri)
     }
-    generated_columns = [
+    excluded_columns = [
         column
-        for column in ("__event_time", "__run_date")
+        for column in (
+            "__event_time",
+            "__run_date",
+            *schema.IGNORED_DATAFLOW_SOURCE_COLUMNS,
+        )
         if column in source_columns
     ]
     passthrough = (
         "* EXCLUDE ("
-        + ", ".join(_quote_identifier(column) for column in generated_columns)
+        + ", ".join(_quote_identifier(column) for column in excluded_columns)
         + ")"
-        if generated_columns
+        if excluded_columns
         else "*"
     )
 
@@ -819,6 +837,14 @@ def _dataflow_parquet_source_projection(
     return (
         f"{passthrough}, {event_time} AS __event_time, "
         f"{run_date} AS __run_date"
+    )
+
+
+def _ignored_source_columns(table_name: str) -> set[str]:
+    return (
+        schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
+        if table_name == schema.DATAFLOW_TABLE
+        else set()
     )
 
 

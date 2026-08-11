@@ -59,10 +59,10 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
     if (!upgradeState || !["pending", "building", "validating", "publishing"].includes(upgradeState)) {
       return undefined;
     }
-    const timer = window.setTimeout(() => {
+    const timer = window.setInterval(() => {
       void fetchStatus(false).catch(() => undefined);
     }, 2_000);
-    return () => window.clearTimeout(timer);
+    return () => window.clearInterval(timer);
   }, [fetchStatus, upgradeState]);
 
   const refreshDiagnostics = useCallback(async () => {

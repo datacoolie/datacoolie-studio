@@ -43,11 +43,6 @@ DATAFLOW_SORT_COLUMNS = {
     "engine_name": "COALESCE(j.engine_name, 'unknown')",
 }
 
-DATAFLOW_CONFIGURE_DERIVED_COLUMNS = {
-    "transform_missing_column_policy",
-}
-
-
 JOB_SORT_COLUMNS = {
     "end_time": "j.__event_time",
     "start_time": "TRY_CAST(j.start_time AS TIMESTAMPTZ)",
@@ -249,7 +244,7 @@ def query_cached_dataflow_logs(
         dataflow_select_sql = _select_alias_columns(
             "d",
             analytics_schema.table_columns(conn, analytics_schema.DATAFLOW_TABLE),
-            exclude=DATAFLOW_CONFIGURE_DERIVED_COLUMNS,
+            exclude=analytics_schema.IGNORED_DATAFLOW_SOURCE_COLUMNS,
         )
         source_placeholders = ", ".join("?" for _ in source_ids)
         where_sql, params = _monitoring_filter_sql(filters, "d", "j")

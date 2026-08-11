@@ -17,6 +17,7 @@ STUDIO_CACHE_COLUMNS = {
     "_ingested_at": "TIMESTAMPTZ",
 }
 GENERATED_CACHE_COLUMNS = {"__event_time", "__run_date"}
+IGNORED_DATAFLOW_SOURCE_COLUMNS = {"transform_missing_column_policy"}
 
 DATAFLOW_COLUMN_TYPES = {
     "_type": "VARCHAR",
@@ -165,7 +166,7 @@ JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
 CACHE_SOURCES_TABLE = "etl_cache_sources"
 ANALYTICS_META_TABLE = "etl_analytics_meta"
-ANALYTICS_SCHEMA_VERSION = 9
+ANALYTICS_SCHEMA_VERSION = 10
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 
@@ -344,6 +345,7 @@ def typed_table_schema_is_current(
         return (
             bool(columns)
             and "_source_id" in columns
+            and not IGNORED_DATAFLOW_SOURCE_COLUMNS.intersection(columns)
             and not has_legacy_raw_json_column(columns)
             and not has_incompatible_column_types(conn, table_name, {})
             and not has_column_order_mismatch(

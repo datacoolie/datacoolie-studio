@@ -223,6 +223,152 @@
   font-weight: var(--font-weight-semibold);
 }
 
+.analytics-upgrade-drawer {
+  width: min(720px, calc(100vw - 24px));
+}
+
+.analytics-upgrade-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.analytics-upgrade-summary,
+.analytics-upgrade-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analytics-upgrade-section-heading,
+.analytics-upgrade-source-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.analytics-upgrade-section-heading h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.analytics-upgrade-section-heading > span:not(.ds-tag) {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}
+
+.analytics-upgrade-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-border);
+}
+
+.analytics-upgrade-summary-grid > div,
+.analytics-upgrade-source-timing > div {
+  min-width: 0;
+  background: var(--color-surface);
+  padding: 9px 10px;
+}
+
+.analytics-upgrade-summary-grid dt,
+.analytics-upgrade-source-timing dt {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  font-weight: var(--font-weight-medium);
+  text-transform: uppercase;
+}
+
+.analytics-upgrade-summary-grid dd,
+.analytics-upgrade-source-timing dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+}
+
+.analytics-upgrade-message,
+.analytics-upgrade-source-message,
+.analytics-upgrade-empty {
+  margin: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  padding: 8px 10px;
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-body);
+}
+
+.analytics-upgrade-message {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.analytics-upgrade-message.is-error {
+  background: color-mix(in srgb, var(--color-danger) 7%, var(--color-surface));
+  color: var(--color-danger);
+}
+
+.analytics-upgrade-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.analytics-upgrade-source {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: 10px;
+}
+
+.analytics-upgrade-source-header > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.analytics-upgrade-source-header strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-upgrade-source-header small {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+}
+
+.analytics-upgrade-source-timing {
+  display: grid;
+  grid-template-columns: 0.7fr 1.15fr 1.15fr;
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--color-border);
+}
+
+@media (max-width: 700px) {
+  .analytics-upgrade-summary-grid,
+  .analytics-upgrade-source-timing {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-cache-maintenance-actions button:hover:not(:disabled) {
   border-color: var(--color-accent);
   background: var(--color-accent-soft);
