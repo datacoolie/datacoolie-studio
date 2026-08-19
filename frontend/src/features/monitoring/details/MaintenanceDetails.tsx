@@ -16,7 +16,8 @@ import {
   diagnosticsSeverityPresentation,
 } from "../diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { CompactNumberValue, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { formatExactBytes } from "../monitoringNumberFormat";
 import { SystemLogViewer } from "../SystemLogViewer";
 import { GroupedDetailCard, IssueCell, MaintenanceHealthChip, detailValue, hasValue } from "./detailPrimitives";
 
@@ -82,7 +83,7 @@ export function MaintenanceDetailSections({
               ["Running", row.running, "running"],
               ["Pending", row.pending, "pending"],
               ["Unknown", row.unknown, "unknown"],
-              ["No-op runs", <MaintenanceMetricValue key="no-op-runs" tone="warning" value={formatNumber(num(row, "no_op_runs"))} />],
+              ["No-op runs", <MaintenanceMetricValue key="no-op-runs" tone="warning" value={<CompactNumberValue value={num(row, "no_op_runs")} />} />],
               ["No-op duration", <MaintenanceMetricValue key="no-op-duration" tone="warning" value={formatSeconds(num(row, "no_op_duration_seconds"))} />],
             ]}
             showEmpty
@@ -92,9 +93,9 @@ export function MaintenanceDetailSections({
           <GroupedDetailCard
             title="Storage impact"
             rows={[
-              ["Bytes reclaimed", <MaintenanceMetricValue key="bytes-reclaimed" tone="reclaim" value={formatBytes(num(row, "bytes_reclaimed"))} />],
-              ["Files removed", <MaintenanceMetricValue key="files-removed" tone="files" value={formatNumber(num(row, "files_removed"))} />],
-              ["Bytes saved", <MaintenanceMetricValue key="bytes-saved" tone="reclaim" value={formatBytes(num(row, "bytes_saved"))} />],
+              ["Bytes reclaimed", <MaintenanceMetricValue key="bytes-reclaimed" tone="reclaim" value={<span title={formatExactBytes(num(row, "bytes_reclaimed"))}>{formatBytes(num(row, "bytes_reclaimed"))}</span>} />],
+              ["Files removed", <MaintenanceMetricValue key="files-removed" tone="files" value={<CompactNumberValue value={num(row, "files_removed")} />} />],
+              ["Bytes saved", <MaintenanceMetricValue key="bytes-saved" tone="reclaim" value={<span title={formatExactBytes(num(row, "bytes_saved"))}>{formatBytes(num(row, "bytes_saved"))}</span>} />],
               ["Total duration", formatSeconds(num(row, "duration_seconds"))],
               ["Efficiency", `${formatBytes(num(row, "bytes_reclaimed_per_second"))}/s`],
             ]}
@@ -108,11 +109,12 @@ export function MaintenanceDetailSections({
       <section className="monitoring-detail-section">
         <div className="monitoring-detail-section-header monitoring-child-dataflows-header">
           <h3>Upstream dataflows</h3>
-          <small>{`${contributingDataflows.length} dataflows · ${upstreamRunCount} ETL runs`}</small>
+          <small><CompactNumberValue value={contributingDataflows.length} /> dataflows · <CompactNumberValue value={upstreamRunCount} /> ETL runs</small>
         </div>
         {loading ? <MaintenanceRelatedLoading /> : (
           <DataTable
             rows={contributingDataflows}
+            compactNumbers
             columns={[
               { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 180, fillPriority: "normal", render: (item) => <MaintenanceDataflowCell row={item} /> },
               { key: "source", label: "Source", sortable: true, minWidth: 150, fillPriority: "last", render: (item) => <MaintenanceSourceCell row={item} /> },
@@ -149,6 +151,7 @@ export function MaintenanceDetailSections({
         {loading ? <MaintenanceRelatedLoading /> : (
           <DataTable
             rows={destinationRuns}
+            compactNumbers
             columns={[
               { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 180, fillPriority: "normal", render: (item) => <MaintenanceDataflowCell row={item} /> },
               { key: "source", label: "Source", sortable: true, minWidth: 150, maxWidth: 190, fillPriority: "normal", render: (item) => <MaintenanceSourceCell row={item} /> },
@@ -172,7 +175,7 @@ export function MaintenanceDetailSections({
   );
 }
 
-export function MaintenanceMetricValue({ tone, value }: { tone: "reclaim" | "files" | "warning"; value: string }) {
+export function MaintenanceMetricValue({ tone, value }: { tone: "reclaim" | "files" | "warning"; value: ReactNode }) {
   return <span className={`monitoring-maintenance-metric-value is-${tone}`}>{value}</span>;
 }
 
@@ -262,8 +265,8 @@ export function MaintenanceContributingVolumeCell({ row }: { row: Record<string,
         `Rows read: ${formatNumber(rowsRead)}`,
       ].join("\n")}
     >
-      <strong>{formatNumber(runs)}</strong>
-      <small>{formatNumber(rowsRead)}</small>
+      <strong><CompactNumberValue value={runs} /></strong>
+      <small><CompactNumberValue value={rowsRead} /></small>
     </span>
   );
 }
@@ -275,8 +278,8 @@ export function MaintenanceRunVolumeCell({ row }: { row: Record<string, unknown>
   const bytesRemoved = num(row, "destination_bytes_removed");
   const filesRemoved = num(row, "destination_files_removed");
   const isMaintenance = isMaintenanceRun(row);
-  const primary = isMaintenance ? formatBytes(bytesRemoved) : `${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`;
-  const secondary = isMaintenance ? `${formatNumber(filesRemoved)} files` : formatBytes(bytesAdded - bytesRemoved);
+  const primary = isMaintenance ? formatBytes(bytesRemoved) : null;
+  const secondary = isMaintenance ? null : formatBytes(bytesAdded - bytesRemoved);
   return (
     <span
       className="freshness-run-stack-cell"
@@ -288,8 +291,8 @@ export function MaintenanceRunVolumeCell({ row }: { row: Record<string, unknown>
         `Files removed: ${formatNumber(filesRemoved)}`,
       ].join("\n")}
     >
-      <strong>{primary}</strong>
-      <small>{secondary}</small>
+      <strong>{primary ?? <><CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} /></>}</strong>
+      <small>{secondary ?? <><CompactNumberValue value={filesRemoved} /> files</>}</small>
     </span>
   );
 }

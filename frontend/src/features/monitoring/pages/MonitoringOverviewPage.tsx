@@ -1,12 +1,12 @@
 import type { MonitoringReport } from "../../../shared/api/domainTypes";
-import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";import { DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusTrendLegend, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, failureCategoriesRuleTooltip, formatNumber, formatPercent, jobStatusTrendOption, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
+import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";import { CompactNumberValue, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusTrendLegend, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, failureCategoriesRuleTooltip, formatPercent, jobStatusTrendOption, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
 import { EngineProviderHealth, FailureBreakdownDetail, OperationHealthPanel, RateBreakdownDetail, WorkloadVolumeContextPanel, WorkloadVolumeLegend, attentionQueueRuleTooltip, failureCategoryOption, healthReasonSummary, healthReasonsTooltip, resolveAttentionTarget } from "./MonitoringOverviewPageSupport";
 
 function RunCountHeadline({ jobRuns, dataflowRuns }: { jobRuns: number; dataflowRuns: number }) {
   return (
     <>
-      {formatNumber(jobRuns)}<span className="overview-run-count-label"> jobs / </span>
-      {formatNumber(dataflowRuns)}<span className="overview-run-count-label"> flows</span>
+      <CompactNumberValue value={jobRuns} /><span className="overview-run-count-label"> jobs / </span>
+      <CompactNumberValue value={dataflowRuns} /><span className="overview-run-count-label"> flows</span>
     </>
   );
 }
@@ -197,7 +197,7 @@ export function MonitoringOverviewPage({
           </ReportPanel>
           <ReportPanel
             title="Attention queue"
-            subtitle={`${report.attention.length} signals`}
+            subtitle={<><CompactNumberValue value={report.attention.length} /> signals</>}
             titleTooltip={attentionQueueRuleTooltip()}
             className="overview-pulse-attention"
           >

@@ -20,14 +20,14 @@ import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
-import { DetailMetric, MonitoringChartLegend, OVERVIEW_STATUSES, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatPercent, horizontalBarDataZoom, horizontalBarSeriesSizing, statusColor, workloadVolumeTrendOption } from "../components/monitoringPrimitives";
+import { CompactNumberValue, DetailMetric, MonitoringChartLegend, OVERVIEW_STATUSES, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatPercent, horizontalBarDataZoom, horizontalBarSeriesSizing, statusColor, workloadVolumeTrendOption } from "../components/monitoringPrimitives";
 
 export function FailureBreakdownDetail({ jobFailed, flowFailed }: { jobFailed: number; flowFailed: number }) {
   return (
     <span className="health-failure-detail">
-      <DetailMetric label="job failed" value={formatNumber(jobFailed)} tone="bad" />
+      <DetailMetric label="job failed" value={<CompactNumberValue value={jobFailed} />} tone="bad" />
       <span className="separator"> · </span>
-      <DetailMetric label="flow failed" value={formatNumber(flowFailed)} tone="bad" />
+      <DetailMetric label="flow failed" value={<CompactNumberValue value={flowFailed} />} tone="bad" />
     </span>
   );
 }
@@ -502,8 +502,8 @@ export function EngineProviderHealth({ rows }: { rows: Array<Record<string, stri
             <span title={String(row.metadata_provider_name ?? "unknown")}>{row.metadata_provider_name ?? "unknown"}</span>
             <span title={String(row.platform_name ?? "unknown")}>{row.platform_name ?? "unknown"}</span>
             <span>
-              <strong>{formatNumber(num(row, "jobs"))}</strong>
-              <small><span className="status-bad">{formatNumber(failed)}</span> failed</small>
+              <CompactNumberValue value={num(row, "jobs")} />
+              <small><span className="status-bad"><CompactNumberValue value={failed} /></span> failed</small>
             </span>
             <span className={successRate < 95 ? "status-bad" : "status-good"}>{formatPercent(successRate)}</span>
             <span>
@@ -558,7 +558,7 @@ export function buildRuntimeContextAutoWidths(rows: Array<Record<string, string 
     columnValues[0].push(String(row.engine_name ?? "unknown"));
     columnValues[1].push(String(row.metadata_provider_name ?? "unknown"));
     columnValues[2].push(String(row.platform_name ?? "unknown"));
-    columnValues[3].push(formatNumber(num(row, "jobs")), failed ? `${formatNumber(failed)} failed` : "0 failed");
+    columnValues[3].push(formatCompact(num(row, "jobs")), failed ? `${formatCompact(failed)} failed` : "0 failed");
     columnValues[4].push(formatPercent(num(row, "success_rate")));
     columnValues[5].push(formatSeconds(num(row, "avg_duration_seconds")), `P95 ${formatSeconds(num(row, "p95_duration_seconds"))}`);
   });

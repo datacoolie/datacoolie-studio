@@ -1,8 +1,9 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions, useQuery } from "@tanstack/react-query";
 import { api } from "../../shared/api/client";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 
 const structuralStaleTime = Number.POSITIVE_INFINITY;
+export const LINEAGE_RUN_HISTORY_PAGE_SIZE = 10;
 
 export const lineageQueryKeys = {
   graph: (environmentId: number) => environmentQueryKeys.lineage(environmentId),
@@ -31,18 +32,23 @@ export function lineageLatestStatusOptions(environmentId: number) {
 }
 
 export function lineageDataflowRunsOptions(environmentId: number, dataflowId: string, dataflowName: string) {
-  return queryOptions({
+  return infiniteQueryOptions({
     queryKey: lineageQueryKeys.dataflowRuns(environmentId, dataflowId, dataflowName),
-    queryFn: async () => {
-      const response = await api.getMonitoringDataflows(environmentId, {
-        search: dataflowId,
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => api.getMonitoringDataflows(environmentId, {
+        investigateKind: "dataflow",
+        investigateValue: dataflowId,
         range: "all",
-        limit: 25,
-        offset: 0,
+        limit: LINEAGE_RUN_HISTORY_PAGE_SIZE,
+        offset: pageParam,
         sortBy: "start_time",
         sortDir: "desc",
-      });
-      return response.records.filter((row) => row.dataflow_id === dataflowId || row.dataflow_name === dataflowName);
+      }),
+    getNextPageParam: (lastPage, pages) => {
+      const loaded = pages.reduce((total, page) => total + page.records.length, 0);
+      const total = lastPage.summary.total_records;
+      if (typeof total === "number") return loaded < total ? loaded : undefined;
+      return lastPage.records.length === LINEAGE_RUN_HISTORY_PAGE_SIZE ? loaded : undefined;
     },
     staleTime: structuralStaleTime,
   });

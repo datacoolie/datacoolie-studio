@@ -16,7 +16,7 @@ import {
   diagnosticsSeverityPresentation,
 } from "../diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { CompactNumberValue, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
 import { SystemLogViewer } from "../SystemLogViewer";
 import { GroupedDetailCard, firstValue, hasValue } from "./detailPrimitives";
 
@@ -38,8 +38,8 @@ export function PerformanceDetailSections({ row }: { row: Record<string, unknown
         <GroupedDetailCard
           title="Efficiency"
           rows={[
-            ["Rows processed", formatNumber(num(row, "performance_rows_processed"))],
-            ["Rows / second", formatNumber(num(row, "performance_rows_per_second"))],
+            ["Rows processed", <CompactNumberValue value={num(row, "performance_rows_processed")} />],
+            ["Rows / second", <CompactNumberValue value={num(row, "performance_rows_per_second")} suffix="/s" />],
             ["Overhead share", performanceRatioLabel(row.performance_overhead_ratio)],
             ["Dominant share", performanceRatioLabel(row.performance_dominant_phase_ratio)],
           ]}

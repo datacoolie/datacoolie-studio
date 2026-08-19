@@ -1,7 +1,7 @@
 export type TargetIdentifierKind = "logical_table" | "physical_path" | "api_endpoint";
 export type ReferenceType = "table_reference" | "path_reference" | "api_endpoint_reference" | "unknown";
 export type ResolutionState = "automatic" | "manual" | "unresolved";
-export type ResolutionReason = "no_match" | "multiple_matches" | "conflicting_targets" | "incomplete" | "target_missing";
+export type ResolutionReason = "no_match" | "multiple_matches" | "out_of_scope" | "conflicting_targets" | "incomplete" | "target_missing";
 
 export interface ReferenceResolution {
   state: ResolutionState;
@@ -366,6 +366,40 @@ export interface SourceSyncJob {
   completed_at?: string | null;
 }
 
+export interface SourceFreshnessStatus {
+  state: "current" | "not_synced" | "missing" | "sync_failed" | "unknown" | string;
+  source_modified_at?: string | null;
+  cache_source_modified_at?: string | null;
+  cache_synced_at?: string | null;
+  summary?: string | null;
+}
+
+export interface SourceValidationStatus {
+  state: "not_validated" | "validating" | "ready" | "warning" | "invalid" | string;
+  completed_at?: string | null;
+  summary?: string | null;
+  error?: Record<string, unknown> | null;
+}
+
+export interface SourceObservationStatus {
+  state: "never" | "checking" | "unchanged" | "changed" | "error" | "paused" | string;
+  checked_at?: string | null;
+  pending_changes?: boolean | null;
+  next_check_at?: string | null;
+  failure_count: number;
+  error?: Record<string, unknown> | null;
+}
+
+export interface SourceSyncExecutionStatus {
+  state: "never" | "running" | "succeeded" | "failed" | string;
+  trigger?: "initial" | "manual" | "scheduled" | "automatic" | string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_successful_at?: string | null;
+  summary?: string | null;
+  error?: Record<string, unknown> | null;
+}
+
 export interface SourceSyncStatus {
   source_id: number;
   source_kind: "metadata" | "logs" | string;
@@ -382,6 +416,10 @@ export interface SourceSyncStatus {
   observation_paused_at?: string | null;
   active_operation?: "validate" | "sync" | null;
   latest_job?: SourceSyncJob | null;
+  freshness?: SourceFreshnessStatus | null;
+  validation?: SourceValidationStatus | null;
+  observation?: SourceObservationStatus | null;
+  sync_execution?: SourceSyncExecutionStatus | null;
 }
 
 export interface SourceObservationOutcome {
@@ -447,6 +485,7 @@ export interface FreshnessGroup {
   max_source_modified_at?: string | null;
   cache_synced_at?: string | null;
   count: number;
+  pending_sync_count?: number;
 }
 
 export interface EnvironmentContext {
@@ -697,6 +736,8 @@ export interface LineageDependency {
   reference_id: string;
   reference_occurrence_id: string;
   resolved_asset_id?: string | null;
+  addressing_mode?: string | null;
+  qualification_level?: string | null;
 }
 
 export interface LineageSummary {
@@ -851,6 +892,8 @@ export interface AssetReferenceOccurrenceItem {
   normalized_value: string;
   context_scope?: string | null;
   context_scope_source?: "detected" | "metadata_context" | null;
+  addressing_mode?: string | null;
+  qualification_level?: string | null;
   source_location?: SourceLocation | null;
   display_name: string;
   provenance?: "sql" | "python" | "python_sql" | string | null;

@@ -11,6 +11,9 @@ from datacoolie_studio.domains.assets.identifiers import (
 from datacoolie_studio.domains.assets.reference_mappings import match_reference_mapping
 from datacoolie_studio.domains.assets.reference_identity import (
     ReferenceSignature,
+    reference_addressing_mode,
+    reference_identifier_parts,
+    reference_qualification_level,
     build_reference_context_scope,
     build_reference_signature,
 )
@@ -34,6 +37,8 @@ class Resolution:
     observations: list[dict[str, Any]] = field(default_factory=list)
     context_scope: str | None = None
     context_scope_source: str | None = None
+    addressing_mode: str | None = None
+    qualification_level: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +51,8 @@ class Resolution:
             "observations": self.observations,
             "context_scope": self.context_scope,
             "context_scope_source": self.context_scope_source,
+            "addressing_mode": self.addressing_mode,
+            "qualification_level": self.qualification_level,
         }
 
 
@@ -57,6 +64,8 @@ class AssetResolver:
     def resolve(self, evidence: InputEvidence, context: dict[str, Any]) -> Resolution:
         signature = build_reference_signature(evidence)
         context_scope = build_reference_context_scope(evidence, context)
+        addressing_mode = reference_addressing_mode(evidence, context)
+        qualification_level = reference_qualification_level(evidence)
 
         def result(
             resolution: ReferenceResolution,
@@ -73,6 +82,8 @@ class AssetResolver:
                 signature,
                 context_scope=context_scope.value if context_scope else None,
                 context_scope_source=context_scope.source if context_scope else None,
+                addressing_mode=addressing_mode,
+                qualification_level=qualification_level,
             )
 
         automatic = self._resolve_auto(evidence, context, result)
@@ -102,6 +113,8 @@ class AssetResolver:
 
     def _resolve_auto(self, evidence: InputEvidence, context: dict[str, Any], result) -> Resolution:
         context_scope = build_reference_context_scope(evidence, context)
+        addressing_mode = reference_addressing_mode(evidence, context)
+        qualification_level = reference_qualification_level(evidence)
 
         identifier = _evidence_identifier(evidence, context)
         if identifier is not None:
@@ -110,24 +123,28 @@ class AssetResolver:
                 return result(AUTOMATIC_RESOLUTION, asset_id, "exact_identifier", [asset_id])
 
         if evidence.kind == "table" and evidence.table:
-            suffix = ".".join(
-                part
-                for part in (evidence.catalog, evidence.database, evidence.schema_name, evidence.table)
-                if part
-            )
-            candidates = self.registry.find_logical_table_suffix(suffix or evidence.table)
-            if len(candidates) == 1:
-                return result(AUTOMATIC_RESOLUTION, candidates[0], "unique_table_suffix", candidates)
+            suffix = _logical_suffix(evidence)
+            exact = qualification_level == "fully_qualified"
+            candidates = self.registry.find_logical_table_suffix(suffix, exact=exact)
             scoped_candidates = self.registry.find_logical_table_suffix(
-                suffix or evidence.table,
-                namespace=context_scope.value if context_scope else None,
+                suffix,
+                resolution_scope=context_scope.value if context_scope else None,
+                exact=exact,
             )
+
             if len(scoped_candidates) == 1:
-                return result(AUTOMATIC_RESOLUTION, scoped_candidates[0], "connection_table_suffix", scoped_candidates)
+                return result(AUTOMATIC_RESOLUTION, scoped_candidates[0], "connection_scoped_table", scoped_candidates)
             if len(scoped_candidates) > 1:
                 return result(unresolved_resolution("multiple_matches"), None, "multiple_connection_table_matches", scoped_candidates)
+
+            if (addressing_mode == "qualified_logical" or exact) and len(candidates) == 1:
+                return result(AUTOMATIC_RESOLUTION, candidates[0], "qualified_cross_connection", candidates)
             if len(candidates) > 1:
+                if context_scope and addressing_mode in {"connection_bound", "weak_logical"}:
+                    return result(unresolved_resolution("out_of_scope"), None, "out_of_scope_table_candidates", candidates)
                 return result(unresolved_resolution("multiple_matches"), None, "multiple_table_suffix_matches", candidates)
+            if candidates:
+                return result(unresolved_resolution("out_of_scope"), None, "out_of_scope_table_candidate", candidates)
 
         return result(unresolved_resolution("no_match"), None, "no_declared_asset_match", [])
 
@@ -166,6 +183,8 @@ class AssetResolver:
                 observations=[mapping_observation],
                 context_scope=resolution.context_scope,
                 context_scope_source=resolution.context_scope_source,
+                addressing_mode=resolution.addressing_mode,
+                qualification_level=resolution.qualification_level,
             )
         return Resolution(
             unresolved_resolution("target_missing"),
@@ -187,6 +206,8 @@ class AssetResolver:
             ],
             context_scope=resolution.context_scope,
             context_scope_source=resolution.context_scope_source,
+            addressing_mode=resolution.addressing_mode,
+            qualification_level=resolution.qualification_level,
         )
 
 
@@ -201,3 +222,8 @@ def _evidence_identifier(evidence: InputEvidence, context: dict[str, Any]) -> di
             "source": evidence.provenance,
         }
     return None
+
+
+def _logical_suffix(evidence: InputEvidence) -> str:
+    parts = reference_identifier_parts(evidence)
+    return ".".join(parts) or str(evidence.table or evidence.value).strip()

@@ -170,19 +170,39 @@ describe("source workspace model", () => {
     expect(sourceOperationFor(remaining, 8, "metadata", 1)?.action).toBe("sync");
   });
 
-  it("summarizes enabled, readable, and current health independently", () => {
+  it("summarizes enabled sources by freshness and unique issues", () => {
     const entries: SourceWorkspaceEntry[] = [
       { kind: "metadata", source: source(1, { latest_validation: { status: "ok" } as SourcePath["latest_validation"] }) },
       { kind: "code", source: source(2, { enabled: false, latest_validation: { status: "warning" } as SourcePath["latest_validation"] }) },
-      { kind: "logs", source: source(3, { latest_validation: { status: "error" } as SourcePath["latest_validation"] }) }
+      { kind: "logs", source: source(3, { latest_validation: { status: "error" } as SourcePath["latest_validation"] }) },
+      { kind: "metadata", source: source(4) }
     ];
     const syncStatuses = {
-      [sourceKey("metadata", 1)]: { status: "ok" },
-      [sourceKey("code", 2)]: { status: "error" },
-      [sourceKey("logs", 3)]: { status: "ok" }
+      [sourceKey("metadata", 1)]: {
+        freshness: { state: "not_synced" },
+        validation: { state: "ready" },
+        observation: { state: "changed" },
+        sync_execution: { state: "succeeded" },
+      },
+      [sourceKey("code", 2)]: {
+        freshness: { state: "sync_failed" },
+        validation: { state: "warning" },
+        observation: { state: "paused" },
+        sync_execution: { state: "failed" },
+      },
+      [sourceKey("logs", 3)]: {
+        freshness: { state: "current" },
+        validation: { state: "invalid" },
+        observation: { state: "error" },
+        sync_execution: { state: "succeeded" },
+      },
+      [sourceKey("metadata", 4)]: {
+        status: "error",
+        message: "Legacy source error",
+      }
     } as Record<string, SourceSyncStatus>;
 
-    expect(summarizeSourceHealth(entries, syncStatuses)).toEqual({ enabled: 2, readable: 2, current: 2 });
+    expect(summarizeSourceHealth(entries, syncStatuses)).toEqual({ enabled: 3, pendingSync: 1, issues: 2 });
   });
 
   it("prefers the label and otherwise uses the final path segment", () => {

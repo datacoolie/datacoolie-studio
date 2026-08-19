@@ -5,7 +5,7 @@ import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";import { DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TableDateTimeValue, TablePager, baseChartOption, bottomAnchoredValueXAxis, formatBytes, formatBytesShort, formatCompact, formatNumber, formatPercent, formatSeconds, horizontalBarDataZoom, monitoringTimezone, normalizeTrendBucketKey, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys } from "../components/monitoringPrimitives";
+import type { TableSort } from "../MonitoringCharts";import { CompactNumberValue, DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TableDateTimeValue, TablePager, baseChartOption, bottomAnchoredValueXAxis, formatBytes, formatBytesShort, formatCompact, formatNumber, formatPercent, formatSeconds, horizontalBarDataZoom, monitoringTimezone, normalizeTrendBucketKey, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys } from "../components/monitoringPrimitives";
 
 const MAINTENANCE_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
 type EfficiencyScaleMode = "linear" | "log";
@@ -69,11 +69,11 @@ export function MaintenancePage({
           value={maintenanceHealthLabel(health)}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="failed" value={formatNumber(latestFailedTables)} tone={latestFailedTables ? "bad" : "neutral"} labelFirst />
+              <DetailMetric label="failed" value={<CompactNumberValue value={latestFailedTables} />} tone={latestFailedTables ? "bad" : "neutral"} labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="missing" value={formatNumber(Number(kpis.coverage_missing_tables ?? 0))} tone={Number(kpis.coverage_missing_tables ?? 0) ? "amber" : "neutral"} labelFirst />
+              <DetailMetric label="missing" value={<CompactNumberValue value={Number(kpis.coverage_missing_tables ?? 0)} />} tone={Number(kpis.coverage_missing_tables ?? 0) ? "amber" : "neutral"} labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="lagged" value={formatNumber(laggedTables)} tone={laggedTables ? "amber" : "neutral"} labelFirst />
+              <DetailMetric label="lagged" value={<CompactNumberValue value={laggedTables} />} tone={laggedTables ? "amber" : "neutral"} labelFirst />
             </span>
           }
           intent={maintenanceHealthIntent(health)}
@@ -83,14 +83,14 @@ export function MaintenancePage({
         />
         <HealthStripCard
           label="Maintenance runs"
-          value={formatNumber(Number(kpis.total_maintenance_runs ?? 0))}
+          value={<CompactNumberValue value={Number(kpis.total_maintenance_runs ?? 0)} />}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="S" value={formatNumber(Number(kpis.succeeded_ops ?? 0))} tone="good" labelFirst />
+              <DetailMetric label="S" value={<CompactNumberValue value={Number(kpis.succeeded_ops ?? 0)} />} tone="good" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="F" value={formatNumber(Number(kpis.failed_ops ?? 0))} tone={Number(kpis.failed_ops ?? 0) ? "bad" : "neutral"} labelFirst />
+              <DetailMetric label="F" value={<CompactNumberValue value={Number(kpis.failed_ops ?? 0)} />} tone={Number(kpis.failed_ops ?? 0) ? "bad" : "neutral"} labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="Skip" value={formatNumber(Number(kpis.skipped_ops ?? 0))} tone={Number(kpis.skipped_ops ?? 0) ? "amber" : "neutral"} labelFirst />
+              <DetailMetric label="Skip" value={<CompactNumberValue value={Number(kpis.skipped_ops ?? 0)} />} tone={Number(kpis.skipped_ops ?? 0) ? "amber" : "neutral"} labelFirst />
             </span>
           }
           intent={Number(kpis.failed_ops ?? 0) ? "bad" : Number(kpis.skipped_ops ?? 0) ? "warning" : "neutral"}
@@ -100,7 +100,7 @@ export function MaintenancePage({
         />
         <HealthStripCard
           label="Maintained tables"
-          value={`${formatNumber(Number(kpis.maintained_tables ?? 0))} / ${formatNumber(Number(kpis.active_lakehouse_tables ?? 0))}`}
+          value={<><CompactNumberValue value={Number(kpis.maintained_tables ?? 0)} /> / <CompactNumberValue value={Number(kpis.active_lakehouse_tables ?? 0)} /></>}
           detail={<DetailMetric label="coverage" value={formatPercent(coverageRate)} tone={coverageRate >= 95 ? "good" : Number(kpis.active_lakehouse_tables ?? 0) ? "amber" : "neutral"} labelFirst />}
           intent={Number(kpis.coverage_missing_tables ?? 0) ? "warning" : Number(kpis.active_lakehouse_tables ?? 0) ? "good" : "neutral"}
           accent="intent"
@@ -109,7 +109,7 @@ export function MaintenancePage({
         />
         <HealthStripCard
           label="Tables with reclaim"
-          value={formatNumber(Number(kpis.tables_with_reclaim ?? 0))}
+          value={<CompactNumberValue value={Number(kpis.tables_with_reclaim ?? 0)} />}
           detail={<DetailMetric label="no-op runtime" value={formatPercent(noOpRuntimeShare)} tone={noOpRuntimeShare ? "amber" : "neutral"} labelFirst />}
           intent="neutral"
           accent="storage"
@@ -127,7 +127,7 @@ export function MaintenancePage({
         />
         <HealthStripCard
           label="Files removed"
-          value={formatNumber(filesRemoved)}
+          value={<CompactNumberValue value={filesRemoved} />}
           detail={<DetailMetric label="avg bytes/file" value={formatBytes(Number(kpis.avg_bytes_per_file_removed ?? 0))} tone="neutral" labelFirst />}
           intent="neutral"
           accent="neutral"
@@ -193,7 +193,7 @@ export function MaintenancePage({
 
         <ReportPanel
           title="Destination table maintenance registry"
-          subtitle={`${formatNumber(totalRows)} destinations · attention first`}
+          subtitle={<><CompactNumberValue value={totalRows} /> destinations · attention first</>}
           className="monitoring-maintenance-runs-panel"
           titleTooltip="One row per destination table or destination asset. Dataflow maintenance runs are evidence behind the table-level health."
           headerAction={
@@ -295,6 +295,7 @@ function MaintenanceRegistryTable({
   return (
     <DataTable<MonitoringRecord>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "target", label: "Destination table", sortable: true, minWidth: 180, fillPriority: "last", render: (row) => <MaintenanceTargetCell row={row} /> },
         { key: "table_health", label: "Health", sortable: true, autoFit: true, minWidth: 86, maxWidth: 112, render: (row) => <MaintenanceTableHealthCell row={row} />, measureValue: (row) => maintenanceTableHealthLabel(String(row.table_health ?? row.status ?? "unknown")) },
@@ -347,11 +348,12 @@ function MaintenanceTableHealthCell({ row }: { row: MonitoringRecord }) {
 }
 
 function MaintenanceReclaimCell({ row }: { row: MonitoringRecord }) {
-  const [bytesLabel, filesLabel] = maintenanceReclaimLines(row);
+  const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
+  const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
   return (
-    <span className="monitor-stack-cell maintenance-reclaim-cell" title={`Bytes reclaimed: ${bytesLabel}\nFiles removed: ${filesLabel}`}>
-      <strong>{bytesLabel}</strong>
-      <small>{filesLabel}</small>
+    <span className="monitor-stack-cell maintenance-reclaim-cell" title={`Bytes reclaimed: ${formatBytes(bytes)}\nFiles removed: ${formatNumber(files)}`}>
+      <strong>{formatBytes(bytes)}</strong>
+      <small><CompactNumberValue value={files} /> files</small>
     </span>
   );
 }
@@ -359,7 +361,7 @@ function MaintenanceReclaimCell({ row }: { row: MonitoringRecord }) {
 function maintenanceReclaimLines(row: MonitoringRecord): [string, string] {
   const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
   const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
-  return [formatBytes(bytes), `${formatNumber(files)} files`];
+  return [formatBytes(bytes), `${formatCompact(files)} files`];
 }
 
 function MaintenanceEfficiencyCell({ row }: { row: MonitoringRecord }) {
@@ -379,17 +381,16 @@ function maintenanceEfficiencyLines(row: MonitoringRecord): [string, string] {
 
 function MaintenanceNoOpCell({ row }: { row: MonitoringRecord }) {
   const runs = num(row, "no_op_runs");
-  const [runsLabel, durationLabel] = maintenanceNoOpLines(row);
   return (
-    <span className={`monitor-stack-cell maintenance-no-op-cell${runs > 0 ? " has-no-op" : ""}`} title={`No-op runs: ${runsLabel}\nNo-op duration: ${durationLabel}\nDefinition: succeeded maintenance runs with 0 bytes removed and 0 files removed.`}>
-      <strong>{runsLabel}</strong>
-      <small>{durationLabel}</small>
+    <span className={`monitor-stack-cell maintenance-no-op-cell${runs > 0 ? " has-no-op" : ""}`} title={`No-op runs: ${formatNumber(runs)}\nNo-op duration: ${formatSeconds(num(row, "no_op_duration_seconds"))}\nDefinition: succeeded maintenance runs with 0 bytes removed and 0 files removed.`}>
+      <strong><CompactNumberValue value={runs} /></strong>
+      <small>{formatSeconds(num(row, "no_op_duration_seconds"))}</small>
     </span>
   );
 }
 
 function maintenanceNoOpLines(row: MonitoringRecord): [string, string] {
-  return [formatNumber(num(row, "no_op_runs")), formatSeconds(num(row, "no_op_duration_seconds"))];
+  return [formatCompact(num(row, "no_op_runs")), formatSeconds(num(row, "no_op_duration_seconds"))];
 }
 
 function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
@@ -407,16 +408,19 @@ function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
 }
 
 function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
-  const [runLabel] = maintenanceRunLines(row);
+  const runCount = num(row, "run_count");
+  const succeeded = num(row, "succeeded");
+  const failed = num(row, "failed");
+  const skipped = num(row, "skipped");
   return (
     <span className="monitor-stack-cell" title={`Runs: ${formatNumber(num(row, "run_count"))}\nSucceeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}\nRunning / pending / unknown: ${formatNumber(num(row, "running"))} / ${formatNumber(num(row, "pending"))} / ${formatNumber(num(row, "unknown"))}`}>
-      <strong>{runLabel}</strong>
+      <strong><CompactNumberValue value={runCount} /></strong>
       <small>
-        <span style={{ color: reportChartPalette.success }}>{formatNumber(num(row, "succeeded"))}</span>
+        <span style={{ color: reportChartPalette.success }}><CompactNumberValue value={succeeded} /></span>
         {" / "}
-        <span style={{ color: num(row, "failed") ? reportChartPalette.failed : undefined }}>{formatNumber(num(row, "failed"))}</span>
+        <span style={{ color: failed ? reportChartPalette.failed : undefined }}><CompactNumberValue value={failed} /></span>
         {" / "}
-        <span style={{ color: num(row, "skipped") ? reportChartPalette.skipped : undefined }}>{formatNumber(num(row, "skipped"))}</span>
+        <span style={{ color: skipped ? reportChartPalette.skipped : undefined }}><CompactNumberValue value={skipped} /></span>
       </small>
     </span>
   );
@@ -424,8 +428,8 @@ function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
 
 function maintenanceRunLines(row: MonitoringRecord): [string, string] {
   return [
-    formatNumber(num(row, "run_count")),
-    `${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}`,
+    formatCompact(num(row, "run_count")),
+    `${formatCompact(num(row, "succeeded"))} / ${formatCompact(num(row, "failed"))} / ${formatCompact(num(row, "skipped"))}`,
   ];
 }
 

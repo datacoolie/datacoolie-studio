@@ -1,6 +1,6 @@
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";import { DataflowEndpointHealthPanel, DataflowNameStatusHealthPanel, DataflowRunsTable } from "./DataflowsPageSupport";
-import { LifecycleStatusValues, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, formatBytes, formatNumber, formatPercent, monitoringTimezone, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
+import { CompactNumberValue, LifecycleStatusValues, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, formatBytes, formatPercent, monitoringTimezone, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
 
 export function DataflowsPage({
   report,
@@ -48,14 +48,14 @@ export function DataflowsPage({
       <section className="overview-health-strip monitoring-dataflow-health-strip">
         <HealthStripCard
           label="Dataflow runs"
-          value={formatNumber(kpis.total_dataflows ?? 0)}
+          value={<CompactNumberValue value={kpis.total_dataflows ?? 0} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.dataflow_runs ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.dataflow_runs ?? 0} />}
               firstTone="headline"
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.dataflow_runs ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.dataflow_runs ?? 0} />}
               secondTone="headline"
             />
           }
@@ -81,14 +81,14 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Failed runs"
-          value={formatNumber(kpis.failed ?? 0)}
+          value={<CompactNumberValue value={kpis.failed ?? 0} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.dataflow_failed ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.dataflow_failed ?? 0} />}
               firstTone={(last24Window.dataflow_failed ?? 0) ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.dataflow_failed ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.dataflow_failed ?? 0} />}
               secondTone={(last7Window.dataflow_failed ?? 0) ? "bad" : "neutral"}
             />
           }
@@ -142,7 +142,7 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Workload"
-          value={`${formatNumber(volumeKpis.total_rows_read ?? 0)} / ${formatNumber(volumeKpis.total_rows_written ?? 0)}`}
+          value={<><CompactNumberValue value={volumeKpis.total_rows_read ?? 0} /> / <CompactNumberValue value={volumeKpis.total_rows_written ?? 0} /></>}
           detail={
             <span className="health-rate-detail">
               <DetailMetric label="net lakehouse bytes" value={formatBytes(volumeKpis.net_bytes_change ?? 0)} tone="blue" />

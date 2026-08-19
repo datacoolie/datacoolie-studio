@@ -20,7 +20,7 @@ import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
-import { CopyableText, DurationDistributionBoxPlot, IssuePreview, MonitoringChartLegend, TableDateTimeValue, childFanoutDistributionOption, compactRunId, humanize, jobStageHealthOption, jobWorkloadEfficiencyOption, operationColor, stageTotal, workloadEfficiencyOperationTypes } from "../components/monitoringPrimitives";
+import { CompactNumberValue, CopyableText, DurationDistributionBoxPlot, IssuePreview, MonitoringChartLegend, TableDateTimeValue, childFanoutDistributionOption, compactRunId, formatCompactNumber, humanize, jobStageHealthOption, jobWorkloadEfficiencyOption, operationColor, stageTotal, workloadEfficiencyOperationTypes } from "../components/monitoringPrimitives";
 
 export function JobStageHealthPanel({ rows }: { rows: Array<Record<string, string | number>> }) {
   const visible = rows
@@ -181,6 +181,7 @@ export function JobRunsTable({
   return (
     <DataTable<JobRecord>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "job_id", label: "Job", sortable: true, width: 132, className: "job-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
         { key: "job_config", label: "Config", autoFit: true, minWidth: 72, maxWidth: 128, className: "job-run-col-config", render: (row) => <JobConfigCell row={row} />, measureValue: (row) => jobConfigLines(row) },
@@ -191,8 +192,8 @@ export function JobRunsTable({
         { key: "end_time", label: "End", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, className: "job-run-col-time", render: (row) => <TableDateTimeValue value={row.end_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.end_time, activeTimezone, "-") },
         { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 76, maxWidth: 96, className: "job-run-col-duration", render: (row) => formatSeconds(num(row, "duration_seconds")), measureValue: (row) => formatSeconds(num(row, "duration_seconds")) },
         { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 88, maxWidth: 112, className: "job-run-col-status", render: (row) => <StatusCell row={row} />, measureValue: (row) => String(row.status || "unknown") },
-        { key: "child_dataflow_count", label: "Child flows", autoFit: true, minWidth: 92, maxWidth: 132, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} />, measureValue: (row) => childFlowSummaryLines(row) },
-        { key: "volume", label: "Volume", autoFit: true, minWidth: 96, maxWidth: 142, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} />, measureValue: (row) => jobVolumeLines(row) },
+        { key: "child_dataflow_count", label: "Child flows", autoFit: true, minWidth: 92, maxWidth: 132, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} />, measureValue: (row) => childFlowSummaryCompactLines(row) },
+        { key: "volume", label: "Volume", autoFit: true, minWidth: 96, maxWidth: 142, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} />, measureValue: (row) => jobVolumeCompactLines(row) },
         { key: "reconciliation_status", label: "Reconcile", autoFit: true, minWidth: 94, maxWidth: 128, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={row.reconciliation_status} />, measureValue: (row) => humanize(String(row.reconciliation_status || "not_available")) },
         { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
       ]}
@@ -285,15 +286,17 @@ export function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
 }
 
 export function JobVolumeCell({ row }: { row: JobRecord }) {
-  const [mainLabel, netBytesLabel] = jobVolumeLines(row);
+  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
+  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
   const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
   const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
+  const netBytesLabel = formatBytes(bytesAdded - bytesRemoved);
   return (
     <span
       className="monitor-stack-cell"
-      title={`Rows read / written: ${mainLabel}\nBytes added: ${formatBytes(bytesAdded)} · Bytes removed: ${formatBytes(bytesRemoved)} · Net bytes: ${netBytesLabel}`}
+      title={`Rows read / written: ${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}\nBytes added: ${formatBytes(bytesAdded)} · Bytes removed: ${formatBytes(bytesRemoved)} · Net bytes: ${netBytesLabel}`}
     >
-      <strong>{mainLabel}</strong>
+      <strong><CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} /></strong>
       <small>{netBytesLabel}</small>
     </span>
   );
@@ -310,23 +313,31 @@ export function jobVolumeLines(row: JobRecord) {
   return [mainLabel, netBytesLabel];
 }
 
+function jobVolumeCompactLines(row: JobRecord) {
+  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
+  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
+  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
+  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
+  return [`${formatCompactNumber(rowsRead)} / ${formatCompactNumber(rowsWritten)}`, formatBytes(bytesAdded - bytesRemoved)];
+}
+
 export function ChildFlowSummary({ row }: { row: JobRecord }) {
-  const [mainLabel] = childFlowSummaryLines(row);
+  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
   const succeeded = num(row, "child_succeeded_count");
   const failed = num(row, "child_failed_count");
   const skipped = num(row, "child_skipped_count");
   return (
     <span
       className="monitor-stack-cell monitor-child-summary"
-      title={`Total child flows: ${mainLabel}\nSucceeded: ${succeeded} / Failed: ${failed} / Skipped: ${skipped}`}
+      title={`Total child flows: ${formatNumber(total)}\nSucceeded: ${formatNumber(succeeded)} / Failed: ${formatNumber(failed)} / Skipped: ${formatNumber(skipped)}`}
     >
-      <strong>{mainLabel}</strong>
+      <strong><CompactNumberValue value={total} /></strong>
       <small>
-        <span className={succeeded > 0 ? "monitor-child-value is-success" : "monitor-child-value"}>{formatNumber(succeeded)}</span>
+        <span className={succeeded > 0 ? "monitor-child-value is-success" : "monitor-child-value"}><CompactNumberValue value={succeeded} /></span>
         <span> / </span>
-        <span className={failed > 0 ? "monitor-child-value is-failed" : "monitor-child-value"}>{formatNumber(failed)}</span>
+        <span className={failed > 0 ? "monitor-child-value is-failed" : "monitor-child-value"}><CompactNumberValue value={failed} /></span>
         <span> / </span>
-        <span className={skipped > 0 ? "monitor-child-value is-skipped" : "monitor-child-value"}>{formatNumber(skipped)}</span>
+        <span className={skipped > 0 ? "monitor-child-value is-skipped" : "monitor-child-value"}><CompactNumberValue value={skipped} /></span>
       </small>
     </span>
   );
@@ -340,6 +351,17 @@ export function childFlowSummaryLines(row: JobRecord) {
   const mainLabel = formatNumber(total);
   const statusLabel = `${formatNumber(succeeded)} / ${formatNumber(failed)} / ${formatNumber(skipped)}`;
   return [mainLabel, statusLabel];
+}
+
+function childFlowSummaryCompactLines(row: JobRecord) {
+  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
+  const succeeded = num(row, "child_succeeded_count");
+  const failed = num(row, "child_failed_count");
+  const skipped = num(row, "child_skipped_count");
+  return [
+    formatCompactNumber(total),
+    `${formatCompactNumber(succeeded)} / ${formatCompactNumber(failed)} / ${formatCompactNumber(skipped)}`
+  ];
 }
 
 export function ReconciliationBadge({ value }: { value: unknown }) {

@@ -11,5 +11,10 @@ describe("reference resolution presentation", () => {
       label: "Unresolved",
       detail: "The saved mapping target is unavailable",
     });
+    expect(presentReferenceResolution({ state: "unresolved", reason: "out_of_scope" })).toEqual({
+      state: "unresolved",
+      label: "Unresolved",
+      detail: "Outside source scope",
+    });
   });
 });

@@ -20,6 +20,7 @@ from datacoolie_studio.domains.metadata.normalizer import (
     enrich_metadata_documents_with_connections,
     normalize_metadata_document,
 )
+from datacoolie_studio.domains.metadata.ordering import canonicalize_editor_document
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.reader import read_metadata_file  # noqa: F401
 from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
@@ -163,7 +164,7 @@ def merge_environment_editor_documents(
         sheet_name: _merge_editor_sheet_documents(documents, sheet_name)
         for sheet_name in ("connections", "dataflows", "schema_hints")
     }
-    document = {
+    document = canonicalize_editor_document({
         "source": {
             "source_id": 0,
             "environment_id": sources[0].environment_id if sources else 0,
@@ -183,7 +184,7 @@ def merge_environment_editor_documents(
         },
         "sheets": sheets,
         "issues": [],
-    }
+    })
     document["issues"] = validate_editor_document(document)["issues"]
     return document
 
@@ -234,6 +235,9 @@ def load_environment_editor_workspace(
         if draft is None
         else draft
     )
+    if resolved_draft is not None:
+        resolved_draft = canonicalize_editor_document(resolved_draft)
+        resolved_draft["issues"] = validate_editor_document(resolved_draft)["issues"]
     return {
         "schema_version": "metadata-editor-workspace.v1",
         "environment_id": environment_id,

@@ -1,6 +1,6 @@
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Code2, Copy, LocateFixed, LogIn, LogOut, PencilLine, TriangleAlert, Workflow, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type {
   AssetDefinitionResponse,
   AssetInventoryItem,
@@ -33,6 +33,7 @@ type InspectorTone = "selected" | "input" | "output";
 type RelationshipTone = Exclude<InspectorTone, "selected">;
 type OpenRelated = (focus: LineageFocus, tone: RelationshipTone) => void;
 type OpenDataflowDetails = (dataflow: LineageDataflow) => void;
+type OpenMonitoringDataflowRun = (run: MonitoringRecord) => void;
 type InspectorPage = LineageFocus & { view: "summary" | "full"; tone: InspectorTone };
 const LINEAGE_DRAWER_HISTORY_KEY = "datacoolieLineageDrawer";
 
@@ -64,6 +65,7 @@ export function LineageDetailsDrawer({
   onClose,
   onFocusItem,
   onOpenDataflowDetails,
+  onOpenMonitoringDataflowRun,
   mappingAssets,
   mappingBusy = false,
   onCreateReferenceMapping,
@@ -80,6 +82,7 @@ export function LineageDetailsDrawer({
   onClose: () => void;
   onFocusItem: (focus: LineageFocus) => void;
   onOpenDataflowDetails: OpenDataflowDetails;
+  onOpenMonitoringDataflowRun: OpenMonitoringDataflowRun;
   mappingAssets: AssetInventoryItem[];
   mappingBusy?: boolean;
   onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
@@ -261,6 +264,7 @@ export function LineageDetailsDrawer({
           : item))}
         onOpenRelated={openRelated}
         onOpenDataflowDetails={onOpenDataflowDetails}
+        onOpenMonitoringDataflowRun={onOpenMonitoringDataflowRun}
         onFocus={() => onFocusItem({ kind: page.kind, id: page.id })}
         onOpenReferenceMapping={openReferenceMapping}
         mappingBusy={mappingBusy}
@@ -273,7 +277,7 @@ export function LineageDetailsDrawer({
   );
 }
 
-function InspectorContent({ environmentId, page, index, latestStatus, metadataDataflowIds, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onFocus, onOpenReferenceMapping, mappingBusy, clearReferenceId, mappingActionError, onClearReferenceMapping, onDismissClearReference }: {
+function InspectorContent({ environmentId, page, index, latestStatus, metadataDataflowIds, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onOpenMonitoringDataflowRun, onFocus, onOpenReferenceMapping, mappingBusy, clearReferenceId, mappingActionError, onClearReferenceMapping, onDismissClearReference }: {
   environmentId: number;
   page: InspectorPage;
   index: LineageGraphIndex;
@@ -282,6 +286,7 @@ function InspectorContent({ environmentId, page, index, latestStatus, metadataDa
   onToggleDetails: () => void;
   onOpenRelated: OpenRelated;
   onOpenDataflowDetails: OpenDataflowDetails;
+  onOpenMonitoringDataflowRun: OpenMonitoringDataflowRun;
   onFocus: () => void;
   onOpenReferenceMapping: (referenceId: string) => void;
   mappingBusy: boolean;
@@ -300,7 +305,7 @@ function InspectorContent({ environmentId, page, index, latestStatus, metadataDa
   if (page.kind === "dataflow") {
     const dataflow = index.dataflowById.get(page.id);
     return dataflow
-      ? <DataflowDetails environmentId={environmentId} dataflow={dataflow} full={page.view === "full"} index={index} run={latestRun(latestStatus, dataflow.dataflow_id, dataflow.name)} canOpenDataflowDetails={metadataDataflowIds.has(dataflow.id)} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onOpenDataflowDetails={onOpenDataflowDetails} onFocus={onFocus} />
+      ? <DataflowDetails environmentId={environmentId} dataflow={dataflow} full={page.view === "full"} index={index} run={latestRun(latestStatus, dataflow.dataflow_id, dataflow.name)} canOpenDataflowDetails={metadataDataflowIds.has(dataflow.id)} onToggleDetails={onToggleDetails} onOpenRelated={onOpenRelated} onOpenDataflowDetails={onOpenDataflowDetails} onOpenMonitoringDataflowRun={onOpenMonitoringDataflowRun} onFocus={onFocus} />
       : <MissingDetails />;
   }
   const dependency = index.dependencyById.get(page.id);
@@ -522,10 +527,10 @@ function lineageReferenceAsAssetReference(reference: LineageReference): AssetRef
 }
 
 
-function DataflowDetails({ environmentId, dataflow, full, index, run, canOpenDataflowDetails, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onFocus }: {
+function DataflowDetails({ environmentId, dataflow, full, index, run, canOpenDataflowDetails, onToggleDetails, onOpenRelated, onOpenDataflowDetails, onOpenMonitoringDataflowRun, onFocus }: {
   environmentId: number; dataflow: LineageDataflow; full: boolean; index: LineageGraphIndex; run: MonitoringRecord | null;
   canOpenDataflowDetails: boolean;
-  onToggleDetails: () => void; onOpenRelated: OpenRelated; onOpenDataflowDetails: OpenDataflowDetails; onFocus: () => void;
+  onToggleDetails: () => void; onOpenRelated: OpenRelated; onOpenDataflowDetails: OpenDataflowDetails; onOpenMonitoringDataflowRun: OpenMonitoringDataflowRun; onFocus: () => void;
 }) {
   const status = typeof run?.status === "string" ? run.status : undefined;
   const informationRows: Array<[string, string]> = [
@@ -557,7 +562,7 @@ function DataflowDetails({ environmentId, dataflow, full, index, run, canOpenDat
         <EndpointGroup title="Input" tone="input" entityId={dataflow.source_asset_id} index={index} onOpenRelated={onOpenRelated} />
         <EndpointGroup title="Output" tone="output" entityId={dataflow.destination_asset_id} index={index} onOpenRelated={onOpenRelated} />
       </section>
-      {full ? <RunHistory key={dataflow.id} environmentId={environmentId} dataflow={dataflow} /> : null}
+      <RunHistory key={dataflow.id} environmentId={environmentId} dataflow={dataflow} onOpenMonitoringDataflowRun={onOpenMonitoringDataflowRun} />
       {full ? <DetailRows rows={[["Metadata source", dataflow.metadata_source_uri]]} /> : null}
       {full ? <IdentityField label="Lineage dataflow identity" value={dataflow.id} /> : null}
     </>
@@ -735,10 +740,14 @@ function OccurrenceDetails({ occurrence }: { occurrence: AssetReferenceOccurrenc
   return <div className="lineage-occurrence"><div><span>{occurrence.raw_value}</span><StatusPill status={occurrence.resolution.state} /></div><small>{occurrence.provenance} · {humanize(occurrence.resolution_method)}{locationText ? ` · ${locationText}` : ""}</small>{occurrence.observations.length ? <CodeBlock label="Evidence" value={JSON.stringify(occurrence.observations, null, 2)} kind="json" /> : null}</div>;
 }
 
-function RunHistory({ environmentId, dataflow }: { environmentId: number; dataflow: LineageDataflow }) {
+function RunHistory({ environmentId, dataflow, onOpenMonitoringDataflowRun }: { environmentId: number; dataflow: LineageDataflow; onOpenMonitoringDataflowRun: OpenMonitoringDataflowRun }) {
   const [open, setOpen] = useState(false);
-  const runs = useQuery({ ...lineageDataflowRunsOptions(environmentId, dataflow.dataflow_id, dataflow.name), enabled: open });
-  return <section className="lineage-run-history"><button type="button" onClick={() => setOpen((value) => !value)}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}Run history</button>{open ? <div>{runs.isFetching ? <small>Loading run history…</small> : runs.error ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load run history."}</small> : runs.data?.length ? runs.data.map((run, index) => <div className="lineage-run-row" key={String(run.dataflow_run_id ?? run.started_at ?? index)}><StatusPill status={typeof run.status === "string" ? run.status : "unknown"} /><span>{formatTimestamp(firstValue(run, "completed_at", "end_time", "started_at", "start_time"))}</span><small>{formatDuration(run.duration_seconds)}</small></div>) : <small>No run history available.</small>}</div> : null}</section>;
+  const runs = useInfiniteQuery({ ...lineageDataflowRunsOptions(environmentId, dataflow.dataflow_id, dataflow.name), enabled: open });
+  const records = runs.data?.pages.flatMap((page) => page.records) ?? [];
+  return <section className="lineage-run-history"><button type="button" onClick={() => setOpen((value) => !value)}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}Run history</button>{open ? <div>{runs.isFetching && !records.length ? <small>Loading run history…</small> : null}{runs.error && !records.length ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load run history."}</small> : null}{records.length ? records.map((run, index) => {
+    const dataflowRunId = String(run.dataflow_run_id ?? "").trim();
+    return <button className="lineage-run-row" type="button" disabled={!dataflowRunId} key={dataflowRunId || String(run.started_at ?? index)} onClick={() => onOpenMonitoringDataflowRun(run)} aria-label={dataflowRunId ? `Open dataflow run ${dataflowRunId} in Monitoring details` : undefined}><StatusPill status={typeof run.status === "string" ? run.status : "unknown"} /><span>{formatTimestamp(firstValue(run, "completed_at", "end_time", "started_at", "start_time"))}</span><small>{formatDuration(run.duration_seconds)}</small></button>;
+  }) : !runs.isFetching && !runs.error ? <small>No run history available.</small> : null}{runs.hasNextPage ? <button className="lineage-run-row lineage-run-history-more" type="button" disabled={runs.isFetchingNextPage} onClick={() => void runs.fetchNextPage()}>{runs.isFetchingNextPage ? "Loading…" : "More"}</button> : null}{runs.error && records.length ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load more run history."}</small> : null}</div> : null}</section>;
 }
 
 function DetailRows({ rows }: { rows: Array<[string, string]> }) { return <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd title={value}>{value}</dd></div>)}</dl>; }

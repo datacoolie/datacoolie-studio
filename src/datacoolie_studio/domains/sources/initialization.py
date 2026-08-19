@@ -318,14 +318,21 @@ def _finish_initialization(
     message: str,
     error: dict[str, Any] | None = None,
 ) -> None:
+    try:
+        previous_result = json.loads(job.result_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        previous_result = {}
+    result = {
+        "status": "error" if status == "failed" else "ok",
+        "message": message,
+        "error": error,
+    }
+    if isinstance(previous_result, dict) and previous_result.get("active_operation"):
+        result["active_operation"] = previous_result["active_operation"]
     sync.finish_sync_job(
         session,
         job,
         status=status,
         message=message,
-        result={
-            "status": "error" if status == "failed" else "ok",
-            "message": message,
-            "error": error,
-        },
+        result=result,
     )

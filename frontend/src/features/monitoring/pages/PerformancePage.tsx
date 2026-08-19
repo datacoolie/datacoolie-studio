@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { TableColumn, TableSort } from "../MonitoringCharts";
-import type { MonitoringFilters } from "../monitoringFilters";import { CompactValue, CopyableText, DataTable, DataflowContextCell, DataflowNameCell, DataflowPhaseCell, DataflowVolumeCell, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, IssuePreview, ReportChart, ReportPanel, RuntimePhaseLegend, RuntimePhaseContribution, StatusCell, TableDateTimeValue, TablePager, bottomAnchoredValueXAxis, compactRunId, durationIntent, durationPercentilesDetail, formatBytes, formatCompact, formatNumber, formatPhasePercent, formatPercent, formatSeconds, formatSecondsSingleDecimal, runtimePhaseContributionTooltip, fillMissingTrendDates, horizontalBarDataZoom, monitoringTimezone, monitoringPhaseColors, num, reportChartPalette, reportChartGrid } from "../components/monitoringPrimitives";
+import type { MonitoringFilters } from "../monitoringFilters";import { CompactNumberValue, CompactValue, CopyableText, DataTable, DataflowContextCell, DataflowNameCell, DataflowPhaseCell, DataflowVolumeCell, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, IssuePreview, ReportChart, ReportPanel, RuntimePhaseLegend, RuntimePhaseContribution, StatusCell, TableDateTimeValue, TablePager, bottomAnchoredValueXAxis, compactRunId, durationIntent, durationPercentilesDetail, formatBytes, formatCompact, formatNumber, formatPhasePercent, formatPercent, formatSeconds, formatSecondsSingleDecimal, runtimePhaseContributionTooltip, fillMissingTrendDates, horizontalBarDataZoom, monitoringTimezone, monitoringPhaseColors, num, reportChartPalette, reportChartGrid } from "../components/monitoringPrimitives";
 import { baseChartOption } from "../ReportChart";
 import {
   defaultPerformanceEfficiencyScope,
@@ -88,7 +88,7 @@ export function PerformancePage({
           value={pressureRatio > 0 ? `${formatNumber(pressureRatio)}x` : "-"}
           detail={
             <span className="health-duration-detail">
-              <DetailMetric label="outliers" value={formatNumber(Number(kpis.duration_outlier_count ?? 0))} tone={Number(kpis.duration_outlier_count ?? 0) ? "amber" : "neutral"} labelFirst />
+              <DetailMetric label="outliers" value={<CompactNumberValue value={Number(kpis.duration_outlier_count ?? 0)} />} tone={Number(kpis.duration_outlier_count ?? 0) ? "amber" : "neutral"} labelFirst />
               <span className="separator"> · </span>
               <DetailMetric label="max" value={formatSecondsSingleDecimal(Number(kpis.max_duration_seconds ?? 0))} tone="purple" labelFirst />
             </span>
@@ -124,12 +124,12 @@ export function PerformancePage({
         />
         <HealthStripCard
           label="Effective read throughput"
-          value={`${formatNumber(Number(kpis.rows_read_per_second ?? 0))}/s`}
+          value={<CompactNumberValue value={Number(kpis.rows_read_per_second ?? 0)} suffix="/s" />}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="read" value={formatNumber(Number(kpis.total_rows_read ?? 0))} tone="read" labelFirst />
+              <DetailMetric label="read" value={<CompactNumberValue value={Number(kpis.total_rows_read ?? 0)} />} tone="read" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="written" value={formatNumber(Number(kpis.total_rows_written ?? 0))} tone="written" labelFirst />
+              <DetailMetric label="written" value={<CompactNumberValue value={Number(kpis.total_rows_written ?? 0)} />} tone="written" labelFirst />
             </span>
           }
           intent="neutral"
@@ -138,16 +138,16 @@ export function PerformancePage({
         />
         <HealthStripCard
           label="Optimization candidates"
-          value={formatNumber(candidateCount)}
+          value={<CompactNumberValue value={candidateCount} />}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="small" value={formatNumber(Number(kpis.slow_small_workload_count ?? 0))} tone="amber" labelFirst />
+              <DetailMetric label="small" value={<CompactNumberValue value={Number(kpis.slow_small_workload_count ?? 0)} />} tone="amber" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="maint" value={formatNumber(Number(kpis.slow_small_maintenance_count ?? 0))} tone="neutral" labelFirst />
+              <DetailMetric label="maint" value={<CompactNumberValue value={Number(kpis.slow_small_maintenance_count ?? 0)} />} tone="neutral" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="overhead" value={formatNumber(Number(kpis.high_overhead_count ?? 0))} tone="purple" labelFirst />
+              <DetailMetric label="overhead" value={<CompactNumberValue value={Number(kpis.high_overhead_count ?? 0)} />} tone="purple" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="skew" value={formatNumber(Number(kpis.phase_skew_count ?? 0))} tone="blue" labelFirst />
+              <DetailMetric label="skew" value={<CompactNumberValue value={Number(kpis.phase_skew_count ?? 0)} />} tone="blue" labelFirst />
             </span>
           }
           intent={candidateCount ? "warning" : "good"}
@@ -333,6 +333,7 @@ function RuntimeContextProfileTable({ rows }: { rows: Array<Record<string, strin
   return (
     <DataTable<Record<string, string | number | null>>
       rows={rows}
+      compactNumbers
       columns={columns}
       maxRows={rows.length}
       className="performance-runtime-context-table"
@@ -371,10 +372,10 @@ function RuntimePerformanceCell({ row }: { row: Record<string, string | number |
         <span className="runtime-context-duration-p95"><b>P95</b> {formatSecondsSingleDecimal(num(row, "p95_duration_seconds"))}</span>
       </span>
       <small>
-        <span className="runtime-context-throughput">{formatNumber(num(row, "rows_read_per_second"))}/s</span>
+        <span className="runtime-context-throughput"><CompactNumberValue value={num(row, "rows_read_per_second")} suffix="/s" /></span>
         <em>·</em>
         <span className={candidateCount ? "runtime-context-candidates-warning" : "runtime-context-candidates-neutral"}>
-          {formatNumber(candidateCount)} candidates
+          <CompactNumberValue value={candidateCount} /> candidates
         </span>
       </small>
     </span>
@@ -387,12 +388,12 @@ function RuntimeHealthCell({ row }: { row: Record<string, string | number | null
   const successTone = successRate >= 95 ? "good" : successRate >= 90 ? "warning" : "bad";
   return (
     <span className="runtime-context-metric-pair">
-      <strong>{formatNumber(num(row, "run_count"))}</strong>
+      <CompactNumberValue value={num(row, "run_count")} />
       <small>
         <span className={`runtime-context-success-${successTone}`}>{formatPercent(successRate)}</span>
         <em>·</em>
         <span className={failed ? "runtime-context-failed-bad" : "runtime-context-failed-neutral"}>
-          {formatNumber(failed)} failed
+          <CompactNumberValue value={failed} /> failed
         </span>
       </small>
     </span>
@@ -497,6 +498,7 @@ function PerformanceInvestigationTable({
   return (
     <DataTable<MonitoringRecord>
       rows={rows}
+      compactNumbers
       columns={columns}
       maxRows={rows.length}
       sort={sort}

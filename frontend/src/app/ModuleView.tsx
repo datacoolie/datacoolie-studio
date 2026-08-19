@@ -181,6 +181,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           editorDocument={workspace.metadataEditorDocument}
           serverDraft={workspace.metadataEditorDraft}
           routeSearch={route.search}
+          onRouteSearchChange={(search) => router.navigate("metadata", search)}
           metadataNavigation={router.metadataNavigation}
           onMetadataNavigationConsumed={router.clearMetadataNavigation}
           onFocusInLineage={(target) => router.navigate("lineage", lineageDataflowFocusSearch(target))}
@@ -230,6 +231,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           environmentId={route.environmentId}
           workspace={workspace}
           routeSearch={route.search}
+          timezoneName={settings.settings?.timezone ?? "UTC"}
           onOpenMetadata={router.navigateMetadata}
         />
       );
@@ -249,10 +251,11 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
   }
 }
 
-function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, onOpenMetadata }: {
+function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, timezoneName, onOpenMetadata }: {
   environmentId: number;
   workspace: StudioWorkspace;
   routeSearch?: string;
+  timezoneName: string | null;
   onOpenMetadata: StudioRouter["navigateMetadata"];
 }) {
   const graph = useLineageGraph(environmentId);
@@ -273,6 +276,7 @@ function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, onOpen
       onValidateMetadata={workspace.validateMetadataEditorDocument}
       onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
       onSaveMetadata={workspace.saveMetadataEditorDocument}
+      timezoneName={timezoneName}
       routeSearch={routeSearch}
       onOpenMetadata={onOpenMetadata}
       onCreateReferenceMapping={workspace.createProjectReferenceMapping}

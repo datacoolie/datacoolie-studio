@@ -8,7 +8,7 @@ import libcst as cst
 from libcst.metadata import MetadataWrapper, PositionProvider
 
 from datacoolie_studio.domains.analysis.models import AnalysisResult, InputEvidence, SourceLocation
-from datacoolie_studio.domains.analysis.sql import analyze_sql
+from datacoolie_studio.domains.analysis.sql import analyze_sql, sql_dialect_for_source
 from datacoolie_studio.domains.analysis.symbols import dotted_name, evaluate_string
 
 SQL_CALL_NAMES = {"execute_sql", "sql", "execute"}
@@ -171,9 +171,12 @@ class _FunctionVisitor(cst.CSTVisitor):
                 expression,
             )
             return
-        analyzed = analyze_sql(sql)
+        source_context = self.context.get("source")
+        dialect = sql_dialect_for_source(source_context if isinstance(source_context, dict) else None)
+        analyzed = analyze_sql(sql, dialect=dialect)
         for item in analyzed.inputs:
             item.provenance = "python_sql"
+            item.details["access_semantics"] = "embedded_sql"
             if item.location is not None:
                 item.details["resolved_sql_location"] = asdict(item.location)
             item.location = self._location(expression)
@@ -223,7 +226,7 @@ class _FunctionVisitor(cst.CSTVisitor):
                 value=path,
                 provenance=provenance,
                 location=self._location(expression),
-                details={"match_precision": "detection_expression"},
+                details={"match_precision": "detection_expression", "access_semantics": "path_api"},
             ))
         else:
             self._diagnostic(
@@ -258,7 +261,7 @@ class _FunctionVisitor(cst.CSTVisitor):
                 value=table_value,
                 provenance=provenance,
                 location=self._location(expression),
-                details={"match_precision": "detection_expression"},
+                details={"match_precision": "detection_expression", "access_semantics": "path_api"},
             ))
             return
         normalized = ".".join(table_parts)
@@ -273,7 +276,12 @@ class _FunctionVisitor(cst.CSTVisitor):
             schema_name=schema_name,
             table=table,
             location=self._location(expression),
-            details={"match_precision": "detection_expression"},
+            details={
+                "match_precision": "detection_expression",
+                "access_semantics": "table_api",
+                "identifier_parts": table_parts,
+                "qualification_level": _qualification_level(table_parts),
+            },
         ))
 
     def _location(self, node: cst.CSTNode) -> SourceLocation:
@@ -492,6 +500,14 @@ def _normalize_table_parts(value: str) -> list[str]:
         if token:
             parts.append(token)
     return parts
+
+
+def _qualification_level(parts: list[str]) -> str:
+    if len(parts) >= 3:
+        return "fully_qualified"
+    if len(parts) >= 2:
+        return "schema_table"
+    return "table"
 
 
 def _looks_like_path_reference(parts: list[str]) -> bool:

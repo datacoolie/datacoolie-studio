@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { StatusPill } from "../../shared/components/StatusPill";
 import { formatTimestampForDisplay, isTimestampFieldName } from "../../shared/time";
+import { CompactNumberValue } from "./CompactNumberValue";
+import { formatCompactNumber, formatExactNumber } from "./monitoringNumberFormat";
 
 export interface MetricItem {
   label: string;
@@ -72,7 +74,7 @@ export function BarList({
             <div className="bar-track">
               <div style={{ width: `${Math.max(3, (value / maxValue) * 100)}%` }} />
             </div>
-            <strong>{valueLabel ? valueLabel(value) : formatNumber(value)}</strong>
+            {valueLabel ? <strong>{valueLabel(value)}</strong> : <CompactNumberValue value={value} />}
           </div>
         );
       })}
@@ -98,13 +100,13 @@ export function StackedStatusBars({ rows, labelKey = "date" }: { rows: Record<st
                   <div
                     key={status}
                     className={`stacked-segment status-bg-${status}`}
-                    title={`${status}: ${value}`}
+                    title={`${status}: ${formatExactNumber(value)}`}
                     style={{ width: `${(value / Math.max(1, total)) * 100}%` }}
                   />
                 );
               })}
             </div>
-            <strong>{formatNumber(total)}</strong>
+            <CompactNumberValue value={total} />
           </div>
         );
       })}
@@ -140,7 +142,7 @@ export function ScatterPlot({
             key={`${text(point, labelKey)}-${index}`}
             className={`scatter-point point-${color}`}
             style={{ left: `${x}%`, top: `${y}%` }}
-            title={`${text(point, labelKey)} | ${formatNumber(num(point, xKey))} rows | ${formatSeconds(num(point, yKey))}`}
+            title={`${text(point, labelKey)} | ${formatExactNumber(num(point, xKey))} rows | ${formatSeconds(num(point, yKey))}`}
           />
         );
       })}
@@ -158,8 +160,10 @@ export function DataTable<T extends Record<string, unknown>>({
   onRowClick,
   sort,
   onSort,
+  rowClassName,
   timezoneName,
   fixedLayout = true,
+  compactNumbers = false,
   className
 }: {
   rows: T[];
@@ -169,8 +173,10 @@ export function DataTable<T extends Record<string, unknown>>({
   onRowClick?: (row: T) => void;
   sort?: TableSort;
   onSort?: (sort: TableSort) => void;
+  rowClassName?: (row: T, index: number, visibleRows: T[]) => string | undefined;
   timezoneName?: string | null;
   fixedLayout?: boolean;
+  compactNumbers?: boolean;
   className?: string;
 }) {
   const [internalSort, setInternalSort] = useState<TableSort | undefined>(undefined);
@@ -184,8 +190,8 @@ export function DataTable<T extends Record<string, unknown>>({
     [sortedRows, offset, maxRows]
   );
   const autoWidths = useMemo(
-    () => calculateAutoFitWidths(visible, columns, timezoneName),
-    [visible, columns, timezoneName]
+    () => calculateAutoFitWidths(visible, columns, timezoneName, compactNumbers),
+    [visible, columns, timezoneName, compactNumbers]
   );
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
@@ -333,7 +339,7 @@ export function DataTable<T extends Record<string, unknown>>({
           {visible.map((row, index) => (
             <tr
               key={index}
-              className={onRowClick ? "clickable-row" : undefined}
+              className={[onRowClick ? "clickable-row" : "", rowClassName?.(row, index, visible) || ""].filter(Boolean).join(" ") || undefined}
               tabIndex={onRowClick ? 0 : undefined}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               onKeyDown={
@@ -353,7 +359,11 @@ export function DataTable<T extends Record<string, unknown>>({
                 const widthStyle = width ? { width: `${width}px` } : undefined;
                 return (
                   <td key={key} className={column.className} style={widthStyle}>
-                    {column.render ? column.render(row) : display(row, key, timezoneName)}
+                    {column.render
+                      ? column.render(row)
+                      : compactNumbers && typeof row[key] === "number"
+                        ? <CompactNumberValue value={row[key] as number} />
+                        : display(row, key, timezoneName)}
                   </td>
                 );
               })}
@@ -574,7 +584,8 @@ function isLongTextFillColumn<T extends Record<string, unknown>>(column: TableCo
 function calculateAutoFitWidths<T extends Record<string, unknown>>(
   rows: T[],
   columns: TableColumn<T>[],
-  timezoneName?: string | null
+  timezoneName?: string | null,
+  compactNumbers = false
 ) {
   const autoColumns = columns.filter((column) => column.autoFit === true || (column.autoFit !== false && column.width === undefined));
   if (!autoColumns.length) return {};
@@ -593,7 +604,7 @@ function calculateAutoFitWidths<T extends Record<string, unknown>>(
       const measuredValues = column.measureValue?.(row, timezoneName);
       const values = Array.isArray(measuredValues)
         ? measuredValues
-        : [measuredValues ?? (column.render ? renderedText(row, column) : display(row, key, timezoneName))];
+        : [measuredValues ?? (column.render ? renderedText(row, column) : autoFitDisplay(row, key, timezoneName, compactNumbers))];
       return Math.max(...values.map((value) => measureTextWidth(context, value || "-") + 26));
     });
     const measured = Math.ceil(Math.max(headerWidth, ...sampleWidths, column.minWidth ?? 0));
@@ -601,6 +612,12 @@ function calculateAutoFitWidths<T extends Record<string, unknown>>(
   }
 
   return result;
+}
+
+function autoFitDisplay(row: Record<string, unknown>, key: string, timezoneName: string | null | undefined, compactNumbers: boolean) {
+  const value = row[key];
+  if (compactNumbers && typeof value === "number") return formatCompactNumber(value);
+  return display(row, key, timezoneName);
 }
 
 function sortRows<T extends Record<string, unknown>>(rows: T[], columns: TableColumn<T>[], sort?: TableSort) {

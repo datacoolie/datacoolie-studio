@@ -5,9 +5,10 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import (
@@ -45,6 +46,87 @@ class EnvironmentContextState:
 
 def environment_freshness(session: Session, environment_id: int) -> dict[str, Any]:
     return _freshness_from_state(_load_environment_context_state(session, environment_id))
+
+
+def source_freshness_statuses(
+    session: Session,
+    sources: list[EnvironmentSource],
+) -> tuple[dict[int, dict[str, Any]], dict[int, SourceObservation]]:
+    """Load per-source freshness with one bulk query per source-data family."""
+
+    source_ids = [source.id for source in sources]
+    if not source_ids:
+        return {}, {}
+    observations = {
+        item.source_id: item
+        for item in session.scalars(
+            select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
+        )
+    }
+    metadata_materializations: dict[int, Any] = {}
+    code_materializations: dict[int, Any] = {}
+    cache_queries = []
+    metadata_ids = [source.id for source in sources if source.source_kind == "metadata"]
+    if metadata_ids:
+        cache_queries.append(
+            select(
+                MetadataMaterialization.source_id,
+                literal("metadata").label("source_kind"),
+                MetadataMaterialization.source_revision_json,
+                MetadataMaterialization.materialized_at,
+            ).where(MetadataMaterialization.source_id.in_(metadata_ids))
+        )
+    code_ids = [source.id for source in sources if source.source_kind == "code"]
+    if code_ids:
+        cache_queries.append(
+            select(
+                CodeArtifactMaterialization.source_id,
+                literal("code").label("source_kind"),
+                CodeArtifactMaterialization.source_revision_json,
+                CodeArtifactMaterialization.materialized_at,
+            ).where(CodeArtifactMaterialization.source_id.in_(code_ids))
+        )
+    manifest_rows: dict[int, list[Any]] = defaultdict(list)
+    log_ids = [source.id for source in sources if source.source_kind == "logs"]
+    if log_ids:
+        cache_queries.append(
+            select(
+                LogFileManifest.source_id,
+                literal("logs").label("source_kind"),
+                LogFileManifest.revision_json.label("source_revision_json"),
+                LogFileManifest.last_seen_at.label("materialized_at"),
+            ).where(LogFileManifest.source_id.in_(log_ids))
+        )
+    if cache_queries:
+        for row in session.execute(union_all(*cache_queries)).mappings():
+            if row["source_kind"] == "logs":
+                manifest_rows[int(row["source_id"])].append(
+                    SimpleNamespace(
+                        revision_json=row["source_revision_json"],
+                        last_seen_at=row["materialized_at"],
+                    )
+                )
+                continue
+            materialization = SimpleNamespace(
+                source_revision_json=row["source_revision_json"],
+                materialized_at=row["materialized_at"],
+            )
+            if row["source_kind"] == "metadata":
+                metadata_materializations[int(row["source_id"])] = materialization
+            else:
+                code_materializations[int(row["source_id"])] = materialization
+
+    items = {}
+    for source in sources:
+        item, _ = _source_freshness(
+            source,
+            observation=observations.get(source.id),
+            metadata_materialization=metadata_materializations.get(source.id),
+            code_materialization=code_materializations.get(source.id),
+            manifest_rows=manifest_rows.get(source.id, []),
+        )
+        items[source.id] = item
+    return items, observations
 
 
 def environment_context(session: Session, environment_id: int) -> dict[str, Any]:
@@ -285,7 +367,10 @@ def _source_freshness(
     source_modified_at = _revision_modified_at(observed_revision)
     cached_modified_at = _revision_modified_at(cache_revision)
     cache_synced_at = _cache_synced_at(
-        source, observation, metadata_materialization
+        source,
+        metadata_materialization=metadata_materialization,
+        code_materialization=code_materialization,
+        manifest_rows=manifest_rows,
     )
     status = _source_status(observation, cache_revision)
     return {
@@ -372,6 +457,7 @@ def _group_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
         "max_source_modified_at": _max_datetime([item.get("source_modified_at") for item in items]),
         "cache_synced_at": _max_datetime([item.get("cache_synced_at") for item in items]),
         "count": len(items),
+        "pending_sync_count": sum(item["status"] == "not_cached" for item in items),
     }
 
 
@@ -392,21 +478,29 @@ def _revision_modified_at(revision: dict[str, Any] | None) -> datetime | None:
 
 def _cache_synced_at(
     source: EnvironmentSource,
-    observation: SourceObservation | None,
-    metadata_materialization: MetadataMaterialization | None,
+    *,
+    metadata_materialization: Any | None,
+    code_materialization: Any | None,
+    manifest_rows: list[Any],
 ) -> datetime | None:
+    if source.last_successful_sync_at:
+        return _as_utc(source.last_successful_sync_at)
     if source.source_kind == "metadata":
-        return (
+        return _as_utc(
             metadata_materialization.materialized_at
             if metadata_materialization
-            else (
-                observation.last_succeeded_at
-                if observation and observation.last_outcome != "error"
-                else None
-            )
+            else None
         )
-    if observation and observation.last_outcome != "error":
-        return observation.last_succeeded_at
+    if source.source_kind == "code":
+        return _as_utc(
+            code_materialization.materialized_at
+            if code_materialization
+            else None
+        )
+    if source.source_kind == "logs":
+        return _max_datetime(
+            [_as_utc(getattr(row, "last_seen_at", None)) for row in manifest_rows]
+        )
     return None
 
 
@@ -428,6 +522,14 @@ def _json_or_none(payload: str | None) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _structural_materializations(session: Session, model, source_ids: list[int]) -> dict[int, Any]:

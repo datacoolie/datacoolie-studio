@@ -12,16 +12,18 @@ import {
   StatusCell,
   type TableSort,
   formatBytes,
-  formatNumber,
   formatSeconds,
   num
 } from "../MonitoringCharts";
+import { CompactNumberValue } from "../CompactNumberValue";
+import { formatCompactNumber, formatExactBytes, formatExactNumber } from "../monitoringNumberFormat";
 import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart";
 import { formatTimestampForDisplay, resolveIntlTimezone } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
 import { formatConfigValue, isMeaningfulConfigValue } from "../pages/JobsPageSupport";
-export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, resolveIntlTimezone, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
+const formatNumber = formatExactNumber;
+export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, CompactNumberValue, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, resolveIntlTimezone, formatCompactNumber, formatExactBytes, formatExactNumber, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
 export type { JobRecord, MonitoringRecord, MonitoringReport, CSSProperties, ReactPointerEvent, ReactNode, MonitoringFilters, MonitoringTabKey, TableSort };
 
 
@@ -192,7 +194,7 @@ export function ReportPanel({
   children
 }: {
   title: string;
-  subtitle?: string;
+  subtitle?: ReactNode;
   titleTooltip?: string;
   className?: string;
   headerAction?: ReactNode;
@@ -323,7 +325,7 @@ export function LifecycleStatusValues({
         <span key={item.status}>
           {index ? <span className="separator"> / </span> : null}
           <span className={`job-lifecycle-status-value status-${item.status}`} style={{ color: item.color }}>
-            {formatNumber(item.value)}
+            <CompactNumberValue value={item.value} />
           </span>
         </span>
       ))}
@@ -445,8 +447,8 @@ export function RuntimePhaseMatrixTooltip({
               <td>{formatSeconds(item.duration)}</td>
               <td>{item.avg > 0 ? formatSeconds(item.avg) : "-"}</td>
               <td>{item.p95 > 0 ? formatSeconds(item.p95) : "-"}</td>
-              <td>{formatNumber(item.runs)}</td>
-              <td className={item.failed > 0 ? "status-bad" : ""}>{formatNumber(item.failed)}</td>
+              <td>{formatExactNumber(item.runs)}</td>
+              <td className={item.failed > 0 ? "status-bad" : ""}>{formatExactNumber(item.failed)}</td>
             </tr>
           ))}
         </tbody>
@@ -1471,8 +1473,7 @@ export function mergeVolumeTrendRows(
 }
 
 export function formatCompact(value: number) {
-  if (!Number.isFinite(value)) return "-";
-  return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+  return formatCompactNumber(value);
 }
 
 export function formatBytesShort(value: number) {
@@ -2624,7 +2625,9 @@ export function DataflowVolumeCell({ row }: { row: MonitoringRecord }) {
         `Net lakehouse bytes: ${formatBytes(netBytes)}`
       ].join("\n")}
     >
-      <strong>{formatNumber(rowsRead)} / {formatNumber(rowsWritten)}</strong>
+      <strong>
+        <CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} />
+      </strong>
       <small>{formatBytes(netBytes)}</small>
     </span>
   );
@@ -2656,6 +2659,7 @@ export function compactRunId(value: unknown) {
 }
 
 export function CompactValue({ value, fallback = "-" }: { value: unknown; fallback?: string }) {
+  if (typeof value === "number") return <CompactNumberValue value={value} fallback={fallback} />;
   const textValue = value === null || value === undefined || value === "" ? fallback : String(value);
   return <span className="monitor-compact-value" title={textValue}>{textValue}</span>;
 }
@@ -2772,8 +2776,11 @@ export function formatCoverage(value: string | number | null) {
 }
 
 export function tableSubtitle(records: number, totalRows: number, loading: boolean) {
-  const prefix = loading ? "Loading" : `${formatNumber(records)} loaded`;
-  return `${prefix} of ${formatNumber(totalRows)} records`;
+  return (
+    <>
+      {loading ? "Loading" : <><CompactNumberValue value={records} /> loaded</>} of <CompactNumberValue value={totalRows} /> records
+    </>
+  );
 }
 
 export function TablePager({

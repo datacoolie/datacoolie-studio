@@ -16,7 +16,7 @@ import {
   diagnosticsSeverityPresentation,
 } from "../diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { CompactNumberValue, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
 import { SystemLogViewer } from "../SystemLogViewer";
 import { DataflowPhaseContribution, ErrorMessageBlock, FreshnessIdentitySection, FreshnessRunTimeCell, GroupedDetailCard, IssueCell, dataflowPhaseBottleneck, dataflowPhaseSegments, detailValue, firstValue, formatFreshnessAge, freshnessRunTimeLines, hasValue, humanize, phaseLabel } from "./detailPrimitives";
 
@@ -206,6 +206,7 @@ export function FreshnessDetailSections({
         </div>
         <DataTable
           rows={relatedDataflows}
+          compactNumbers
           columns={[
             {
               key: "start_time",
@@ -264,17 +265,17 @@ export function isFreshnessWatermarkConfigured(row: Record<string, unknown>) {
 export function FreshnessRunMix({ row }: { row: Record<string, unknown> }) {
   return (
     <span className="monitoring-freshness-run-mix" title="Succeeded / failed / skipped / running / pending">
-      <strong>{formatNumber(num(row, "run_count"))}</strong><span>total</span><i>·</i>
+      <strong><CompactNumberValue value={num(row, "run_count")} /></strong><span>total</span><i>·</i>
       <span>S</span>
-      <strong className="is-success">{formatNumber(num(row, "succeeded_count"))}</strong>
+      <strong className="is-success"><CompactNumberValue value={num(row, "succeeded_count")} /></strong>
       <span>F</span>
-      <strong className="is-failed">{formatNumber(num(row, "failed_count"))}</strong>
+      <strong className="is-failed"><CompactNumberValue value={num(row, "failed_count")} /></strong>
       <span>Skip</span>
-      <strong className="is-warning">{formatNumber(num(row, "skipped_count"))}</strong>
+      <strong className="is-warning"><CompactNumberValue value={num(row, "skipped_count")} /></strong>
       <span>Run</span>
-      <strong>{formatNumber(num(row, "running_count"))}</strong>
+      <strong><CompactNumberValue value={num(row, "running_count")} /></strong>
       <span>Pend</span>
-      <strong>{formatNumber(num(row, "pending_count"))}</strong>
+      <strong><CompactNumberValue value={num(row, "pending_count")} /></strong>
     </span>
   );
 }
@@ -309,7 +310,7 @@ export function FreshnessRunVolumeCell({ row }: { row: Record<string, unknown> }
         `Net lakehouse bytes: ${formatBytes(netBytes)}`,
       ].join("\n")}
     >
-      <strong>{formatNumber(rowsRead)} / {formatNumber(rowsWritten)}</strong>
+      <strong><CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} /></strong>
       <small>{formatBytes(netBytes)}</small>
     </span>
   );

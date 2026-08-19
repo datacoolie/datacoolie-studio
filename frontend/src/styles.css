@@ -905,6 +905,98 @@ select:focus {
   font-weight: 800;
 }
 
+.metadata-stage-tone-neutral {
+  --metadata-stage-background: #f3f5f8;
+  --metadata-stage-border: #cbd5e1;
+  --metadata-stage-foreground: #405466;
+}
+
+.metadata-stage-tone-0 {
+  --metadata-stage-background: #e6f4f1;
+  --metadata-stage-border: #91cfc4;
+  --metadata-stage-foreground: #155e59;
+}
+
+.metadata-stage-tone-1 {
+  --metadata-stage-background: #eaf2fb;
+  --metadata-stage-border: #a5c5e8;
+  --metadata-stage-foreground: #1e4e80;
+}
+
+.metadata-stage-tone-2 {
+  --metadata-stage-background: #fff5df;
+  --metadata-stage-border: #e8c879;
+  --metadata-stage-foreground: #79520b;
+}
+
+.metadata-stage-tone-3 {
+  --metadata-stage-background: #f1ecfb;
+  --metadata-stage-border: #c4b4e9;
+  --metadata-stage-foreground: #5b3e91;
+}
+
+.metadata-stage-tone-4 {
+  --metadata-stage-background: #fcecf0;
+  --metadata-stage-border: #e8b5c3;
+  --metadata-stage-foreground: #8a324b;
+}
+
+.metadata-stage-tone-5 {
+  --metadata-stage-background: #e6f5f8;
+  --metadata-stage-border: #98d2dc;
+  --metadata-stage-foreground: #155e6b;
+}
+
+.metadata-stage-tone-6 {
+  --metadata-stage-background: #eaf5e9;
+  --metadata-stage-border: #a9d1a5;
+  --metadata-stage-foreground: #28612b;
+}
+
+.metadata-stage-tone-7 {
+  --metadata-stage-background: #fff0e5;
+  --metadata-stage-border: #edb996;
+  --metadata-stage-foreground: #8a431b;
+}
+
+.metadata-stage-tone-8 {
+  --metadata-stage-background: #eef0fc;
+  --metadata-stage-border: #b3bced;
+  --metadata-stage-foreground: #3f4b98;
+}
+
+.metadata-stage-tone-9 {
+  --metadata-stage-background: #f1f6df;
+  --metadata-stage-border: #c9d99b;
+  --metadata-stage-foreground: #526614;
+}
+
+.metadata-stage-tone-10 {
+  --metadata-stage-background: #f7ecf8;
+  --metadata-stage-border: #d9b8dd;
+  --metadata-stage-foreground: #713975;
+}
+
+.metadata-stage-tone-11 {
+  --metadata-stage-background: #edf2f6;
+  --metadata-stage-border: #bbc9d5;
+  --metadata-stage-foreground: #405466;
+}
+
+.summary-pill-button.metadata-stage-tone {
+  background: var(--metadata-stage-background);
+  border-color: var(--metadata-stage-border);
+  color: var(--metadata-stage-foreground);
+}
+
+.summary-pill-button.metadata-stage-tone span {
+  color: var(--metadata-stage-foreground);
+}
+
+.summary-pill-button.metadata-stage-tone b {
+  color: color-mix(in srgb, var(--metadata-stage-foreground) 78%, #64748b);
+}
+
 .project-list {
   display: flex;
   flex-direction: column;
@@ -2192,6 +2284,24 @@ button.metadata-kpi-tile {
 
 .metadata-datasheet.metadata-datasheet-view .dsg-cell {
   background: #f3f5f8 !important;
+}
+
+.metadata-datasheet .dsg-cell.metadata-stage-tone {
+  background: var(--metadata-stage-background) !important;
+}
+
+.metadata-datasheet .dsg-cell.metadata-filter-match {
+  background: #fff6c8 !important;
+  box-shadow: inset 0 0 0 1px #e2c45c;
+}
+
+.metadata-datasheet .dsg-row.metadata-source-group-start .dsg-cell {
+  border-top: 2px solid #cbd5e1;
+}
+
+.metadata-datasheet .dsg-cell.metadata-cell-warning.metadata-filter-match {
+  background: #fff6f6 !important;
+  box-shadow: inset 0 -2px 0 #c84c4c;
 }
 
 .metadata-datasheet.metadata-datasheet-view .dsg-input {
@@ -3957,6 +4067,27 @@ button.assets-metric-chip:hover,
   transition: background-color 130ms ease;
 }
 
+.assets-table tbody tr.assets-stage-source {
+  background: #f0faf8;
+}
+
+.assets-table tbody tr.assets-stage-bronze {
+  background: #f7eee6;
+}
+
+.assets-table tbody tr.assets-stage-silver {
+  background: #f3f6f8;
+}
+
+.assets-table tbody tr.assets-stage-gold {
+  background: #fffbea;
+}
+
+.assets-table tbody tr.assets-connection-group-start td,
+.assets-table tbody tr.assets-reference-resolution-group-start td {
+  border-top: 2px solid #dce5ec;
+}
+
 .assets-table tbody tr:hover {
   background: #f4faf9;
 }
@@ -5665,6 +5796,7 @@ button.assets-metadata-action:hover:not(:disabled) {
 .reference-source-preview {
   display: grid;
   gap: 7px;
+  min-width: 0;
   border: 1px solid #dfe6ed;
   border-radius: 6px;
   background: #f8fafc;
@@ -5757,6 +5889,10 @@ button.assets-metadata-action:hover:not(:disabled) {
 }
 
 .source-code-block {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   max-height: min(260px, 34vh);
   min-height: 52px;
   overflow: auto;
@@ -5777,7 +5913,7 @@ button.assets-metadata-action:hover:not(:disabled) {
 
 .source-code-block.is-expanded {
   max-height: none;
-  overflow: visible;
+  overflow: auto;
 }
 
 .source-code-block.has-location-highlight {
@@ -6233,6 +6369,7 @@ button.reference-occurrence-row:focus-visible {
 
 .assets-definition-panel {
   display: grid;
+  min-width: 0;
   gap: 8px;
   border-top: 1px solid #e1e7ee;
   background: #ffffff;
@@ -6299,6 +6436,10 @@ button.reference-occurrence-row:focus-visible {
 }
 
 .assets-definition-code {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   max-height: min(360px, 45vh);
   min-height: 52px;
   overflow: auto;
@@ -6319,7 +6460,7 @@ button.reference-occurrence-row:focus-visible {
 
 .assets-definition-code.is-tall {
   max-height: none;
-  overflow: visible;
+  overflow: auto;
 }
 
 .assets-definition-code .hljs {
@@ -9903,13 +10044,63 @@ button.reference-occurrence-row:focus-visible {
 
 .lineage-run-row {
   display: grid;
+  width: 100%;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
+  border: 0;
   border-bottom: 1px solid #edf0f4;
+  background: transparent;
   padding: 5px 0;
   color: #465264;
+  font: inherit;
   font-size: 10px;
+  text-align: left;
+}
+
+button.lineage-run-row:not(:disabled) {
+  cursor: pointer;
+}
+
+button.lineage-run-row:not(:disabled):hover,
+button.lineage-run-row:not(:disabled):focus-visible {
+  outline: 0;
+  background: #f0f6fc;
+  color: #284e71;
+}
+
+button.lineage-run-row:focus-visible {
+  box-shadow: 0 0 0 2px #9ec5e7;
+}
+
+button.lineage-run-row:disabled {
+  cursor: default;
+}
+
+.lineage-run-history-more {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  border: 0;
+  border-bottom: 1px solid #edf0f4;
+  background: transparent;
+  color: #315b80;
+  padding: 5px 0;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lineage-run-history-more:hover:not(:disabled),
+.lineage-run-history-more:focus-visible {
+  outline: 0;
+  background: #f0f6fc;
+  color: #284e71;
+}
+
+.lineage-run-history-more:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .lineage-run-row > span {

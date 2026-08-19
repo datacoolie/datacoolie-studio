@@ -61,6 +61,7 @@ def init_db() -> None:
     _migrate_source_registrations(engine)
     _migrate_log_sources(engine)
     _migrate_log_file_manifest(engine)
+    _backfill_last_successful_sync_at(engine)
     _ensure_log_file_manifest_unique_index(engine)
 
 
@@ -401,11 +402,89 @@ def _ensure_environment_source_columns(engine) -> None:
         statements.append("ALTER TABLE environment_sources ADD COLUMN sync_interval_minutes INTEGER")
     if "last_scheduled_sync_at" not in columns:
         statements.append("ALTER TABLE environment_sources ADD COLUMN last_scheduled_sync_at DATETIME")
+    if "last_successful_sync_at" not in columns:
+        timestamp_type = (
+            "TIMESTAMP WITH TIME ZONE"
+            if engine.dialect.name == "postgresql"
+            else "DATETIME"
+        )
+        statements.append(
+            "ALTER TABLE environment_sources "
+            f"ADD COLUMN last_successful_sync_at {timestamp_type}"
+        )
     if statements:
         with engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
     _ensure_environment_source_storage_indexes(engine)
+
+
+def _backfill_last_successful_sync_at(engine) -> None:
+    """Backfill durable sync history without overwriting newer values."""
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "environment_sources" not in tables:
+        return
+    columns = {column["name"] for column in inspector.get_columns("environment_sources")}
+    if "last_successful_sync_at" not in columns:
+        return
+
+    # Keep the qualifying job list in the sync domain; importing lazily avoids a
+    # session -> sync -> session import cycle during application startup.
+    from datacoolie_studio.domains.sync.service import QUALIFYING_SYNC_JOB_TYPES
+
+    job_types = sorted(QUALIFYING_SYNC_JOB_TYPES)
+    placeholders = ", ".join(f":job_type_{index}" for index, _ in enumerate(job_types))
+    params = {f"job_type_{index}": value for index, value in enumerate(job_types)}
+    candidates: dict[int, object] = {}
+
+    if "sync_jobs" in tables and job_types:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT source_id, MAX(completed_at) AS completed_at "
+                    "FROM sync_jobs "
+                    "WHERE status = 'succeeded' "
+                    f"AND job_type IN ({placeholders}) "
+                    "GROUP BY source_id"
+                ),
+                params,
+            ).mappings()
+            for row in rows:
+                if row["completed_at"] is not None:
+                    candidates[int(row["source_id"])] = row["completed_at"]
+
+    fallback_queries = (
+        ("metadata_materializations", "materialized_at"),
+        ("code_artifact_materializations", "materialized_at"),
+        ("log_file_manifest", "last_seen_at"),
+    )
+    with engine.begin() as connection:
+        for table_name, timestamp_column in fallback_queries:
+            if table_name not in tables:
+                continue
+            rows = connection.execute(
+                text(
+                    f"SELECT source_id, MAX({timestamp_column}) AS latest_at "
+                    f"FROM {table_name} GROUP BY source_id"
+                )
+            ).mappings()
+            for row in rows:
+                source_id = int(row["source_id"])
+                if source_id in candidates or row["latest_at"] is None:
+                    continue
+                candidates[source_id] = row["latest_at"]
+
+        for source_id, timestamp in candidates.items():
+            connection.execute(
+                text(
+                    "UPDATE environment_sources "
+                    "SET last_successful_sync_at = :timestamp "
+                    "WHERE id = :source_id AND last_successful_sync_at IS NULL"
+                ),
+                {"source_id": source_id, "timestamp": timestamp},
+            )
 
 
 def _ensure_environment_source_storage_indexes(engine) -> None:

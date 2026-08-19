@@ -1,5 +1,7 @@
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
 import { describe, expect, it } from "vitest";
-import { monitoringTableTestUtils, type TableColumn } from "./MonitoringCharts";
+import { DataTable, monitoringTableTestUtils, type TableColumn } from "./MonitoringCharts";
 
 describe("monitoring table sizing", () => {
   it("floors a fractional panel width so a fitted table does not create a false horizontal scrollbar", () => {
@@ -115,5 +117,28 @@ describe("monitoring table sizing", () => {
     const sorted = monitoringTableTestUtils.sortRows(rows, columns, { sortBy: "start_time", sortDir: "asc" });
 
     expect(sorted.map((row) => row.id)).toEqual(["earlier", "later"]);
+  });
+
+  it("compacts opt-in numeric cells without changing raw-value sorting", () => {
+    const rows: Array<Record<string, unknown>> = [{ id: "large", count: 898500000 }, { id: "small", count: 1200 }];
+    const columns: Array<TableColumn<Record<string, unknown>>> = [
+      { key: "count", label: "Count", sortable: true, autoFit: true }
+    ];
+
+    const markup = renderToStaticMarkup(createElement(DataTable, { rows, columns, compactNumbers: true }));
+    const sorted = monitoringTableTestUtils.sortRows(rows, columns, { sortBy: "count", sortDir: "asc" });
+
+    expect(markup).toContain('title="898,500,000"');
+    expect(markup).toContain(">898.5M</span>");
+    expect(sorted.map((row) => row.id)).toEqual(["small", "large"]);
+  });
+
+  it("keeps the default DataTable numeric presentation exact", () => {
+    const markup = renderToStaticMarkup(
+      createElement(DataTable, { rows: [{ count: 898500000 }], columns: [{ key: "count", label: "Count" }] })
+    );
+
+    expect(markup).toContain(">898,500,000</td>");
+    expect(markup).not.toContain("898.5M");
   });
 });

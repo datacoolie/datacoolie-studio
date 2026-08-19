@@ -6,6 +6,7 @@ import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { toErrorMessage } from "../../shared/lib/errors";
+import { connectionStageFamily } from "../../shared/connectionOrder";
 import { DataTable, formatNumber, type TableColumn, type TableSort } from "../monitoring/MonitoringCharts";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
@@ -20,6 +21,7 @@ import {
 import { metadataSaveConfirmation } from "../metadata-explorer/metadataSaveConfirmation";
 import { MetadataSourceSaveConfirmationDialog } from "../metadata-explorer/MetadataSourceSaveConfirmationDialog";
 import { metadataQueryForAsset, presentAsset, presentReference, referenceConsumerTypeSummary, referenceContextLine, referenceProvenanceDescription, referenceProvenanceLabel, referenceProvenanceTone, referenceResolutionPresentation } from "./assetsPresentation";
+import { orderAssetsByConnection, orderReferencesByAction, RECOMMENDED_ASSET_SORT_KEY, RECOMMENDED_SORT, startsConnectionGroup, startsReferenceResolutionGroup } from "./assetsOrdering";
 import { AssetsDrawer } from "./AssetsDrawer";
 import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import { ReferenceMappingClearAction } from "../reference-mappings/ReferenceMappingClearAction";
@@ -210,8 +212,8 @@ export function AssetsView({
   const [referenceQuery, setReferenceQuery] = useState("");
   const [assetFilters, setAssetFilters] = useState<AssetFilters>(EMPTY_ASSET_FILTERS);
   const [referenceFilters, setReferenceFilters] = useState<ReferenceFilters>(EMPTY_REFERENCE_FILTERS);
-  const [assetSort, setAssetSort] = useState<TableSort>({ sortBy: "display_name", sortDir: "asc" });
-  const [referenceSort, setReferenceSort] = useState<TableSort>({ sortBy: "display_name", sortDir: "asc" });
+  const [assetSort, setAssetSort] = useState<TableSort>(RECOMMENDED_SORT);
+  const [referenceSort, setReferenceSort] = useState<TableSort>(RECOMMENDED_SORT);
   const [selectedAssetTrail, setSelectedAssetTrail] = useState<string[]>([]);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [referenceDrawerMode, setReferenceDrawerMode] = useState<"details" | "mapping">("details");
@@ -230,7 +232,7 @@ export function AssetsView({
     role: assetFilters.role || undefined,
     attention_state: assetFilters.attentionState || undefined,
     scope: assetFilters.scope || undefined,
-    sort_by: assetSort.sortBy === "display_name" ? undefined : assetSort.sortBy,
+    sort_by: assetSort.sortBy === "display_name" || assetSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? undefined : assetSort.sortBy,
     sort_dir: assetSort.sortDir === "asc" ? undefined : assetSort.sortDir,
   }), [assetFilters, assetSort, debouncedAssetQuery]);
   const referenceParameters = useMemo(() => ({
@@ -239,7 +241,7 @@ export function AssetsView({
     provenance: referenceFilters.provenance || undefined,
     resolution_state: referenceFilters.resolutionState || undefined,
     attention_state: referenceFilters.attentionState || undefined,
-    sort_by: referenceSort.sortBy === "display_name" ? undefined : referenceSort.sortBy,
+    sort_by: referenceSort.sortBy === "display_name" || referenceSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? undefined : referenceSort.sortBy,
     sort_dir: referenceSort.sortDir === "asc" ? undefined : referenceSort.sortDir,
   }), [debouncedReferenceQuery, referenceFilters, referenceSort]);
   const resources = useAssetsResources({
@@ -391,8 +393,14 @@ export function AssetsView({
   const assetMetrics = useMemo(() => calculateAssetMetrics(inventory, references, assets?.summary), [inventory, references, assets?.summary]);
   // Pages already reflect the server query. Retain the previous page while a
   // debounced request is in flight instead of locally hiding stale rows.
-  const filteredAssets = inventory as AssetRow[];
-  const filteredReferences = references as ReferenceRow[];
+  const filteredAssets = useMemo(
+    () => (assetSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? orderAssetsByConnection(inventory) : inventory) as AssetRow[],
+    [assetSort.sortBy, inventory],
+  );
+  const filteredReferences = useMemo(
+    () => (referenceSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? orderReferencesByAction(references) : references) as ReferenceRow[],
+    [referenceSort.sortBy, references],
+  );
   const attentionMappingLabels = useMemo(() => {
     const labels: Record<string, string> = {};
     for (const reference of references) {
@@ -594,11 +602,21 @@ export function AssetsView({
   function resetAssetFilters() {
     setAssetQuery("");
     setAssetFilters(EMPTY_ASSET_FILTERS);
+    setAssetSort(RECOMMENDED_SORT);
   }
 
   function resetReferenceFilters() {
     setReferenceQuery("");
     setReferenceFilters(EMPTY_REFERENCE_FILTERS);
+    setReferenceSort(RECOMMENDED_SORT);
+  }
+
+  function handleAssetSort(nextSort: TableSort) {
+    setAssetSort((current) => current.sortBy === RECOMMENDED_ASSET_SORT_KEY ? { ...nextSort, sortDir: "asc" } : nextSort);
+  }
+
+  function handleReferenceSort(nextSort: TableSort) {
+    setReferenceSort((current) => current.sortBy === RECOMMENDED_ASSET_SORT_KEY ? { ...nextSort, sortDir: "asc" } : nextSort);
   }
 
   async function refreshAfterReferenceMapping() {
@@ -630,24 +648,28 @@ export function AssetsView({
     setActiveTab("inventory");
     setAssetQuery("");
     setAssetFilters(EMPTY_ASSET_FILTERS);
+    setAssetSort(RECOMMENDED_SORT);
   }
 
   function showAttentionAssets() {
     setActiveTab("inventory");
     setAssetQuery("");
     setAssetFilters({ ...EMPTY_ASSET_FILTERS, attentionState: "with_attention" });
+    setAssetSort(RECOMMENDED_SORT);
   }
 
   function showReferencesNeedingMapping() {
     setActiveTab("references");
     setReferenceQuery("");
     setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, resolutionState: NEEDS_MAPPING_FILTER });
+    setReferenceSort(RECOMMENDED_SORT);
   }
 
   function showAttentionItems() {
     if (activeTab === "references") {
       setReferenceQuery("");
       setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, attentionState: "with_attention" });
+      setReferenceSort(RECOMMENDED_SORT);
       return;
     }
     showAttentionAssets();
@@ -871,7 +893,13 @@ export function AssetsView({
                 onRowClick={(asset) => openAssetDrawer(asset.id)}
                 rows={filteredAssets}
                 sort={assetSort}
-                onSort={setAssetSort}
+                onSort={handleAssetSort}
+                rowClassName={(asset, index, rows) => [
+                  connectionStageFamily(asset.connection_name) ? `assets-stage-${connectionStageFamily(asset.connection_name)}` : undefined,
+                  assetSort.sortBy === RECOMMENDED_ASSET_SORT_KEY && startsConnectionGroup(asset, rows[index - 1])
+                    ? "assets-connection-group-start"
+                    : undefined,
+                ].filter(Boolean).join(" ") || undefined}
               />
             ) : (
               <div className="table-empty">No assets match the current filters.</div>
@@ -918,7 +946,10 @@ export function AssetsView({
                 onRowClick={(reference) => openReferenceDrawer(reference.id)}
                 rows={filteredReferences}
                 sort={referenceSort}
-                onSort={setReferenceSort}
+                onSort={handleReferenceSort}
+                rowClassName={referenceSort.sortBy === RECOMMENDED_ASSET_SORT_KEY
+                  ? (reference, index, rows) => startsReferenceResolutionGroup(reference, rows[index - 1]) ? "assets-reference-resolution-group-start" : undefined
+                  : undefined}
               />
             ) : (
               <div className="table-empty">No references match the current filters.</div>

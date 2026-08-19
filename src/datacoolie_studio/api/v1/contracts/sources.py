@@ -120,6 +120,40 @@ class SourceSyncJobResponse(BaseModel):
     completed_at: datetime | None = None
 
 
+class SourceFreshnessStatusResponse(BaseModel):
+    state: str
+    source_modified_at: datetime | None = None
+    cache_source_modified_at: datetime | None = None
+    cache_synced_at: datetime | None = None
+    summary: str | None = None
+
+
+class SourceValidationStatusResponse(BaseModel):
+    state: str
+    completed_at: datetime | None = None
+    summary: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class SourceObservationStatusResponse(BaseModel):
+    state: str
+    checked_at: datetime | None = None
+    pending_changes: bool | None = None
+    next_check_at: datetime | None = None
+    failure_count: int = 0
+    error: dict[str, Any] | None = None
+
+
+class SourceSyncExecutionStatusResponse(BaseModel):
+    state: str
+    trigger: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_successful_at: datetime | None = None
+    summary: str | None = None
+    error: dict[str, Any] | None = None
+
+
 class SourceSyncStatusResponse(BaseModel):
     source_id: int
     source_kind: str
@@ -136,6 +170,10 @@ class SourceSyncStatusResponse(BaseModel):
     observation_paused_at: datetime | None = None
     active_operation: Literal["validate", "sync"] | None = None
     latest_job: SourceSyncJobResponse | None = None
+    freshness: SourceFreshnessStatusResponse | None = None
+    validation: SourceValidationStatusResponse | None = None
+    observation: SourceObservationStatusResponse | None = None
+    sync_execution: SourceSyncExecutionStatusResponse | None = None
 
 
 class SourceObservationOutcomeResponse(BaseModel):
@@ -217,6 +255,7 @@ class FreshnessGroupResponse(BaseModel):
     max_source_modified_at: datetime | None = None
     cache_synced_at: datetime | None = None
     count: int
+    pending_sync_count: int = 0
 
 
 class EnvironmentFreshnessResponse(BaseModel):

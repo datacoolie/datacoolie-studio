@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -33,10 +33,34 @@ logger = logging.getLogger(__name__)
 
 SYNC_JOB_RETENTION_DAYS = 30
 SYNC_JOB_RETENTION_MINIMUM = 100
+QUALIFYING_SYNC_JOB_TYPES = frozenset(
+    {
+        "initial_refresh",
+        "manual_refresh",
+        "force_refresh",
+        "scheduled_refresh",
+        "auto_refresh",
+    }
+)
+SYNC_TRIGGER_BY_JOB_TYPE = {
+    "initial_refresh": "initial",
+    "manual_refresh": "manual",
+    "force_refresh": "manual",
+    "scheduled_refresh": "scheduled",
+    "auto_refresh": "automatic",
+}
 
 
 class SyncJobOverlapError(RuntimeError):
     pass
+
+
+def is_qualifying_sync_job_type(job_type: str | None) -> bool:
+    return str(job_type or "") in QUALIFYING_SYNC_JOB_TYPES
+
+
+def sync_trigger_for_job_type(job_type: str | None) -> str | None:
+    return SYNC_TRIGGER_BY_JOB_TYPE.get(str(job_type or ""))
 
 
 @contextmanager
@@ -228,10 +252,19 @@ def finish_sync_job(
     result: dict[str, Any],
     completed_at: datetime | None = None,
 ) -> SyncJob:
+    previous_result = _json_or_none(job.result_json)
     job.status = status
     job.message = message
     job.result_json = json.dumps(result, sort_keys=True)
     job.completed_at = completed_at or utc_now()
+    if status == "succeeded" and _is_qualifying_sync_job(job, previous_result):
+        source = session.get(EnvironmentSource, job.source_id)
+        current_success = _as_utc(source.last_successful_sync_at if source else None)
+        completed_success = _as_utc(job.completed_at)
+        if source is not None and completed_success is not None and (
+            current_success is None or current_success < completed_success
+        ):
+            source.last_successful_sync_at = completed_success
     session.commit()
     session.refresh(job)
     return job
@@ -258,86 +291,79 @@ def record_source_observation(
 
 def source_sync_status(session: Session, source: EnvironmentSource, latest_job: SyncJob | None = None) -> dict[str, Any]:
     observation = session.get(SourceObservation, source.id)
-    if latest_job is None:
-        latest_job = session.scalars(
+    jobs = list(
+        session.scalars(
             select(SyncJob)
-            .where(
-                SyncJob.source_id == source.id,
-                SyncJob.status.in_({"queued", "initializing", "running"}),
-            )
-            .order_by(
-                case(
-                    (SyncJob.status == "initializing", 0),
-                    (SyncJob.status == "running", 1),
-                    else_=2,
-                ),
-                SyncJob.id.desc(),
-            )
-        ).first()
-    if latest_job is None:
-        latest_job = session.scalars(
-            select(SyncJob).where(SyncJob.source_id == source.id).order_by(SyncJob.started_at.desc(), SyncJob.id.desc())
-        ).first()
-
-    return _source_sync_status(source, observation, latest_job)
+            .where(SyncJob.source_id == source.id)
+            .order_by(SyncJob.id)
+        )
+    )
+    active_job = _latest_active_job(jobs)
+    latest_job = latest_job or active_job or (jobs[-1] if jobs else None)
+    latest_sync_job = _latest_qualifying_job(jobs)
+    return _source_sync_status(source, observation, latest_job, latest_sync_job)
 
 
 def source_sync_statuses(
     session: Session,
     sources: list[EnvironmentSource],
+    *,
+    observations: dict[int, SourceObservation] | None = None,
 ) -> list[dict[str, Any]]:
     source_ids = [source.id for source in sources]
     if not source_ids:
         return []
-    observations = {
-        item.source_id: item
-        for item in session.scalars(
-            select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
-        )
-    }
-    latest_job_ids = (
-        select(SyncJob.source_id, func.max(SyncJob.id).label("job_id"))
-        .where(SyncJob.source_id.in_(source_ids))
-        .group_by(SyncJob.source_id)
-        .subquery()
-    )
-    latest_jobs = {
-        job.source_id: job
-        for job in session.scalars(
-            select(SyncJob).join(latest_job_ids, SyncJob.id == latest_job_ids.c.job_id)
-        )
-    }
-    active_jobs: dict[int, SyncJob] = {}
+    if observations is None:
+        observations = {
+            item.source_id: item
+            for item in session.scalars(
+                select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
+            )
+        }
+    jobs_by_source: dict[int, list[SyncJob]] = {}
     for job in session.scalars(
         select(SyncJob)
         .where(
             SyncJob.source_id.in_(source_ids),
-            SyncJob.status.in_({"queued", "initializing", "running"}),
         )
-        .order_by(SyncJob.id.desc())
+        .order_by(SyncJob.source_id, SyncJob.id)
     ):
-        current = active_jobs.get(job.source_id)
-        if current is None or _active_job_priority(job) < _active_job_priority(current):
-            active_jobs[job.source_id] = job
-    latest_jobs.update(active_jobs)
+        jobs_by_source.setdefault(job.source_id, []).append(job)
     return [
-        _source_sync_status(
-            source,
-            observations.get(source.id),
-            latest_jobs.get(source.id),
-        )
+        _source_sync_status_for_jobs(source, observations.get(source.id), jobs_by_source.get(source.id, []))
         for source in sources
     ]
+
+
+def _source_sync_status_for_jobs(
+    source: EnvironmentSource,
+    observation: SourceObservation | None,
+    jobs: list[SyncJob],
+) -> dict[str, Any]:
+    return _source_sync_status(
+        source,
+        observation,
+        _latest_active_job(jobs) or (jobs[-1] if jobs else None),
+        _latest_qualifying_job(jobs),
+    )
 
 
 def _source_sync_status(
     source: EnvironmentSource,
     observation: SourceObservation | None,
     latest_job: SyncJob | None,
+    latest_sync_job: SyncJob | None = None,
 ) -> dict[str, Any]:
     observed = observation_payload(observation)
     outcome = str(observed["status"])
     active_operation = _active_operation(latest_job)
+    validation = _validation_status(source, active_operation)
+    observation_status = _observation_status(observation, observed)
+    sync_execution = _sync_execution_status(
+        source,
+        latest_sync_job,
+        active_operation=active_operation,
+    )
     return {
         "source_id": source.id,
         "source_kind": source.source_kind,
@@ -362,6 +388,167 @@ def _source_sync_status(
         "observation_paused_at": observed["observation_paused_at"],
         "active_operation": active_operation,
         "latest_job": _job_to_dict(latest_job) if latest_job else None,
+        "validation": validation,
+        "observation": observation_status,
+        "sync_execution": sync_execution,
+    }
+
+
+def _latest_active_job(jobs: list[SyncJob]) -> SyncJob | None:
+    active = [job for job in jobs if job.status in {"queued", "initializing", "running"}]
+    return min(active, key=_active_job_priority) if active else None
+
+
+def _latest_qualifying_job(jobs: list[SyncJob]) -> SyncJob | None:
+    qualifying = [
+        job for job in jobs
+        if job.status in {"queued", "initializing", "running", "succeeded", "failed"}
+        if _is_qualifying_sync_job(job, _json_or_none(job.result_json))
+    ]
+    return max(
+        qualifying,
+        key=lambda job: (_normalized_datetime(job.started_at), job.id),
+        default=None,
+    )
+
+
+def _is_qualifying_sync_job(
+    job: SyncJob,
+    result: dict[str, Any] | None,
+) -> bool:
+    if not is_qualifying_sync_job_type(job.job_type):
+        return False
+    if job.job_type == "initial_refresh" and result:
+        return result.get("active_operation") != "validate"
+    return True
+
+
+def _normalized_datetime(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _validation_status(
+    source: EnvironmentSource,
+    active_operation: str | None,
+) -> dict[str, Any]:
+    result = _json_or_none(source.read_check_result_json) or {}
+    raw_status = str(source.read_check_status or result.get("status") or "")
+    if active_operation == "validate":
+        state = "validating"
+    elif not raw_status:
+        state = "not_validated"
+    elif raw_status == "ok":
+        state = "ready"
+    elif raw_status == "warning":
+        state = "warning"
+    else:
+        state = "invalid"
+    errors = result.get("errors")
+    error = (
+        {"message": result.get("message"), "errors": errors}
+        if state == "invalid"
+        else None
+    )
+    return {
+        "state": state,
+        "completed_at": _as_utc(source.read_checked_at) if source.read_checked_at else None,
+        "summary": result.get("message") or None,
+        "error": error,
+    }
+
+
+def _observation_status(
+    observation: SourceObservation | None,
+    observed: dict[str, Any],
+) -> dict[str, Any]:
+    raw_status = str(observed["status"])
+    if observation is None or raw_status == "never":
+        state = "never"
+    elif observation.lease_owner:
+        state = "checking"
+    elif observed["observation_paused_at"] is not None:
+        state = "paused"
+    elif raw_status == "error":
+        state = "error"
+    elif observed["pending_changes"] is True:
+        # pending_changes is anchored to the last successful sync. Repeated
+        # checks can therefore report an unchanged observation while the
+        # source is still ahead of the cache.
+        state = "changed"
+    elif raw_status == "changed" and observed["pending_changes"] is None:
+        # Keep the warning for legacy observations that predate the durable
+        # pending_changes value.
+        state = "changed"
+    else:
+        state = "unchanged"
+    return {
+        "state": state,
+        "checked_at": (
+            _as_utc(observed["last_observed_at"])
+            if observed["last_observed_at"]
+            else None
+        ),
+        "pending_changes": observed["pending_changes"],
+        "next_check_at": (
+            _as_utc(observed["next_check_at"])
+            if observed["next_check_at"]
+            else None
+        ),
+        "failure_count": observed["observation_failure_count"],
+        "error": observed["error"],
+    }
+
+
+def _sync_execution_status(
+    source: EnvironmentSource,
+    latest_sync_job: SyncJob | None,
+    *,
+    active_operation: str | None,
+) -> dict[str, Any]:
+    active_sync = (
+        latest_sync_job
+        if latest_sync_job is not None
+        and latest_sync_job.status in {"queued", "initializing", "running"}
+        and active_operation != "validate"
+        else None
+    )
+    job = active_sync or latest_sync_job
+    result = _json_or_none(job.result_json) if job is not None else None
+    if active_sync is not None:
+        state = "running"
+    elif job is None:
+        state = "succeeded" if source.last_successful_sync_at else "never"
+    elif job.status == "succeeded":
+        state = "succeeded"
+    elif job.status == "failed":
+        state = "failed"
+    else:
+        state = "never"
+    error = (
+        (result or {}).get("error")
+        if state == "failed"
+        else None
+    )
+    if state == "failed" and not isinstance(error, dict):
+        error = {"message": job.message} if job and job.message else None
+    return {
+        "state": state,
+        "trigger": sync_trigger_for_job_type(job.job_type) if job else None,
+        "started_at": _as_utc(job.started_at) if job else None,
+        "completed_at": (
+            _as_utc(job.completed_at)
+            if job is not None
+            else _as_utc(source.last_successful_sync_at)
+            if state == "succeeded"
+            else None
+        ),
+        "last_successful_at": (
+            _as_utc(source.last_successful_sync_at)
+            if source.last_successful_sync_at
+            else None
+        ),
+        "summary": job.message if job else "Last successful sync is outside retained job history" if state == "succeeded" else None,
+        "error": error,
     }
 
 
@@ -497,7 +684,9 @@ def _json_or_none(value: str | None) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _as_utc(value: datetime) -> datetime:
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)

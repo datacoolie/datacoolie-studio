@@ -40,4 +40,12 @@ describe("MetadataSheetToolbar", () => {
     expect(markup).toContain('aria-busy="true"');
     expect(markup).toContain("is-spinning");
   });
+
+  it("shows a concise removable exact-stage filter", () => {
+    const markup = renderToolbar({ stageFilter: "silver2" });
+
+    expect(markup).toContain("Stage: silver2");
+    expect(markup).toContain("Clear stage filter");
+    expect(markup).toContain("metadata-stage-tone");
+  });
 });

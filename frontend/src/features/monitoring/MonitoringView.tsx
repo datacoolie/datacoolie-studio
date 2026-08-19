@@ -15,7 +15,6 @@ import { MonitoringFilterBar, type MonitoringSearchOption } from "./MonitoringFi
 import { IntentPrefetchController } from "./intentPrefetch";
 import {
   monitoringDataflowsOptions,
-  monitoringDataflowRunDetailOptions,
   monitoringDetailDataflowsOptions,
   monitoringEvidenceOptions,
   monitoringJobRunDetailOptions,
@@ -43,6 +42,7 @@ import {
 } from "./monitoringFilters";
 
 const MonitoringDetailDrawer = lazy(() => import("./MonitoringDetailDrawer").then((module) => ({ default: module.MonitoringDetailDrawer })));
+const MonitoringDataflowRunDrawer = lazy(() => import("./MonitoringDataflowRunDrawer").then((module) => ({ default: module.MonitoringDataflowRunDrawer })));
 
 interface MonitoringViewProps {
   environmentId: number;
@@ -188,17 +188,11 @@ export function MonitoringView({
   );
   const detailDataflowsQuery = useQuery(monitoringDetailDataflowsOptions(environmentId, activeDetailEvidenceRequest));
   const detailDataflows = detailDataflowsQuery.data ?? null;
-  const detailDataflowRunId = detail?.kind === "dataflow"
-    ? String(detail.row.dataflow_run_id ?? "").trim()
-    : "";
-  const detailDataflowRunQuery = useQuery(monitoringDataflowRunDetailOptions(environmentId, detailDataflowRunId));
   const detailJobId = detail?.kind === "job" ? String(detail.row.job_id ?? "").trim() : "";
   const detailJobRunQuery = useQuery(monitoringJobRunDetailOptions(environmentId, detailJobId));
-  const activeDetailRow = detail?.kind === "dataflow"
-    ? mergeDataflowRunDetail(detail.row, detailDataflowRunQuery.data)
-    : detail?.kind === "job"
-      ? mergeDataflowRunDetail(detail.row, detailJobRunQuery.data)
-      : detail?.row;
+  const activeDetailRow = detail?.kind === "job"
+    ? mergeDataflowRunDetail(detail.row, detailJobRunQuery.data)
+    : detail?.row;
   const searchOptions = useMemo(
     () => buildMonitoringSearchOptions(
       reportForView,
@@ -593,36 +587,64 @@ export function MonitoringView({
       </div>
       {detail ? (
         <Suspense fallback={null}>
-        <MonitoringDetailDrawer
-          kind={detail.kind}
-          row={activeDetailRow ?? detail.row}
-          environmentId={environmentId}
-          timezoneName={reportForView.summary.timezone || "UTC"}
-          relatedDataflows={
-            detail.kind === "job" || detail.kind === "freshness" || detail.kind === "maintenance" || detail.kind === "volume"
-              ? detailDataflows?.records ?? []
-              : relatedDataflows(detail.row, dataflowRuns?.records ?? [])
-          }
-          relatedDataflowsTotal={detailDataflows?.summary.total_records ?? detailDataflows?.records.length ?? 0}
-          relatedDataflowsOffset={detailDataflowOffset}
-          relatedDataflowsLimit={detailDataflowLimit}
-          relatedDataflowsSort={detailDataflowSort}
-          onRelatedDataflowsPageChange={setDetailDataflowOffset}
-          onRelatedDataflowsPageSizeChange={(nextLimit) => {
-            setDetailDataflowLimit(nextLimit);
-            setDetailDataflowOffset(0);
-          }}
-          onRelatedDataflowsSort={(nextSort) => {
-            setDetailDataflowSort(nextSort);
-            setDetailDataflowOffset(0);
-          }}
-          relatedDataflowsLoading={Boolean(activeDetailEvidenceRequest && detailDataflowsQuery.isFetching)}
-          reconciliationChecks={relatedReconciliationChecks(detail.row, reportForView.reconciliation.checks)}
-          onOpenDataflow={(row) => pushDetail({ kind: "dataflow", row })}
-          onOpenJob={openLinkedJobDetail}
-          onBack={detailStack.length ? popDetail : undefined}
-          onClose={closeDetail}
-        />
+        {detail.kind === "dataflow" ? (
+          <MonitoringDataflowRunDrawer
+            row={detail.row as MonitoringRecord}
+            environmentId={environmentId}
+            timezoneName={reportForView.summary.timezone || "UTC"}
+            relatedDataflows={relatedDataflows(detail.row, dataflowRuns?.records ?? [])}
+            relatedDataflowsTotal={detailDataflows?.summary.total_records ?? detailDataflows?.records.length ?? 0}
+            relatedDataflowsOffset={detailDataflowOffset}
+            relatedDataflowsLimit={detailDataflowLimit}
+            relatedDataflowsSort={detailDataflowSort}
+            onRelatedDataflowsPageChange={setDetailDataflowOffset}
+            onRelatedDataflowsPageSizeChange={(nextLimit) => {
+              setDetailDataflowLimit(nextLimit);
+              setDetailDataflowOffset(0);
+            }}
+            onRelatedDataflowsSort={(nextSort) => {
+              setDetailDataflowSort(nextSort);
+              setDetailDataflowOffset(0);
+            }}
+            relatedDataflowsLoading={Boolean(activeDetailEvidenceRequest && detailDataflowsQuery.isFetching)}
+            reconciliationChecks={relatedReconciliationChecks(detail.row, reportForView.reconciliation.checks)}
+            onOpenDataflow={(row) => pushDetail({ kind: "dataflow", row })}
+            onOpenJob={openLinkedJobDetail}
+            onBack={detailStack.length ? popDetail : undefined}
+            onClose={closeDetail}
+          />
+        ) : (
+          <MonitoringDetailDrawer
+            kind={detail.kind}
+            row={activeDetailRow ?? detail.row}
+            environmentId={environmentId}
+            timezoneName={reportForView.summary.timezone || "UTC"}
+            relatedDataflows={
+              detail.kind === "job" || detail.kind === "freshness" || detail.kind === "maintenance" || detail.kind === "volume"
+                ? detailDataflows?.records ?? []
+                : relatedDataflows(detail.row, dataflowRuns?.records ?? [])
+            }
+            relatedDataflowsTotal={detailDataflows?.summary.total_records ?? detailDataflows?.records.length ?? 0}
+            relatedDataflowsOffset={detailDataflowOffset}
+            relatedDataflowsLimit={detailDataflowLimit}
+            relatedDataflowsSort={detailDataflowSort}
+            onRelatedDataflowsPageChange={setDetailDataflowOffset}
+            onRelatedDataflowsPageSizeChange={(nextLimit) => {
+              setDetailDataflowLimit(nextLimit);
+              setDetailDataflowOffset(0);
+            }}
+            onRelatedDataflowsSort={(nextSort) => {
+              setDetailDataflowSort(nextSort);
+              setDetailDataflowOffset(0);
+            }}
+            relatedDataflowsLoading={Boolean(activeDetailEvidenceRequest && detailDataflowsQuery.isFetching)}
+            reconciliationChecks={relatedReconciliationChecks(detail.row, reportForView.reconciliation.checks)}
+            onOpenDataflow={(row) => pushDetail({ kind: "dataflow", row })}
+            onOpenJob={openLinkedJobDetail}
+            onBack={detailStack.length ? popDetail : undefined}
+            onClose={closeDetail}
+          />
+        )}
         </Suspense>
       ) : null}
     </div>

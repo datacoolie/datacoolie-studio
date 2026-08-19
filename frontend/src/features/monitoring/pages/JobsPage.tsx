@@ -1,6 +1,6 @@
 import type { JobRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";import { ChildFanoutDistributionPanel, JobDurationByOperationBoxPlot, JobRunsTable, JobStageHealthPanel, JobWorkloadEfficiencyScatter, WorkloadEfficiencyLegend } from "./JobsPageSupport";
-import { DetailMetric, DurationHeadline, HealthStripCard, LifecycleStatusValues, ReportChart, ReportPanel, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, durationIntent, durationPercentilesDetail, durationStatsTitle, formatNumber, formatPercent, formatTimestampForDisplay, jobStatusTrendOption, monitoringTimezone, successRateIntent } from "../components/monitoringPrimitives";
+import { CompactNumberValue, DetailMetric, DurationHeadline, HealthStripCard, LifecycleStatusValues, ReportChart, ReportPanel, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, durationIntent, durationPercentilesDetail, durationStatsTitle, formatPercent, formatTimestampForDisplay, jobStatusTrendOption, monitoringTimezone, successRateIntent } from "../components/monitoringPrimitives";
 
 export function JobsPage({
   report,
@@ -55,14 +55,14 @@ export function JobsPage({
       <section className="overview-health-strip monitoring-job-health-strip">
         <HealthStripCard
           label="Job runs"
-          value={formatNumber(kpis.total_jobs ?? 0)}
+          value={<CompactNumberValue value={kpis.total_jobs ?? 0} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.job_runs ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.job_runs ?? 0} />}
               firstTone="headline"
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.job_runs ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.job_runs ?? 0} />}
               secondTone="headline"
             />
           }
@@ -88,14 +88,14 @@ export function JobsPage({
         />
         <HealthStripCard
           label="Failed jobs"
-          value={formatNumber(kpis.total_failures ?? 0)}
+          value={<CompactNumberValue value={kpis.total_failures ?? 0} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.job_failed ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.job_failed ?? 0} />}
               firstTone={Number(last24Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.job_failed ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.job_failed ?? 0} />}
               secondTone={Number(last7Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
             />
           }
@@ -153,11 +153,11 @@ export function JobsPage({
         />
         <HealthStripCard
           label="Dataflow impact"
-          value={`${formatNumber(dataflowKpis.failed ?? 0)} failed / ${formatNumber(dataflowKpis.total_dataflows ?? 0)}`}
+          value={<><CompactNumberValue value={dataflowKpis.failed ?? 0} /> failed / <CompactNumberValue value={dataflowKpis.total_dataflows ?? 0} /></>}
           detail={
             <DetailMetric
               label="reconcile mismatch checks"
-              value={formatNumber(childMismatchCount)}
+              value={<CompactNumberValue value={childMismatchCount} />}
               tone={childMismatchCount ? "warning" : "neutral"}
             />
           }

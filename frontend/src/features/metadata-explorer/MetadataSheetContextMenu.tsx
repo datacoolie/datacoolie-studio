@@ -11,6 +11,9 @@ interface MetadataSheetContextMenuProps extends ContextMenuComponentProps {
   onDeleteRow: (rowIndex: number | null) => void;
   onDuplicateRow: (rowIndex: number | null) => void;
   onMoveRow: (rowIndex: number | null, offset: -1 | 1) => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  movementDisabledReason: string;
   onPasteColumn: (columnKey: string | null, rowIndex: number | null) => void;
   onPasteRow: (rowIndex: number | null) => void;
 }
@@ -28,6 +31,9 @@ export function MetadataSheetContextMenu({
   onDeleteRow,
   onDuplicateRow,
   onMoveRow,
+  canMoveUp,
+  canMoveDown,
+  movementDisabledReason,
   onPasteColumn,
   onPasteRow
 }: MetadataSheetContextMenuProps) {
@@ -72,10 +78,10 @@ export function MetadataSheetContextMenu({
       <button type="button" onClick={() => run(() => onDeleteRow(rowIndex))} disabled={rowIndex == null} role="menuitem">
         Delete row
       </button>
-      <button type="button" onClick={() => run(() => onMoveRow(rowIndex, -1))} disabled={rowIndex == null || rowIndex === 0} role="menuitem">
+      <button type="button" onClick={() => run(() => onMoveRow(rowIndex, -1))} disabled={!canMoveUp} title={!canMoveUp ? movementDisabledReason : undefined} role="menuitem">
         Move row up
       </button>
-      <button type="button" onClick={() => run(() => onMoveRow(rowIndex, 1))} disabled={rowIndex == null} role="menuitem">
+      <button type="button" onClick={() => run(() => onMoveRow(rowIndex, 1))} disabled={!canMoveDown} title={!canMoveDown ? movementDisabledReason : undefined} role="menuitem">
         Move row down
       </button>
       <hr />

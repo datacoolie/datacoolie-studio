@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import type { EnvironmentContext } from "../shared/api/domainTypes";
 import { RelativeTime } from "../shared/components/RelativeTime";
+import { formatAbsoluteTime } from "../shared/time";
 import type { ModuleKey, ModuleScope } from "./moduleRegistry";
 
 interface ContextBarProps {
@@ -67,6 +68,7 @@ export function ContextBar({
                 countLabel="sources"
                 modifiedAt={freshness.metadata.max_source_modified_at}
                 status={freshness.metadata.status}
+                pendingSyncCount={freshness.metadata.pending_sync_count ?? 0}
                 timezoneName={timezoneName}
               />
               <FreshnessPill
@@ -75,6 +77,7 @@ export function ContextBar({
                 countLabel="paths"
                 modifiedAt={freshness.etl_logs.max_source_modified_at}
                 status={freshness.etl_logs.status}
+                pendingSyncCount={freshness.etl_logs.pending_sync_count ?? 0}
                 timezoneName={timezoneName}
               />
             </>
@@ -96,6 +99,7 @@ function FreshnessPill({
   countLabel,
   modifiedAt,
   status,
+  pendingSyncCount,
   timezoneName
 }: {
   label: string;
@@ -103,10 +107,14 @@ function FreshnessPill({
   countLabel: string;
   modifiedAt?: string | null;
   status: string;
+  pendingSyncCount: number;
   timezoneName: string | null;
 }) {
   return (
-    <strong className={`freshness-chip freshness-${status}`} title={freshnessDescription(label, status)}>
+    <strong
+      className={`freshness-chip freshness-${status}`}
+      title={freshnessDescription(label, status, modifiedAt, count, countLabel, pendingSyncCount, timezoneName)}
+    >
       <span className="freshness-label">{label}</span>
       <span className="freshness-count">
         {count} {countLabel}
@@ -133,12 +141,21 @@ function freshnessLabel(status: string) {
   }[status] ?? "Unknown";
 }
 
-function freshnessDescription(label: string, status: string) {
-  return {
-    current: `${label} source and Studio cache are aligned.`,
-    not_cached: `${label} source has changes that are not synced into Studio yet.`,
-    missing: `${label} source cannot be found at its configured path.`,
-    sync_failed: `${label} source could not be synchronized into Studio.`,
-    unknown: `${label} cache state is not available.`
-  }[status] ?? `${label} cache state is not available.`;
+function freshnessDescription(
+  label: string,
+  status: string,
+  modifiedAt: string | null | undefined,
+  count: number,
+  countLabel: string,
+  pendingSyncCount: number,
+  timezoneName: string | null
+) {
+  const absolute = formatAbsoluteTime(modifiedAt, timezoneName);
+  const sourceClause = absolute ? `Source modified: ${absolute}` : "Source modified time unavailable";
+  const cacheClause = pendingSyncCount > 0
+    ? `Cache: ${pendingSyncCount} of ${count} ${countLabel} not synced`
+    : status === "current"
+      ? "Cache: aligned"
+      : `Cache: ${freshnessLabel(status)}`;
+  return `${label} · ${sourceClause} · ${cacheClause}`;
 }

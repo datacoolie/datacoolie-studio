@@ -16,9 +16,10 @@ import {
   diagnosticsSeverityPresentation,
 } from "./diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
+import { CompactNumberValue, formatCompactNumber, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
 import { SystemLogViewer } from "./SystemLogViewer";
 import { FreshnessDrawerHealthTone, FreshnessRunTimeCell, IssueCell, MaintenanceHealthChip, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, freshnessRunTimeLines, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
+import "./monitoring.css";
 import { lazy } from "react";
 const JobDetailSections = lazy(() => import("./details/JobDetails").then((module) => ({ default: module.JobDetailSections })));
 const DataflowDetailSections = lazy(() => import("./details/DataflowDetails").then((module) => ({ default: module.DataflowDetailSections })));
@@ -29,7 +30,7 @@ const DiagnosticsDetailSections = lazy(() => import("./details/DiagnosticsDetail
 
 export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";
 
-interface MonitoringDetailDrawerProps {
+export interface MonitoringDetailDrawerProps {
   kind: MonitoringDetailKind;
   row: Record<string, unknown>;
   environmentId?: number | null;
@@ -380,6 +381,7 @@ export function MonitoringDetailDrawer({
               </div>
               <DataTable
                 rows={sortableRelatedDataflows}
+                compactNumbers
                 columns={jobChildDataflowColumns(timezoneName)}
                 maxRows={relatedDataflowsLimit}
                 offset={0}
@@ -397,6 +399,7 @@ export function MonitoringDetailDrawer({
               <h3>Reconciliation checks</h3>
               <DataTable
                 rows={reconciliationChecks}
+                compactNumbers
                 columns={[
                   { key: "severity", label: "Severity" },
                   { key: "metric", label: "Metric" },
@@ -460,7 +463,7 @@ export function jobChildDataflowColumns(timezoneName?: string | null): TableColu
       minWidth: 118,
       maxWidth: 180,
       render: (child) => <ChildDataflowRowsCell row={child} />,
-      measureValue: childDataflowRowLines,
+      measureValue: childDataflowCompactRowLines,
     },
     { key: "error_preview", label: "Issue", sortable: true, width: 240, className: "monitoring-child-issue-column", render: (child) => <IssueCell row={child} /> },
   ];
@@ -477,6 +480,13 @@ export function childDataflowRowLines(row: MonitoringRecord) {
   ];
 }
 
+function childDataflowCompactRowLines(row: MonitoringRecord) {
+  return [
+    `${formatCompactNumber(num(row, "source_rows_read"))} read`,
+    `${formatCompactNumber(num(row, "destination_rows_written"))} written`,
+  ];
+}
+
 function ChildDataflowStageOperationCell({ row }: { row: MonitoringRecord }) {
   const [stage, operation] = childDataflowStageOperationLines(row);
   return (
@@ -488,11 +498,12 @@ function ChildDataflowStageOperationCell({ row }: { row: MonitoringRecord }) {
 }
 
 function ChildDataflowRowsCell({ row }: { row: MonitoringRecord }) {
-  const [rowsRead, rowsWritten] = childDataflowRowLines(row);
+  const rowsRead = num(row, "source_rows_read");
+  const rowsWritten = num(row, "destination_rows_written");
   return (
-    <span className="freshness-run-stack-cell" title={`Rows read: ${rowsRead.replace(/ read$/u, "")}\nRows written: ${rowsWritten.replace(/ written$/u, "")}`}>
-      <strong>{rowsRead}</strong>
-      <small>{rowsWritten}</small>
+    <span className="freshness-run-stack-cell" title={`Rows read: ${formatNumber(rowsRead)}\nRows written: ${formatNumber(rowsWritten)}`}>
+      <strong><CompactNumberValue value={rowsRead} /> read</strong>
+      <small><CompactNumberValue value={rowsWritten} /> written</small>
     </span>
   );
 }

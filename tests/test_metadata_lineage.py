@@ -696,7 +696,7 @@ def test_schema_table_reference_resolves_to_path_backed_table_asset():
     assert occurrence["raw_value"] == "silver.saleslt_salesorderheader"
     assert reference["entity_type"] == "reference"
     assert reference["resolution"]["state"] == "automatic"
-    assert dependency["resolution_method"] == "unique_table_suffix"
+    assert dependency["resolution_method"] == "connection_scoped_table"
     assert dependency["resolved_asset_id"] == table_asset["id"]
 
 
@@ -716,7 +716,161 @@ def test_partial_schema_table_reference_uses_connection_when_multiple_assets_mat
     expected = next(asset for asset in lineage["assets"] if asset.get("database") == "lh1" and asset.get("schema_name") == "silver")
     assert reference["resolution"]["state"] == "automatic"
     assert dependency["resolved_asset_id"] == expected["id"]
-    assert dependency["resolution_method"] == "connection_table_suffix"
+    assert dependency["resolution_method"] == "connection_scoped_table"
+
+
+def test_database_reference_does_not_cross_map_to_unique_file_suffix():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        _database_reference_with_file_candidate(include_database_target=False),
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=31)
+
+    reference = next(item for item in lineage["references"] if item["normalized_value"] == "application.stateprovinces")
+    dependency = next(item for item in lineage["dependencies"] if item["reference_id"] == reference["id"])
+    bronze = next(asset for asset in lineage["assets"] if asset.get("connection_name") == "bronze_parquet")
+
+    assert reference["resolution"] == {"state": "unresolved", "reason": "out_of_scope"}
+    assert dependency["resolution"] == {"state": "unresolved", "reason": "out_of_scope"}
+    assert dependency["resolved_asset_id"] is None
+    assert dependency["resolution_method"] == "out_of_scope_table_candidate"
+    assert bronze["id"] in reference["candidate_asset_ids"]
+
+
+def test_database_reference_resolves_only_inside_database_scope():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        _database_reference_with_file_candidate(include_database_target=True),
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=32)
+
+    reference = next(item for item in lineage["references"] if item["normalized_value"] == "application.stateprovinces")
+    dependency = next(item for item in lineage["dependencies"] if item["reference_id"] == reference["id"])
+    target = next(
+        asset for asset in lineage["assets"]
+        if asset.get("connection_name") == "wwi_sqlserver"
+        and asset.get("database") == "WideWorldImporters"
+        and asset.get("schema_name") == "Application"
+        and asset.get("table") == "StateProvinces"
+    )
+
+    assert reference["resolution"] == {"state": "automatic", "reason": None}
+    assert dependency["resolved_asset_id"] == target["id"]
+    assert dependency["resolution_method"] == "connection_scoped_table"
+
+
+def test_database_scope_keeps_same_host_databases_distinct():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        {
+            "connections": [
+                {
+                    "name": "db_a",
+                    "connection_type": "database",
+                    "database": "DatabaseA",
+                    "configure": {"database_type": "mssql", "host": "sql.example", "port": 1433},
+                },
+                {
+                    "name": "db_b",
+                    "connection_type": "database",
+                    "database": "DatabaseB",
+                    "configure": {"database_type": "mssql", "host": "sql.example", "port": 1433},
+                },
+            ],
+            "dataflows": [
+                {
+                    "name": "declare_db_a_table",
+                    "source": {"connection_name": "db_a", "schema_name": "Application", "table": "StateProvinces"},
+                    "destination": {"connection_name": "db_a", "schema_name": "Application", "table": "StateProvinces"},
+                },
+                {
+                    "name": "declare_db_b_table",
+                    "source": {"connection_name": "db_b", "schema_name": "Application", "table": "StateProvinces"},
+                    "destination": {"connection_name": "db_b", "schema_name": "Application", "table": "StateProvinces"},
+                },
+                {
+                    "name": "query_db_a_table",
+                    "source": {"connection_name": "db_a", "query": "SELECT * FROM Application.StateProvinces"},
+                    "destination": {"connection_name": "db_a", "schema_name": "stage", "table": "StateProvinces"},
+                },
+            ],
+        },
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=34)
+
+    dependency = next(item for item in lineage["dependencies"] if item["resolution_method"] == "connection_scoped_table")
+    target = next(
+        asset for asset in lineage["assets"]
+        if asset.get("connection_name") == "db_a" and asset.get("database") == "DatabaseA"
+    )
+    assert dependency["resolved_asset_id"] == target["id"]
+    assert dependency["resolution"] == {"state": "automatic", "reason": None}
+
+
+def test_fully_qualified_database_reference_can_resolve_exact_cross_connection_target():
+    document = normalize_metadata_document(
+        1,
+        "metadata.json",
+        {
+            "connections": [
+                {
+                    "name": "query_sqlserver",
+                    "connection_type": "database",
+                    "database": "Reporting",
+                    "configure": {"database_type": "mssql", "connection_instance": "sqlserver:reporting"},
+                },
+                {
+                    "name": "wwi_sqlserver",
+                    "connection_type": "database",
+                    "database": "WideWorldImporters",
+                    "configure": {"database_type": "mssql", "connection_instance": "sqlserver:wwi"},
+                },
+            ],
+            "dataflows": [
+                {
+                    "name": "declare_wwi_stateprovinces",
+                    "source": {
+                        "connection_name": "wwi_sqlserver",
+                        "database": "WideWorldImporters",
+                        "schema_name": "Application",
+                        "table": "StateProvinces",
+                    },
+                    "destination": {
+                        "connection_name": "wwi_sqlserver",
+                        "database": "WideWorldImporters",
+                        "schema_name": "Application",
+                        "table": "StateProvinces",
+                    },
+                },
+                {
+                    "name": "query_external_stateprovinces",
+                    "source": {
+                        "connection_name": "query_sqlserver",
+                        "query": "SELECT * FROM WideWorldImporters.Application.StateProvinces",
+                    },
+                    "destination": {
+                        "connection_name": "query_sqlserver",
+                        "database": "Reporting",
+                        "schema_name": "stage",
+                        "table": "StateProvinces",
+                    },
+                },
+            ],
+        },
+    )
+
+    lineage = build_lineage({"_documents": [document], "dataflows": document["dataflows"], "errors": []}, environment_id=33)
+
+    dependency = next(item for item in lineage["dependencies"] if item["resolution_method"] == "qualified_cross_connection")
+    assert dependency["resolution"] == {"state": "automatic", "reason": None}
+    assert dependency["addressing_mode"] == "connection_bound"
+    assert dependency["qualification_level"] == "fully_qualified"
 
 
 def test_project_mapping_can_replace_successful_automatic_resolution():
@@ -739,7 +893,7 @@ def test_project_mapping_can_replace_successful_automatic_resolution():
     assert dependency["resolution"]["state"] == "manual"
     assert dependency["resolved_asset_id"] == expected["id"]
     observation = next(item for item in lineage["references"][0]["observations"] if item.get("mapping_id") == 303)
-    assert observation["automatic_suggestion"]["method"] == "connection_table_suffix"
+    assert observation["automatic_suggestion"]["method"] == "connection_scoped_table"
 
 
 def test_manual_reference_mapping_resolves_ambiguous_reference():
@@ -1066,4 +1220,42 @@ def _path_backed_schema_table_metadata() -> dict:
                 "destination": {"connection_name": "fabric_lakehouse", "schema_name": "gold", "table": "fact_sales"},
             },
         ],
+    }
+
+
+def _database_reference_with_file_candidate(*, include_database_target: bool) -> dict:
+    dataflows = [
+        {
+            "name": "seed_bronze_stateprovinces",
+            "source": {"connection_name": "bronze_parquet", "schema_name": "Application", "table": "StateProvinces"},
+            "destination": {"connection_name": "bronze_parquet", "schema_name": "Application", "table": "StateProvinces"},
+        },
+        {
+            "name": "query_stateprovinces",
+            "source": {"connection_name": "wwi_sqlserver", "query": "SELECT * FROM Application.StateProvinces"},
+            "destination": {"connection_name": "wwi_sqlserver", "schema_name": "stage", "table": "StateProvinces"},
+        },
+    ]
+    if include_database_target:
+        dataflows.insert(1, {
+            "name": "declare_wwi_stateprovinces",
+            "source": {"connection_name": "wwi_sqlserver", "database": "WideWorldImporters", "schema_name": "Application", "table": "StateProvinces"},
+            "destination": {"connection_name": "wwi_sqlserver", "database": "WideWorldImporters", "schema_name": "Application", "table": "StateProvinces"},
+        })
+    return {
+        "connections": [
+            {
+                "name": "wwi_sqlserver",
+                "connection_type": "database",
+                "database": "WideWorldImporters",
+                "configure": {"database_type": "mssql", "connection_instance": "sqlserver:wwi"},
+            },
+            {
+                "name": "bronze_parquet",
+                "connection_type": "file",
+                "format": "parquet",
+                "configure": {"base_path": "data/bronze"},
+            },
+        ],
+        "dataflows": dataflows,
     }

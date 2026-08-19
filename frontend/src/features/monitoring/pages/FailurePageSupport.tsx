@@ -38,6 +38,7 @@ export function FailureQueueTable({
   return (
     <DataTable<Record<string, string | number | null>>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "failure_time", label: "Time", sortable: true, autoFit: true, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.failure_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.failure_time, activeTimezone, "-") },
         { key: "dataflow_name", label: "Dataflow", sortable: true, width: 178, render: (row) => <FailureDataflowNameCell row={row} /> },
@@ -66,6 +67,7 @@ export function RepeatedFailureTable({
   return (
     <DataTable<Record<string, string | number | null>>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "failure_category", label: "Category", sortable: true, autoFit: true, maxWidth: 180, measureValue: (row) => String(row.failure_category || "unknown") },
         { key: "failure_phase", label: "Phase", sortable: true, autoFit: true, maxWidth: 112, render: (row) => <FailurePhaseBadge value={row.failure_phase} />, measureValue: (row) => humanize(String(row.failure_phase || "unknown")) },
@@ -94,6 +96,7 @@ export function EndpointImpactTable({
   return (
     <DataTable<Record<string, string | number | null>>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "source_name", label: "Route", sortable: true, minWidth: 210, fillPriority: "last", render: (row) => <FailureRouteCell row={row} /> },
         { key: "failed_runs", label: "Runs", sortable: true, autoFit: true, minWidth: 52, maxWidth: 70 },

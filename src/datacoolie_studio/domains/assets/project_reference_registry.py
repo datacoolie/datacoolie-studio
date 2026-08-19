@@ -109,7 +109,7 @@ def _project_resolution(row: dict[str, Any], target: dict[str, Any] | None) -> R
 
 def _preferred_environment_reason(environments: list[dict[str, Any]]) -> str:
     reasons = {_resolution_reason(item) for item in environments}
-    for reason in ("target_missing", "conflicting_targets", "multiple_matches", "incomplete", "no_match"):
+    for reason in ("target_missing", "conflicting_targets", "multiple_matches", "out_of_scope", "incomplete", "no_match"):
         if reason in reasons:
             return reason
     return "incomplete"

@@ -6,9 +6,10 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlglot import errors as sqlglot_errors, parse
+from sqlglot import errors as sqlglot_errors
 
 from datacoolie_studio.db.models import Environment, EnvironmentSource
+from datacoolie_studio.domains.analysis.sql import parse_sql_statements, sql_dialect_for_source
 from datacoolie_studio.domains.code_artifacts.indexer import ArtifactIndexError
 from datacoolie_studio.domains.assets.manual_mapping import manual_mapping_from_observations
 from datacoolie_studio.domains.assets.mapping_target import asset_mapping_target
@@ -30,7 +31,7 @@ from datacoolie_studio.domains.read_models.keys import ASSETS_CATALOG
 from datacoolie_studio.domains.workspace import service as workspace
 
 
-ASSETS_PROJECTOR_VERSION = "assets-catalog-v3-reference-resolution"
+ASSETS_PROJECTOR_VERSION = "assets-catalog-v5-context-aware-resolution"
 
 
 @dataclass(frozen=True)
@@ -379,6 +380,7 @@ def build_assets_inventory(
             "format": format_value,
             "connection_name": connection_name,
             "connection_type": _string_or_none(asset.get("connection_type")),
+            "database_type": _string_or_none(asset.get("database_type")),
             "catalog": _string_or_none(asset.get("catalog")),
             "database": _string_or_none(asset.get("database")),
             "schema_name": _string_or_none(asset.get("schema_name")),
@@ -431,6 +433,8 @@ def build_assets_inventory(
             "normalized_value": _string_or_none(occurrence.get("normalized_value")) or raw_value,
             "context_scope": _string_or_none(occurrence.get("context_scope")),
             "context_scope_source": _string_or_none(occurrence.get("context_scope_source")),
+            "addressing_mode": _string_or_none(occurrence.get("addressing_mode")),
+            "qualification_level": _string_or_none(occurrence.get("qualification_level")),
             "source_location": occurrence.get("source_location"),
             "display_name": display_name,
             "provenance": _string_or_none(occurrence.get("provenance")),
@@ -717,7 +721,7 @@ def _asset_definition(
     query = _string_or_none(asset.get("query"))
     python_function = _string_or_none(asset.get("python_function"))
     if asset_type == "sql_query" or query:
-        return _sql_definition(query)
+        return _sql_definition(query, dialect=sql_dialect_for_source(asset))
     if asset_type == "python_function" or python_function:
         return _python_definition(
             python_function, code_artifacts, session=session
@@ -742,7 +746,7 @@ def _asset_definition_descriptor(asset: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
-def _sql_definition(query: str | None) -> dict[str, Any]:
+def _sql_definition(query: str | None, *, dialect: str | None = None) -> dict[str, Any]:
     raw = (query or "").strip()
     if not raw:
         return {
@@ -759,12 +763,17 @@ def _sql_definition(query: str | None) -> dict[str, Any]:
     diagnostics: list[dict[str, Any]] = []
     formatted = raw
     try:
-        expressions = [expression for expression in parse(raw) if expression is not None]
+        expressions, used_dialect = parse_sql_statements(raw, dialect=dialect)
         if expressions:
-            formatted = ";\n\n".join(expression.sql(pretty=True) for expression in expressions)
+            formatted = ";\n\n".join(
+                expression.sql(pretty=True, dialect=used_dialect)
+                if used_dialect
+                else expression.sql(pretty=True)
+                for expression in expressions
+            )
             if len(expressions) > 1:
                 formatted = f"{formatted};"
-    except (sqlglot_errors.ParseError, ValueError, TypeError) as exc:
+    except (sqlglot_errors.ParseError, sqlglot_errors.TokenError, ValueError, TypeError) as exc:
         diagnostics.append(_definition_diagnostic("warning", "sql_format_failed", str(exc)))
 
     return {

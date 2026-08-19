@@ -2712,6 +2712,16 @@ body,
     width: auto;
   }
 
+  .source-card-line-primary .source-card-row-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .source-card-line-primary .source-labeled-status {
+    width: auto;
+    justify-content: flex-start;
+  }
+
   .source-card-line-secondary .source-labeled-status {
     width: auto;
     justify-content: flex-start;
@@ -3468,6 +3478,12 @@ body,
   justify-content: flex-end;
   flex-wrap: wrap;
   overflow: visible;
+}
+
+.source-card.is-disabled .source-status-pill {
+  border-color: var(--color-border);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-subtle);
 }
 
 .source-log-schedule {

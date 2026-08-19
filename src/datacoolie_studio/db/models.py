@@ -178,6 +178,7 @@ class EnvironmentSource(Base):
     sync_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_interval_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_scheduled_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 

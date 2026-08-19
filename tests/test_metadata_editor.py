@@ -91,6 +91,163 @@ def _column_keys(document: dict, sheet: str) -> list[str]:
     return [column["key"] for column in document["sheets"][sheet]["columns"]]
 
 
+def test_environment_metadata_canonical_ordering_groups_sources_and_natural_keys():
+    from datacoolie_studio.domains.metadata.editor import _source_document_changed
+    from datacoolie_studio.domains.metadata.ordering import (
+        canonicalize_editor_document,
+        same_canonical_document,
+    )
+
+    def row(source_id: int, source_uri: str, **values: object) -> dict:
+        return {
+            **values,
+            "__metadata_source_id": source_id,
+            "__metadata_source_uri": source_uri,
+            "__metadata_source_name": Path(source_uri).name,
+        }
+
+    document = {
+        "sheets": {
+            "connections": {
+                "rows": [
+                    row(2, "/metadata/silver.json", name="silver-first"),
+                    row(1, "/metadata/source.json", name="source"),
+                    row(2, "/metadata/silver.json", name="silver-second"),
+                ]
+            },
+            "dataflows": {
+                "rows": [
+                    row(1, "/metadata/source.json", stage="gold", name="gold"),
+                    row(2, "/metadata/silver.json", stage="silver10", name="silver10"),
+                    row(1, "/metadata/source.json", stage="source2", name="source2"),
+                    row(2, "/metadata/silver.json", stage="silver2", name="silver2"),
+                    row(1, "/metadata/source.json", stage="source", name="source"),
+                ]
+            },
+            "schema_hints": {
+                "rows": [
+                    row(1, "/metadata/source.json", connection_name="z", schema_name="s", table_name="t", ordinal_position=1),
+                    row(1, "/metadata/source.json", connection_name="a", schema_name="s", table_name="t", ordinal_position=2),
+                    row(1, "/metadata/source.json", connection_name="a", schema_name="s", table_name="t", ordinal_position=10),
+                ]
+            },
+        }
+    }
+
+    ordered = canonicalize_editor_document(document)
+    assert [item["name"] for item in ordered["sheets"]["connections"]["rows"]] == [
+        "source",
+        "silver-first",
+        "silver-second",
+    ]
+    assert [item["name"] for item in ordered["sheets"]["dataflows"]["rows"]] == [
+        "source",
+        "source2",
+        "gold",
+        "silver2",
+        "silver10",
+    ]
+    assert [item["connection_name"] for item in ordered["sheets"]["schema_hints"]["rows"]] == ["a", "a", "z"]
+    assert [item["ordinal_position"] for item in ordered["sheets"]["schema_hints"]["rows"][:2]] == [2, 10]
+
+    reversed_source_groups = canonicalize_editor_document({
+        **document,
+        "sheets": {
+            **document["sheets"],
+            "connections": {
+                "rows": [
+                    document["sheets"]["connections"]["rows"][0],
+                    document["sheets"]["connections"]["rows"][2],
+                    document["sheets"]["connections"]["rows"][1],
+                ]
+            },
+        },
+    })
+    assert same_canonical_document(ordered, reversed_source_groups)
+    assert not _source_document_changed(ordered, reversed_source_groups)
+
+
+def test_connection_rename_rewrites_references_only_when_name_changes():
+    from datacoolie_studio.domains.metadata.editor import synchronize_connection_name_references
+
+    baseline = {
+        "sheets": {
+            "connections": {"rows": [{"connection_id": "conn-1", "name": "silver"}]},
+            "dataflows": {"rows": [{"source_connection_name": "silver", "destination_connection_name": "silver"}]},
+            "schema_hints": {"rows": [{"connection_name": "silver"}]},
+        }
+    }
+    renamed = {
+        "sheets": {
+            "connections": {"rows": [{"connection_id": "conn-1", "name": "silver_curated"}]},
+            "dataflows": {"rows": [{"source_connection_name": "silver", "destination_connection_name": "silver"}]},
+            "schema_hints": {"rows": [{"connection_name": "silver"}]},
+        }
+    }
+
+    synchronized = synchronize_connection_name_references(renamed, baseline)
+
+    assert synchronized["sheets"]["dataflows"]["rows"] == [
+        {"source_connection_name": "silver_curated", "destination_connection_name": "silver_curated"}
+    ]
+    assert synchronized["sheets"]["schema_hints"]["rows"] == [{"connection_name": "silver_curated"}]
+    unchanged = synchronize_connection_name_references(baseline, baseline)
+    assert unchanged is baseline
+
+
+def test_environment_metadata_save_applies_connection_rename_to_references(tmp_path: Path, monkeypatch):
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(
+        json.dumps({
+            "connections": [{"name": "silver", "connection_type": "file", "format": "json"}],
+            "dataflows": [{
+                "name": "flow",
+                "source": {"connection_name": "silver", "table": "orders"},
+                "destination": {"connection_name": "silver", "table": "orders_curated"},
+            }],
+            "schema_hints": [{
+                "connection_name": "silver",
+                "table_name": "orders",
+                "column_name": "id",
+                "data_type": "integer",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+
+    from fastapi.testclient import TestClient
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        env = client.post(f"/api/v1/projects/{project['id']}/environments", json={"name": "dev"}).json()
+        client.post(
+            f"/api/v1/environments/{env['id']}/metadata-sources",
+            json={"uri": str(metadata_path), "label": "metadata"},
+        )
+        document = _editor_document(client, env["id"])
+        document["sheets"]["connections"]["rows"][0]["name"] = "silver_curated"
+
+        response = client.put(
+            f"/api/v1/environments/{env['id']}/metadata-editor-document",
+            json={
+                "expected_revision": document["source"]["revision"],
+                "editor_document": document,
+                "confirm_overwrite": True,
+            },
+        )
+
+        assert response.status_code == 200
+
+    saved = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert saved["connections"][0]["name"] == "silver_curated"
+    assert saved["dataflows"][0]["source"]["connection_name"] == "silver_curated"
+    assert saved["dataflows"][0]["destination"]["connection_name"] == "silver_curated"
+    assert saved["schema_hints"][0]["connection_name"] == "silver_curated"
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+
+
 def _source_revision(document: dict, source_id: int) -> dict:
     source = next(item for item in document["source"]["revision"]["sources"] if item["source_id"] == source_id)
     return source["revision"]

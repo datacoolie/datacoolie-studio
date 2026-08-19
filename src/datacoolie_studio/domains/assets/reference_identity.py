@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from datacoolie_studio.domains.analysis.models import InputEvidence
 from datacoolie_studio.domains.assets.identifiers import (
-    connection_instance,
+    database_resolution_scope,
     normalize_api_url,
     normalize_physical_path,
     storage_authority,
@@ -16,6 +16,8 @@ from datacoolie_studio.domains.assets.identifiers import (
 
 
 REFERENCE_TYPES = {"table_reference", "path_reference", "api_endpoint_reference", "unknown"}
+AddressingMode = Literal["physical_exact", "connection_bound", "qualified_logical", "weak_logical"]
+QualificationLevel = Literal["table", "schema_table", "fully_qualified"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +88,7 @@ def build_reference_context_scope(
 ) -> ReferenceContextScope | None:
     reference_type = reference_type_from_evidence(evidence.kind)
     if reference_type == "table_reference":
-        value = normalize_optional(connection_instance(context), lower=True)
+        value = normalize_optional(database_resolution_scope(context), lower=True)
         return ReferenceContextScope(value, "metadata_context") if value else None
     if reference_type == "path_reference":
         value = normalize_optional(storage_authority(evidence.value), lower=True)
@@ -106,6 +108,53 @@ def reference_type_from_evidence(value: str) -> str:
     if value in {"api", "api_endpoint", "http"}:
         return "api_endpoint_reference"
     return "unknown"
+
+
+def reference_identifier_parts(evidence: InputEvidence) -> tuple[str, ...]:
+    details = evidence.details if isinstance(evidence.details, dict) else {}
+    raw_parts = details.get("identifier_parts")
+    if isinstance(raw_parts, (list, tuple)):
+        parts = tuple(str(part).strip() for part in raw_parts if str(part).strip())
+        if parts:
+            return parts
+    if evidence.kind == "table":
+        parts = tuple(
+            str(part).strip()
+            for part in (evidence.catalog, evidence.database, evidence.schema_name, evidence.table)
+            if str(part or "").strip()
+        )
+        if parts:
+            return parts
+        return tuple(part.strip() for part in evidence.value.split(".") if part.strip())
+    return ()
+
+
+def reference_qualification_level(evidence: InputEvidence) -> QualificationLevel:
+    part_count = len(reference_identifier_parts(evidence))
+    if part_count >= 3:
+        return "fully_qualified"
+    if part_count >= 2:
+        return "schema_table"
+    return "table"
+
+
+def reference_addressing_mode(
+    evidence: InputEvidence,
+    context: dict[str, Any],
+) -> AddressingMode:
+    reference_type = reference_type_from_evidence(evidence.kind)
+    if reference_type in {"path_reference", "api_endpoint_reference"}:
+        return "physical_exact"
+    if reference_type != "table_reference":
+        return "weak_logical"
+
+    connection_type = normalize_optional(context.get("connection_type"), lower=True)
+    database_type = normalize_optional(context.get("database_type"), lower=True)
+    if connection_type == "database" or database_type:
+        return "connection_bound"
+    if reference_qualification_level(evidence) != "table":
+        return "qualified_logical"
+    return "weak_logical"
 
 
 def normalize_reference_type(value: Any) -> str:

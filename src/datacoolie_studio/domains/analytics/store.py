@@ -11,6 +11,7 @@ import duckdb
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import utc_now
 from datacoolie_studio.domains.analytics import schema
+from datacoolie_studio.domains.analytics import schema_compatibility
 from datacoolie_studio.domains.analytics.errors import (
     AnalyticsFileChangedDuringPublishError,
     AnalyticsSchemaIncompatibleError,
@@ -716,15 +717,13 @@ def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
         return
     candidate_types: dict[str, str] = {}
     for file_uri in file_uris:
-        for column, source_type in _describe_parquet_columns(conn, file_uri):
-            if (
-                column in schema.STUDIO_CACHE_COLUMNS
-                or column in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
-                or column == "__event_time"
-            ):
-                continue
+        for column, source_type in _dataflow_parquet_target_types(conn, file_uri).items():
             previous = candidate_types.get(column)
-            candidate_types[column] = source_type if previous is None else _common_source_type(column, previous, source_type)
+            candidate_types[column] = (
+                source_type
+                if previous is None
+                else _common_source_type(column, previous, source_type)
+            )
     candidate_types["__event_time"] = "TIMESTAMPTZ"
     candidate_types["__run_date"] = "DATE"
     existing = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
@@ -756,13 +755,11 @@ def _common_source_type(column: str, left: str, right: str) -> str:
 
 
 def _source_type_fits_target(target_type: str, source_type: str) -> bool:
-    target = target_type.upper()
-    source = source_type.upper()
-    if schema.duckdb_type_matches(target, source):
-        return True
-    if target == "DOUBLE" and source in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT"}:
-        return True
-    return target in {"TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"} and source.startswith("TIMESTAMP")
+    try:
+        schema_compatibility.classify_type(target_type, source_type)
+    except ValueError:
+        return False
+    return True
 
 
 def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
@@ -775,16 +772,79 @@ def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
 
 
 def _dataflow_parquet_target_types(conn, file_uri: str) -> dict[str, str]:
-    target_types = {
-        name: data_type
-        for name, data_type in _describe_parquet_columns(conn, file_uri)
-        if name not in schema.STUDIO_CACHE_COLUMNS
-        and name not in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
-        and name != "__event_time"
-    }
+    source_types = dict(_describe_parquet_columns(conn, file_uri))
+    actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
+    target_types: dict[str, str] = {}
+    for name, source_type in source_types.items():
+        if (
+            name in schema.STUDIO_CACHE_COLUMNS
+            or name in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
+            or name in schema.GENERATED_CACHE_COLUMNS
+        ):
+            continue
+        target_type = (
+            schema.DATAFLOW_COLUMN_TYPES.get(name)
+            or actual_types.get(name)
+            or source_type
+        )
+        try:
+            compatibility = schema_compatibility.classify_type(
+                target_type,
+                source_type,
+            )
+        except ValueError as exc:
+            raise AnalyticsSchemaIncompatibleError(
+                f"Column {name!r} changed datatype from {target_type} to "
+                f"{source_type} in {file_uri}: {exc}"
+            ) from exc
+        if compatibility.requires_value_validation:
+            _validate_lossless_integer_column(
+                conn,
+                file_uri,
+                name,
+                source_type,
+                target_type,
+            )
+        target_types[name] = compatibility.normalized_type
     target_types["__event_time"] = "TIMESTAMPTZ"
     target_types["__run_date"] = "DATE"
     return target_types
+
+
+def _validate_lossless_integer_column(
+    conn,
+    file_uri: str,
+    column: str,
+    source_type: str,
+    target_type: str,
+) -> None:
+    escaped = file_uri.replace("'", "''")
+    quoted = _quote_identifier(column)
+    invalid_predicate = schema_compatibility.lossless_integer_predicate(
+        quoted,
+        source_type,
+    )
+    row = conn.execute(
+        f"""
+        SELECT
+          COUNT(*)::BIGINT AS row_count,
+          COUNT(*) FILTER (WHERE {quoted} IS NOT NULL AND ({invalid_predicate}))::BIGINT AS invalid_count,
+          MIN({quoted}) AS min_value,
+          MAX({quoted}) AS max_value
+        FROM read_parquet(
+          '{escaped}',
+          union_by_name=true,
+          hive_partitioning=false
+        )
+        """
+    ).fetchone()
+    invalid_count = int(row[1] or 0)
+    if invalid_count:
+        raise AnalyticsSchemaIncompatibleError(
+            f"Column {column!r} cannot be safely cast from {source_type} to "
+            f"{target_type} in {file_uri}: {invalid_count} invalid value(s); "
+            f"range={row[2]!r}..{row[3]!r}"
+        )
 
 
 def _dataflow_parquet_source_projection(
@@ -793,15 +853,28 @@ def _dataflow_parquet_source_projection(
     *,
     partition_date: str | None = None,
 ) -> str:
-    source_columns = {
-        name for name, _data_type in _describe_parquet_columns(conn, file_uri)
-    }
+    source_types = dict(_describe_parquet_columns(conn, file_uri))
+    source_columns = set(source_types)
+    cast_columns: list[tuple[str, str]] = []
+    for column, source_type in source_types.items():
+        if column in schema.GENERATED_CACHE_COLUMNS or column in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS:
+            continue
+        target_type = schema.DATAFLOW_COLUMN_TYPES.get(column)
+        if not target_type:
+            continue
+        compatibility = schema_compatibility.classify_type(
+            target_type,
+            source_type,
+        )
+        if compatibility.requires_projection_cast:
+            cast_columns.append((column, compatibility.normalized_type))
     excluded_columns = [
         column
         for column in (
             "__event_time",
             "__run_date",
             *schema.IGNORED_DATAFLOW_SOURCE_COLUMNS,
+            *(column for column, _target_type in cast_columns),
         )
         if column in source_columns
     ]
@@ -834,10 +907,21 @@ def _dataflow_parquet_source_projection(
         f"COALESCE({_sql_date(partition_date)}, {source_run_date}, "
         f"CAST(timezone('UTC', {event_time}) AS DATE))"
     )
-    return (
-        f"{passthrough}, {event_time} AS __event_time, "
-        f"{run_date} AS __run_date"
+    normalized_columns = ", ".join(
+        schema_compatibility.normalized_cast_expression(
+            _quote_identifier(column),
+            target_type,
+            alias=_quote_identifier(column),
+        )
+        for column, target_type in cast_columns
     )
+    projection_parts = [passthrough]
+    if normalized_columns:
+        projection_parts.append(normalized_columns)
+    projection_parts.extend(
+        (f"{event_time} AS __event_time", f"{run_date} AS __run_date")
+    )
+    return ", ".join(projection_parts)
 
 
 def _ignored_source_columns(table_name: str) -> set[str]:

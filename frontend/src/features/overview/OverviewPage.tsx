@@ -3,6 +3,7 @@ import type { EnvironmentOverview, ResolutionState } from "../../shared/api/doma
 import { EmptyState } from "../../shared/components/EmptyState";
 import { RelativeTime } from "../../shared/components/RelativeTime";
 import { elapsedWholeDays } from "../../shared/time";
+import { createStageToneMap, normalizeStageSummary, stageToneClass } from "../../shared/stagePresentation";
 import type { ModuleKey } from "../../app/moduleRegistry";
 
 interface OverviewPageProps {
@@ -61,7 +62,8 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
     logFreshness,
     primaryAction
   });
-  const stageSummary = metadata?.stages ?? [];
+  const stageSummary = normalizeStageSummary(metadata?.stages ?? []);
+  const stageToneMap = createStageToneMap(stageSummary.map((item) => item.name));
   const loadTypeSummary = metadata?.load_types ?? [];
   const lineageCoverage = metadata?.dataflows ? Math.round(((lineage?.dataflows ?? 0) / metadata.dataflows) * 100) : 0;
   const referenceMappingCoverage = lineage?.references
@@ -185,8 +187,13 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
             manual={lineage?.manual_references ?? 0}
             unresolved={lineage?.unresolved_references ?? 0}
           />
-          <PillSummary label="Stages" items={stageSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
-          <PillSummary label="Load types" items={loadTypeSummary} onItemClick={(value) => openDataflowMetadataFilter(onNavigate, value)} />
+          <PillSummary
+            label="Stages"
+            items={stageSummary}
+            toneByValue={(value) => stageToneClass(value, stageToneMap)}
+            onItemClick={(value) => openDataflowMetadataStageFilter(onNavigate, value)}
+          />
+          <PillSummary label="Load types" items={loadTypeSummary} onItemClick={(value) => openDataflowMetadataTextFilter(onNavigate, value)} />
         </OverviewPanel>
 
         <OverviewPanel title="Operations">
@@ -302,11 +309,13 @@ function RatioStat({
 function PillSummary({
   label,
   items,
-  onItemClick
+  onItemClick,
+  toneByValue
 }: {
   label: string;
   items: Array<{ name: string; count: number }>;
   onItemClick?: (value: string) => void;
+  toneByValue?: (value: string) => string;
 }) {
   return (
     <div className="summary-pill-list pill-summary">
@@ -315,10 +324,10 @@ function PillSummary({
         {items.length ? items.map((item) => (
           <button
             key={item.name}
-            className="summary-pill-button"
+            className={`summary-pill-button${toneByValue ? ` ${toneByValue(item.name)}` : ""}`}
             type="button"
             onClick={() => onItemClick?.(item.name)}
-            title={`Filter metadata dataflows by ${label.toLowerCase()}: ${item.name}`}
+            title={toneByValue ? `Filter dataflows by exact stage: ${item.name}` : `Filter metadata dataflows by ${label.toLowerCase()}: ${item.name}`}
           >
             <span>{item.name}</span>
             <b>{item.count}</b>
@@ -333,9 +342,22 @@ function PillSummary({
   );
 }
 
-function openDataflowMetadataFilter(onNavigate: (module: ModuleKey, search?: string) => void, value: string) {
+function openDataflowMetadataStageFilter(onNavigate: (module: ModuleKey, search?: string) => void, value: string) {
+  onNavigate("metadata", dataflowMetadataStageSearch(value));
+}
+
+function openDataflowMetadataTextFilter(onNavigate: (module: ModuleKey, search?: string) => void, value: string) {
+  onNavigate("metadata", dataflowMetadataTextSearch(value));
+}
+
+export function dataflowMetadataStageSearch(value: string) {
+  const params = new URLSearchParams({ sheet: "dataflows", stage: value });
+  return `?${params.toString()}`;
+}
+
+export function dataflowMetadataTextSearch(value: string) {
   const params = new URLSearchParams({ sheet: "dataflows", q: value });
-  onNavigate("metadata", `?${params.toString()}`);
+  return `?${params.toString()}`;
 }
 
 function formatDateRange(dateRange: { min?: string | null; max?: string | null } | undefined) {

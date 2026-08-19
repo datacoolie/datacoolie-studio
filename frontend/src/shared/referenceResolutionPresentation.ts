@@ -15,6 +15,7 @@ const labels: Record<ResolutionState, string> = {
 const reasonLabels: Record<ResolutionReason, string> = {
   no_match: "No matching asset found",
   multiple_matches: "Multiple matching assets found",
+  out_of_scope: "Outside source scope",
   conflicting_targets: "Occurrences resolve to different assets",
   incomplete: "Some occurrences are not resolved",
   target_missing: "The saved mapping target is unavailable",

@@ -2,7 +2,8 @@ import type { EChartsOption } from "echarts";
 import { useMemo } from "react";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { TableColumn } from "../MonitoringCharts";
-import type { MonitoringFilters } from "../monitoringFilters";import { DataTable, DetailMetric, EndpointCell, HealthStripCard, ReportChart, ReportPanel, TablePager, TableDateTimeValue, WatermarkBadge, baseChartOption, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatNumber, formatPercent, monitoringTimezone, horizontalBarDataZoom, horizontalBarSeriesSizing, reportChartPalette, reportChartGrid, resolveIntlTimezone, resolveTrendBucketKeys, normalizeTrendBucketKey, normalizeTrendGrain, type TableSort } from "../components/monitoringPrimitives";
+import type { MonitoringFilters } from "../monitoringFilters";import { CompactNumberValue, DataTable, DetailMetric, EndpointCell, HealthStripCard, ReportChart, ReportPanel, TablePager, TableDateTimeValue, WatermarkBadge, baseChartOption, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatNumber, formatPercent, monitoringTimezone, horizontalBarDataZoom, horizontalBarSeriesSizing, reportChartPalette, reportChartGrid, resolveIntlTimezone, resolveTrendBucketKeys, normalizeTrendBucketKey, normalizeTrendGrain, type TableSort } from "../components/monitoringPrimitives";
+import { formatAgeNumber } from "../monitoringNumberFormat";
 
 type FreshnessRow = Record<string, unknown>;
 
@@ -100,11 +101,11 @@ export function FreshnessPage({
           value={healthLabel}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="stale" value={formatNumber(staleDataflows)} tone={staleDataflows ? "warning" : "neutral"} />
+              <DetailMetric label="stale" value={<CompactNumberValue value={staleDataflows} />} tone={staleDataflows ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="run issue" value={formatNumber(latestStatusIssueDataflows)} tone={latestStatusIssueDataflows ? "warning" : "neutral"} />
+              <DetailMetric label="run issue" value={<CompactNumberValue value={latestStatusIssueDataflows} />} tone={latestStatusIssueDataflows ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="wm issue" value={formatNumber(latestWatermarkIssueDataflows)} tone={latestWatermarkIssueDataflows ? "warning" : "neutral"} />
+              <DetailMetric label="wm issue" value={<CompactNumberValue value={latestWatermarkIssueDataflows} />} tone={latestWatermarkIssueDataflows ? "warning" : "neutral"} />
             </span>
           }
           intent={healthIntent}
@@ -113,16 +114,16 @@ export function FreshnessPage({
         />
         <HealthStripCard
           label="Observed dataflows"
-          value={formatNumber(observedDataflows)}
+          value={<CompactNumberValue value={observedDataflows} />}
           detail={
             <span className="health-rate-detail freshness-observed-runs-detail">
               <span className="health-detail-label">etl runs S/F/Skip</span>
               <span className="health-detail-value">
-                <b className="detail-value-good">{formatNumber(successfulRuns)}</b>
+                <b className="detail-value-good"><CompactNumberValue value={successfulRuns} /></b>
                 <span className="separator"> / </span>
-                <b className="detail-value-bad">{formatNumber(failedRuns)}</b>
+                <b className="detail-value-bad"><CompactNumberValue value={failedRuns} /></b>
                 <span className="separator"> / </span>
-                <b className="detail-value-warning">{formatNumber(skippedRuns)}</b>
+                <b className="detail-value-warning"><CompactNumberValue value={skippedRuns} /></b>
               </span>
             </span>
           }
@@ -130,7 +131,7 @@ export function FreshnessPage({
         />
         <HealthStripCard
           label="Stale dataflows"
-          value={formatNumber(staleDataflows)}
+          value={<CompactNumberValue value={staleDataflows} />}
           detail={<DetailMetric label="of dataflows" value={formatPercent(Number(kpis.stale_dataflow_rate ?? 0))} tone={staleDataflows ? "warning" : "neutral"} />}
           intent={staleDataflows ? "warning" : "neutral"}
           accent="intent"
@@ -155,7 +156,7 @@ export function FreshnessPage({
         <HealthStripCard
           label="Watermark coverage"
           value={formatPercent(Number(kpis.watermark_coverage_rate ?? 0))}
-          detail={<DetailMetric label="enabled flows" value={formatNumber(Number(kpis.watermark_enabled_dataflows ?? 0))} tone="blue" />}
+          detail={<DetailMetric label="enabled flows" value={<CompactNumberValue value={Number(kpis.watermark_enabled_dataflows ?? 0)} />} tone="blue" />}
           intent={Number(kpis.watermark_coverage_rate ?? 0) > 0 ? "good" : "neutral"}
           accent={Number(kpis.watermark_coverage_rate ?? 0) > 0 ? "source" : "neutral"}
           title="Watermark coverage = dataflows with watermark config or watermark values / observed dataflows."
@@ -166,11 +167,11 @@ export function FreshnessPage({
           className="freshness-watermark-movement-card"
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="adv" value={formatNumber(advancedRuns)} tone={advancedRuns ? "good" : "neutral"} />
+              <DetailMetric label="adv" value={<CompactNumberValue value={advancedRuns} />} tone={advancedRuns ? "good" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="unch" value={formatNumber(unchangedRuns)} tone={unchangedRuns ? "warning" : "neutral"} />
+              <DetailMetric label="unch" value={<CompactNumberValue value={unchangedRuns} />} tone={unchangedRuns ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="init" value={formatNumber(initializedRuns)} tone={initializedRuns ? "blue" : "neutral"} />
+              <DetailMetric label="init" value={<CompactNumberValue value={initializedRuns} />} tone={initializedRuns ? "blue" : "neutral"} />
             </span>
           }
           intent={latestWatermarkIssueDataflows ? "warning" : "neutral"}
@@ -232,7 +233,7 @@ export function FreshnessPage({
 
         <ReportPanel
           title="Dataflow freshness registry"
-          subtitle={`${formatNumber(totalRows)} dataflows`}
+          subtitle={<><CompactNumberValue value={totalRows} /> dataflows</>}
           titleTooltip="Dataflow-level registry used for investigation. Click a row to inspect latest master data, freshness evidence, and the related dataflow runs."
           className="monitoring-freshness-registry-panel"
           headerAction={
@@ -295,6 +296,7 @@ function DataflowFreshnessTable({
   return (
     <DataTable<FreshnessRow>
       rows={rows}
+      compactNumbers
       columns={columns}
       maxRows={limit}
       offset={offset}
@@ -775,12 +777,12 @@ function emptyChartOption(message: string): EChartsOption {
 
 function formatAgeSeconds(value: number) {
   if (!Number.isFinite(value)) return "-";
-  if (value < 60) return `${Math.max(0, Math.round(value))}s`;
+  if (value < 60) return `${formatAgeNumber(Math.max(0, value))}s`;
   const minutes = value / 60;
-  if (minutes < 60) return `${formatNumber(minutes)}m`;
+  if (minutes < 60) return `${formatAgeNumber(minutes)}m`;
   const hours = minutes / 60;
-  if (hours < 24) return `${formatNumber(hours)}h`;
-  return `${formatNumber(value / 86400)}d`;
+  if (hours < 24) return `${formatAgeNumber(hours)}h`;
+  return `${formatAgeNumber(value / 86400)}d`;
 }
 
 function notConfiguredDataflows(row: FreshnessRow) {

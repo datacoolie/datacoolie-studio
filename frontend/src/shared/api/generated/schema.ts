@@ -1624,6 +1624,8 @@ export interface components {
         };
         /** AssetReferenceOccurrenceResponse */
         AssetReferenceOccurrenceResponse: {
+            /** Addressing Mode */
+            addressing_mode?: string | null;
             /**
              * Attention Count
              * @default 0
@@ -1672,6 +1674,8 @@ export interface components {
             }[];
             /** Provenance */
             provenance?: ("sql" | "python" | "python_sql") | null;
+            /** Qualification Level */
+            qualification_level?: string | null;
             /** Raw Value */
             raw_value: string;
             /** Reference Id */
@@ -2162,6 +2166,11 @@ export interface components {
             count: number;
             /** Max Source Modified At */
             max_source_modified_at?: string | null;
+            /**
+             * Pending Sync Count
+             * @default 0
+             */
+            pending_sync_count: number;
             /** Status */
             status: string;
         };
@@ -2282,6 +2291,8 @@ export interface components {
         };
         /** LineageDependencyResponse */
         LineageDependencyResponse: {
+            /** Addressing Mode */
+            addressing_mode?: string | null;
             /** Consumer Asset Id */
             consumer_asset_id: string;
             /** Id */
@@ -2296,6 +2307,8 @@ export interface components {
              * @enum {string}
              */
             provenance: "sql" | "python" | "python_sql";
+            /** Qualification Level */
+            qualification_level?: string | null;
             /** Reference Id */
             reference_id: string;
             /** Reference Occurrence Id */
@@ -3483,7 +3496,7 @@ export interface components {
         /** ReferenceResolutionResponse */
         ReferenceResolutionResponse: {
             /** Reason */
-            reason?: ("no_match" | "multiple_matches" | "conflicting_targets" | "incomplete" | "target_missing") | null;
+            reason?: ("no_match" | "multiple_matches" | "out_of_scope" | "conflicting_targets" | "incomplete" | "target_missing") | null;
             /**
              * State
              * @enum {string}
@@ -3599,6 +3612,19 @@ export interface components {
             /** Summary */
             summary: string;
         };
+        /** SourceFreshnessStatusResponse */
+        SourceFreshnessStatusResponse: {
+            /** Cache Source Modified At */
+            cache_source_modified_at?: string | null;
+            /** Cache Synced At */
+            cache_synced_at?: string | null;
+            /** Source Modified At */
+            source_modified_at?: string | null;
+            /** State */
+            state: string;
+            /** Summary */
+            summary?: string | null;
+        };
         /** SourceImportItemResponse */
         SourceImportItemResponse: {
             configured_location?: components["schemas"]["ConfiguredSourceLocationResponse"] | null;
@@ -3687,6 +3713,45 @@ export interface components {
             started_at: string;
             status: components["schemas"]["SourceSyncStatusResponse"];
         };
+        /** SourceObservationStatusResponse */
+        SourceObservationStatusResponse: {
+            /** Checked At */
+            checked_at?: string | null;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Failure Count
+             * @default 0
+             */
+            failure_count: number;
+            /** Next Check At */
+            next_check_at?: string | null;
+            /** Pending Changes */
+            pending_changes?: boolean | null;
+            /** State */
+            state: string;
+        };
+        /** SourceSyncExecutionStatusResponse */
+        SourceSyncExecutionStatusResponse: {
+            /** Completed At */
+            completed_at?: string | null;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /** Last Successful At */
+            last_successful_at?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** State */
+            state: string;
+            /** Summary */
+            summary?: string | null;
+            /** Trigger */
+            trigger?: string | null;
+        };
         /** SourceSyncJobResponse */
         SourceSyncJobResponse: {
             /** Completed At */
@@ -3725,6 +3790,7 @@ export interface components {
             error?: {
                 [key: string]: unknown;
             } | null;
+            freshness?: components["schemas"]["SourceFreshnessStatusResponse"] | null;
             /** Last Observed At */
             last_observed_at?: string | null;
             latest_job?: components["schemas"]["SourceSyncJobResponse"] | null;
@@ -3732,6 +3798,7 @@ export interface components {
             message: string;
             /** Next Check At */
             next_check_at?: string | null;
+            observation?: components["schemas"]["SourceObservationStatusResponse"] | null;
             /**
              * Observation Failure Count
              * @default 0
@@ -3757,6 +3824,8 @@ export interface components {
             source_kind: string;
             /** Status */
             status: string;
+            sync_execution?: components["schemas"]["SourceSyncExecutionStatusResponse"] | null;
+            validation?: components["schemas"]["SourceValidationStatusResponse"] | null;
         };
         /** SourceUpdate */
         SourceUpdate: {
@@ -3811,6 +3880,19 @@ export interface components {
             status: string;
             /** Validated At */
             validated_at?: string | null;
+        };
+        /** SourceValidationStatusResponse */
+        SourceValidationStatusResponse: {
+            /** Completed At */
+            completed_at?: string | null;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /** State */
+            state: string;
+            /** Summary */
+            summary?: string | null;
         };
         /** SourcesWorkspaceResponse */
         SourcesWorkspaceResponse: {

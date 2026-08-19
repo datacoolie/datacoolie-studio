@@ -115,6 +115,8 @@ class AssetReferenceOccurrenceResponse(BaseModel):
     normalized_value: str
     context_scope: str | None = None
     context_scope_source: Literal["detected", "metadata_context"] | None = None
+    addressing_mode: str | None = None
+    qualification_level: str | None = None
     source_location: SourceLocationResponse | None = None
     display_name: str
     provenance: Literal["sql", "python", "python_sql"] | None = None

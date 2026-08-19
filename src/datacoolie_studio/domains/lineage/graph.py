@@ -186,6 +186,32 @@ def _add_resolution(
     dependencies: dict[str, LineageDependency],
     diagnostics: list[LineageDiagnostic],
 ) -> None:
+    if resolution.asset_id == target_asset_id:
+        diagnostics.append(LineageDiagnostic(
+            severity="warning",
+            code="dependency_self_reference",
+            message=f"Self-reference was not mapped: {resolution.evidence.value}",
+            asset_id=target_asset_id,
+            dataflow_id=dataflow.dataflow_id,
+            metadata_source_id=dataflow.metadata_source_id,
+            details={
+                "resolution_method": resolution.method,
+                "candidate_asset_ids": resolution.candidates[:MAX_CANDIDATES],
+            },
+        ))
+        resolution = Resolution(
+            unresolved_resolution("no_match"),
+            None,
+            "self_reference_rejected",
+            resolution.candidates,
+            resolution.evidence,
+            resolution.reference_signature,
+            observations=resolution.observations,
+            context_scope=resolution.context_scope,
+            context_scope_source=resolution.context_scope_source,
+            addressing_mode=resolution.addressing_mode,
+            qualification_level=resolution.qualification_level,
+        )
     evidence = resolution.evidence.to_dict()
     resolution_observations = list(resolution.observations or [])
     provenance = _provenance(resolution.evidence.provenance)
@@ -259,6 +285,8 @@ def _add_resolution(
             reference_id=existing_reference.id,
             reference_occurrence_id=existing_occurrence.id,
             resolved_asset_id=resolved_asset_id,
+            addressing_mode=resolution.addressing_mode,
+            qualification_level=resolution.qualification_level,
         )
         dependencies[dependency_id] = dependency
     else:
@@ -378,6 +406,8 @@ def _reference_occurrence_from_resolution(
         _source_location_key(evidence.location),
         resolution.context_scope or "",
         resolution.context_scope_source or "",
+        resolution.addressing_mode or "",
+        resolution.qualification_level or "",
     ])
     return LineageReferenceOccurrence(
         id=f"reference-occurrence:{_digest(key)}",
@@ -393,6 +423,8 @@ def _reference_occurrence_from_resolution(
         provenance=provenance,
         target_asset_id=target_asset_id,
         consumer_asset_id=target_asset_id,
+        addressing_mode=resolution.addressing_mode,
+        qualification_level=resolution.qualification_level,
         resolved_asset_id=resolution.asset_id,
         candidate_asset_ids=resolution.candidates[:MAX_CANDIDATES],
         resolution_method=resolution.method,

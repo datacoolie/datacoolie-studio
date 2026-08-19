@@ -32,6 +32,47 @@ def test_sql_analysis_keeps_repeated_reference_detections_with_ranges():
     assert all(item.location and item.location.coordinate_space == "query_source" for item in result.inputs)
 
 
+def test_sql_analysis_supports_sql_server_bracketed_spatial_queries():
+    from datacoolie_studio.domains.analysis.sql import analyze_sql
+
+    query = """
+    SELECT [Border].STAsBinary() AS [Border], [CountryID]
+    FROM [Person].[StateProvince]
+    """
+    for dialect in ("mssql", None):
+        result = analyze_sql(query, dialect=dialect)
+
+        assert [item.value for item in result.inputs] == ["Person.StateProvince"]
+        assert result.diagnostics == []
+
+
+def test_sql_analysis_keeps_invalid_sql_as_a_diagnostic():
+    from datacoolie_studio.domains.analysis.sql import analyze_sql
+
+    result = analyze_sql("SELECT [", dialect="mssql")
+
+    assert result.inputs == []
+    assert [item["code"] for item in result.diagnostics] == ["sql_parse_error"]
+
+
+def test_python_sql_analysis_uses_source_database_dialect():
+    from datacoolie_studio.domains.analysis.python import analyze_python_function
+
+    result = analyze_python_function(
+        """
+def read_state_province(engine):
+    return engine.execute_sql(
+        "SELECT [Border].STAsBinary() AS [Border] FROM [Person].[StateProvince]"
+    )
+""",
+        "demo.read_state_province",
+        context={"source": {"database_type": "mssql"}},
+    )
+
+    assert [item.value for item in result.inputs] == ["Person.StateProvince"]
+    assert result.diagnostics == []
+
+
 def test_python_analysis_resolves_context_fstring():
     from datacoolie_studio.domains.analysis.python import analyze_python_function
 

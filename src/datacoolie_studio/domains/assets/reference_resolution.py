@@ -8,6 +8,7 @@ ResolutionState = Literal["automatic", "manual", "unresolved"]
 ResolutionReason = Literal[
     "no_match",
     "multiple_matches",
+    "out_of_scope",
     "conflicting_targets",
     "incomplete",
     "target_missing",
@@ -86,6 +87,7 @@ def _preferred_reason(
         "target_missing",
         "conflicting_targets",
         "multiple_matches",
+        "out_of_scope",
         "incomplete",
         "no_match",
     )

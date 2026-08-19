@@ -105,6 +105,8 @@ class LineageDependencyResponse(BaseModel):
     reference_id: str
     reference_occurrence_id: str
     resolved_asset_id: str | None = None
+    addressing_mode: str | None = None
+    qualification_level: str | None = None
 
 
 class LineageResponse(BaseModel):

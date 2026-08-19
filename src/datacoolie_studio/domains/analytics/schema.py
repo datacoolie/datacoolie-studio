@@ -347,7 +347,11 @@ def typed_table_schema_is_current(
             and "_source_id" in columns
             and not IGNORED_DATAFLOW_SOURCE_COLUMNS.intersection(columns)
             and not has_legacy_raw_json_column(columns)
-            and not has_incompatible_column_types(conn, table_name, {})
+            and not has_incompatible_column_types(
+                conn,
+                table_name,
+                DATAFLOW_COLUMN_TYPES,
+            )
             and not has_column_order_mismatch(
                 conn,
                 table_name,

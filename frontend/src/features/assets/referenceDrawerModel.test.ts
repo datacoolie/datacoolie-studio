@@ -72,6 +72,7 @@ describe("reference drawer model", () => {
 
   it.each([
     ["multiple_matches", "2 canonical candidates match this reference."],
+    ["out_of_scope", "A matching asset is outside the source scope."],
     ["target_missing", "The mapped target is missing from this environment."],
     ["incomplete", "1 of 2 occurrences resolve successfully."],
     ["conflicting_targets", "Occurrences resolve to 2 different assets."],
@@ -84,7 +85,7 @@ describe("reference drawer model", () => {
       : [];
     const story = referenceResolutionStory(reference({
       resolution: { state: "unresolved", reason },
-      candidate_asset_ids: reason === "multiple_matches" ? ["asset:a", "asset:b"] : [],
+      candidate_asset_ids: reason === "multiple_matches" || reason === "out_of_scope" ? ["asset:a", "asset:b"] : [],
       resolved_asset_ids: reason === "conflicting_targets" ? ["asset:a", "asset:b"] : [],
       manual_mapping: reason === "target_missing"
         ? { mapping_id: 9, target_normalized_value: "catalog.database.silver.customer" }

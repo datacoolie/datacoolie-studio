@@ -24,6 +24,9 @@ from datacoolie_studio.db.models import (
 )
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
+from datacoolie_studio.domains.metadata.ordering import (
+    canonicalize_editor_document,
+)
 from datacoolie_studio.domains.metadata.storage_io import (
     conditional_replace,
     conditional_create,
@@ -119,6 +122,7 @@ STUDIO_ROUTING_COLUMNS = (
     "__metadata_source_kind",
 )
 VISIBLE_STUDIO_ROUTING_COLUMN = "__metadata_source_name"
+CONNECTION_REFERENCE_FIELDS = ("connection_name", "source_connection_name", "destination_connection_name")
 
 
 def load_editor_document(source: EnvironmentSource) -> dict[str, Any]:
@@ -399,6 +403,57 @@ def validate_editor_document(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def synchronize_connection_name_references(
+    document: dict[str, Any],
+    baseline_document: dict[str, Any],
+) -> dict[str, Any]:
+    baseline_connections = _sheet_rows(baseline_document.get("sheets") or {}, "connections")
+    next_connections = _sheet_rows(document.get("sheets") or {}, "connections")
+    baseline_names = {
+        _connection_row_identity(row, index): _string(row.get("name"))
+        for index, row in enumerate(baseline_connections)
+        if _string(row.get("name"))
+    }
+    renames: dict[str, str] = {}
+    for index, row in enumerate(next_connections):
+        previous_name = baseline_names.get(_connection_row_identity(row, index))
+        next_name = _string(row.get("name"))
+        if previous_name and next_name and previous_name != next_name:
+            renames[previous_name] = next_name
+    if not renames:
+        return document
+
+    sheets = dict(document.get("sheets") or {})
+    for sheet_name in ("dataflows", "schema_hints"):
+        sheet = sheets.get(sheet_name) or {}
+        rows = _sheet_rows(sheets, sheet_name)
+        sheets[sheet_name] = {
+            **sheet,
+            "rows": [_replace_connection_name_references(row, renames) for row in rows],
+        }
+    return {**document, "sheets": sheets}
+
+
+def _connection_row_identity(row: dict[str, Any], index: int) -> str:
+    connection_id = _string(row.get("connection_id"))
+    return f"id:{connection_id}" if connection_id else f"index:{index}"
+
+
+def _replace_connection_name_references(
+    row: dict[str, Any],
+    renames: dict[str, str],
+) -> dict[str, Any]:
+    updated = dict(row)
+    changed = False
+    for field in CONNECTION_REFERENCE_FIELDS:
+        current_name = _string(row.get(field))
+        replacement = renames.get(current_name)
+        if replacement and replacement != current_name:
+            updated[field] = replacement
+            changed = True
+    return updated if changed else row
+
+
 def _has_new_validation_errors(
     validation: dict[str, Any],
     baseline_validation: dict[str, Any],
@@ -421,7 +476,9 @@ def load_editor_draft(session: Session, source: EnvironmentSource) -> dict[str, 
     draft = _latest_draft(session, source.id)
     if draft is None:
         return None
-    return json.loads(draft.editor_document_json)
+    document = canonicalize_editor_document(json.loads(draft.editor_document_json))
+    document["issues"] = validate_editor_document(document)["issues"]
+    return document
 
 
 def save_editor_draft(
@@ -437,6 +494,7 @@ def save_editor_draft(
         document.get("source", {}).get("revision") or {},
         secret_store=secret_store,
     )
+    document = canonicalize_editor_document(document)
     _materialize_generated_ids(_document_sheets_as_rows(document))
     document["issues"] = validate_editor_document(document)["issues"]
     draft = _latest_draft(session, source.id)
@@ -463,7 +521,9 @@ def load_environment_editor_draft(session: Session, environment_id: int) -> dict
     draft = _latest_environment_draft(session, environment_id)
     if draft is None:
         return None
-    return json.loads(draft.editor_document_json)
+    document = canonicalize_editor_document(json.loads(draft.editor_document_json))
+    document["issues"] = validate_editor_document(document)["issues"]
+    return document
 
 
 def save_environment_editor_draft(
@@ -474,6 +534,7 @@ def save_environment_editor_draft(
     *,
     secret_store: CredentialSecretStore | None = None,
 ) -> dict[str, Any]:
+    document = canonicalize_editor_document(document)
     _materialize_generated_ids(_document_sheets_as_rows(document))
     document["issues"] = validate_editor_document(document)["issues"]
     payload = json.dumps(document, ensure_ascii=False)
@@ -612,6 +673,7 @@ def save_editor_document(
         _record_save_event(session, source, "conflict", "Source file changed before save", current_revision, None, None)
         raise MetadataConflictError("Source file changed before save")
 
+    document = canonicalize_editor_document(document)
     _materialize_generated_ids(_document_sheets_as_rows(document))
     if validate_document:
         validation = validate_editor_document(document)
@@ -685,6 +747,7 @@ def save_environment_editor_document(
 
     from datacoolie_studio.domains.metadata import service as metadata_service
 
+    document = canonicalize_editor_document(document)
     _materialize_generated_ids(_document_sheets_as_rows(document))
     source_revision_map = _environment_revision_sources(expected_revision)
     base_documents: dict[int, dict[str, Any]] = {}
@@ -705,12 +768,13 @@ def save_environment_editor_document(
         except MetadataReadError as exc:
             raise MetadataConflictError(str(exc)) from exc
 
+    baseline_document = metadata_service.merge_environment_editor_documents(
+        enabled_sources,
+        list(base_documents.values()),
+    )
+    document = synchronize_connection_name_references(document, baseline_document)
     validation = validate_editor_document(document)
     if validation["status"] == "error":
-        baseline_document = metadata_service.merge_environment_editor_documents(
-            enabled_sources,
-            list(base_documents.values()),
-        )
         baseline_validation = validate_editor_document(baseline_document)
         if _has_new_validation_errors(validation, baseline_validation):
             document["issues"] = validation["issues"]
@@ -726,6 +790,8 @@ def save_environment_editor_document(
         document,
         secret_store=secret_store,
     )
+    document = canonicalize_editor_document(document)
+    document["issues"] = validate_editor_document(document)["issues"]
 
     source_documents: list[
         tuple[EnvironmentSource, dict[str, Any], dict[str, Any], bytes]
@@ -1309,7 +1375,9 @@ def _is_preferred_column(key: str) -> bool:
 
 
 def _source_document_changed(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    return _normalized_document_sheets(left) != _normalized_document_sheets(right)
+    return _normalized_document_sheets(canonicalize_editor_document(left)) != _normalized_document_sheets(
+        canonicalize_editor_document(right)
+    )
 
 
 def _normalized_document_sheets(document: dict[str, Any]) -> dict[str, Any]:

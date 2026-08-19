@@ -1,11 +1,95 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import re
 from typing import Any
 
-from sqlglot import errors, exp, parse_one
+from sqlglot import errors, exp, parse, parse_one
 
 from datacoolie_studio.domains.analysis.models import AnalysisResult, InputEvidence, SourceLocation
+
+
+SQL_DIALECT_ALIASES = {
+    "mssql": "tsql",
+    "sql_server": "tsql",
+    "sqlserver": "tsql",
+    "azure_sql": "tsql",
+    "azure_synapse": "tsql",
+    "fabric": "tsql",
+    "synapse": "tsql",
+    "postgresql": "postgres",
+    "mariadb": "mysql",
+}
+SQL_DIALECT_FALLBACKS = ("tsql", "mysql", "postgres", "oracle", "sqlite", "spark")
+
+
+def normalize_sql_dialect(dialect: str | None) -> str | None:
+    value = str(dialect or "").strip().lower()
+    if not value:
+        return None
+    normalized = value.replace("-", "_").replace(" ", "_")
+    return SQL_DIALECT_ALIASES.get(normalized, normalized)
+
+
+def sql_dialect_for_source(source: Mapping[str, Any] | None) -> str | None:
+    """Return the SQLGlot dialect declared by a metadata source, when known."""
+
+    if not isinstance(source, Mapping):
+        return None
+    configure = source.get("configure")
+    candidates = [source.get("sql_dialect"), source.get("dialect"), source.get("database_type")]
+    if isinstance(configure, Mapping):
+        candidates.extend([
+            configure.get("sql_dialect"),
+            configure.get("dialect"),
+            configure.get("database_type"),
+        ])
+    for candidate in candidates:
+        normalized = normalize_sql_dialect(candidate if isinstance(candidate, str) else None)
+        if normalized:
+            return normalized
+    return None
+
+
+def parse_sql_one(
+    sql: str,
+    *,
+    dialect: str | None = None,
+) -> tuple[exp.Expression, str | None]:
+    last_error: Exception | None = None
+    for candidate in _dialect_candidates(dialect):
+        try:
+            return parse_one(sql, read=candidate), candidate
+        except (errors.ParseError, errors.TokenError, ValueError, TypeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError("SQL could not be parsed")
+
+
+def parse_sql_statements(
+    sql: str,
+    *,
+    dialect: str | None = None,
+) -> tuple[list[exp.Expression], str | None]:
+    last_error: Exception | None = None
+    for candidate in _dialect_candidates(dialect):
+        try:
+            expressions = [expression for expression in parse(sql, read=candidate) if expression is not None]
+            if expressions:
+                return expressions, candidate
+        except (errors.ParseError, errors.TokenError, ValueError, TypeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError("SQL could not be parsed")
+
+
+def _dialect_candidates(dialect: str | None) -> tuple[str | None, ...]:
+    normalized = normalize_sql_dialect(dialect)
+    if normalized:
+        return (normalized,)
+    return (None, *SQL_DIALECT_FALLBACKS)
 
 
 def analyze_sql(sql: str, dialect: str | None = None) -> AnalysisResult:
@@ -13,8 +97,8 @@ def analyze_sql(sql: str, dialect: str | None = None) -> AnalysisResult:
     if not sql.strip():
         return result
     try:
-        expression = parse_one(sql, read=dialect)
-    except (errors.ParseError, ValueError) as exc:
+        expression, used_dialect = parse_sql_one(sql, dialect=dialect)
+    except (errors.ParseError, errors.TokenError, ValueError, TypeError) as exc:
         result.diagnostics.append({
             "severity": "warning",
             "code": "sql_parse_error",
@@ -36,6 +120,14 @@ def analyze_sql(sql: str, dialect: str | None = None) -> AnalysisResult:
         database_or_schema = _identifier_text(table.args.get("db"))
         parts = [part for part in (catalog, database_or_schema, name) if part]
         location, search_start = _table_location(sql, parts, search_start)
+        details = {
+            "match_precision": "exact_reference" if location else "location_only",
+            "access_semantics": "direct_sql",
+            "identifier_parts": parts,
+            "qualification_level": _qualification_level(parts),
+        }
+        if used_dialect:
+            details["sql_dialect"] = used_dialect
         result.inputs.append(InputEvidence(
             kind="table",
             value=".".join(parts),
@@ -45,7 +137,7 @@ def analyze_sql(sql: str, dialect: str | None = None) -> AnalysisResult:
             table=name,
             sql=sql,
             location=location,
-            details={"match_precision": "exact_reference"} if location else {},
+            details=details,
         ))
     return result
 
@@ -61,6 +153,14 @@ def _identifier_text(value: Any) -> str | None:
 
 def _normalize_name(value: str) -> str:
     return value.strip().strip('"`[]').lower()
+
+
+def _qualification_level(parts: list[str]) -> str:
+    if len(parts) >= 3:
+        return "fully_qualified"
+    if len(parts) >= 2:
+        return "schema_table"
+    return "table"
 
 
 def _table_location(sql: str, parts: list[str], search_start: int) -> tuple[SourceLocation | None, int]:

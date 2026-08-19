@@ -38,6 +38,7 @@ from datacoolie_studio.domains.credentials.store import (
     CredentialSecretStore,
     KeyringCredentialSecretStore,
 )
+from datacoolie_studio.domains.freshness.service import source_freshness_statuses
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.service import ensure_metadata_materialization
 from datacoolie_studio.domains.read_models.cache import (
@@ -457,7 +458,23 @@ def sources_workspace(session: Session, environment_id: int) -> dict[str, Any]:
         kind: [source for source in sources if source.source_kind == kind]
         for kind in ("metadata", "logs", "code")
     }
-    statuses = sync.source_sync_statuses(session, sources)
+    freshness_by_source, observations = source_freshness_statuses(session, sources)
+    statuses = sync.source_sync_statuses(
+        session,
+        sources,
+        observations=observations,
+    )
+    for status in statuses:
+        item = freshness_by_source.get(status["source_id"])
+        if item is None:
+            continue
+        status["freshness"] = {
+            "state": "not_synced" if item["status"] == "not_cached" else item["status"],
+            "source_modified_at": item.get("source_modified_at"),
+            "cache_source_modified_at": item.get("cache_source_modified_at"),
+            "cache_synced_at": item.get("cache_synced_at"),
+            "summary": item.get("message"),
+        }
     cloud_source_ids = {
         source.id for source in sources if source.storage_provider != "local"
     }

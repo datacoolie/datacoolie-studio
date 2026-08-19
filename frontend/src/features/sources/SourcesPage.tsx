@@ -46,7 +46,6 @@ import {
   SourceOperationIcon,
   SourceOperationPill,
   sourceOperationLabel,
-  sourceOperationStatusSlot,
 } from "./SourceOperationFeedback";
 import {
   clearLogSyncActivity,
@@ -341,10 +340,10 @@ export function SourcesPage({
             <span>{configurationSources.length} metadata &amp; code · {logSources.length} logs</span>
           </div>
         </div>
-        <div className="sources-health-line" aria-label={`${sourceHealth.enabled} enabled, ${sourceHealth.readable} readable, ${sourceHealth.current} current`}>
+        <div className="sources-health-line" aria-label={`${sourceHealth.enabled} enabled, ${sourceHealth.pendingSync} pending sync, ${sourceHealth.issues} with issues`}>
           <span><strong>{sourceHealth.enabled}</strong> enabled</span>
-          <span><strong>{sourceHealth.readable}</strong> readable</span>
-          <span><strong>{sourceHealth.current}</strong> current</span>
+          <span><strong>{sourceHealth.pendingSync}</strong> pending sync</span>
+          <span><strong>{sourceHealth.issues}</strong> with issues</span>
         </div>
       </section>
 
@@ -1045,13 +1044,11 @@ function SourceCard({
   const displayName = item.label || basename(item.uri);
   const typeLabel = sourceTypeLabel(kind, item, modeLabel);
   const scheduleInterval = logRefreshInterval(item);
-  const backendSyncing = isSourceSyncRunning(syncStatus);
+  const backendSyncing = isSourceSyncRunning(syncStatus)
+    && syncStatus?.active_operation !== "validate";
   const activeAction = operation?.action
     ?? syncStatus?.active_operation
     ?? (backendSyncing ? "sync" : null);
-  const activeStatusSlot = activeAction
-    ? sourceOperationStatusSlot(activeAction)
-    : null;
   const working = activeAction !== null;
   const syncing = activeAction === "sync";
   const effectiveSyncActivity = backendSyncing ? "syncing" : syncActivity;
@@ -1066,7 +1063,7 @@ function SourceCard({
 
   return (
     <article
-      className={`source-card${working ? ` is-working is-${activeAction}` : ""}`}
+      className={`source-card${item.enabled ? "" : " is-disabled"}${working ? ` is-working is-${activeAction}` : ""}`}
       aria-busy={working}
     >
       <div className="source-card-line source-card-line-primary">
@@ -1075,6 +1072,18 @@ function SourceCard({
           <span className="source-type-chip">{typeLabel}</span>
         </div>
         <div className="source-card-row-actions">
+          <LabeledStatus label="Validation">
+            {activeAction === "validate" ? (
+              <SourceOperationPill action={activeAction} />
+            ) : (
+              <ValidationBadge
+                status={syncStatus?.validation}
+                fallback={validation}
+                syncStatus={syncStatus}
+                timezoneName={timezoneName}
+              />
+            )}
+          </LabeledStatus>
           <button
             className={`source-enabled-toggle ${item.enabled ? "is-enabled" : "is-disabled"}`}
             onClick={() => onUpdate(kind, item.id, { enabled: !item.enabled })}
@@ -1164,21 +1173,21 @@ function SourceCard({
           ) : null}
         </div>
         <div className="source-card-status">
-          {activeAction && activeStatusSlot === "all" ? (
+          {activeAction === "delete" ? (
             <LabeledStatus label="Status">
               <SourceOperationPill action={activeAction} />
             </LabeledStatus>
           ) : (
             <>
-              <LabeledStatus label="Read">
-                {activeAction && activeStatusSlot === "read" ? (
+              <LabeledStatus label="Check">
+                {activeAction === "retry" ? (
                   <SourceOperationPill action={activeAction} />
                 ) : (
-                  <ReadCheckBadge validation={validation} timezoneName={timezoneName} />
+                  <CheckBadge status={syncStatus} timezoneName={timezoneName} />
                 )}
               </LabeledStatus>
-              <LabeledStatus label="Cache">
-                {activeAction && activeStatusSlot === "cache" ? (
+              <LabeledStatus label="Sync">
+                {activeAction === "sync" ? (
                   <SourceOperationPill action={activeAction} />
                 ) : (
                   <SyncBadge status={syncStatus} timezoneName={timezoneName} />
@@ -1427,60 +1436,241 @@ function LabeledStatus({ label, children }: { label: string; children: React.Rea
   );
 }
 
-function ReadCheckBadge({ validation, timezoneName }: { validation: SourceReadCheckResult | null; timezoneName: string | null }) {
-  if (!validation) {
-    return (
-      <span className="source-status-pill muted" title="Not yet validated">
-        <Clock size={11} />
-        <span>not validated</span>
-      </span>
-    );
-  }
-  const ok = validation.status === "ok" || validation.status === "warning";
-  const summary = compactValidationSummary(validation);
+type SourceStatusTone = "ok" | "warn" | "error" | "muted";
+type SourceStatusIcon = "check" | "warning" | "error" | "clock" | "running" | "refresh";
+
+type SourceStatusView = {
+  label: string;
+  tone: SourceStatusTone;
+  icon: SourceStatusIcon;
+  timestamp?: string | null;
+  tooltip: string;
+};
+
+function StatusPill({ view, timezoneName }: { view: SourceStatusView; timezoneName: string | null }) {
   return (
-    <span className={`source-status-pill ${ok ? "ok" : "error"}`} title={readCheckTooltip(validation)}>
-      {ok ? <CheckCircle2 size={11} /> : <XCircle size={11} />}
-      <span>{ok ? "readable" : "not readable"}</span>
-      {validation.validated_at ? <StatusTimestamp value={validation.validated_at} timezoneName={timezoneName} /> : null}
-      {summary ? <em className="source-status-detail">· {summary}</em> : null}
+    <span className={`source-status-pill ${view.tone}`} title={view.tooltip || undefined}>
+      {view.icon === "running" ? <SourceOperationIcon size={11} /> : null}
+      {view.icon === "check" ? <CheckCircle2 size={11} /> : null}
+      {view.icon === "warning" ? <AlertTriangle size={11} /> : null}
+      {view.icon === "error" ? <XCircle size={11} /> : null}
+      {view.icon === "clock" ? <Clock size={11} /> : null}
+      {view.icon === "refresh" ? <RefreshCw size={11} /> : null}
+      <span>{view.label}</span>
+      {view.timestamp ? <StatusTimestamp value={view.timestamp} timezoneName={timezoneName} /> : null}
     </span>
   );
 }
 
+function ValidationBadge({
+  status,
+  fallback,
+  syncStatus,
+  timezoneName,
+}: {
+  status: SourceSyncStatus["validation"];
+  fallback: SourceReadCheckResult | null;
+  syncStatus: SourceSyncStatus | null;
+  timezoneName: string | null;
+}) {
+  const state = status?.state ?? validationStateFromResult(fallback);
+  const timestamp = state === "validating"
+    ? syncStatus?.latest_job?.started_at
+    : status?.completed_at ?? fallback?.validated_at;
+  const view: SourceStatusView = {
+    label: validationLabel(state),
+    tone: state === "ready" ? "ok" : state === "warning" || state === "validating" ? "warn" : state === "invalid" ? "error" : "muted",
+    icon: state === "ready" ? "check" : state === "warning" || state === "validating" ? "warning" : state === "invalid" ? "error" : "clock",
+    timestamp,
+    tooltip: validationTooltip(status, fallback, timestamp, timezoneName),
+  };
+  return <StatusPill view={view} timezoneName={timezoneName} />;
+}
+
+function CheckBadge({ status, timezoneName }: { status: SourceSyncStatus | null; timezoneName: string | null }) {
+  const observation = status?.observation;
+  const state = observation?.state ?? legacyObservationState(status);
+  const timestamp = observation?.checked_at ?? status?.last_observed_at;
+  const view: SourceStatusView = {
+    label: checkLabel(state),
+    tone: state === "unchanged" ? "ok" : state === "changed" || state === "checking" || state === "paused" ? "warn" : state === "error" ? "error" : "muted",
+    icon: state === "unchanged" ? "check" : state === "changed" || state === "checking" || state === "paused" ? "warning" : state === "error" ? "error" : "clock",
+    timestamp: state === "paused" || state === "never" ? null : timestamp,
+    tooltip: checkTooltip(status, observation, timestamp, timezoneName),
+  };
+  return <StatusPill view={view} timezoneName={timezoneName} />;
+}
+
 function SyncBadge({ status, timezoneName }: { status: SourceSyncStatus | null; timezoneName: string | null }) {
-  if (!status || status.status === "unknown") {
-    return (
-      <span className="source-status-pill muted" title="Not synced">
-        <Clock size={11} />
-        <span>not synced</span>
-      </span>
-    );
+  const execution = status?.sync_execution;
+  const fallback = legacySyncExecution(status);
+  const state = execution?.state ?? fallback.state;
+  const timestamp = state === "running"
+    ? execution?.started_at ?? fallback.started_at
+    : execution?.completed_at ?? fallback.completed_at;
+  const view: SourceStatusView = {
+    label: syncLabel(state),
+    tone: state === "succeeded" ? "ok" : state === "running" ? "warn" : state === "failed" ? "error" : "muted",
+    icon: state === "succeeded" ? "check" : state === "running" ? "running" : state === "failed" ? "error" : "clock",
+    timestamp,
+    tooltip: syncExecutionTooltip(execution, fallback, timestamp, timezoneName),
+  };
+  return <StatusPill view={view} timezoneName={timezoneName} />;
+}
+
+function validationStateFromResult(validation: SourceReadCheckResult | null) {
+  if (!validation) return "not_validated";
+  if (validation.status === "ok") return "ready";
+  if (validation.status === "warning") return "warning";
+  return "invalid";
+}
+
+function validationLabel(state: string) {
+  return {
+    not_validated: "Not validated",
+    validating: "Validating",
+    ready: "Ready",
+    warning: "Warning",
+    invalid: "Invalid",
+  }[state] ?? "Not validated";
+}
+
+function validationTooltip(
+  status: SourceSyncStatus["validation"],
+  fallback: SourceReadCheckResult | null,
+  timestamp: string | null | undefined,
+  timezoneName: string | null,
+) {
+  const summary = status?.summary ?? (fallback ? compactValidationSummary(fallback) : null);
+  const error = detailMessage(status?.error) ?? fallback?.errors?.[0]?.message;
+  return [
+    timestamp ? `Validated ${formatAbsoluteTime(timestamp, timezoneName) ?? timestamp}` : "Not yet validated",
+    summary,
+    error ? `Error: ${error}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function legacyObservationState(status: SourceSyncStatus | null) {
+  if (!status) return "never";
+  if (status.observation_state === "paused" || status.observation_paused_at) return "paused";
+  if (status.status === "error") return "error";
+  if (status.pending_changes === true) return "changed";
+  if (status.last_observed_at) return "unchanged";
+  return "never";
+}
+
+function checkLabel(state: string) {
+  return {
+    never: "Not checked",
+    checking: "Checking",
+    unchanged: "No changes",
+    changed: "Changes found",
+    error: "Check failed",
+    paused: "Paused",
+  }[state] ?? "Not checked";
+}
+
+function checkTooltip(
+  status: SourceSyncStatus | null,
+  observation: SourceSyncStatus["observation"],
+  timestamp: string | null | undefined,
+  timezoneName: string | null,
+) {
+  const nextCheck = observation?.next_check_at ?? status?.next_check_at;
+  const pendingChanges = observation?.pending_changes ?? status?.pending_changes;
+  const syncBaseline = pendingChanges === true
+    ? "Changes since last sync"
+    : pendingChanges === false
+      ? "No changes since last sync"
+      : null;
+  const error = detailMessage(observation?.error) ?? observationErrorMessage(status);
+  return [
+    timestamp ? `Checked ${formatAbsoluteTime(timestamp, timezoneName) ?? timestamp}` : "Not yet checked",
+    syncBaseline,
+    nextCheck ? `Next check ${formatAbsoluteTime(nextCheck, timezoneName) ?? nextCheck}` : null,
+    error ? `Error: ${error}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+type LegacySyncExecution = {
+  state: string;
+  trigger?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_successful_at?: string | null;
+  summary?: string | null;
+  error?: Record<string, unknown> | null;
+};
+
+function legacySyncExecution(status: SourceSyncStatus | null): LegacySyncExecution {
+  const job = status?.latest_job;
+  const qualifying = ["initial_refresh", "manual_refresh", "force_refresh", "scheduled_refresh", "auto_refresh"];
+  if (
+    !job
+    || !qualifying.includes(job.job_type)
+    || status?.active_operation === "validate"
+    || (job.job_type === "initial_refresh" && job.result?.active_operation === "validate")
+  ) {
+    return { state: "never" };
   }
-  if (status.observation_state === "paused") {
-    return (
-      <span className="source-status-pill warn" title={syncTooltip(status)}>
-        <AlertTriangle size={12} />
-        <span>paused</span>
-        {status.observation_paused_at ? (
-          <StatusTimestamp
-            value={status.observation_paused_at}
-            timezoneName={timezoneName}
-          />
-        ) : null}
-      </span>
-    );
+  const trigger = job.job_type === "initial_refresh"
+    ? "initial"
+    : job.job_type === "scheduled_refresh"
+      ? "scheduled"
+      : job.job_type === "auto_refresh"
+        ? "automatic"
+        : "manual";
+  return {
+    state: job.status === "running" || job.status === "queued" || job.status === "initializing"
+      ? "running"
+      : job.status === "succeeded"
+        ? "succeeded"
+        : job.status === "failed"
+          ? "failed"
+          : "never",
+    trigger,
+    started_at: job.started_at,
+    completed_at: job.completed_at,
+    summary: job.message,
+    error: job.result?.error as Record<string, unknown> | null | undefined,
+  };
+}
+
+function syncLabel(state: string) {
+  return {
+    never: "Never synced",
+    running: "Running",
+    succeeded: "Succeeded",
+    failed: "Failed",
+  }[state] ?? "Never synced";
+}
+
+function syncExecutionTooltip(
+  execution: SourceSyncStatus["sync_execution"],
+  fallback: LegacySyncExecution,
+  timestamp: string | null | undefined,
+  timezoneName: string | null,
+) {
+  const current = execution ?? fallback;
+  const trigger = current.trigger ? `Trigger: ${current.trigger}` : null;
+  const error = detailMessage(current.error);
+  const lastSuccess = current.last_successful_at ?? execution?.last_successful_at;
+  const timestampClause = timestamp
+    ? `${current.state === "running" ? "Started" : "Completed"} ${formatAbsoluteTime(timestamp, timezoneName) ?? timestamp}`
+    : "No sync has completed";
+  const detail = error ? `Error: ${error}` : current.summary;
+  const history = lastSuccess && (current.state === "running" || current.state === "failed")
+    ? `Last success ${formatAbsoluteTime(lastSuccess, timezoneName) ?? lastSuccess}`
+    : null;
+  if (history) {
+    return [timestampClause, error ? detail : trigger ?? detail, history].filter(Boolean).join(" · ");
   }
-  const ok = status.status === "ok";
-  const failed = status.status === "error";
-  const running = isSourceSyncRunning(status);
-  return (
-    <span className={`source-status-pill ${running ? "warn" : ok ? "ok" : failed ? "error" : "muted"}`} title={syncTooltip(status)}>
-      {running ? <SourceOperationIcon size={11} /> : ok ? <CheckCircle2 size={11} /> : failed ? <XCircle size={11} /> : <RefreshCw size={11} />}
-      <span>{running ? "syncing..." : ok ? "synced" : status.status}</span>
-      {status.checked_at ? <StatusTimestamp value={status.checked_at} timezoneName={timezoneName} /> : null}
-    </span>
-  );
+  return [timestampClause, trigger, detail].filter(Boolean).slice(0, 3).join(" · ");
+}
+
+function detailMessage(error?: Record<string, unknown> | null) {
+  const message = error?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
 }
 
 function toBatchEntries(entries: SourceEntry[]): SourceBatchEntry[] {
@@ -1572,32 +1762,9 @@ function compactValidationSummary(validation: SourceReadCheckResult) {
   return validation.message;
 }
 
-function syncTooltip(status: SourceSyncStatus) {
-  const revision = status.revision ?? {};
-  return [
-    status.message,
-    status.latest_job?.status ? `job: ${status.latest_job.status}` : "",
-    typeof revision.size === "number" ? `size: ${revision.size}` : "",
-    typeof revision.file_count === "number" ? `files: ${revision.file_count}` : ""
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
 function observationErrorMessage(status: SourceSyncStatus | null) {
   const message = status?.error?.message;
   return typeof message === "string" && message.trim() ? message.trim() : null;
-}
-
-function readCheckTooltip(validation: SourceReadCheckResult) {
-  return [validation.message, validation.detected_provider, validation.detected_format, formatCounts(validation.record_counts)].filter(Boolean).join(" · ");
-}
-
-function formatCounts(counts?: Record<string, number>) {
-  if (!counts || !Object.keys(counts).length) return "";
-  return Object.entries(counts)
-    .map(([key, value]) => `${key.replace(/_/g, " ")}: ${value}`)
-    .join(", ");
 }
 
 function StatusTimestamp({ value, timezoneName }: { value: string; timezoneName: string | null }) {

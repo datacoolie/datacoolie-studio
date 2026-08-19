@@ -164,17 +164,27 @@ export function summarizeSourceHealth(
   syncStatuses: Record<string, SourceSyncStatus>
 ) {
   let enabled = 0;
-  let readable = 0;
-  let current = 0;
+  let pendingSync = 0;
+  let issues = 0;
 
   for (const { source, kind } of entries) {
-    if (source.enabled) enabled += 1;
-    if (source.latest_validation?.status === "ok" || source.latest_validation?.status === "warning") readable += 1;
+    if (!source.enabled) continue;
+    enabled += 1;
     const status = syncStatuses[sourceKey(kind, source.id)];
-    if (status?.status === "ok") current += 1;
+    if (status?.freshness?.state === "not_synced" || status?.pending_changes === true) {
+      pendingSync += 1;
+    }
+    const hasIssue = status?.freshness?.state === "missing"
+      || status?.freshness?.state === "sync_failed"
+      || status?.validation?.state === "invalid"
+      || status?.observation?.state === "error"
+      || status?.observation?.state === "paused"
+      || status?.sync_execution?.state === "failed"
+      || (!status?.freshness && status?.status === "error");
+    if (hasIssue) issues += 1;
   }
 
-  return { enabled, readable, current };
+  return { enabled, pendingSync, issues };
 }
 
 export function sourceDisplayName(source: SourcePath) {

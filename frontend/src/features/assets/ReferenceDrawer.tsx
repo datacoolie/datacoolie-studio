@@ -352,7 +352,7 @@ function OccurrenceSourcePreview({ source, error, loading }: { source: Reference
             ) : <strong>{selectedView?.label}</strong>}
             {selectedView ? <small>{sourceContext(selectedView)}</small> : null}
           </div>
-          {selectedView ? <SourceCodeViewer content={selectedView.content} language={selectedView.language} matches={selectedView.matches} defaultWrapped={selectedView.id === "evaluated_sql"} ariaLabel={`${selectedView.label} source`} /> : null}
+          {selectedView ? <SourceCodeViewer content={selectedView.content} language={selectedView.language} matches={selectedView.matches} defaultWrapped ariaLabel={`${selectedView.label} source`} /> : null}
         </>
       ) : <div className="reference-source-empty">No source preview is available for this detection.</div>}
       {source.diagnostics.length ? <div className="reference-source-diagnostics">{source.diagnostics.map((diagnostic) => <small key={`${diagnostic.code}-${diagnostic.message}`}>{diagnostic.message}</small>)}</div> : null}

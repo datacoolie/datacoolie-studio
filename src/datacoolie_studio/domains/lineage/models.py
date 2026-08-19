@@ -49,6 +49,8 @@ class LineageReferenceOccurrence:
     provenance: Provenance
     target_asset_id: str
     consumer_asset_id: str
+    addressing_mode: str | None = None
+    qualification_level: str | None = None
     resolved_asset_id: str | None = None
     candidate_asset_ids: list[str] = field(default_factory=list)
     resolution_method: str = "insufficient_identity"
@@ -86,6 +88,8 @@ class LineageDependency:
     reference_id: str
     reference_occurrence_id: str
     resolved_asset_id: str | None = None
+    addressing_mode: str | None = None
+    qualification_level: str | None = None
     observations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

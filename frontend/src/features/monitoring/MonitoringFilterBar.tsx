@@ -7,6 +7,7 @@ import { api } from "../../shared/api/client";
 import type { JobRecord, MonitoringFilterOptionsResponse, MonitoringRecord } from "../../shared/api/domainTypes";
 import type { FilterOption, MonitoringFilters } from "./monitoringFilters";
 import { DEFAULT_MONITORING_FILTERS, hasActiveFilters } from "./monitoringFilters";
+import { CompactNumberValue } from "./CompactNumberValue";
 
 interface MonitoringFilterBarProps {
   environmentId: number;
@@ -574,7 +575,7 @@ function FilterDropdown({
                   onClick={(event) => chooseOption(option.value, event)}
                 >
                   <span>{option.label}</span>
-                  {option.count !== undefined ? <small>{formatCount(option.count)}</small> : null}
+                  {option.count !== undefined ? <small><CompactNumberValue value={option.count} /></small> : null}
                   {active ? <strong>Selected</strong> : null}
                 </button>
               );
@@ -619,10 +620,6 @@ function optionsFor(response: MonitoringFilterOptionsResponse | null, field: str
       }))
     : fallback.map((value) => ({ value, label: value }));
   return [{ value: "all", label: "All" }, ...options];
-}
-
-function formatCount(value: number) {
-  return new Intl.NumberFormat("en-US").format(value);
 }
 
 function toDateTimeLocal(value: string) {

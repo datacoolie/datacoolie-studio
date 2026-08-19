@@ -1,6 +1,6 @@
 import { Activity, Check, ChevronDown, FilterX, GitBranch, LocateFixed, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument } from "../../shared/api/domainTypes";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument, MonitoringRecord } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { lineageDataflowFocusFromSearch, type LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
@@ -31,6 +31,8 @@ import { toggleFilterValue } from "./model/filterSelection";
 import type { ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import { useLineageLatestStatus } from "./lineageQueries";
 
+const MonitoringDataflowRunDrawer = lazy(() => import("../monitoring/MonitoringDataflowRunDrawer").then((module) => ({ default: module.MonitoringDataflowRunDrawer })));
+
 interface LineageViewProps {
   environmentId: number;
   lineage: LineageResponse;
@@ -42,6 +44,7 @@ interface LineageViewProps {
   onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  timezoneName?: string | null;
   routeSearch?: string;
   onOpenMetadata: (target: MetadataNavigationTarget) => void;
   onCreateReferenceMapping: (payload: ReferenceMappingPayload) => Promise<unknown>;
@@ -51,8 +54,14 @@ interface LineageViewProps {
 
 const EMPTY_FILTERS: LineageFilters = { connections: [], stages: [], formats: [], resolutions: [] };
 const LINEAGE_DATAFLOW_HISTORY_KEY = "datacoolieLineageDataflowDrawer";
+const LINEAGE_MONITORING_DRAWER_HISTORY_KEY = "datacoolieLineageMonitoringDrawer";
 
-export function LineageView({ environmentId, lineage, onRefreshLineage, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, routeSearch, onOpenMetadata, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping }: LineageViewProps) {
+function hasLineageMonitoringDrawerHistory(state: unknown) {
+  if (!state || typeof state !== "object") return false;
+  return (state as Record<string, unknown>)[LINEAGE_MONITORING_DRAWER_HISTORY_KEY] === true;
+}
+
+export function LineageView({ environmentId, lineage, onRefreshLineage, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, timezoneName, routeSearch, onOpenMetadata, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping }: LineageViewProps) {
   const [query, setQuery] = useState("");
   const [focuses, setFocuses] = useState<LineageFocus[]>([]);
   const [direction, setDirection] = useState<TraceDirection>("both");
@@ -62,6 +71,8 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
   const [showReferences, setShowReferences] = useState(false);
   const [selection, setSelection] = useState<LineageSelection>(null);
   const [selectedMetadataDataflow, setSelectedMetadataDataflow] = useState<MetadataDataflowSelection | null>(null);
+  const [selectedMonitoringDataflowRun, setSelectedMonitoringDataflowRun] = useState<MonitoringRecord | null>(null);
+  const monitoringDrawerHistoryRef = useRef(false);
   const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
   const latestStatusQuery = useLineageLatestStatus(environmentId, statusOverlay || selection?.kind === "dataflow");
   const latestStatus = latestStatusQuery.data ?? null;
@@ -151,6 +162,16 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
   }, []);
 
   useEffect(() => {
+    function handleMonitoringDrawerPopState(event: PopStateEvent) {
+      if (!monitoringDrawerHistoryRef.current || hasLineageMonitoringDrawerHistory(event.state)) return;
+      monitoringDrawerHistoryRef.current = false;
+      setSelectedMonitoringDataflowRun(null);
+    }
+    window.addEventListener("popstate", handleMonitoringDrawerPopState);
+    return () => window.removeEventListener("popstate", handleMonitoringDrawerPopState);
+  }, []);
+
+  useEffect(() => {
     const params = new URLSearchParams(routeSearch ?? "");
     const nextQuery = params.get("q");
     if (nextQuery !== null) {
@@ -204,6 +225,23 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
       return;
     }
     setSelectedMetadataDataflow(null);
+  }
+
+  function openMonitoringDataflowRun(run: MonitoringRecord) {
+    const historyState = window.history.state && typeof window.history.state === "object"
+      ? { ...(window.history.state as Record<string, unknown>) }
+      : {};
+    window.history.pushState({ ...historyState, [LINEAGE_MONITORING_DRAWER_HISTORY_KEY]: true }, "", window.location.href);
+    monitoringDrawerHistoryRef.current = true;
+    setSelectedMonitoringDataflowRun(run);
+  }
+
+  function closeMonitoringDataflowRun() {
+    if (monitoringDrawerHistoryRef.current) {
+      window.history.back();
+      return;
+    }
+    setSelectedMonitoringDataflowRun(null);
   }
 
   function focusMetadataDataflow(target: LineageDataflowFocusTarget) {
@@ -401,6 +439,7 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
             onRefreshReferenceMappings={async () => { await onRefreshLineage(); }}
             suspended={Boolean(selectedMetadataDataflowRecord)}
             onOpenDataflowDetails={openMetadataDataflow}
+            onOpenMonitoringDataflowRun={openMonitoringDataflowRun}
             onClose={() => setSelection(null)}
             onFocusItem={(focus) => {
               setFocuses((current) => current.some((item) => item.kind === focus.kind && item.id === focus.id)
@@ -426,6 +465,18 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
           onFocusInLineage={focusMetadataDataflow}
           onOpenMetadata={onOpenMetadata}
         />
+      ) : null}
+      {selectedMonitoringDataflowRun ? (
+        <Suspense fallback={null}>
+          <MonitoringDataflowRunDrawer
+            key={String(selectedMonitoringDataflowRun.dataflow_run_id ?? "")}
+            environmentId={environmentId}
+            row={selectedMonitoringDataflowRun}
+            timezoneName={timezoneName ?? "UTC"}
+            onBack={closeMonitoringDataflowRun}
+            onClose={closeMonitoringDataflowRun}
+          />
+        </Suspense>
       ) : null}
       {pendingMetadataSave && sourceSaveConfirmation ? (
         <MetadataSourceSaveConfirmationDialog

@@ -1,4 +1,5 @@
-import type { MetadataEditorDocument } from "../../shared/api/domainTypes";
+import type { MetadataEditorDocument, MetadataEditorSheet } from "../../shared/api/domainTypes";
+import { normalizeStage, stageFilterMatches } from "../../shared/stagePresentation";
 import type { SheetKey, SheetRow } from "./metadataSheetTypes";
 
 export const STUDIO_METADATA_SOURCE_FIELDS = [
@@ -12,12 +13,51 @@ export function filterMetadataRows(
   sheetKey: SheetKey,
   rows: Array<Record<string, unknown>>,
   columns: Array<{ key: string }>,
-  query: string
+  query: string,
+  stageFilter?: string | null
 ): SheetRow[] {
   const needle = query.trim().toLocaleLowerCase();
+  const normalizedStageFilter = normalizeStage(stageFilter);
   return rows
     .map<SheetRow>((row, index) => ({ ...row, __rowId: `${sheetKey}-${index}`, __rowIndex: index }))
+    .filter((row) => !normalizedStageFilter || stageFilterMatches(row.stage, normalizedStageFilter))
     .filter((row) => !needle || columns.some((column) => metadataCellMatches(row[column.key], needle)));
+}
+
+export function metadataSourceIdentity(row: Record<string, unknown>) {
+  const sourceId = Number(row.__metadata_source_id);
+  if (Number.isFinite(sourceId) && sourceId > 0) return `id:${sourceId}`;
+  const uri = formatCellValue(row.__metadata_source_uri).trim().toLowerCase();
+  if (uri) return `uri:${uri}`;
+  return `name:${formatCellValue(row.__metadata_source_name).trim().toLowerCase()}`;
+}
+
+export function metadataSourceGroupStartIds(rows: SheetRow[]) {
+  const starts = new Set<string>();
+  let previousSource = "";
+  rows.forEach((row, index) => {
+    const source = metadataSourceIdentity(row);
+    if (index === 0 || source !== previousSource) starts.add(row.__rowId);
+    previousSource = source;
+  });
+  return starts;
+}
+
+export function sameMetadataSortBucket(sheetKey: SheetKey, left: Record<string, unknown>, right: Record<string, unknown>) {
+  if (metadataSourceIdentity(left) !== metadataSourceIdentity(right)) return false;
+  if (sheetKey === "connections") return true;
+  if (sheetKey === "dataflows") return normalizeStage(left.stage) === normalizeStage(right.stage);
+  return normalizeText(left.connection_name) === normalizeText(right.connection_name)
+    && normalizeText(left.schema_name) === normalizeText(right.schema_name)
+    && normalizeText(left.table_name) === normalizeText(right.table_name)
+    && ordinalIdentity(left.ordinal_position) === ordinalIdentity(right.ordinal_position);
+}
+
+export function canMoveMetadataRow(sheetKey: SheetKey, rows: Array<Record<string, unknown>>, rowIndex: number | null, offset: -1 | 1) {
+  if (rowIndex == null) return false;
+  const targetIndex = rowIndex + offset;
+  if (rowIndex < 0 || rowIndex >= rows.length || targetIndex < 0 || targetIndex >= rows.length) return false;
+  return sameMetadataSortBucket(sheetKey, rows[rowIndex], rows[targetIndex]);
 }
 
 export function mergeFilteredRows(sourceRows: Array<Record<string, unknown>>, filteredRows: SheetRow[]) {
@@ -46,6 +86,17 @@ function searchableCellValue(value: unknown) {
     }
   }
   return String(value);
+}
+
+function normalizeText(value: unknown) {
+  return formatCellValue(value).trim().toLowerCase();
+}
+
+function ordinalIdentity(value: unknown) {
+  const text = formatCellValue(value).trim();
+  if (!text) return "last";
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? `number:${numeric}` : "last";
 }
 
 export function cleanRuntimeRows(rows: SheetRow[]) {
@@ -173,6 +224,65 @@ export function formatPrettyStructuredValue(value: unknown) {
 export function connectionNameOptions(document: MetadataEditorDocument | null) {
   const rows = document?.sheets.connections?.rows ?? [];
   return rows.map((row) => formatCellValue(row.name).trim()).filter(Boolean);
+}
+
+const connectionReferenceFields = new Set(["connection_name", "source_connection_name", "destination_connection_name"]);
+
+export function synchronizeConnectionNameReferences(document: MetadataEditorDocument, nextConnections: MetadataEditorSheet) {
+  const currentConnections = document.sheets.connections?.rows ?? [];
+  const renames = connectionNameRenames(currentConnections, nextConnections.rows);
+  const sheets: MetadataEditorDocument["sheets"] = {
+    ...document.sheets,
+    connections: nextConnections
+  };
+  if (!renames.size) return { ...document, sheets };
+
+  for (const sheetKey of ["dataflows", "schema_hints"] as const) {
+    const sheet = sheets[sheetKey];
+    if (!sheet) continue;
+    sheets[sheetKey] = {
+      ...sheet,
+      rows: sheet.rows.map((row) => replaceConnectionNameReferences(row, renames))
+    };
+  }
+  return { ...document, sheets };
+}
+
+function connectionNameRenames(currentRows: Array<Record<string, unknown>>, nextRows: Array<Record<string, unknown>>) {
+  const currentByIdentity = new Map<string, string>();
+  currentRows.forEach((row, index) => {
+    const name = normalizeConnectionName(row.name);
+    if (name) currentByIdentity.set(connectionRowIdentity(row, index), name);
+  });
+
+  const renames = new Map<string, string>();
+  nextRows.forEach((row, index) => {
+    const previousName = currentByIdentity.get(connectionRowIdentity(row, index));
+    const nextName = normalizeConnectionName(row.name);
+    if (previousName && nextName && previousName !== nextName) renames.set(previousName, nextName);
+  });
+  return renames;
+}
+
+function connectionRowIdentity(row: Record<string, unknown>, index: number) {
+  const connectionId = formatCellValue(row.connection_id).trim();
+  return connectionId ? `id:${connectionId}` : `index:${index}`;
+}
+
+function normalizeConnectionName(value: unknown) {
+  return formatCellValue(value).trim();
+}
+
+function replaceConnectionNameReferences(row: Record<string, unknown>, renames: Map<string, string>) {
+  let nextRow: Record<string, unknown> | null = null;
+  for (const [key, value] of Object.entries(row)) {
+    if (!connectionReferenceFields.has(key)) continue;
+    const replacement = renames.get(normalizeConnectionName(value));
+    if (!replacement) continue;
+    nextRow ??= { ...row };
+    nextRow[key] = replacement;
+  }
+  return nextRow ?? row;
 }
 
 export function studioRoutingValues(document: MetadataEditorDocument | null) {

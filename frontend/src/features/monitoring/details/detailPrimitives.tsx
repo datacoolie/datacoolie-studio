@@ -16,6 +16,8 @@ import {
   diagnosticsSeverityPresentation,
 } from "../diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
+import { CompactNumberValue } from "../CompactNumberValue";
+import { formatAgeNumber, formatExactBytes } from "../monitoringNumberFormat";
 import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
 import { SystemLogViewer } from "../SystemLogViewer";
 
@@ -185,12 +187,13 @@ export function freshnessRunTimeLines(row: Record<string, unknown>, timezoneName
 export function formatFreshnessAge(ageSeconds: unknown, ageDays: unknown) {
   const seconds = Number(ageSeconds);
   if (Number.isFinite(seconds)) {
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-    if (seconds < 86400) return `${Math.round((seconds / 3600) * 10) / 10}h`;
-    return `${Math.round((seconds / 86400) * 10) / 10}d`;
+    if (seconds < 60) return `${formatAgeNumber(Math.max(0, seconds))}s`;
+    if (seconds < 3600) return `${formatAgeNumber(seconds / 60)}m`;
+    if (seconds < 86400) return `${formatAgeNumber(seconds / 3600)}h`;
+    return `${formatAgeNumber(seconds / 86400)}d`;
   }
   const days = Number(ageDays);
-  return Number.isFinite(days) ? `${Math.round(days * 10) / 10}d` : "-";
+  return Number.isFinite(days) ? `${formatAgeNumber(days)}d` : "-";
 }
 
 export function DataflowPhaseContribution({ row }: { row: Record<string, unknown> }) {
@@ -308,7 +311,10 @@ export function renderGroupedValue(value: unknown, timezoneName?: string | null,
   if (field && LIST_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="list" />;
   if (field && JSON_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="json" />;
   if (field?.endsWith("duration_seconds")) return formatSeconds(Number(value) || 0);
-  if (field?.includes("bytes")) return formatBytes(Number(value) || 0);
+  if (field?.includes("bytes")) {
+    const bytes = Number(value) || 0;
+    return <span title={formatExactBytes(bytes)}>{formatBytes(bytes)}</span>;
+  }
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value) || (value && typeof value === "object")) return <JsonBlock value={value} />;
   if (typeof value === "string" && looksJson(value)) return <JsonBlock value={value} />;
@@ -370,13 +376,13 @@ export function SemanticValue({ value }: { value: SemanticValueModel }) {
       <span className="monitoring-semantic-pair">
         <span className={`monitoring-semantic-value is-${statusIntent}`} style={semanticIntentStyle(statusIntent)}>{value.status}</span>
         <span aria-hidden="true">·</span>
-        <span className={`monitoring-semantic-value is-${countIntent}`} style={semanticIntentStyle(countIntent)}>{display({ value: value.mismatch }, "value")}</span>
+        <span className={`monitoring-semantic-value is-${countIntent}`} style={semanticIntentStyle(countIntent)}><CompactNumberValue value={value.mismatch} /></span>
       </span>
     );
   }
   if (value.kind === "count") {
     const intent = value.intent ?? "neutral";
-    return <span className={`monitoring-semantic-value is-${intent}`} style={semanticIntentStyle(intent)}>{display({ value: value.value }, "value")}</span>;
+    return <span className={`monitoring-semantic-value is-${intent}`} style={semanticIntentStyle(intent)}><CompactNumberValue value={value.value} /></span>;
   }
   const intent = semanticIntent(value);
   return <span className={`monitoring-semantic-value is-${intent}`} style={semanticIntentStyle(intent)}>{value.value}</span>;
@@ -573,7 +579,10 @@ export function jsonTokenClass(token: string, afterToken: string) {
 export function detailValue(row: Record<string, unknown>, field: string, timezoneName?: string | null) {
   const value = row[field];
   if (field.endsWith("duration_seconds")) return `${display(row, field)}s`;
-  if (field.includes("bytes")) return formatBytes(num(row, field));
+  if (field.includes("bytes")) {
+    const bytes = num(row, field);
+    return <span title={formatExactBytes(bytes)}>{formatBytes(bytes)}</span>;
+  }
   if (typeof value === "string" && timezoneName && isTimestampFieldName(field)) return formatTimestampForDisplay(value, timezoneName);
   if (Array.isArray(value) || (value && typeof value === "object")) {
     return <JsonBlock value={value} />;

@@ -4,6 +4,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { formatTimestampForDisplay, parseTimestamp } from "../../shared/time";
 import { monitoringSystemLogsOptions, SYSTEM_LOG_PAGE_SIZE } from "./monitoringQueries";
+import { CompactNumberValue } from "./CompactNumberValue";
 
 export { systemLogScopeParams } from "./monitoringQueries";
 
@@ -135,8 +136,8 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
           </div>
           <div className="system-log-dialog-summary">
             <span>{scopeLabel}</span>
-            <span>{loading ? "Loading…" : `${total} records`}</span>
-            <span>{files.length} files</span>
+            <span>{loading ? "Loading…" : <><CompactNumberValue value={total} /> records</>}</span>
+            <span><CompactNumberValue value={files.length} /> files</span>
           </div>
           <button className="icon-action" type="button" aria-label="Close system logs" title="Close" onClick={onClose}>
             <X size={17} />
@@ -199,7 +200,7 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
           {records.length ? (
             <div className="system-log-lines" role="log" aria-label="System log records">
               {records.map((record, index) => <SystemLogLine key={logRecordKey(record, index)} record={record} timezoneName={timezoneName} />)}
-              {readErrors.length ? <div className="system-log-read-warning">{readErrors.length} file read warnings occurred while loading these logs.</div> : null}
+              {readErrors.length ? <div className="system-log-read-warning"><CompactNumberValue value={readErrors.length} /> file read warnings occurred while loading these logs.</div> : null}
               {error ? <div className="system-log-read-warning is-error">Could not load more records: {error}</div> : null}
               {canLoadMore ? (
                 <button className="system-log-load-more" type="button" disabled={loadingMore} onClick={() => void loadMore()}>

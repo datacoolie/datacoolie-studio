@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from datacoolie_studio.domains.assets.identifiers import canonical_asset_id
+from datacoolie_studio.domains.assets.identifiers import canonical_asset_id, database_resolution_scope
 
 
 @dataclass
@@ -11,6 +11,7 @@ class _AssetGroup:
     id: str
     node: dict[str, Any]
     identifiers: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
+    resolution_scopes: set[str] = field(default_factory=set)
     metadata_source_ids: set[int] = field(default_factory=set)
     roles: set[str] = field(default_factory=set)
     connection_names: set[str] = field(default_factory=set)
@@ -47,6 +48,9 @@ class AssetRegistry:
             group = _AssetGroup(id=group_id, node={**node, "id": group_id, "identity": group_id})
             self._groups[group_id] = group
 
+        resolution_scope = database_resolution_scope(node)
+        if resolution_scope:
+            group.resolution_scopes.add(resolution_scope)
         group.identifiers.update(identifiers)
         for key in identifiers:
             self._identifier_to_group[key] = group.id
@@ -73,17 +77,27 @@ class AssetRegistry:
     def resolve_identifier(self, kind: str, normalized_value: str) -> str | None:
         return self._identifier_to_group.get((kind, normalized_value))
 
-    def find_logical_table_suffix(self, suffix: str, namespace: str | None = None) -> list[str]:
+    def find_logical_table_suffix(
+        self,
+        suffix: str,
+        namespace: str | None = None,
+        resolution_scope: str | None = None,
+        *,
+        exact: bool = False,
+    ) -> list[str]:
         normalized_suffix = suffix.lower()
         matches: set[str] = set()
         for (kind, value), group_id in self._identifier_to_group.items():
             if kind != "logical_table":
                 continue
-            identifier = self._groups[group_id].identifiers[(kind, value)]
+            group = self._groups[group_id]
+            identifier = group.identifiers[(kind, value)]
             if namespace and identifier.get("namespace") != namespace:
                 continue
+            if resolution_scope and resolution_scope not in group.resolution_scopes:
+                continue
             logical_name = value.split("|", 1)[-1]
-            if logical_name == normalized_suffix or logical_name.endswith(f".{normalized_suffix}"):
+            if logical_name == normalized_suffix or (not exact and logical_name.endswith(f".{normalized_suffix}")):
                 matches.add(group_id)
         return sorted(matches)
 
@@ -123,6 +137,9 @@ class AssetRegistry:
             "normalized_value": f"conflict:{source_id}:{node['id']}:{primary['normalized_value']}",
         })
         group = _AssetGroup(id=conflict_id, node={**node, "id": conflict_id, "identity": conflict_id})
+        resolution_scope = database_resolution_scope(node)
+        if resolution_scope:
+            group.resolution_scopes.add(resolution_scope)
         group.identifiers.update(identifiers)
         group.metadata_source_ids.add(source_id)
         if node.get("role"):

@@ -391,6 +391,53 @@ def read_orders(engine):
     assert "def helper" not in python_definition["source"]
 
 
+def test_mssql_sql_asset_formats_and_keeps_sql_references():
+    query = """
+    SELECT [Border].STAsBinary() AS [Border], [CountryID]
+    FROM [Person].[StateProvince]
+    """
+    document = normalize_metadata_document(
+        1,
+        "mssql.json",
+        {
+            "connections": [
+                {
+                    "name": "mssql",
+                    "connection_type": "database",
+                    "format": "sql",
+                    "configure": {"database_type": "mssql"},
+                },
+                {
+                    "name": "lake",
+                    "connection_type": "file",
+                    "format": "parquet",
+                    "configure": {"base_path": "./data"},
+                },
+            ],
+            "dataflows": [
+                {
+                    "name": "read_state_province",
+                    "source": {"connection_name": "mssql", "query": query},
+                    "destination": {"connection_name": "lake", "table": "state_province"},
+                },
+            ],
+        },
+    )
+
+    lineage = build_lineage({"_documents": [document], "errors": []}, environment_id=42)
+    payload = build_assets_inventory(lineage, {1: "mssql.json"})
+    sql_asset = next(item for item in payload["assets"] if item["asset_type"] == "sql_query")
+    detail = build_asset_detail(sql_asset["id"], payload, lineage)
+
+    assert sql_asset["database_type"] == "mssql"
+    assert not any(item["code"] == "sql_parse_error" for item in lineage["diagnostics"])
+    assert lineage["references"]
+    assert detail is not None
+    definition = detail["definition"]
+    assert definition["diagnostics"] == []
+    assert "\nFROM [Person].[StateProvince]" in definition["formatted"]
+
+
 def test_asset_detail_definition_resolves_manually_selected_package_directory(tmp_path: Path):
     from datacoolie_studio.db.models import EnvironmentSource
 

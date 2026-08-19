@@ -15,7 +15,7 @@ from datacoolie_studio.db.models import (
 )
 from datacoolie_studio.domains.analysis.models import AnalysisResult
 from datacoolie_studio.domains.analysis.service import analyze_code_artifact_function
-from datacoolie_studio.domains.analysis.sql import analyze_sql
+from datacoolie_studio.domains.analysis.sql import analyze_sql, sql_dialect_for_source
 from datacoolie_studio.domains.assets.resolver import AssetResolver
 from datacoolie_studio.domains.assets.registry import AssetRegistry
 from datacoolie_studio.domains.assets.manual_mapping import manual_mapping_from_observations
@@ -37,7 +37,7 @@ from datacoolie_studio.domains.read_models.cache import (
 from datacoolie_studio.domains.read_models.keys import LINEAGE_GRAPH
 
 
-LINEAGE_ANALYZER_VERSION = f"lineage-v3:{ANALYZER_VERSION}:reference-resolution-v1"
+LINEAGE_ANALYZER_VERSION = f"lineage-v3:{ANALYZER_VERSION}:reference-resolution-v3-context-aware"
 LINEAGE_RESPONSE_VERSION = "lineage-v4-compact"
 
 
@@ -274,7 +274,7 @@ def _analyze_dataflow_source(
     source = dataflow.get("source") or {}
     query = source.get("query")
     if isinstance(query, str) and query.strip():
-        return analyze_sql(query)
+        return analyze_sql(query, dialect=sql_dialect_for_source(source))
     function_path = source.get("python_function")
     if not isinstance(function_path, str) or not function_path.strip():
         return AnalysisResult()

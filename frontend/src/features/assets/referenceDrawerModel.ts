@@ -33,6 +33,16 @@ export function referenceResolutionStory(
       detail: "The resolver cannot select one unique target.",
     };
   }
+  if (reference.resolution.reason === "out_of_scope") {
+    const candidateCount = reference.candidate_asset_ids.length;
+    return {
+      tone: "attention",
+      title: "A matching asset is outside the source scope.",
+      detail: candidateCount
+        ? `${plural(candidateCount, "candidate")} found; review it or add a manual mapping.`
+        : "Review the source scope or add a manual mapping.",
+    };
+  }
   if (reference.resolution.reason === "target_missing") {
     const missingTarget = reference.manual_mapping?.target_normalized_value;
     return {

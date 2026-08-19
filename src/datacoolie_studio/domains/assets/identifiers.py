@@ -56,6 +56,32 @@ def connection_instance(endpoint: dict[str, Any]) -> str:
     return ""
 
 
+def database_resolution_scope(endpoint: dict[str, Any]) -> str:
+    """Return a matching scope without changing persisted asset identifiers.
+
+    ``connection_instance`` intentionally remains the stable physical namespace
+    used by logical identifiers. Database resolution also needs the selected
+    catalog/database, especially when host information is absent or shared.
+    Non-database connections keep their existing scope so Lakehouse and file
+    references retain their current cross-connection behavior.
+    """
+
+    physical = connection_instance(endpoint).strip().lower()
+    connection_type = _clean(endpoint.get("connection_type")).lower()
+    database_type = _clean(endpoint.get("database_type")).lower()
+    if connection_type != "database" and not database_type:
+        return physical
+
+    parts = [physical or database_type or "database"]
+    catalog = _clean(endpoint.get("catalog")).lower()
+    database = _clean(endpoint.get("database")).lower()
+    if catalog:
+        parts.append(f"catalog:{catalog}")
+    if database:
+        parts.append(f"database:{database}")
+    return "|".join(parts)
+
+
 def normalize_api_url(value: str) -> str:
     normalized = value.strip().replace("\\", "/")
     if not normalized:

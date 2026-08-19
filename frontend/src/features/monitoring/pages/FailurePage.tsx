@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
-import type { MonitoringFilters } from "../monitoringFilters";import { DetailMetric, HealthStripCard, ReportChart, ReportPanel, TablePager, WindowPairDetail, failureCategoryPhaseMatrixOption, failureCategoriesRuleTooltip, failureHorizontalBarOption, failureTrendOption, formatNumber, formatPercent, monitoringTimezone } from "../components/monitoringPrimitives";
+import type { MonitoringFilters } from "../monitoringFilters";import { CompactNumberValue, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TablePager, WindowPairDetail, failureCategoryPhaseMatrixOption, failureCategoriesRuleTooltip, failureHorizontalBarOption, failureTrendOption, formatPercent, monitoringTimezone } from "../components/monitoringPrimitives";
 import { EndpointImpactTable, FailurePhaseLegend, FailureQueueTable, FailureTrendLegend, RepeatedFailureTable } from "./FailurePageSupport";
 
 const FAILURE_QUEUE_PAGE_SIZE = 50;
@@ -67,14 +67,14 @@ export function FailurePage({
       <section className="overview-health-strip monitoring-failure-health-strip">
         <HealthStripCard
           label="Failed jobs"
-          value={formatNumber(Number(kpis.failed_jobs ?? 0))}
+          value={<CompactNumberValue value={Number(kpis.failed_jobs ?? 0)} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.job_failed ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.job_failed ?? 0} />}
               firstTone={(last24Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.job_failed ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.job_failed ?? 0} />}
               secondTone={(last7Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
             />
           }
@@ -84,14 +84,14 @@ export function FailurePage({
         />
         <HealthStripCard
           label="Failed dataflows"
-          value={formatNumber(Number(kpis.failed_dataflows ?? rows.length ?? 0))}
+          value={<CompactNumberValue value={Number(kpis.failed_dataflows ?? rows.length ?? 0)} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatNumber(last24Window.dataflow_failed ?? 0)}
+              firstValue={<CompactNumberValue value={last24Window.dataflow_failed ?? 0} />}
               firstTone={(last24Window.dataflow_failed ?? 0) > 0 ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={formatNumber(last7Window.dataflow_failed ?? 0)}
+              secondValue={<CompactNumberValue value={last7Window.dataflow_failed ?? 0} />}
               secondTone={(last7Window.dataflow_failed ?? 0) > 0 ? "bad" : "neutral"}
             />
           }
@@ -109,12 +109,12 @@ export function FailurePage({
         />
         <HealthStripCard
           label="Blast radius"
-          value={`${formatNumber(Number(kpis.affected_job_shapes ?? kpis.affected_job_contexts ?? kpis.affected_stages ?? 0))} shapes`}
+          value={<><CompactNumberValue value={Number(kpis.affected_job_shapes ?? kpis.affected_job_contexts ?? kpis.affected_stages ?? 0)} /> shapes</>}
           detail={
             <>
-              <DetailMetric label="dataflows" value={formatNumber(Number(kpis.affected_dataflows ?? 0))} tone={Number(kpis.affected_dataflows ?? 0) ? "warning" : "neutral"} />
+              <DetailMetric label="dataflows" value={<CompactNumberValue value={Number(kpis.affected_dataflows ?? 0)} />} tone={Number(kpis.affected_dataflows ?? 0) ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="routes" value={formatNumber(Number(kpis.affected_routes ?? 0))} tone={Number(kpis.affected_routes ?? 0) ? "warning" : "neutral"} />
+              <DetailMetric label="routes" value={<CompactNumberValue value={Number(kpis.affected_routes ?? 0)} />} tone={Number(kpis.affected_routes ?? 0) ? "warning" : "neutral"} />
             </>
           }
           intent={Number(kpis.affected_job_shapes ?? kpis.affected_job_contexts ?? kpis.affected_stages ?? 0) || Number(kpis.affected_dataflows ?? 0) ? "warning" : "neutral"}
@@ -123,12 +123,12 @@ export function FailurePage({
         />
         <HealthStripCard
           label="Repeated signatures"
-          value={formatNumber(Number(kpis.repeated_signatures ?? 0))}
+          value={<CompactNumberValue value={Number(kpis.repeated_signatures ?? 0)} />}
           detail={
             <>
               <DetailMetric label="repeat runs" value={formatPercent(Number(kpis.repeated_failure_share ?? 0))} tone={Number(kpis.repeated_failure_share ?? 0) ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="unique" value={formatNumber(Number(kpis.unique_signatures ?? 0))} tone="neutral" />
+              <DetailMetric label="unique" value={<CompactNumberValue value={Number(kpis.unique_signatures ?? 0)} />} tone="neutral" />
             </>
           }
           intent={Number(kpis.repeated_signatures ?? 0) ? "warning" : "neutral"}
@@ -138,7 +138,7 @@ export function FailurePage({
         <HealthStripCard
           label="Top cause share"
           value={formatPercent(Number(kpis.top_cause_share ?? 0))}
-          detail={<DetailMetric label={`${String(kpis.top_cause_category ?? "-")} / ${String(kpis.top_cause_phase ?? "-")}`} value={formatNumber(Number(kpis.top_cause_runs ?? 0))} tone={Number(kpis.top_cause_runs ?? 0) ? "bad" : "neutral"} />}
+          detail={<DetailMetric label={`${String(kpis.top_cause_category ?? "-")} / ${String(kpis.top_cause_phase ?? "-")}`} value={<CompactNumberValue value={Number(kpis.top_cause_runs ?? 0)} />} tone={Number(kpis.top_cause_runs ?? 0) ? "bad" : "neutral"} />}
           intent={Number(kpis.top_cause_share ?? 0) >= 50 ? "bad" : Number(kpis.top_cause_share ?? 0) > 0 ? "warning" : "neutral"}
           accent="intent"
           title={topCauseTitle}

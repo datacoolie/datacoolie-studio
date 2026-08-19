@@ -1,7 +1,7 @@
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";import { CompactValue, DataTable, DataflowContextCell, DataflowNameCell, DetailMetric, EndpointCell, EndpointRouteNode, HealthStripCard, ReportChart, ReportPanel, TablePager, baseChartOption, bottomAnchoredValueXAxis, createEmptyVolumeTrendRow, formatBytes, formatBytesShort, formatCompact, formatNumber, horizontalBarDataZoom, mergeVolumeTrendRows, monitoringTimezone, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption } from "../components/monitoringPrimitives";
+import type { TableSort } from "../MonitoringCharts";import { CompactNumberValue, CompactValue, DataTable, DataflowContextCell, DataflowNameCell, DetailMetric, EndpointCell, EndpointRouteNode, HealthStripCard, ReportChart, ReportPanel, TablePager, baseChartOption, bottomAnchoredValueXAxis, createEmptyVolumeTrendRow, formatBytes, formatBytesShort, formatCompact, formatCompactNumber, formatNumber, horizontalBarDataZoom, mergeVolumeTrendRows, monitoringTimezone, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption } from "../components/monitoringPrimitives";
 import { alignedVolumeAxisBounds } from "../volumePageModel";
 
 export function VolumePage({
@@ -43,8 +43,8 @@ export function VolumePage({
       <section className="overview-health-strip monitoring-volume-health-strip">
         <HealthStripCard
           label="Rows read"
-          value={formatNumber(kpis.total_rows_read ?? 0)}
-          detail={<DetailMetric label="runs" value={formatNumber(report.summary.dataflow_records ?? 0)} tone="neutral" />}
+          value={<CompactNumberValue value={kpis.total_rows_read ?? 0} />}
+          detail={<DetailMetric label="runs" value={<CompactNumberValue value={report.summary.dataflow_records ?? 0} />} tone="neutral" />}
           intent="neutral"
           accent="source"
           className="volume-kpi volume-kpi-rows-read"
@@ -52,12 +52,12 @@ export function VolumePage({
         />
         <HealthStripCard
           label="Est rows written"
-          value={formatNumber(kpis.total_est_rows_written ?? 0)}
+          value={<CompactNumberValue value={kpis.total_est_rows_written ?? 0} />}
           detail={
             <span className="health-rate-detail">
-              <DetailMetric label="lakehouse obs" value={formatNumber(kpis.total_rows_written ?? 0)} tone="written" labelFirst />
+              <DetailMetric label="lakehouse obs" value={<CompactNumberValue value={kpis.total_rows_written ?? 0} />} tone="written" labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="non-lh est" value={formatNumber(kpis.total_est_rows_written_non_lakehouse ?? 0)} tone="written" labelFirst />
+              <DetailMetric label="non-lh est" value={<CompactNumberValue value={kpis.total_est_rows_written_non_lakehouse ?? 0} />} tone="written" labelFirst />
             </span>
           }
           intent="neutral"
@@ -69,11 +69,11 @@ export function VolumePage({
           label="Row changes"
           value={
             <span className="volume-kpi-triple-value" aria-label="inserted / updated / deleted">
-              <b className="is-insert">{formatNumber(kpis.total_rows_inserted ?? 0)}</b>
+              <b className="is-insert"><CompactNumberValue value={kpis.total_rows_inserted ?? 0} /></b>
               <span>/</span>
-              <b className="is-update">{formatNumber(kpis.total_rows_updated ?? 0)}</b>
+              <b className="is-update"><CompactNumberValue value={kpis.total_rows_updated ?? 0} /></b>
               <span>/</span>
-              <b className="is-delete">{formatNumber(kpis.total_rows_deleted ?? 0)}</b>
+              <b className="is-delete"><CompactNumberValue value={kpis.total_rows_deleted ?? 0} /></b>
             </span>
           }
           detail={<DetailMetric label="insert / update / delete" value="lakehouse" tone="neutral" />}
@@ -101,9 +101,9 @@ export function VolumePage({
           label="Files changed"
           value={
             <span className="volume-kpi-dual-value" aria-label="files added / files removed">
-              <b className="is-added">{formatNumber(kpis.files_added ?? 0)}</b>
+              <b className="is-added"><CompactNumberValue value={kpis.files_added ?? 0} /></b>
               <span>/</span>
-              <b className="is-removed">{formatNumber(kpis.files_removed ?? 0)}</b>
+              <b className="is-removed"><CompactNumberValue value={kpis.files_removed ?? 0} /></b>
             </span>
           }
           detail={<DetailMetric label="avg added file" value={formatBytes(kpis.avg_bytes_per_file_added ?? 0)} tone="neutral" />}
@@ -114,9 +114,9 @@ export function VolumePage({
         />
         <HealthStripCard
           label="High-volume candidates"
-          value={formatNumber(highVolumeCount)}
+          value={<CompactNumberValue value={highVolumeCount} />}
           detail={
-            <DetailMetric label="candidate runs" value={formatNumber(candidateRunCount)} tone="amber" labelFirst />
+            <DetailMetric label="candidate runs" value={<CompactNumberValue value={candidateRunCount} />} tone="amber" labelFirst />
           }
           intent="neutral"
           accent={highVolumeCount ? "warning" : "neutral"}
@@ -196,7 +196,7 @@ export function VolumePage({
 
         <ReportPanel
           title="Dataflow volume registry"
-          subtitle={`${formatNumber(totalRows)} dataflows · totals in current filters`}
+          subtitle={<><CompactNumberValue value={totalRows} /> dataflows · totals in current filters</>}
           className="monitoring-volume-runs-panel"
           titleTooltip="One row per dataflow in the current filters. Totals are aggregated across related runs; click a row to inspect volume evidence and individual runs."
           headerAction={
@@ -274,14 +274,15 @@ function DataflowVolumeRegistryTable({
   return (
     <DataTable<MonitoringRecord>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 150, fillPriority: "normal", render: (row) => <DataflowNameCell row={row} /> },
         { key: "context", label: "Context", sortable: true, sortKey: "stage", minWidth: 108, maxWidth: 150, fillPriority: "normal", render: (row) => <DataflowContextCell row={row} /> },
         { key: "source", label: "Source", minWidth: 142, maxWidth: 220, fillPriority: "normal", render: (row) => <EndpointCell row={row} direction="source" /> },
         { key: "destination", label: "Destination", minWidth: 142, maxWidth: 220, fillPriority: "normal", render: (row) => <EndpointCell row={row} direction="destination" /> },
-        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 54, maxWidth: 82, render: (row) => <CompactValue value={formatNumber(num(row, "run_count"))} /> },
-        { key: "volume_rows_read", label: "Rows read", sortable: true, autoFit: true, minWidth: 82, maxWidth: 124, render: (row) => <CompactValue value={formatNumber(num(row, "volume_rows_read"))} /> },
-        { key: "volume_est_rows_written", label: "Est rows written", sortable: true, autoFit: true, minWidth: 104, maxWidth: 148, render: (row) => <CompactValue value={formatNumber(num(row, "volume_est_rows_written"))} /> },
+        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 54, maxWidth: 82, render: (row) => <CompactNumberValue value={num(row, "run_count")} /> },
+        { key: "volume_rows_read", label: "Rows read", sortable: true, autoFit: true, minWidth: 82, maxWidth: 124, render: (row) => <CompactNumberValue value={num(row, "volume_rows_read")} /> },
+        { key: "volume_est_rows_written", label: "Est rows written", sortable: true, autoFit: true, minWidth: 104, maxWidth: 148, render: (row) => <CompactNumberValue value={num(row, "volume_est_rows_written")} /> },
         { key: "volume_rows_inserted", label: "Row changes", sortable: true, minWidth: 118, maxWidth: 154, render: (row) => <VolumeRowChangesCell row={row} /> },
         { key: "volume_files_changed", label: "Files", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (row) => <VolumeFilesCell row={row} /> },
         { key: "volume_net_bytes", label: "Net bytes", sortable: true, autoFit: true, minWidth: 86, maxWidth: 124, render: (row) => <CompactValue value={formatBytes(num(row, "volume_net_bytes"))} /> },
@@ -303,10 +304,10 @@ function VolumeRowChangesCell({ row }: { row: MonitoringRecord }) {
   const deleted = num(row, "volume_rows_deleted");
   const title = `Inserted / updated / deleted: ${formatNumber(inserted)} / ${formatNumber(updated)} / ${formatNumber(deleted)}`;
   return (
-    <span className="volume-row-changes-inline" title={title}>
-      <span className="is-insert">{formatNumber(inserted)}</span><i>/</i>
-      <span className="is-update">{formatNumber(updated)}</span><i>/</i>
-      <span className="is-delete">{formatNumber(deleted)}</span>
+      <span className="volume-row-changes-inline" title={title}>
+      <span className="is-insert"><CompactNumberValue value={inserted} /></span><i>/</i>
+      <span className="is-update"><CompactNumberValue value={updated} /></span><i>/</i>
+      <span className="is-delete"><CompactNumberValue value={deleted} /></span>
     </span>
   );
 }
@@ -316,9 +317,9 @@ function VolumeFilesCell({ row }: { row: MonitoringRecord }) {
   const removed = num(row, "volume_files_removed");
   const title = `Files added / removed: ${formatNumber(added)} / ${formatNumber(removed)}`;
   return (
-    <span className="volume-files-changed-inline" title={title}>
-      <span className="is-added">{formatNumber(added)}</span><i>/</i>
-      <span className="is-removed">{formatNumber(removed)}</span>
+      <span className="volume-files-changed-inline" title={title}>
+      <span className="is-added"><CompactNumberValue value={added} /></span><i>/</i>
+      <span className="is-removed"><CompactNumberValue value={removed} /></span>
     </span>
   );
 }
@@ -355,11 +356,20 @@ function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number
                 ? "files"
                 : "neutral";
         const destinationValue = estRowsWritten > 0
+          ? formatCompactNumber(estRowsWritten)
+          : rowsWritten > 0
+            ? formatCompactNumber(rowsWritten)
+            : hasStorageBytes
+              ? formatBytesShort(bytesAdded + bytesRemoved)
+              : filesChanged > 0
+                ? formatCompactNumber(filesChanged)
+                : "—";
+        const destinationExactValue = estRowsWritten > 0
           ? formatNumber(estRowsWritten)
           : rowsWritten > 0
             ? formatNumber(rowsWritten)
             : hasStorageBytes
-              ? formatBytesShort(bytesAdded + bytesRemoved)
+              ? formatBytes(bytesAdded + bytesRemoved)
               : filesChanged > 0
                 ? formatNumber(filesChanged)
                 : "—";
@@ -373,7 +383,7 @@ function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number
                 ? "Files changed"
                 : "No destination volume";
         const destinationTitle = [
-          `${destinationLabel}: ${destinationValue}`,
+          `${destinationLabel}: ${destinationExactValue}`,
           estRowsWritten > 0 && rowsWritten > 0 ? `Observed lakehouse rows written: ${formatNumber(rowsWritten)}` : "",
           hasStorageBytes ? `Net bytes: ${formatSignedBytes(netBytes)}` : "",
           filesChanged > 0 ? `Files changed: ${formatNumber(filesChanged)}` : ""
@@ -403,8 +413,8 @@ function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number
               </div>
             </div>
             <div className="dataflow-route-health">
-              <strong className="volume-route-read-value" title={`Rows read: ${formatNumber(rowsRead)}`}>{formatNumber(rowsRead)}</strong>
-              <small title={`Rows read: ${formatNumber(rowsRead)} · Runs: ${formatNumber(num(row, "runs"))}`}>{formatNumber(num(row, "runs"))} runs</small>
+              <strong className="volume-route-read-value" title={`Rows read: ${formatNumber(rowsRead)}`}><CompactNumberValue value={rowsRead} /></strong>
+              <small title={`Rows read: ${formatNumber(rowsRead)} · Runs: ${formatNumber(num(row, "runs"))}`}><CompactNumberValue value={num(row, "runs")} /> runs</small>
             </div>
             <div className="dataflow-route-volume">
               <strong className={`volume-route-destination-value volume-route-value-${destinationTone}`} title={destinationTitle}>{destinationValue}</strong>

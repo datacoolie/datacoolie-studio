@@ -20,7 +20,7 @@ import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart
 import { formatTimestampForDisplay } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
-import { CopyableText, DataflowContextCell, DataflowNameCell, DataflowPhaseCell, DataflowVolumeCell, EndpointCell, EndpointRouteNode, IssuePreview, TableDateTimeValue, WatermarkBadge, cleanDisplayValue, compactRunId, dataflowNameStatusHealthOption, formatPercent, stageTotal, successRateIntent } from "../components/monitoringPrimitives";
+import { CompactNumberValue, CopyableText, DataflowContextCell, DataflowNameCell, DataflowPhaseCell, DataflowVolumeCell, EndpointCell, EndpointRouteNode, IssuePreview, TableDateTimeValue, WatermarkBadge, cleanDisplayValue, compactRunId, dataflowNameStatusHealthOption, formatPercent, stageTotal, successRateIntent } from "../components/monitoringPrimitives";
 
 export function DataflowNameStatusHealthPanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
   const visible = rows.filter((row) => String(row.dataflow_name ?? "").trim() && stageTotal(row as Record<string, string | number>) > 0);
@@ -78,12 +78,12 @@ export function DataflowEndpointHealthPanel({ rows }: { rows: Array<Record<strin
             <div className="dataflow-route-health">
               <strong className={`status-${healthIntent}`}>{formatPercent(successRate)}</strong>
               <small>
-                <span>{formatNumber(num(row, "runs"))} runs</span>
-                {failed ? <><span aria-hidden="true"> · </span><span className="dataflow-route-failures">{formatNumber(failed)} failed</span></> : null}
+                <span><CompactNumberValue value={num(row, "runs")} /> runs</span>
+                {failed ? <><span aria-hidden="true"> · </span><span className="dataflow-route-failures"><CompactNumberValue value={failed} /> failed</span></> : null}
               </small>
             </div>
             <div className="dataflow-route-volume">
-              <strong>{formatNumber(rowsRead)} / {formatNumber(rowsWritten)}</strong>
+              <strong><CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} /></strong>
               <small className="dataflow-route-duration">P95 {formatSeconds(p95)}</small>
             </div>
           </div>
@@ -123,6 +123,7 @@ export function DataflowRunsTable({
   return (
     <DataTable<MonitoringRecord>
       rows={rows}
+      compactNumbers
       columns={[
         { key: "job_id", label: "Job", sortable: true, width: 104, className: "dataflow-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
         { key: "dataflow_name", label: "Dataflow", sortable: true, width: 148, className: "dataflow-run-col-dataflow", render: (row) => <DataflowNameCell row={row} /> },

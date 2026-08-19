@@ -1,5 +1,6 @@
 import { History, Loader2, Save, Search, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { stageToneClass, type StageToneMap } from "../../shared/stagePresentation";
 import type { SheetKey } from "./metadataSheetTypes";
 
 interface MetadataSheetToolbarProps {
@@ -13,6 +14,8 @@ interface MetadataSheetToolbarProps {
   totalRowCount: number;
   mode: "view" | "edit";
   query: string;
+  stageFilter?: string | null;
+  stageToneMap?: StageToneMap;
   readOnly?: boolean;
   sourceFormat: string;
   sourceUri: string;
@@ -22,6 +25,7 @@ interface MetadataSheetToolbarProps {
   onHistoryOpen: () => void;
   onModeChange: (mode: "view" | "edit") => void;
   onQueryChange: (query: string) => void;
+  onStageFilterClear?: () => void;
   onSave: () => void;
   onSaveDraft: () => void;
   onValidate: () => void;
@@ -44,6 +48,8 @@ export function MetadataSheetToolbar({
   totalRowCount,
   mode,
   query,
+  stageFilter = null,
+  stageToneMap,
   readOnly = false,
   sourceFormat,
   sourceUri,
@@ -53,12 +59,14 @@ export function MetadataSheetToolbar({
   onHistoryOpen,
   onModeChange,
   onQueryChange,
+  onStageFilterClear,
   onSave,
   onSaveDraft,
   onValidate
 }: MetadataSheetToolbarProps) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const hasQuery = Boolean(query.trim());
+  const hasFilter = hasQuery || Boolean(stageFilter);
 
   useEffect(() => {
     const focusFind = (event: KeyboardEvent) => {
@@ -100,8 +108,8 @@ export function MetadataSheetToolbar({
               Edit
             </button>
           </div>
-        </div>
-        <div className="metadata-sheet-actions">
+          </div>
+          <div className="metadata-sheet-actions">
           {mode === "edit" ? (
             <div className="metadata-edit-actions">
               {!readOnly ? (
@@ -147,7 +155,15 @@ export function MetadataSheetToolbar({
               History
             </button>
           ) : null}
-          <div className={`metadata-find${hasQuery ? " active" : ""}`}>
+          {stageFilter ? (
+            <div className={`metadata-stage-filter ${stageToneClass(stageFilter, stageToneMap)}`} role="status" title="Exact normalized stage filter">
+              <span>Stage: {stageFilter}</span>
+              <button type="button" onClick={onStageFilterClear} aria-label="Clear stage filter" title="Clear stage filter">
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
+          <div className={`metadata-find${hasFilter ? " active" : ""}`}>
             <label className="search-box metadata-find-input">
               <Search size={16} />
               <input
@@ -157,6 +173,7 @@ export function MetadataSheetToolbar({
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     if (hasQuery) onQueryChange("");
+                    else if (stageFilter) onStageFilterClear?.();
                     else event.currentTarget.blur();
                   }
                 }}
@@ -165,14 +182,16 @@ export function MetadataSheetToolbar({
                 title="Filter rows (Ctrl+F)"
               />
             </label>
-            {hasQuery ? (
+            {hasFilter ? (
               <>
                 <span className={`metadata-find-count${filteredRowCount ? "" : " empty"}`} aria-live="polite">
                   {filteredRowCount} of {totalRowCount} rows
                 </span>
-                <button type="button" onClick={() => onQueryChange("")} aria-label="Clear filter" title="Clear filter (Esc)">
-                  <X size={15} />
-                </button>
+                {hasQuery ? (
+                  <button type="button" onClick={() => onQueryChange("")} aria-label="Clear text filter" title="Clear text filter (Esc)">
+                    <X size={15} />
+                  </button>
+                ) : null}
               </>
             ) : null}
           </div>

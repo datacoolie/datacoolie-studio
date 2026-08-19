@@ -8,6 +8,7 @@ import {
   lineageGraphOptions,
   lineageLatestStatusOptions,
   lineageQueryKeys,
+  LINEAGE_RUN_HISTORY_PAGE_SIZE,
 } from "./lineageQueries";
 
 const graph = {
@@ -38,18 +39,28 @@ describe("Lineage query ownership", () => {
     expect(latestRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("caches exact dataflow run history and refetches after operations invalidation", async () => {
+  it("loads exact dataflow run history in ten-row pages and refetches after operations invalidation", async () => {
     const client = new QueryClient();
-    const response = { records: [
-      { dataflow_id: "orders", dataflow_name: "Orders" },
-      { dataflow_id: "other", dataflow_name: "Other" },
-    ], errors: [], summary: { records: 2, limit: 25 } } as MonitoringRecordsResponse<MonitoringRecord>;
+    const response = { records: Array.from({ length: LINEAGE_RUN_HISTORY_PAGE_SIZE }, (_, index) => ({
+      dataflow_id: "orders", dataflow_name: "Orders", dataflow_run_id: `run-${index}`,
+    })), errors: [], summary: { records: LINEAGE_RUN_HISTORY_PAGE_SIZE, total_records: 12, limit: LINEAGE_RUN_HISTORY_PAGE_SIZE, offset: 0 } } as MonitoringRecordsResponse<MonitoringRecord>;
     const request = vi.spyOn(api, "getMonitoringDataflows").mockResolvedValue(response);
     const options = lineageDataflowRunsOptions(7, "orders", "Orders");
-    expect(await client.fetchQuery(options)).toHaveLength(1);
-    expect(await client.fetchQuery(options)).toHaveLength(1);
+    const first = await client.fetchInfiniteQuery(options);
+    expect(first.pages[0].records).toHaveLength(LINEAGE_RUN_HISTORY_PAGE_SIZE);
+    expect(options.getNextPageParam(response, [response], 0, [0])).toBe(LINEAGE_RUN_HISTORY_PAGE_SIZE);
+    expect(await client.fetchInfiniteQuery(options)).toEqual(first);
     await client.invalidateQueries({ queryKey: environmentQueryKeys.monitoring(7) });
-    expect(await client.fetchQuery(options)).toHaveLength(1);
+    await client.fetchInfiniteQuery(options);
+    expect(request).toHaveBeenCalledWith(7, {
+      investigateKind: "dataflow",
+      investigateValue: "orders",
+      range: "all",
+      limit: LINEAGE_RUN_HISTORY_PAGE_SIZE,
+      offset: 0,
+      sortBy: "start_time",
+      sortDir: "desc",
+    });
     expect(request).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,5 +1,5 @@
 import type { EChartsOption } from "echarts";
-import type { MonitoringReport } from "../../../shared/api/domainTypes";import { DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, baseChartOption, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatNumber, formatPercent, formatTimestampForDisplay, horizontalBarDataZoom, horizontalBarSeriesSizing, monitoringTimezone, num, reportChartPalette } from "../components/monitoringPrimitives";
+import type { MonitoringReport } from "../../../shared/api/domainTypes";import { CompactNumberValue, DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, baseChartOption, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatNumber, formatPercent, formatTimestampForDisplay, horizontalBarDataZoom, horizontalBarSeriesSizing, monitoringTimezone, num, reportChartPalette } from "../components/monitoringPrimitives";
 import { reportTightChartGrid } from "./DiagnosticsPageSupport";
 import {
   diagnosticsCoverageSummary,
@@ -43,11 +43,11 @@ export function DiagnosticsPage({
           value={healthLabel(healthStatus)}
           detail={
             <span>
-              <DetailMetric label="read/cache" value={formatNumber(warningCount + cacheWarnings)} tone={warningCount || cacheWarnings ? "warning" : "neutral"} labelFirst />
+              <DetailMetric label="read/cache" value={<CompactNumberValue value={warningCount + cacheWarnings} />} tone={warningCount || cacheWarnings ? "warning" : "neutral"} labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="link" value={formatNumber(linkageGaps)} tone={linkageGaps ? "bad" : "neutral"} labelFirst />
+              <DetailMetric label="link" value={<CompactNumberValue value={linkageGaps} />} tone={linkageGaps ? "bad" : "neutral"} labelFirst />
               <span className="separator"> · </span>
-              <DetailMetric label="recon" value={formatNumber(mismatchCount)} tone={mismatchCount ? "bad" : "neutral"} labelFirst />
+              <DetailMetric label="recon" value={<CompactNumberValue value={mismatchCount} />} tone={mismatchCount ? "bad" : "neutral"} labelFirst />
             </span>
           }
           title="Core integrity is based on read/cache warnings, job_id linkage gaps, and reconciliation mismatches. Conditional field coverage is reported separately."
@@ -60,9 +60,9 @@ export function DiagnosticsPage({
           value={formatPercent(Number(kpis.job_linkage_rate ?? 0))}
           detail={
             <span>
-              <DetailMetric label="matched" value={formatNumber(toNumber(kpis.matched_job_ids))} tone="good" />
+              <DetailMetric label="matched" value={<CompactNumberValue value={toNumber(kpis.matched_job_ids)} />} tone="good" />
               <span className="separator"> · </span>
-              <DetailMetric label="orphan" value={formatNumber(toNumber(kpis.orphan_dataflow_job_ids))} tone={Number(kpis.orphan_dataflow_job_ids ?? 0) ? "bad" : "neutral"} />
+              <DetailMetric label="orphan" value={<CompactNumberValue value={toNumber(kpis.orphan_dataflow_job_ids)} />} tone={Number(kpis.orphan_dataflow_job_ids ?? 0) ? "bad" : "neutral"} />
             </span>
           }
           title="Matched job IDs divided by the union of job IDs found in job and dataflow logs."
@@ -71,7 +71,7 @@ export function DiagnosticsPage({
         />
         <HealthStripCard
           label="Job-only IDs"
-          value={formatNumber(toNumber(kpis.jobs_without_dataflow_records))}
+          value={<CompactNumberValue value={toNumber(kpis.jobs_without_dataflow_records)} />}
           detail="job logs without child dataflow records"
           title="Job logs that have no dataflow_run_log records for the same job_id in the current filter."
           intent={Number(kpis.jobs_without_dataflow_records ?? 0) ? "warning" : "good"}
@@ -79,10 +79,10 @@ export function DiagnosticsPage({
         />
         <HealthStripCard
           label="Reconciliation"
-          value={formatNumber(mismatchCount)}
+          value={<CompactNumberValue value={mismatchCount} />}
           detail={
             <span>
-              <DetailMetric label="jobs" value={formatNumber(toNumber(kpis.affected_reconciliation_jobs))} tone={Number(kpis.affected_reconciliation_jobs ?? 0) ? "bad" : "neutral"} />
+              <DetailMetric label="jobs" value={<CompactNumberValue value={toNumber(kpis.affected_reconciliation_jobs)} />} tone={Number(kpis.affected_reconciliation_jobs ?? 0) ? "bad" : "neutral"} />
             </span>
           }
           title="Mismatch count between job totals and rollups from child dataflow records."
@@ -94,9 +94,9 @@ export function DiagnosticsPage({
           value={formatPercent(Number(kpis.field_readiness_rate ?? 0))}
           detail={
             <span>
-              <DetailMetric label="issues" value={formatNumber(fieldIssues)} tone={fieldIssues ? "warning" : "neutral"} />
+              <DetailMetric label="issues" value={<CompactNumberValue value={fieldIssues} />} tone={fieldIssues ? "warning" : "neutral"} />
               <span className="separator"> · </span>
-              <DetailMetric label="conditional" value={formatNumber(coverageSummary.conditional.length)} tone="neutral" />
+              <DetailMetric label="conditional" value={<CompactNumberValue value={coverageSummary.conditional.length} />} tone="neutral" />
             </span>
           }
           title="Coverage across required evidence fields used by Monitoring. Conditional watermark and maintenance groups are shown separately and do not reduce this rate."
@@ -105,10 +105,10 @@ export function DiagnosticsPage({
         />
         <HealthStripCard
           label="Read/cache warnings"
-          value={formatNumber(warningCount)}
+          value={<CompactNumberValue value={warningCount} />}
           detail={
             <span>
-              <DetailMetric label="sources" value={formatNumber(cacheWarnings)} tone={cacheWarnings ? "warning" : "neutral"} />
+              <DetailMetric label="sources" value={<CompactNumberValue value={cacheWarnings} />} tone={cacheWarnings ? "warning" : "neutral"} />
             </span>
           }
           title="Warnings emitted while reading or caching ETL log sources."
@@ -142,7 +142,7 @@ export function DiagnosticsPage({
           </ReportPanel>
         </section>
 
-        <ReportPanel title="Diagnostics investigation queue" subtitle={`${formatNumber(investigationQueue.length)} evidence ${investigationQueue.length === 1 ? "item" : "items"}`}>
+        <ReportPanel title="Diagnostics investigation queue" subtitle={<><CompactNumberValue value={investigationQueue.length} /> evidence {investigationQueue.length === 1 ? "item" : "items"}</>}>
           <DiagnosticsQueueTable rows={investigationQueue} timezoneName={timezoneName} onInspect={onInspect} />
         </ReportPanel>
       </div>
@@ -162,10 +162,10 @@ function DiagnosticsRecordLegend() {
 function DiagnosticsCoverageHeader({ summary }: { summary: ReturnType<typeof diagnosticsCoverageSummary> }) {
   return (
     <span className="monitoring-diagnostics-coverage-summary">
-      <span className={summary.issues.length ? "is-warning" : "is-clear"}>{formatNumber(summary.issues.length)} {summary.issues.length === 1 ? "issue" : "issues"}</span>
-      <span>{formatNumber(summary.ready.length)} ready</span>
-      <span className="is-conditional">{formatNumber(summary.conditional.length)} conditional</span>
-      {summary.unavailable.length ? <span className="is-unavailable">{formatNumber(summary.unavailable.length)} unavailable</span> : null}
+      <span className={summary.issues.length ? "is-warning" : "is-clear"}><CompactNumberValue value={summary.issues.length} /> {summary.issues.length === 1 ? "issue" : "issues"}</span>
+      <span><CompactNumberValue value={summary.ready.length} /> ready</span>
+      <span className="is-conditional"><CompactNumberValue value={summary.conditional.length} /> conditional</span>
+      {summary.unavailable.length ? <span className="is-unavailable"><CompactNumberValue value={summary.unavailable.length} /> unavailable</span> : null}
     </span>
   );
 }
@@ -184,9 +184,10 @@ function JobLinkageHealth({ rows }: { rows: DiagnosticsRow[] }) {
       </div>
       <DataTable
         rows={rows}
+        compactNumbers
         columns={[
           { key: "label", label: "Linkage", sortable: true, minWidth: 140, fillPriority: "last" },
-          { key: "count", label: "Count", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.count)) },
+          { key: "count", label: "Count", sortable: true, autoFit: true, render: (row) => <CompactNumberValue value={toNumber(row.count)} /> },
           { key: "share", label: "Share", sortable: true, autoFit: true, render: (row) => formatPercent(Number(row.share ?? 0)) },
           { key: "severity", label: "Status", sortable: true, autoFit: true, minWidth: 78, maxWidth: 104, render: (row) => <DiagnosticsLinkageStatus row={row} /> }
         ]}
@@ -207,12 +208,13 @@ function FieldCompleteness({ rows }: { rows: DiagnosticsRow[] }) {
   return (
     <DataTable
       rows={rows}
+      compactNumbers
       columns={[
         { key: "record_type", label: "Type", sortable: true, autoFit: true, render: (row) => humanLabel(row.record_type) },
         { key: "group", label: "Evidence", sortable: true, minWidth: 132, fillPriority: "last", render: (row) => <EvidenceGroupCell row={row} /> },
         { key: "applicability", label: "Scope", sortable: true, autoFit: true, minWidth: 82, maxWidth: 108, render: (row) => <EvidenceScope row={row} /> },
         { key: "completeness_rate", label: "Coverage", sortable: true, autoFit: true, render: (row) => <CompletenessValue row={row} /> },
-        { key: "missing_values", label: "Missing", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.missing_values)) }
+        { key: "missing_values", label: "Missing", sortable: true, autoFit: true, render: (row) => <CompactNumberValue value={toNumber(row.missing_values)} /> }
       ]}
       maxRows={12}
       className="diagnostics-compact-table monitoring-table-one-line"
@@ -251,9 +253,10 @@ function SourceCoverageTable({ rows, timezoneName }: { rows: DiagnosticsRow[]; t
   return (
     <DataTable
       rows={rows}
+      compactNumbers
       columns={[
         { key: "source", label: "Source", sortable: true, minWidth: 118, fillPriority: "last", render: (row) => <SourceCell row={row} /> },
-        { key: "records", label: "Recs", sortable: true, autoFit: true, render: (row) => formatNumber(toNumber(row.records)) },
+        { key: "records", label: "Recs", sortable: true, autoFit: true, render: (row) => <CompactNumberValue value={toNumber(row.records)} /> },
         { key: "latest_log_at", label: "Latest", sortable: true, width: 170, render: (row) => formatTime(row.latest_log_at, timezoneName) },
         { key: "warning_count", label: "Warn", sortable: true, autoFit: true, render: (row) => <WarningValue value={Number(row.warning_count ?? 0)} /> }
       ]}
@@ -276,6 +279,7 @@ function DiagnosticsQueueTable({
   return (
     <DataTable
       rows={rows}
+      compactNumbers
       columns={[
         { key: "severity", label: "Severity", sortable: true, autoFit: true, minWidth: 72, maxWidth: 92, render: (row) => <DiagnosticsSeverityCell value={row.severity} /> },
         { key: "category", label: "Category", sortable: true, autoFit: true, minWidth: 132, maxWidth: 184, render: (row) => diagnosticsCategoryLabel(row.category) },
@@ -433,13 +437,13 @@ function SourceCell({ row }: { row: DiagnosticsRow }) {
   return (
     <span className="monitoring-stack-cell diagnostics-source-cell">
       <strong className="monitoring-ellipsis" title={source}>{diagnosticsSourceLabel(source)}</strong>
-      <small>{fileKind} · {formatNumber(toNumber(row.file_count))} files</small>
+      <small title={`Files: ${formatNumber(toNumber(row.file_count))}`} >{fileKind} · <CompactNumberValue value={toNumber(row.file_count)} /> files</small>
     </span>
   );
 }
 
 function WarningValue({ value }: { value: number }) {
-  return <span className={value ? "diagnostics-warning-value" : "monitor-muted"}>{formatNumber(value)}</span>;
+  return <span className={value ? "diagnostics-warning-value" : "monitor-muted"}><CompactNumberValue value={value} /></span>;
 }
 
 function toNumber(value: unknown) {
