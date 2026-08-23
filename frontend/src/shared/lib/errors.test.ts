@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apiErrorMessage, apiRequestError } from "./errors";
+import { apiErrorMessage, apiRequestError, shouldRetryQueryError } from "./errors";
 
 describe("apiErrorMessage", () => {
   it("extracts a FastAPI detail string", () => {
@@ -19,5 +19,15 @@ describe("apiErrorMessage", () => {
     expect(error.message).toBe("Sync Log sources");
     expect(error.status).toBe(409);
     expect(error.code).toBe("analytics_rebuild_required");
+  });
+
+  it("does not retry deterministic HTTP 422 failures", () => {
+    const error = apiRequestError(
+      '{"detail":{"code":"metadata_sources_unavailable","message":"Azure credential failed"}}',
+      422,
+    );
+    expect(shouldRetryQueryError(0, error)).toBe(false);
+    expect(shouldRetryQueryError(0, new Error("temporary failure"))).toBe(true);
+    expect(shouldRetryQueryError(1, new Error("temporary failure"))).toBe(false);
   });
 });

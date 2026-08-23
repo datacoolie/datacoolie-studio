@@ -2,6 +2,7 @@ import { FileClock, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MetadataBackup, MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { formatCellValue } from "./metadataSheetOperations";
 import type { SheetKey } from "./metadataSheetTypes";
 
@@ -133,6 +134,7 @@ export function MetadataHistoryDrawer({
   const previewSheet = preview?.sheets[activeSheet];
   const previewColumns = previewSheet?.columns ?? [];
   const previewRows = previewSheet?.rows ?? [];
+  const displaySourceUri = displayStorageUri(currentDocument.source.uri);
 
   return (
     <div className="metadata-drawer-backdrop" onMouseDown={actionBusy ? undefined : onClose}>
@@ -141,7 +143,7 @@ export function MetadataHistoryDrawer({
           <div>
             <span className="eyebrow">Metadata source</span>
             <h2>Save history</h2>
-            <small title={currentDocument.source.uri}>{shortPath(currentDocument.source.uri)}</small>
+            <small title={displaySourceUri}>{shortPath(displaySourceUri)}</small>
           </div>
           <div className="metadata-history-header-actions">
             <button

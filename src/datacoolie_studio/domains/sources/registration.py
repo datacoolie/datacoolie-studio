@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import EnvironmentSource, SourceRegistration
 from datacoolie_studio.domains.storage.binding import StorageBinding
-from datacoolie_studio.domains.storage.uri import canonical_cloud_uri, normalized_source_uri
+from datacoolie_studio.domains.storage.uri import (
+    canonical_cloud_uri,
+    normalized_source_uri,
+    validate_storage_uri,
+)
 
 
 LOCATION_CONFIG_KEYS = (
@@ -21,6 +25,33 @@ LOCATION_CONFIG_KEYS = (
     "metadata_root_uri",
     "module_root_uri",
 )
+LOCATION_CONFIG_ALIASES = {
+    "base_log_uri": ("base_log_path",),
+    "etl_logs_uri": ("etl_log_uri", "etl_logs_path"),
+    "system_logs_uri": ("system_log_uri", "system_logs_path"),
+    "metadata_root_uri": (),
+    "module_root_uri": (),
+}
+LOCATION_CONFIG_INPUT_KEYS = frozenset(
+    (
+        *LOCATION_CONFIG_KEYS,
+        *(
+            alias
+            for aliases in LOCATION_CONFIG_ALIASES.values()
+            for alias in aliases
+        ),
+    )
+)
+
+
+def location_config_value(
+    source_config: Mapping[str, object], key: str
+) -> tuple[str, str] | None:
+    for input_key in (key, *LOCATION_CONFIG_ALIASES.get(key, ())):
+        value = source_config.get(input_key)
+        if isinstance(value, str) and value.strip():
+            return input_key, value.strip()
+    return None
 
 
 def canonicalize_location_config(
@@ -32,14 +63,16 @@ def canonicalize_location_config(
     input_locations: dict[str, str] = {}
     canonical_locations: dict[str, str] = {}
     for key in LOCATION_CONFIG_KEYS:
-        value = canonical_config.get(key)
-        if not isinstance(value, str) or not value.strip():
+        configured = location_config_value(canonical_config, key)
+        if configured is None:
             continue
-        raw = value.strip()
+        _input_key, raw = configured
         canonical = _canonical_uri(raw, binding.provider)
         input_locations[key] = raw
         canonical_locations[key] = canonical
         canonical_config[key] = canonical
+        for alias in LOCATION_CONFIG_ALIASES.get(key, ()):
+            canonical_config.pop(alias, None)
     return canonical_config, input_locations, canonical_locations
 
 
@@ -172,6 +205,7 @@ def source_input_locations(source: EnvironmentSource) -> dict[str, str]:
 
 
 def _canonical_uri(uri: str, provider: str) -> str:
+    validate_storage_uri(uri, provider)
     return (
         canonical_cloud_uri(uri, provider)
         if provider != "local"

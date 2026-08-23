@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import CredentialProfile, EnvironmentSource
+from datacoolie_studio.domains.sources.registration import (
+    LOCATION_CONFIG_KEYS,
+    location_config_value,
+)
 from datacoolie_studio.domains.storage.binding import StorageBinding
 from datacoolie_studio.domains.storage.errors import StorageConfigurationError
 from datacoolie_studio.domains.storage.uri import (
@@ -151,15 +155,11 @@ def _reject_sensitive_source_config(value: object, path: str = "source_config") 
 def _validate_secondary_uris(
     source_config: Mapping[str, object], binding: StorageBinding
 ) -> None:
-    for key in (
-        "etl_logs_uri",
-        "system_logs_uri",
-        "metadata_root_uri",
-        "module_root_uri",
-    ):
-        value = source_config.get(key)
-        if not isinstance(value, str) or not value.strip():
+    for key in LOCATION_CONFIG_KEYS:
+        configured = location_config_value(source_config, key)
+        if configured is None:
             continue
+        _input_key, value = configured
         try:
             validate_storage_uri(value, binding.provider)
         except StorageConfigurationError as exc:

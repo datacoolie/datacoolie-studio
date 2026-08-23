@@ -19,6 +19,7 @@ from datacoolie_studio.db.models import (
     SourceObservation,
 )
 from datacoolie_studio.db.session import create_session
+from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.metadata.service import load_environment_metadata
@@ -36,11 +37,16 @@ from datacoolie_studio.domains.read_models.keys import OVERVIEW
 
 
 OVERVIEW_SUMMARY_KEY = OVERVIEW
-OVERVIEW_CALCULATOR_VERSION = "environment-overview-v2-reference-resolution"
+OVERVIEW_CALCULATOR_VERSION = "environment-overview-v3-source-validation-warnings"
 OVERVIEW_RANGE = "30d"
 
 
-def load_environment_overview(session: Session, environment_id: int) -> dict[str, Any]:
+def load_environment_overview(
+    session: Session,
+    environment_id: int,
+    *,
+    secret_store: CredentialSecretStore | None = None,
+) -> dict[str, Any]:
     """Return the narrow Environment Overview read model.
 
     Cache reuse is based on persisted source revisions and manifests, never a
@@ -114,7 +120,9 @@ def load_environment_overview(session: Session, environment_id: int) -> dict[str
                 environment_id,
                 timezone_context,
             )
-            metadata = load_environment_metadata(session, metadata_sources)
+            metadata = load_environment_metadata(
+                session, metadata_sources, secret_store=secret_store
+            )
             reference_mappings = workspace.list_project_reference_mappings(session, environment.project_id)
             lineage = build_lineage_overview_summary(
                 session,

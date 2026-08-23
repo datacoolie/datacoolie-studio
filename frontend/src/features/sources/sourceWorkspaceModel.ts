@@ -1,4 +1,5 @@
 import type { SourceDeleteImpact, SourceDeleteImpactItem, SourcePath, SourceSyncStatus } from "../../shared/api/domainTypes";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 
 export type SourceBatchAction = "validate" | "sync" | "delete";
@@ -189,23 +190,23 @@ export function summarizeSourceHealth(
 
 export function sourceDisplayName(source: SourcePath) {
   if (source.label) return source.label;
-  const parts = source.uri.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.at(-1) || source.uri;
+  const displayUri = displayStorageUri(source.uri);
+  const parts = displayUri.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.at(-1) || displayUri;
 }
 
 export function sourceDisplayPath(source: SourcePath, kind: SourceKind) {
   const location = source.configured_location;
-  if (!location) return source.uri;
+  if (!location) return displayStorageUri(source.uri);
 
   const locationKey = kind === "metadata" ? "metadata_uri" : kind === "code" ? "code_uri" : null;
-  const inputBase = locationKey
-    ? location.input_locations[locationKey] || location.input_uri
-    : location.input_uri;
   const canonicalBase = locationKey
     ? location.canonical_locations[locationKey] || location.canonical_uri
     : location.canonical_uri;
   const suffix = sourceLocationSuffix(source.uri, canonicalBase);
-  return suffix === null ? source.uri : joinDisplayLocation(inputBase, suffix);
+  return suffix === null
+    ? displayStorageUri(source.uri)
+    : displayStorageUri(joinDisplayLocation(canonicalBase, suffix));
 }
 
 function sourceLocationSuffix(uri: string, base: string) {

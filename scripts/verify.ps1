@@ -29,7 +29,7 @@ try {
     } else {
         Invoke-Checked {
             python -m pytest `
-                tests/test_architecture_boundaries.py `
+                tests/architecture/test_architecture_boundaries.py `
                 tests/test_main.py `
                 tests/test_openapi_export.py
         } "Backend fast regression"

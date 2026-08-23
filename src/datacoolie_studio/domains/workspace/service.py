@@ -74,7 +74,7 @@ from datacoolie_studio.domains.sources.storage_binding import (
     validate_and_normalize_binding,
 )
 from datacoolie_studio.domains.sources.registration import (
-    LOCATION_CONFIG_KEYS,
+    LOCATION_CONFIG_INPUT_KEYS,
     canonicalize_location_config,
     configured_location_dict,
     get_or_create_registration,
@@ -1758,7 +1758,7 @@ def _source_input_uri(source: EnvironmentSource) -> str:
 def _has_location_input(uri: str | None, source_config: dict | None) -> bool:
     return uri is not None or (
         source_config is not None
-        and any(key in source_config for key in LOCATION_CONFIG_KEYS)
+        and any(key in source_config for key in LOCATION_CONFIG_INPUT_KEYS)
     )
 
 

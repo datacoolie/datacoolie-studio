@@ -7,7 +7,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../shared/api/client";
 import type {
@@ -20,6 +20,7 @@ import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
 import { StorageProviderIcon } from "../../shared/components/StorageProviderIcon";
+import { useNotificationCenter } from "../../shared/notifications/NotificationCenter";
 
 type CloudProvider = Exclude<StorageProvider, "local">;
 type FieldSpec = { key: string; label: string; optional?: boolean; placeholder?: string };
@@ -79,6 +80,7 @@ const SECRET_FIELDS: Record<string, FieldSpec[]> = {
 };
 
 export function CredentialProfilesSection() {
+  const { publish } = useNotificationCenter();
   const [profiles, setProfiles] = useState<CredentialProfile[]>([]);
   const [capabilities, setCapabilities] = useState<CredentialCapabilities | null>(null);
   const [drawer, setDrawer] = useState<"create" | "edit" | null>(null);
@@ -91,7 +93,17 @@ export function CredentialProfilesSection() {
   const [replaceSecret, setReplaceSecret] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<CredentialProfile | null>(null);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const [feedback, setFeedbackState] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const setFeedback = useCallback((next: { tone: "success" | "error"; message: string } | null) => {
+    setFeedbackState(next);
+    if (!next) return;
+    publish({
+      tone: next.tone,
+      title: next.tone === "success" ? "Credential profile updated" : "Credential profile action failed",
+      location: "Settings / Credentials",
+      message: next.message,
+    });
+  }, [publish]);
 
   async function load() {
     const [nextProfiles, nextCapabilities] = await Promise.all([

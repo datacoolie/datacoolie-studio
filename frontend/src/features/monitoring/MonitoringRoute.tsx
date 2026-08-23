@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { OperationNotification } from "../../shared/components/OperationNotification";
 import { ApiRequestError } from "../../shared/lib/errors";
 import { api } from "../../shared/api/client";
+import { useNotificationCenter } from "../../shared/notifications/NotificationCenter";
 import { monitoringFilterOptionsOptions, monitoringReportOptions } from "./monitoringQueries";
 import { filtersFromSearch, type MonitoringTabKey, writeFiltersToSearch } from "./monitoringFilters";
 import { preloadMonitoringPage } from "./monitoringPageModules";
@@ -21,6 +22,7 @@ export function MonitoringRoute({
   onPageChange: (page: MonitoringTabKey) => void;
   onOpenSources: () => void;
 }) {
+  const { publish } = useNotificationCenter();
   const [filters, setFilters] = useState(() => filtersFromSearch(window.location.search));
   const reportQuery = useQuery(monitoringReportOptions(environmentId, activePage, filters));
   const filterOptionsQuery = useQuery(monitoringFilterOptionsOptions(environmentId));
@@ -32,11 +34,38 @@ export function MonitoringRoute({
     ? String(reportError.detail?.reason ?? "")
     : "";
   const upgradeInProgress = rebuildReason === "analytics_upgrade_in_progress";
+  const rebuildNotice = rebuildRequired ? {
+    tone: "warning" as const,
+    title: upgradeInProgress ? "Monitoring analytics are upgrading" : "Monitoring analytics need attention",
+    detail: upgradeInProgress
+      ? "Studio is rebuilding the DuckDB cache automatically. Monitoring will refresh when publication completes."
+      : rebuildReason === "analytics_upgrade_failed"
+        ? "The previous cache was preserved. Studio will retry automatically, or you can retry now."
+        : "Open Sources and sync the Log sources before loading Monitoring again.",
+  } : null;
+  const lastPublishedNoticeKey = useRef<string | null>(null);
   const refetchReport = reportQuery.refetch;
 
   useEffect(() => {
     setNoticeDismissed(false);
   }, [environmentId, reportError]);
+
+  useEffect(() => {
+    if (!rebuildNotice) {
+      lastPublishedNoticeKey.current = null;
+      return;
+    }
+    const dedupeKey = `${environmentId}:${activePage}:${rebuildReason || "analytics_rebuild_required"}:${rebuildNotice.title}`;
+    if (lastPublishedNoticeKey.current === dedupeKey) return;
+    lastPublishedNoticeKey.current = dedupeKey;
+    publish({
+      tone: rebuildNotice.tone,
+      title: rebuildNotice.title,
+      location: `Monitoring / ${activePage}`,
+      message: rebuildNotice.detail,
+      dedupeKey,
+    });
+  }, [activePage, environmentId, publish, rebuildNotice, rebuildReason]);
 
   useEffect(() => {
     writeFiltersToSearch(filters);
@@ -63,15 +92,7 @@ export function MonitoringRoute({
     <>
       {rebuildRequired && !noticeDismissed ? (
         <OperationNotification
-          notice={{
-            tone: "warning",
-            title: upgradeInProgress ? "Monitoring analytics are upgrading" : "Monitoring analytics need attention",
-            detail: upgradeInProgress
-              ? "Studio is rebuilding the DuckDB cache automatically. Monitoring will refresh when publication completes."
-              : rebuildReason === "analytics_upgrade_failed"
-                ? "The previous cache was preserved. Studio will retry automatically, or you can retry now."
-                : "Open Sources and sync the Log sources before loading Monitoring again.",
-          }}
+          notice={rebuildNotice!}
           onClose={() => setNoticeDismissed(true)}
         />
       ) : null}

@@ -208,6 +208,25 @@ def canonical_cloud_uri(uri: str, provider: str | None = None) -> str:
     return urlunsplit((scheme, split.netloc.lower(), path.rstrip("/"), "", ""))
 
 
+def transport_storage_uri(uri: str, provider: str) -> str:
+    """Return a canonical URI with path escapes decoded for provider transport.
+
+    Canonical URIs keep path segments percent-encoded for stable API and persistence
+    identities. Provider SDKs encode object names themselves, so forwarding those
+    escapes unchanged would turn ``%20`` into ``%2520``. Decode exactly one layer at
+    the transport boundary while leaving canonical values unchanged elsewhere.
+    """
+
+    canonical = canonical_cloud_uri(uri, provider)
+    split = urlsplit(canonical)
+    path = "/".join(unquote(part) for part in split.path.split("/"))
+    if path == "/":
+        path = ""
+    else:
+        path = path.rstrip("/")
+    return urlunsplit((split.scheme, split.netloc, path, "", ""))
+
+
 def _looks_like_windows_drive(value: str) -> bool:
     return len(value) >= 2 and value[1] == ":" and value[0].isalpha()
 

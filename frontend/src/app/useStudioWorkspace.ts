@@ -64,6 +64,7 @@ export interface StudioWorkspace {
   loading: boolean;
   busy: boolean;
   error: string | null;
+  retryMetadataEditor: () => Promise<unknown>;
   refreshCurrentEnvironment: () => Promise<void>;
   reloadProjectSummaries: () => Promise<void>;
   createProject: (name: string) => Promise<void>;
@@ -492,6 +493,7 @@ export function useStudioWorkspace(
     error: error
       ?? (activeQueryError ? toErrorMessage(activeQueryError) : null)
       ?? (metadataEditor.error ? toErrorMessage(metadataEditor.error) : null),
+    retryMetadataEditor: async () => { await metadataEditor.retryWorkspace(); },
     refreshCurrentEnvironment: () => refreshEnvironment(route.environmentId, route.module, { forceHeader: true, forceModule: true }),
     reloadProjectSummaries: () => loadProjectSummaries(true),
     createProject,

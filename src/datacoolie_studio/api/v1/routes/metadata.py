@@ -34,6 +34,7 @@ from datacoolie_studio.domains.metadata.editor import (
 )
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.service import (
+    MetadataSourcesUnavailableError,
     ensure_metadata_materialization,
     load_environment_editor_workspace,
     load_environment_metadata,
@@ -51,11 +52,14 @@ def get_metadata(
     secret_store: CredentialSecretStore = Depends(get_credential_secret_store),
 ):
     sources = workspace.list_metadata_sources(session, environment_id)
-    return _public_metadata(
-        load_environment_metadata(
-            session, sources, secret_store=secret_store
+    try:
+        return _public_metadata(
+            load_environment_metadata(
+                session, sources, secret_store=secret_store
+            )
         )
-    )
+    except MetadataSourcesUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=_metadata_sources_error_detail(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/metadata-editor-workspace", response_model=MetadataEditorWorkspaceResponse)
@@ -72,8 +76,10 @@ def get_environment_metadata_editor_workspace(
             sources,
             secret_store=secret_store,
         )
+    except MetadataSourcesUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=_metadata_sources_error_detail(exc)) from exc
     except MetadataReadError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail={"code": "metadata_read_failed", "message": str(exc)}) from exc
 
 
 @router.post("/environments/{environment_id}/metadata-editor-document/validate", response_model=MetadataEditorValidationResponse)
@@ -222,6 +228,14 @@ def delete_metadata_backup(backup_id: int, session: Session = Depends(get_sessio
 
 def _public_metadata(metadata: dict) -> dict:
     return {key: value for key, value in metadata.items() if not key.startswith("_")}
+
+
+def _metadata_sources_error_detail(exc: MetadataSourcesUnavailableError) -> dict:
+    return {
+        "code": exc.code,
+        "message": str(exc),
+        "source_ids": exc.source_ids,
+    }
 
 
 def _metadata_source(session: Session, source_id: int) -> EnvironmentSource:

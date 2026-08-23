@@ -18,7 +18,7 @@ import {
   Trash2,
   XCircle
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   SourceBatchAction,
   SourceBatchEntry,
@@ -29,7 +29,9 @@ import type {
 import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourcePath, SourceReadCheckResult, SourceSyncStatus, StorageBinding } from "../../shared/api/domainTypes";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
 import { OperationNotification, type OperationNotice } from "../../shared/components/OperationNotification";
+import { useNotificationCenter } from "../../shared/notifications/NotificationCenter";
 import { toErrorMessage } from "../../shared/lib/errors";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 import { formatAbsoluteTime, formatRelativeTime } from "../../shared/time";
 import {
@@ -144,7 +146,31 @@ export function SourcesPage({
   sourceOperations,
   timezoneName,
 }: SourcesPageProps) {
-  const [notice, setNotice] = useState<SourceOperationNotice>(null);
+  const { publish } = useNotificationCenter();
+  const [notice, setNoticeState] = useState<SourceOperationNotice>(null);
+  const setNotice = useCallback((next: SourceOperationNotice) => {
+    setNoticeState(next);
+    if (!next) return;
+    publish({
+      tone: next.tone,
+      title: next.title,
+      location: "Sources",
+      message: next.detail,
+      errors: next.errors,
+    });
+  }, [publish]);
+  const validateSourceWithNotice = useCallback(async (kind: SourceKind, id: number) => {
+    const result = await onValidateSource(kind, id);
+    if (result.status === "error" || result.status === "warning") {
+      setNotice({
+        tone: result.status === "error" ? "error" : "warning",
+        title: result.status === "error" ? "Source validation failed" : "Source validation completed with warnings",
+        detail: result.message || "Review the source validation result.",
+        errors: result.errors.map((error) => detailMessage(error) ?? JSON.stringify(error)),
+      });
+    }
+    return result;
+  }, [onValidateSource, setNotice]);
   const [deletePrompt, setDeletePrompt] = useState<DeletePrompt | null>(null);
   const [logSyncPrompt, setLogSyncPrompt] = useState<LogSyncPrompt | null>(null);
   const [logSyncActivities, setLogSyncActivities] = useState<LogSyncActivities>({});
@@ -422,7 +448,7 @@ export function SourcesPage({
                 busy={busy}
                 onUpdate={onUpdateSource}
                 onDelete={requestSourceDelete}
-                onValidate={onValidateSource}
+                onValidate={validateSourceWithNotice}
                 onSync={onSyncSource}
                 onRetryObservation={onRetrySourceObservation}
                 syncStatuses={syncStatuses}
@@ -441,7 +467,7 @@ export function SourcesPage({
                 busy={busy}
                 onUpdate={onUpdateSource}
                 onDelete={requestSourceDelete}
-                onValidate={onValidateSource}
+                onValidate={validateSourceWithNotice}
                 onSync={onSyncSource}
                 onRetryObservation={onRetrySourceObservation}
                 syncStatuses={syncStatuses}
@@ -507,7 +533,7 @@ export function SourcesPage({
               busy={busy}
               onUpdate={onUpdateSource}
               onDelete={requestSourceDelete}
-              onValidate={onValidateSource}
+              onValidate={validateSourceWithNotice}
               onSync={onSyncSource}
               onRetryObservation={onRetrySourceObservation}
               onRequestLogSync={(id) => {
@@ -1025,7 +1051,9 @@ function SourceCard({
   onRetryObservation: SourcesPageProps["onRetrySourceObservation"];
   timezoneName: string | null;
 }) {
-  const secondaryPath = kind === "logs" && typeof item.source_config?.system_logs_uri === "string" ? item.source_config.system_logs_uri : null;
+  const secondaryPath = kind === "logs" && typeof item.source_config?.system_logs_uri === "string"
+    ? displayStorageUri(item.source_config.system_logs_uri)
+    : null;
   const etlPath = kind === "logs" && typeof item.source_config?.etl_logs_uri === "string" ? item.source_config.etl_logs_uri : null;
   const primaryPathLabel = kind === "logs" && item.source_config?.mode === "separate_paths" ? "ETL" : "Path";
   const modeLabel =
@@ -1039,9 +1067,9 @@ function SourceCard({
           ? String(item.source_config.discovery_mode).replace(/_/g, " ")
           : null;
   const primaryPath = kind === "logs"
-    ? etlPath || item.uri
+    ? displayStorageUri(etlPath || item.uri)
     : sourceDisplayPath(item, kind);
-  const displayName = item.label || basename(item.uri);
+  const displayName = item.label || basename(displayStorageUri(item.uri));
   const typeLabel = sourceTypeLabel(kind, item, modeLabel);
   const scheduleInterval = logRefreshInterval(item);
   const backendSyncing = isSourceSyncRunning(syncStatus)

@@ -1,5 +1,6 @@
 import { History, Loader2, Save, Search, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { stageToneClass, type StageToneMap } from "../../shared/stagePresentation";
 import type { SheetKey } from "./metadataSheetTypes";
 
@@ -82,12 +83,14 @@ export function MetadataSheetToolbar({
     return () => document.removeEventListener("keydown", focusFind, true);
   }, []);
 
+  const displaySourceUri = displayStorageUri(sourceUri);
+
   return (
     <div className="panel-toolbar metadata-sheet-toolbar">
       <div className="metadata-sheet-title">
         <h2>{sheetTitle(activeSheet)}</h2>
-        <span title={sourceUri}>
-          {sourceFormat === "merged" ? "Merged sources" : `${sourceFormat.toUpperCase()} · ${shortPath(sourceUri)}`}
+        <span title={displaySourceUri}>
+          {sourceFormat === "merged" ? "Merged sources" : `${sourceFormat.toUpperCase()} · ${shortPath(displaySourceUri)}`}
           {readOnly ? " · save disabled" : ""}
         </span>
       </div>

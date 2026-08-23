@@ -100,7 +100,12 @@ pip install "datacoolie-studio[gcs]"
 
 Databricks SDK support is included in the base installation. Use
 `pip install "datacoolie-studio[cloud]"` to install every other cloud
-integration.
+integration. For a complete environment with every cloud integration and
+the development, test, and packaging tools, use:
+
+```powershell
+pip install "datacoolie-studio[all]"
+```
 
 ## Create your first workspace
 

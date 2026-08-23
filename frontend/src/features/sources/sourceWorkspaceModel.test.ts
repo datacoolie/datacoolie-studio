@@ -210,7 +210,7 @@ describe("source workspace model", () => {
     expect(sourceDisplayName(source(2, { uri: "D:\\workspace\\metadata\\dataflows.json" }))).toBe("dataflows.json");
   });
 
-  it("shows the user-entered path and falls back to the canonical source path", () => {
+  it("shows the preferred canonical display path", () => {
     expect(sourceDisplayPath(source(1, {
       uri: "abfs://test@account.dfs.core.windows.net/metadata/assets.json",
       configured_location: {
@@ -221,9 +221,28 @@ describe("source workspace model", () => {
         input_locations: {},
         canonical_locations: {}
       }
-    }), "metadata")).toBe("https://account.dfs.core.windows.net/test/metadata/assets.json");
+    }), "metadata")).toBe("abfss://test@account.dfs.core.windows.net/metadata/assets.json");
     expect(sourceDisplayPath(source(2, { uri: "s3://bucket/metadata.json" }), "metadata"))
       .toBe("s3://bucket/metadata.json");
+  });
+
+  it("shows DBFS Volume sources with the Databricks path form", () => {
+    expect(sourceDisplayPath(source(5, {
+      uri: "dbfs:/Volumes/catalog/schema/volume/metadata.json"
+    }), "metadata")).toBe("/Volumes/catalog/schema/volume/metadata.json");
+    expect(sourceDisplayPath(source(6, {
+      uri: "dbfs:/Volumes/catalog/schema/volume/metadata.json",
+      configured_location: {
+        registration_id: 8,
+        purpose: "metadata",
+        input_uri: "dbfs:/Volumes/catalog/schema/volume",
+        canonical_uri: "dbfs:/Volumes/catalog/schema/volume",
+        input_locations: {},
+        canonical_locations: {}
+      }
+    }), "metadata")).toBe("/Volumes/catalog/schema/volume/metadata.json");
+    expect(sourceDisplayPath(source(7, { uri: "dbfs:/mnt/project/metadata.json" }), "metadata"))
+      .toBe("dbfs:/mnt/project/metadata.json");
   });
 
   it("rebases project sources onto the user-entered metadata and code roots", () => {

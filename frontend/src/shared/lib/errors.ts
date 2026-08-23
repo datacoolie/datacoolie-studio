@@ -49,3 +49,8 @@ export function apiRequestError(body: string, status: number): ApiRequestError {
 export function apiErrorMessage(body: string, status: number): string {
   return apiRequestError(body, status).message;
 }
+
+/** React Query should not repeat deterministic API contract failures. */
+export function shouldRetryQueryError(failureCount: number, error: unknown): boolean {
+  return !(error instanceof ApiRequestError && error.status === 422) && failureCount < 1;
+}

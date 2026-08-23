@@ -10,6 +10,7 @@ import type {
   MetadataEditorDocument,
   MetadataEditorWorkspace,
 } from "../../shared/api/domainTypes";
+import { shouldRetryQueryError } from "../../shared/lib/errors";
 import { environmentQueryKeys } from "../environments/environmentQueries";
 
 const metadataQueryStaleTime = Number.POSITIVE_INFINITY;
@@ -19,6 +20,7 @@ export function metadataEditorWorkspaceOptions(environmentId: number) {
     queryKey: environmentQueryKeys.metadataWorkspace(environmentId),
     queryFn: () => api.getEnvironmentMetadataEditorWorkspace(environmentId),
     staleTime: metadataQueryStaleTime,
+    retry: shouldRetryQueryError,
   });
 }
 
@@ -53,6 +55,7 @@ export function useEnvironmentMetadataEditor(
     queryFn: () => api.getEnvironmentMetadataEditorWorkspace(environmentId!),
     staleTime: metadataQueryStaleTime,
     enabled: environmentId !== null && options.enabled,
+    retry: shouldRetryQueryError,
   });
 
   const validateMutation = useMutation({
@@ -197,6 +200,7 @@ export function useEnvironmentMetadataEditor(
     savingDraft: saveDraftMutation.isPending,
     error: workspaceQuery.error ?? mutationError,
     ensureContext,
+    retryWorkspace: workspaceQuery.refetch,
     validateDocument,
     saveDraft,
     discardDraft,

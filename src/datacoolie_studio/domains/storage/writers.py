@@ -12,9 +12,9 @@ from uuid import uuid4
 from datacoolie_studio.domains.storage.adapters import StorageRevision
 from datacoolie_studio.domains.storage.errors import StorageConflictError
 from datacoolie_studio.domains.storage.uri import (
-    canonical_cloud_uri,
     parse_onelake_location,
     require_local_path,
+    transport_storage_uri,
     validate_storage_uri,
 )
 
@@ -233,8 +233,8 @@ class DatabricksVerifiedStorageWriter:
         return digest.hexdigest()
 
     def _upload(self, uri: str, content: bytes, *, overwrite: bool) -> None:
-        canonical = canonical_cloud_uri(uri, "dbfs")
-        path = "/" + canonical.removeprefix("dbfs:").lstrip("/")
+        transport = transport_storage_uri(uri, "dbfs")
+        path = "/" + transport.removeprefix("dbfs:").lstrip("/")
         payload = io.BytesIO(content)
         if path == "/Volumes" or path.startswith("/Volumes/"):
             self._client.files.upload(path, payload, overwrite=overwrite)
@@ -256,7 +256,7 @@ def _atomic_write(path: Path, content: bytes, *, must_not_exist: bool) -> None:
 
 def _bucket_key(uri: str, provider: str) -> tuple[str, str]:
     validate_storage_uri(uri, provider)
-    parsed = urlsplit(uri)
+    parsed = urlsplit(transport_storage_uri(uri, provider))
     return parsed.netloc, parsed.path.lstrip("/")
 
 

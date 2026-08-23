@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { MasterDataPage } from "../features/master-data/MasterDataPage";
 import { SourcesPage } from "../features/sources/SourcesPage";
 import { useEnvironmentOverviewQuery } from "../features/environments/environmentQueries";
@@ -13,6 +13,8 @@ import type { StudioModulesState } from "./useStudioModules";
 import type { StudioRouter } from "./useStudioRouter";
 import type { StudioWorkspace } from "./useStudioWorkspace";
 import type { EnvironmentContext } from "../shared/api/domainTypes";
+import { toErrorMessage } from "../shared/lib/errors";
+import { useNotificationCenter } from "../shared/notifications/NotificationCenter";
 
 // Heavy, graph/chart-heavy pages are code-split so the initial bundle stays small.
 const MetadataExplorer = lazy(() =>
@@ -57,6 +59,21 @@ export function ModuleView(props: ModuleViewProps) {
 
 function ResolveModule({ router, workspace, settings, diagnostics, modules, environmentContext }: ModuleViewProps) {
   const { route } = router;
+  const { publish } = useNotificationCenter();
+  const metadataWarning = route.module === "metadata"
+    ? errorListMessage(workspace.metadataEditorDocument?.source.revision?.errors)
+    : null;
+
+  useEffect(() => {
+    if (route.module !== "metadata" || !route.environmentId || (!workspace.error && !metadataWarning)) return;
+    publish({
+      tone: "error",
+      title: workspace.error ? "Metadata could not load" : "Metadata source read failed",
+      location: "Metadata",
+      message: workspace.error ?? metadataWarning ?? "Metadata source read failed",
+      dedupeKey: `environment:${route.environmentId}:metadata:${workspace.error ?? metadataWarning}`,
+    });
+  }, [metadataWarning, publish, route.environmentId, route.module, workspace.error]);
 
   switch (route.module) {
     case "projects":
@@ -175,6 +192,15 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
         />
       );
     case "metadata":
+      if (workspace.error && !workspace.metadataEditorDocument) {
+        return (
+          <EmptyState
+            title="Unable to load metadata"
+            detail={workspace.error}
+            action={<button type="button" onClick={() => void workspace.retryMetadataEditor()}>Retry</button>}
+          />
+        );
+      }
       return (
         <MetadataExplorer
           key={route.environmentId}
@@ -296,15 +322,55 @@ function EnvironmentOverviewRoute({
   timezoneName: string | null;
 }) {
   const overview = useEnvironmentOverviewQuery(environmentId);
+  const { publish } = useNotificationCenter();
+  const errorMessage = overview.error ? toErrorMessage(overview.error) : null;
+  const sourceWarningMessage = errorListMessage(overview.data?.metadata.errors);
+
+  useEffect(() => {
+    if (!overview.isError || overview.data || !errorMessage) return;
+    publish({
+      tone: "error",
+      title: "Overview could not load",
+      location: "Overview",
+      message: errorMessage,
+      dedupeKey: `environment:${environmentId}:overview:${errorMessage}`,
+    });
+  }, [environmentId, errorMessage, overview.data, overview.isError, publish]);
+
+  useEffect(() => {
+    if (!overview.data || !sourceWarningMessage) return;
+    publish({
+      tone: "error",
+      title: "Overview loaded with source errors",
+      location: "Overview",
+      message: sourceWarningMessage,
+      dedupeKey: `environment:${environmentId}:overview:sources:${sourceWarningMessage}`,
+    });
+  }, [environmentId, overview.data, publish, sourceWarningMessage]);
+
   if (overview.isError && !overview.data) {
     return (
       <EmptyState
         title="Unable to load overview"
-        detail={overview.error instanceof Error ? overview.error.message : "Overview request failed"}
+        detail={errorMessage ?? "Overview request failed"}
         action={<button type="button" onClick={() => void overview.refetch()}>Retry</button>}
       />
     );
   }
   if (!overview.data) return <EmptyState title="Loading overview…" />;
   return <OverviewPage overview={overview.data} onNavigate={onNavigate} timezoneName={timezoneName} />;
+}
+
+function errorListMessage(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const messages = value
+    .map((item) => {
+      if (item && typeof item === "object" && "message" in item) {
+        const message = (item as { message?: unknown }).message;
+        return typeof message === "string" ? message : null;
+      }
+      return typeof item === "string" ? item : null;
+    })
+    .filter((message): message is string => Boolean(message));
+  return messages.length ? messages.join("\n") : null;
 }

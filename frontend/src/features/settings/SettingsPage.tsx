@@ -1,11 +1,12 @@
 import { AlertTriangle, CheckCircle2, Loader2, Settings, Trash2 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ModuleInfo, StudioDiagnostics, StudioSettings } from "../../shared/api/domainTypes";
 import { formatRelativeTime } from "../../shared/time";
 import { Tag } from "../../shared/components/Tag";
 import { Toggle } from "../../shared/components/Toggle";
 import { OperationConfirmationDialog } from "../../shared/components/OperationConfirmationDialog";
 import { OperationNotification } from "../../shared/components/OperationNotification";
+import { useNotificationCenter } from "../../shared/notifications/NotificationCenter";
 import { api } from "../../shared/api/client";
 import { toErrorMessage } from "../../shared/lib/errors";
 import type { StudioSettingsChanges } from "./hooks/useStudioSettings";
@@ -49,6 +50,7 @@ export function SettingsPage({
   modulesBusyKey,
   onToggleModule,
 }: SettingsPageProps) {
+  const { publish } = useNotificationCenter();
   const [configurationDrawerOpen, setConfigurationDrawerOpen] = useState(false);
   const [upgradeDetailsOpen, setUpgradeDetailsOpen] = useState(false);
   const [timezoneOptions, setTimezoneOptions] = useState<TimezoneOption[] | null>(null);
@@ -56,6 +58,15 @@ export function SettingsPage({
   const [workspaceMaintenanceBusy, setWorkspaceMaintenanceBusy] = useState(false);
   const [workspaceMaintenanceNotice, setWorkspaceMaintenanceNotice] = useState<{ tone: "success" | "error"; title: string; detail: string } | null>(null);
   const cache = useStudioCache(onReloadDiagnostics);
+  const cacheFeedbackKeyRef = useRef<string | null>(null);
+  const publishSettingsNotice = useCallback((notice: { tone: "success" | "error"; title: string; detail: string }, location = "Settings") => {
+    publish({
+      tone: notice.tone,
+      title: notice.title,
+      location,
+      message: notice.detail,
+    });
+  }, [publish]);
   const closeConfigurationDrawer = useCallback(() => setConfigurationDrawerOpen(false), []);
   const workspaceDatabase = diagnostics?.workspace_database;
   const analyticsCache = cache.status?.analytics_cache;
@@ -78,20 +89,43 @@ export function SettingsPage({
 
   const maintenanceBusy = cache.busyAction !== null || workspaceMaintenanceBusy;
 
+  useEffect(() => {
+    const feedbackKey = cache.error
+      ? `error:${cache.error}`
+      : cache.lastAction
+        ? `action:${JSON.stringify(cache.lastAction)}`
+        : null;
+    if (!feedbackKey) {
+      cacheFeedbackKeyRef.current = null;
+      return;
+    }
+    if (cacheFeedbackKeyRef.current === feedbackKey) return;
+    cacheFeedbackKeyRef.current = feedbackKey;
+    if (cache.error) {
+      publishSettingsNotice({ tone: "error", title: "Cache unavailable", detail: cache.error });
+    } else if (cache.lastAction) {
+      publishSettingsNotice({ tone: "success", title: "Cache updated", detail: cacheMutationMessage(cache.lastAction) });
+    }
+  }, [cache.error, cache.lastAction, publishSettingsNotice]);
+
   const compactWorkspaceDatabase = useCallback(async () => {
     setWorkspaceMaintenanceBusy(true);
     setWorkspaceMaintenanceNotice(null);
     try {
       await api.compactWorkspaceDatabase();
       await onReloadDiagnostics();
-      setWorkspaceMaintenanceNotice({ tone: "success", title: "Database compacted", detail: "Workspace database maintenance completed." });
+      const notice = { tone: "success" as const, title: "Database compacted", detail: "Workspace database maintenance completed." };
+      setWorkspaceMaintenanceNotice(notice);
+      publishSettingsNotice(notice);
     } catch (error) {
-      setWorkspaceMaintenanceNotice({ tone: "error", title: "Database maintenance failed", detail: toErrorMessage(error) });
+      const notice = { tone: "error" as const, title: "Database maintenance failed", detail: toErrorMessage(error) };
+      setWorkspaceMaintenanceNotice(notice);
+      publishSettingsNotice(notice);
       throw error;
     } finally {
       setWorkspaceMaintenanceBusy(false);
     }
-  }, [onReloadDiagnostics]);
+  }, [onReloadDiagnostics, publishSettingsNotice]);
 
   const confirmPendingMaintenanceAction = useCallback(() => {
     if (!pendingMaintenanceAction) return;

@@ -3653,7 +3653,8 @@ th:hover .table-column-resizer::after,
 
 .table-pager-size select {
   flex: 0 0 auto;
-  width: 54px;
+  width: 72px;
+  min-width: 72px;
   min-height: 24px;
   border: 1px solid #d8e0ea;
   border-radius: 5px;
@@ -13497,6 +13498,21 @@ button.lineage-run-row:disabled {
     justify-content: flex-start;
   }
 
+  .context-bar-actions {
+    width: 100%;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+
+  .context-bar-actions .context-status {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .context-bar-global .notification-center {
+    align-self: flex-end;
+  }
+
   .context-bar:not(.context-bar-global) {
     display: grid;
     grid-template-columns: 1fr;
@@ -13995,6 +14011,17 @@ button.lineage-run-row:disabled {
   .stacked-row,
   .breakdown-row {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .notification-center-popover {
+    position: fixed;
+    top: 58px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100vh - 76px);
   }
 }
 

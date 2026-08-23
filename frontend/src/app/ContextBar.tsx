@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import type { EnvironmentContext } from "../shared/api/domainTypes";
 import { RelativeTime } from "../shared/components/RelativeTime";
+import { NotificationCenter } from "../shared/notifications/NotificationCenter";
 import { formatAbsoluteTime } from "../shared/time";
 import type { ModuleKey, ModuleScope } from "./moduleRegistry";
 
@@ -36,6 +37,7 @@ export function ContextBar({
           <span className="eyebrow">Studio</span>
           <h2>{activeModule === "settings" ? "Settings" : "Projects"}</h2>
         </div>
+        <NotificationCenter />
       </header>
     );
   }
@@ -59,36 +61,39 @@ export function ContextBar({
         {scope === "environment" ? <span className="context-trail-module">{activeModule}</span> : null}
       </nav>
       {scope === "environment" ? (
-        <div className="context-status">
-          {freshness ? (
-            <>
-              <FreshnessPill
-                label="Metadata"
-                count={metadataSourceCount}
-                countLabel="sources"
-                modifiedAt={freshness.metadata.max_source_modified_at}
-                status={freshness.metadata.status}
-                pendingSyncCount={freshness.metadata.pending_sync_count ?? 0}
-                timezoneName={timezoneName}
-              />
-              <FreshnessPill
-                label="Logs"
-                count={logPathCount}
-                countLabel="paths"
-                modifiedAt={freshness.etl_logs.max_source_modified_at}
-                status={freshness.etl_logs.status}
-                pendingSyncCount={freshness.etl_logs.pending_sync_count ?? 0}
-                timezoneName={timezoneName}
-              />
-            </>
-          ) : (
-            <>
-              <span>{metadataSourceCount} metadata sources</span>
-              <span>{logPathCount} log paths</span>
-            </>
-          )}
+        <div className="context-bar-actions">
+          <div className="context-status">
+            {freshness ? (
+              <>
+                <FreshnessPill
+                  label="Metadata"
+                  count={metadataSourceCount}
+                  countLabel="sources"
+                  modifiedAt={freshness.metadata.max_source_modified_at}
+                  status={freshness.metadata.status}
+                  pendingSyncCount={freshness.metadata.pending_sync_count ?? 0}
+                  timezoneName={timezoneName}
+                />
+                <FreshnessPill
+                  label="Logs"
+                  count={logPathCount}
+                  countLabel="paths"
+                  modifiedAt={freshness.etl_logs.max_source_modified_at}
+                  status={freshness.etl_logs.status}
+                  pendingSyncCount={freshness.etl_logs.pending_sync_count ?? 0}
+                  timezoneName={timezoneName}
+                />
+              </>
+            ) : (
+              <>
+                <span>{metadataSourceCount} metadata sources</span>
+                <span>{logPathCount} log paths</span>
+              </>
+            )}
+          </div>
+          <NotificationCenter />
         </div>
-      ) : null}
+      ) : <NotificationCenter />}
     </header>
   );
 }

@@ -15,6 +15,7 @@ import type {
 } from "../../../shared/api/domainTypes";
 import { StatusPill } from "../../../shared/components/StatusPill";
 import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
+import { displayStorageUri } from "../../../shared/lib/storage";
 import { latestRun } from "../model/flow";
 import { groupRelationsByNeighbor, isAttentionResolutionStatus, referenceNeighborAttentionStatus, type LineageGraphIndex, type Relation } from "../model/graphIndex";
 import { assetIconKind, assetTypeTone, presentLineageAsset, referenceTypeAssetType } from "../model/presentation";
@@ -563,7 +564,7 @@ function DataflowDetails({ environmentId, dataflow, full, index, run, canOpenDat
         <EndpointGroup title="Output" tone="output" entityId={dataflow.destination_asset_id} index={index} onOpenRelated={onOpenRelated} />
       </section>
       <RunHistory key={dataflow.id} environmentId={environmentId} dataflow={dataflow} onOpenMonitoringDataflowRun={onOpenMonitoringDataflowRun} />
-      {full ? <DetailRows rows={[["Metadata source", dataflow.metadata_source_uri]]} /> : null}
+      {full ? <DetailRows rows={[["Metadata source", displayStorageUri(dataflow.metadata_source_uri)]]} /> : null}
       {full ? <IdentityField label="Lineage dataflow identity" value={dataflow.id} /> : null}
     </>
   );

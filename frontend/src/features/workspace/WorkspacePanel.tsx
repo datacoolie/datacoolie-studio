@@ -2,6 +2,7 @@ import { Database, FolderOpen, Plus, Server } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { BrandLogo } from "../../app/BrandLogo";
 import type { Environment, Project, SourcePath } from "../../shared/api/domainTypes";
+import { displayStorageUri } from "../../shared/lib/storage";
 
 interface WorkspacePanelProps {
   projects: Project[];
@@ -194,8 +195,8 @@ function SourceList({ items, empty }: { items: SourcePath[]; empty: string }) {
   return (
     <div className="source-list">
       {items.map((item) => (
-        <div key={item.id} className="source-item" title={item.uri}>
-          <span>{item.label || basename(item.uri)}</span>
+        <div key={item.id} className="source-item" title={displayStorageUri(item.uri)}>
+          <span>{item.label || basename(displayStorageUri(item.uri))}</span>
           <small>{item.enabled ? "enabled" : "disabled"}</small>
         </div>
       ))}

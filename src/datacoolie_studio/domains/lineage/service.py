@@ -22,7 +22,7 @@ from datacoolie_studio.domains.assets.manual_mapping import manual_mapping_from_
 from datacoolie_studio.domains.assets.mapping_target import asset_mapping_target
 from datacoolie_studio.domains.code_artifacts.service import (
     ANALYZER_VERSION,
-    ensure_code_artifact_materialization,
+    ensure_code_artifact_materialization_result,
 )
 from datacoolie_studio.domains.lineage.graph import build_typed_graph, build_typed_graph_summary
 from datacoolie_studio.domains.metadata.normalizer import enrich_metadata_documents_with_connections
@@ -235,7 +235,16 @@ def build_lineage_overview_summary(
     """
     for source in code_artifacts:
         if source.enabled:
-            ensure_code_artifact_materialization(session, source)
+            _materialization, warning = ensure_code_artifact_materialization_result(
+                session, source
+            )
+            if warning:
+                metadata.setdefault("errors", []).append({
+                    "metadata_source_id": source.id,
+                    "uri": source.uri,
+                    **warning,
+                    "cache_status": "stale",
+                })
 
     registry = AssetRegistry(environment_id)
     documents = enrich_metadata_documents_with_connections(metadata.get("_documents", []))

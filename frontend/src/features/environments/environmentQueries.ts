@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../shared/api/client";
 import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/domainTypes";
+import { shouldRetryQueryError } from "../../shared/lib/errors";
 
 export const environmentQueryKeys = {
   all: ["environments"] as const,
@@ -105,5 +106,6 @@ export function useEnvironmentOverviewQuery(environmentId: number) {
     queryKey: environmentQueryKeys.overview(environmentId),
     queryFn: () => api.getEnvironmentOverview(environmentId),
     staleTime: Number.POSITIVE_INFINITY,
+    retry: shouldRetryQueryError,
   });
 }

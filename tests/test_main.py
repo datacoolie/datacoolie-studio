@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from datacoolie_studio.main import app, spa_fallback
+from tests.support.paths import REPOSITORY_ROOT
 
 
 def test_spa_root_deep_link_and_root_asset_are_served_from_static_package():
@@ -69,7 +70,7 @@ def test_spa_fallback_rejects_non_http_normalized_traversal(path: str):
 
 
 def test_spa_fallback_never_serves_an_existing_file_outside_static_root():
-    repository_config = Path(__file__).parents[1] / "pyproject.toml"
+    repository_config = REPOSITORY_ROOT / "pyproject.toml"
 
     assert repository_config.is_file()
     with pytest.raises(HTTPException) as error:

@@ -33,6 +33,7 @@ import type {
   AssetUsedByItem,
 } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
 import { assetIconKind, assetTypeTone, type AssetIconKind } from "../lineage/model/presentation";
@@ -550,11 +551,12 @@ function DefinitionEmpty({ definition }: { definition: AssetDefinitionResponse }
 }
 
 function PythonDefinitionMeta({ definition }: { definition: AssetDefinitionResponse }) {
+  const sourceUri = pickUnknownString(definition, "source_uri");
   const rows = [
     ["Function", definition.function_path],
     ["Module", definition.module_name],
     ["File", definition.relative_path],
-    ["Source", pickUnknownString(definition, "source_uri")],
+    ["Source", sourceUri ? displayStorageUri(sourceUri) : sourceUri],
     ["Lines", pythonLineRange(definition)],
   ].filter(([, value]) => value);
   const matches = Array.isArray(definition.matches) ? definition.matches : [];
@@ -573,12 +575,15 @@ function PythonDefinitionMeta({ definition }: { definition: AssetDefinitionRespo
       ) : null}
       {matches.length ? (
         <div className="assets-definition-match-list">
-          {matches.map((match, index) => (
-            <div key={`python-match-${index}`}>
-              <strong>{pickUnknownString(match, "relative_path") || pickUnknownString(match, "module_name") || `match ${index + 1}`}</strong>
-              <small>{pickUnknownString(match, "source_uri") || pickUnknownString(match, "source_id") || "-"}</small>
-            </div>
-          ))}
+          {matches.map((match, index) => {
+            const matchSourceUri = pickUnknownString(match, "source_uri");
+            return (
+              <div key={`python-match-${index}`}>
+                <strong>{pickUnknownString(match, "relative_path") || pickUnknownString(match, "module_name") || `match ${index + 1}`}</strong>
+                <small>{matchSourceUri ? displayStorageUri(matchSourceUri) : pickUnknownString(match, "source_id") || "-"}</small>
+              </div>
+            );
+          })}
         </div>
       ) : null}
     </div>
@@ -939,13 +944,16 @@ function ProvenanceSection({
                 <span role="columnheader">Name</span>
                 <span role="columnheader">URI</span>
               </div>
-              {sources.map((source) => (
-                <div className="assets-provenance-source-row" key={source.id} role="row" title={source.uri}>
-                  <strong role="cell">#{source.id}</strong>
-                  <b role="cell">{sourceTail(source.uri)}</b>
-                  <span role="cell">{source.uri}</span>
-                </div>
-              ))}
+              {sources.map((source) => {
+                const displayUri = displayStorageUri(source.uri);
+                return (
+                  <div className="assets-provenance-source-row" key={source.id} role="row" title={displayUri}>
+                    <strong role="cell">#{source.id}</strong>
+                    <b role="cell">{sourceTail(displayUri)}</b>
+                    <span role="cell">{displayUri}</span>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="assets-empty-inline">No metadata source is linked to this asset.</div>

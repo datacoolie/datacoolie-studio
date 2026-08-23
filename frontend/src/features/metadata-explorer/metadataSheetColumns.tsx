@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { checkboxColumn, createTextColumn, keyColumn, type CellComponent, type Column } from "react-datasheet-grid";
 import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
+import { displayStorageUri } from "../../shared/lib/storage";
 import { MetadataStructuredCell } from "./MetadataStructuredCell";
 import { formatCellValue, parseCellText, structuredCellKind, type MetadataSourceOption } from "./metadataSheetOperations";
 import type { SheetRow } from "./metadataSheetTypes";
@@ -185,7 +186,8 @@ const studioMetadataSourceCell: CellComponent<SheetRow, MetadataSourceColumnData
   const cellRef = useRef<HTMLDivElement>(null);
   const sourceName = formatCellValue(rowData.__metadata_source_name) || "metadata_source";
   const sourceUri = formatCellValue(rowData.__metadata_source_uri);
-  const title = sourceUri ? `${sourceName}\n${sourceUri}` : sourceName;
+  const displaySourceUri = displayStorageUri(sourceUri);
+  const title = displaySourceUri ? `${sourceName}\n${displaySourceUri}` : sourceName;
   const [draftValue, setDraftValue] = useState(sourceName);
   const [open, setOpen] = useState(false);
 
@@ -266,7 +268,7 @@ const studioMetadataSourceCell: CellComponent<SheetRow, MetadataSourceColumnData
                 key={option.source_id}
                 type="button"
                 role="option"
-                title={option.uri}
+                title={displayStorageUri(option.uri)}
                 onMouseDown={(event) => {
                   event.preventDefault();
                   commit(option.name);
@@ -413,7 +415,7 @@ function findExactSourceOption(options: MetadataSourceOption[], value: string) {
 }
 
 function shortSourceUri(value: string) {
-  return value.replace(/\\/g, "/").split("/").filter(Boolean).slice(-2).join("/");
+  return displayStorageUri(value).replace(/\\/g, "/").split("/").filter(Boolean).slice(-2).join("/");
 }
 
 function isConnectionReferenceColumn(key: string) {

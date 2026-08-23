@@ -19,7 +19,10 @@ from datacoolie_studio.domains.storage.errors import (
     StorageNotFoundError,
 )
 from datacoolie_studio.domains.storage.redaction import redact_storage_error
-from datacoolie_studio.domains.storage.uri import canonical_cloud_uri
+from datacoolie_studio.domains.storage.uri import (
+    canonical_cloud_uri,
+    transport_storage_uri,
+)
 
 if TYPE_CHECKING:
     from datacoolie_studio.domains.storage.inventory import (
@@ -226,7 +229,10 @@ class FsspecStorageAdapter:
 
     def _path(self, uri: str) -> str:
         strip = getattr(self._filesystem, "_strip_protocol", None)
-        return str(strip(uri) if callable(strip) else uri)
+        transport_uri = transport_storage_uri(uri, self.provider)
+        return str(
+            strip(transport_uri) if callable(strip) else transport_uri
+        )
 
     def _canonical_from_path(self, path: str, *, source_uri: str | None = None) -> str:
         if "://" in path:

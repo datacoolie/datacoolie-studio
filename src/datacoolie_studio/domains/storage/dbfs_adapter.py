@@ -26,7 +26,10 @@ from datacoolie_studio.domains.storage.errors import (
     StorageConflictError,
     StorageNotFoundError,
 )
-from datacoolie_studio.domains.storage.uri import canonical_cloud_uri
+from datacoolie_studio.domains.storage.uri import (
+    canonical_cloud_uri,
+    transport_storage_uri,
+)
 
 if TYPE_CHECKING:
     from datacoolie_studio.domains.storage.inventory import (
@@ -368,8 +371,8 @@ def _safe_close(stream: BinaryIO) -> None:
 
 
 def _dbfs_path(uri: str) -> str:
-    canonical = canonical_cloud_uri(uri, "dbfs")
-    return "/" + canonical.removeprefix("dbfs:").lstrip("/")
+    transport = transport_storage_uri(uri, "dbfs")
+    return "/" + transport.removeprefix("dbfs:").lstrip("/")
 
 
 def _is_volume_path(path: str) -> bool:

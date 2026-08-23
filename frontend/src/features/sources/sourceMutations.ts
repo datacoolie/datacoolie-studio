@@ -219,6 +219,9 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
             ? await api.validateLogSource(environmentId, id)
             : await api.validateCodeArtifact(environmentId, id);
       await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
+      if (result.status === "error" && activeEnvironmentIdRef.current === environmentId) {
+        setError(result.message || "Source validation failed");
+      }
       return result;
     } catch (err) {
       const message = toErrorMessage(err);

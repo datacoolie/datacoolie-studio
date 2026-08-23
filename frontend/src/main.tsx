@@ -7,11 +7,14 @@ import "./styles.css";
 import "./styles/components.css";
 import { App } from "./App";
 import { queryClient } from "./shared/data/queryClient";
+import { NotificationCenterProvider } from "./shared/notifications/NotificationCenter";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <NotificationCenterProvider>
+        <App />
+      </NotificationCenterProvider>
     </QueryClientProvider>
   </React.StrictMode>
 );

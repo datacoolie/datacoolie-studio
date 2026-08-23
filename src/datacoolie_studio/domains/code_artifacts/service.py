@@ -22,7 +22,10 @@ from datacoolie_studio.domains.code_artifacts.materializer import (
     materialize_remote_artifact,
 )
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
-from datacoolie_studio.domains.sources.service import record_source_validation
+from datacoolie_studio.domains.sources.service import (
+    record_source_validation,
+    stored_source_validation_error,
+)
 from datacoolie_studio.domains.sources.storage_binding import binding_from_source
 from datacoolie_studio.domains.storage.factory import create_storage_adapter
 from datacoolie_studio.domains.storage.inventory import (
@@ -35,6 +38,17 @@ from datacoolie_studio.domains.sync import service as sync
 
 ANALYZER_VERSION = "artifact-index-v2"
 CODE_MATERIALIZATION_SCHEMA_VERSION = "code-artifact.v1"
+
+
+class CodeArtifactSourceUnavailableError(ArtifactIndexError):
+    """A source validation failure makes a remote code artifact unavailable."""
+
+    code = "source_validation_failed"
+
+    def __init__(self, source: EnvironmentSource, error: dict[str, Any]) -> None:
+        self.source_id = source.id
+        self.source_uri = source.uri
+        super().__init__(str(error.get("message") or "Code artifact source validation failed"))
 
 
 def validate_code_artifact(
@@ -151,6 +165,12 @@ def ensure_code_artifact_materialization_result(
     secret_store: CredentialSecretStore | None = None,
 ) -> tuple[CodeArtifactMaterialization | None, dict[str, Any] | None]:
     materialization = code_artifact_materialization(session, source.id)
+    validation_error = stored_source_validation_error(source)
+    if validation_error is not None:
+        if materialization is not None:
+            return materialization, validation_error
+        raise CodeArtifactSourceUnavailableError(source, validation_error)
+
     config = _source_config(source)
     artifact_type = str(config.get("artifact_type") or _infer_artifact_type(source.uri))
     if (
@@ -480,6 +500,7 @@ def _code_validation_statistics(
         uri=source.uri,
         session=session,
         secret_store=secret_store,
+        for_validation=True,
     )
     if artifact_type == "directory":
         bounded_probe = _storage_provider(source) == "dbfs"

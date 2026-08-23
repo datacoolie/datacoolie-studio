@@ -54,6 +54,7 @@ def validate_storage_connection(
             uri=canonical_uri,
             session=session,
             secret_store=secret_store,
+            for_validation=True,
         )
         if binding.provider == "local":
             path = require_local_path(canonical_uri)
@@ -144,6 +145,35 @@ def is_validated_empty_log_source(source: EnvironmentSource) -> bool:
     return result.get("message") == EMPTY_LOG_SOURCE_MESSAGE
 
 
+def stored_source_validation_error(source: EnvironmentSource) -> dict[str, str] | None:
+    """Return a persisted validation failure without touching source storage."""
+    if getattr(source, "read_check_status", None) != "error":
+        return None
+    try:
+        result = json.loads(getattr(source, "read_check_result_json", None) or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    message = result.get("message")
+    if not message:
+        for error in result.get("errors") or []:
+            if isinstance(error, dict) and error.get("message"):
+                message = error["message"]
+                break
+    if not message:
+        return None
+    return {
+        "code": "source_validation_failed",
+        "message": str(message),
+        **(
+            {"provider": str(result["detected_provider"])}
+            if result.get("detected_provider")
+            else {}
+        ),
+    }
+
+
 def validate_metadata_source(
     session: Session,
     source: EnvironmentSource,
@@ -157,8 +187,17 @@ def validate_metadata_source(
                 uri=source.uri,
                 session=session,
                 secret_store=secret_store,
+                for_validation=True,
             )
             adapter.stat(source.uri)
+        except StorageError as exc:
+            return record_source_validation(
+                session,
+                source,
+                source_validation_error(
+                    source, str(exc), provider=exc.provider or source.storage_provider
+                ),
+            )
         except Exception:
             return record_source_validation(
                 session,
@@ -235,6 +274,7 @@ def validate_log_source(
             uri=source.uri,
             session=session,
             secret_store=secret_store,
+            for_validation=True,
         )
         scan_specs = [
             (_stream_uri(etl_uri, "dataflow_run_log"), ".parquet", None),
@@ -264,6 +304,15 @@ def validate_log_source(
         dataflow_files = list(listings[0].files)
         job_files = list(listings[1].files)
         system_files = list(listings[2].files) if len(listings) > 2 else []
+    except StorageError as exc:
+        message = str(exc) or "Log storage is not accessible"
+        return record_source_validation(
+            session,
+            source,
+            source_validation_error(
+                source, message, provider=exc.provider or source.storage_provider
+            ),
+        )
     except Exception:
         message = "Log storage is not accessible"
         return record_source_validation(

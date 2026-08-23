@@ -34,10 +34,36 @@ from datacoolie_studio.domains.metadata.storage_io import (
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 from datacoolie_studio.domains.storage.inventory import storage_diagnostics
+from datacoolie_studio.domains.sources.service import stored_source_validation_error
 from datacoolie_studio.domains.sync import service as sync
 
 
 METADATA_MATERIALIZATION_SCHEMA_VERSION = "metadata-materialization.v1"
+
+
+class MetadataSourcesUnavailableError(MetadataReadError):
+    """All enabled metadata sources failed and no usable materialization exists."""
+
+    code = "metadata_sources_unavailable"
+
+    def __init__(self, errors: list[dict]) -> None:
+        self.errors = errors
+        self.source_ids = [
+            int(error["metadata_source_id"])
+            for error in errors
+            if error.get("metadata_source_id") is not None
+        ]
+        messages = [
+            f"{error.get('uri')}: {error.get('message')}"
+            if error.get("uri")
+            else str(error.get("message") or "Metadata source read failed")
+            for error in errors
+        ]
+        message = messages[0] if len(messages) == 1 else (
+            "Metadata sources could not be read:\n"
+            + "\n".join(f"- {item}" for item in messages)
+        )
+        super().__init__(message)
 
 
 def load_environment_metadata(
@@ -63,12 +89,22 @@ def load_environment_metadata(
                     {
                         "metadata_source_id": source.id,
                         "uri": source.uri,
-                        "message": warning["message"],
+                        **warning,
                         "cache_status": "stale",
                     }
                 )
         except MetadataReadError as exc:
-            errors.append({"metadata_source_id": source.id, "uri": source.uri, "message": str(exc)})
+            error = {
+                "metadata_source_id": source.id,
+                "uri": source.uri,
+                "message": str(exc),
+            }
+            validation_error = stored_source_validation_error(source)
+            if validation_error:
+                error.update(validation_error)
+                error["message"] = str(exc)
+            errors.append(error)
+    _raise_if_all_metadata_reads_failed(sources, documents, errors)
     documents = enrich_metadata_documents_with_connections(documents)
     connections = [item for doc in documents for item in doc["connections"]]
     dataflows = [item for doc in documents for item in doc["dataflows"]]
@@ -143,14 +179,30 @@ def load_environment_editor_document(
         if not source.enabled:
             continue
         try:
-            documents.append(
-                load_cached_editor_document(
-                    session, source, secret_store=secret_store
+            documents.append(load_cached_editor_document(session, source, secret_store=secret_store))
+            validation_error = stored_source_validation_error(source)
+            if validation_error:
+                errors.append(
+                    {
+                        "metadata_source_id": source.id,
+                        "uri": source.uri,
+                        **validation_error,
+                        "cache_status": "stale",
+                    }
                 )
-            )
         except MetadataReadError as exc:
-            errors.append({"metadata_source_id": source.id, "uri": source.uri, "message": str(exc)})
+            error = {
+                "metadata_source_id": source.id,
+                "uri": source.uri,
+                "message": str(exc),
+            }
+            validation_error = stored_source_validation_error(source)
+            if validation_error:
+                error.update(validation_error)
+                error["message"] = str(exc)
+            errors.append(error)
 
+    _raise_if_all_metadata_reads_failed(sources, documents, errors)
     return merge_environment_editor_documents(sources, documents, errors=errors)
 
 
@@ -307,6 +359,12 @@ def ensure_metadata_materialization_result(
         raise MetadataReadError("Source is not a metadata source")
 
     current_materialization = metadata_materialization(session, source.id)
+    validation_error = None if force else stored_source_validation_error(source)
+    if validation_error is not None:
+        if current_materialization is not None:
+            return current_materialization, validation_error
+        raise MetadataReadError(validation_error["message"])
+
     try:
         storage = storage_for_source(
             session, source, secret_store=secret_store
@@ -444,6 +502,21 @@ def metadata_materialization(session: Session, source_id: int) -> MetadataMateri
     return session.scalar(
         select(MetadataMaterialization).where(MetadataMaterialization.source_id == source_id)
     )
+
+
+def _raise_if_all_metadata_reads_failed(
+    sources: list[EnvironmentSource],
+    documents: list[dict],
+    errors: list[dict],
+) -> None:
+    enabled_sources = [source for source in sources if source.enabled]
+    if (
+        enabled_sources
+        and errors
+        and not documents
+        and any(error.get("code") == "source_validation_failed" for error in errors)
+    ):
+        raise MetadataSourcesUnavailableError(errors)
 
 
 def _upsert_metadata_materialization(

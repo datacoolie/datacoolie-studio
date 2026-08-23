@@ -32,7 +32,7 @@ const PROVIDERS: Array<{
   { value: "local", label: "Local filesystem", shortLabel: "Local", example: "D:\\projects\\datacoolie" },
   { value: "s3", label: "Amazon S3", shortLabel: "S3", example: "s3://bucket/project" },
   { value: "minio", label: "MinIO", shortLabel: "MinIO", example: "s3://bucket/project" },
-  { value: "adls", label: "Azure Data Lake Gen2", shortLabel: "ADLS", example: "abfs://container@account.dfs.core.windows.net/project" },
+  { value: "adls", label: "Azure Data Lake Gen2", shortLabel: "ADLS", example: "abfss://container@account.dfs.core.windows.net/project" },
   { value: "onelake", label: "Microsoft OneLake", shortLabel: "OneLake", example: "abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse/Files/project" },
   { value: "gcs", label: "Google Cloud Storage", shortLabel: "GCS", example: "gs://bucket/project" },
   { value: "dbfs", label: "Databricks DBFS", shortLabel: "Databricks", example: "/Volumes/catalog/schema/volume/project" },
@@ -179,7 +179,7 @@ export function StorageLocationFields({
           <strong>{provider.label}</strong>
           <span>
             {binding.provider === "adls" ? (
-              <>Accepts: <code>abfs:// · abfss:// · Azure DFS HTTPS</code></>
+              <>Preferred: <code>abfss://</code> · accepts <code>abfs:// · Azure DFS HTTPS</code></>
             ) : binding.provider === "onelake" ? (
               <>ABFSS or HTTPS · <code>Lakehouse Files only</code></>
             ) : binding.provider === "dbfs" ? (

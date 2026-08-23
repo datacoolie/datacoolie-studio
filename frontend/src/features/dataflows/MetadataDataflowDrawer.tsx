@@ -3,6 +3,7 @@ import { Fragment, useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
+import { displayStorageUri } from "../../shared/lib/storage";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { MetadataDataflowField, MetadataDataflowRecord } from "./metadataDataflowModel";
@@ -184,7 +185,7 @@ export function MetadataDataflowDrawer({
                 {copied ? <Check size={14} /> : <Copy size={14} />}
               </button>
             </div>
-            <small title={record.metadataSourceUri}>{record.metadataSourceName || record.metadataSourceUri || "metadata source"}</small>
+            <small title={displayStorageUri(record.metadataSourceUri)}>{displayStorageUri(record.metadataSourceName || record.metadataSourceUri) || "metadata source"}</small>
             <div className="assets-drawer-header-chips dataflow-drawer-chips">
               <span className="assets-header-chip">row:{record.rowIndex + 1}</span>
               <span className="assets-header-chip">{record.stage || "not set"}</span>

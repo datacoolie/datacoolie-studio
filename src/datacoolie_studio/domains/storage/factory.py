@@ -33,7 +33,10 @@ from datacoolie_studio.domains.storage.errors import (
 )
 from datacoolie_studio.domains.storage.fsspec_adapter import FsspecStorageAdapter
 from datacoolie_studio.domains.storage.onelake_adapter import OneLakeStorageAdapter
-from datacoolie_studio.domains.storage.uri import validate_storage_uri
+from datacoolie_studio.domains.storage.uri import (
+    transport_storage_uri,
+    validate_storage_uri,
+)
 from datacoolie_studio.domains.storage.writers import (
     AdlsConditionalStorageWriter,
     ConditionalStorageWriter,
@@ -71,6 +74,13 @@ _onelake_client_cache: OrderedDict[
 ] = OrderedDict()
 _onelake_client_cache_lock = threading.Lock()
 
+# Validation is an interactive probe.  A provider authentication failure should be
+# returned to the caller promptly instead of spending minutes in SDK backoff.  These
+# values apply only to adapters created with ``for_validation=True``; normal sync and
+# materialization operations retain each provider's resilience defaults.
+_VALIDATION_CONNECTION_TIMEOUT_SECONDS = 10
+_VALIDATION_READ_TIMEOUT_SECONDS = 15
+
 
 def invalidate_storage_client_caches() -> None:
     """Drop reusable provider clients after credential configuration changes."""
@@ -104,6 +114,7 @@ def create_storage_adapter(
     uri: str | None = None,
     session: Session | None = None,
     secret_store: CredentialSecretStore | None = None,
+    for_validation: bool = False,
 ) -> StorageAdapter:
     _validate_provider_configuration(binding, uri)
     if binding.provider == "local":
@@ -147,6 +158,7 @@ def create_storage_adapter(
             uri=uri,
             auth_type=auth_type,
             credentials=credentials,
+            for_validation=for_validation,
         )
     finally:
         credentials.clear()
@@ -281,7 +293,7 @@ def create_storage_writer(
             def blob_client(uri: str):
                 from urllib.parse import urlsplit
 
-                parsed = urlsplit(uri)
+                parsed = urlsplit(transport_storage_uri(uri, "adls"))
                 container = parsed.username or parsed.netloc.split("@", 1)[0]
                 return service.get_blob_client(
                     container=container, blob=parsed.path.lstrip("/")
@@ -514,6 +526,7 @@ def _create_filesystem(
     uri: str | None,
     auth_type: str | None,
     credentials: dict[str, object],
+    for_validation: bool = False,
 ):
     options = binding.options
     if binding.provider in {"s3", "minio"}:
@@ -586,7 +599,15 @@ def _create_filesystem(
             )
         _validate_adls_account_match(uri, str(kwargs.get("account_name") or ""))
         fsspec = importlib.import_module("fsspec")
-        return fsspec.filesystem("abfs", **kwargs)
+        if for_validation:
+            # fsspec caches filesystem instances by constructor arguments.  Do not
+            # mutate a cached client that a normal sync may reuse when applying the
+            # fail-fast validation policy below.
+            kwargs["skip_instance_cache"] = True
+        filesystem = fsspec.filesystem("abfs", **kwargs)
+        if for_validation:
+            _configure_validation_transport(filesystem)
+        return filesystem
 
     fsspec = importlib.import_module("fsspec")
     kwargs = {}
@@ -599,6 +620,44 @@ def _create_filesystem(
     if options.get("billing_project"):
         kwargs["requester_pays"] = options["billing_project"]
     return fsspec.filesystem("gcs", **kwargs)
+
+
+def _configure_validation_transport(filesystem: object) -> None:
+    """Bound Azure SDK retries and network waits for an interactive ADLS probe.
+
+    ``adlfs`` owns the Azure client and does not expose its retry policy through the
+    fsspec constructor.  Its client configuration is stable across supported versions,
+    so mutate only existing attributes and leave minimal/fake clients untouched.
+    """
+
+    service_client = getattr(filesystem, "service_client", None)
+    config = getattr(service_client, "_config", None)
+    if config is None:
+        return
+
+    retry_policy = getattr(config, "retry_policy", None)
+    if retry_policy is not None:
+        for attribute in (
+            "total_retries",
+            "connect_retries",
+            "read_retries",
+            "status_retries",
+            "initial_backoff",
+            "increment_base",
+            "random_jitter_range",
+            "backoff_factor",
+        ):
+            if hasattr(retry_policy, attribute):
+                setattr(retry_policy, attribute, 0)
+
+    transport = getattr(config, "transport", None)
+    connection_config = getattr(transport, "connection_config", None)
+    if connection_config is None:
+        return
+    if hasattr(connection_config, "timeout"):
+        connection_config.timeout = _VALIDATION_CONNECTION_TIMEOUT_SECONDS
+    if hasattr(connection_config, "read_timeout"):
+        connection_config.read_timeout = _VALIDATION_READ_TIMEOUT_SECONDS
 
 
 def _adls_account_name(uri: str | None) -> str | None:
