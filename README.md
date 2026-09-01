@@ -45,6 +45,17 @@ Sources shows Local and cloud bindings, readable/cache status, scheduled Log ref
 
 ![Sources and storage](docs/screenshots/sources.png)
 
+When scanning a project, Studio always uses automatic layout discovery. It
+keeps the configured `functions` root and also recognizes common Python
+layouts from a root `pyproject.toml`. A project with `src/<package>/**/*.py`
+is indexed with import names such as `package.module`, without executing or
+installing the project. `.py`, `.zip`, and `.whl` files found below the code
+root become separate code artifacts, so their provenance and validation state
+remain independent. Unsupported or ambiguous namespace layouts are reported
+for manual module-root/module-prefix configuration. The API still accepts
+`code_discovery_mode=explicit` for advanced integrations that need to limit a
+scan to the configured folder.
+
 ### Monitoring
 
 Monitoring is split into nine focused pages so operational questions can be answered without leaving the Environment.

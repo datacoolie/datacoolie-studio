@@ -24,6 +24,7 @@ import { formatPrettySql, highlightStructuredValue } from "../metadata-explorer/
 
 interface MetadataDataflowDrawerProps {
   record: MetadataDataflowRecord;
+  sectionOrder?: "source-transform-destination" | "source-destination-transform";
   editable?: boolean;
   readOnly?: boolean;
   busy?: boolean;
@@ -42,6 +43,7 @@ interface MetadataDataflowDrawerProps {
 
 export function MetadataDataflowDrawer({
   record,
+  sectionOrder = "source-transform-destination",
   editable = false,
   readOnly = false,
   busy = false,
@@ -84,6 +86,38 @@ export function MetadataDataflowDrawer({
   const route = dataflowRouteText(drawerRecord);
   const related = relatedDataflowRecords(record, relatedDataflows);
   const drawerDirty = JSON.stringify(drawerDraftRow) !== JSON.stringify(record.row);
+  const sourceSection = (
+    <section key="source" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-source">
+      <DataflowFields
+        fields={sourceFieldsForDisplay}
+        record={drawerRecord}
+        editable={canEdit}
+        onFieldChange={setField}
+        connectionOptions={connectionOptions}
+        connectionDetails={connectionDetailFields(sourceFieldsForDisplay, "source", sourceConnection, connectionColumns)}
+      />
+    </section>
+  );
+  const transformSection = (
+    <section key="transform" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-transform">
+      <DataflowFields fields={drawerRecord.transformRows} record={drawerRecord} editable={canEdit} onFieldChange={setField} />
+    </section>
+  );
+  const destinationSection = (
+    <section key="destination" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-destination">
+      <DataflowFields
+        fields={destinationFieldsForDisplay}
+        record={drawerRecord}
+        editable={canEdit}
+        onFieldChange={setField}
+        connectionOptions={connectionOptions}
+        connectionDetails={connectionDetailFields(destinationFieldsForDisplay, "destination", destinationConnection, connectionColumns)}
+      />
+    </section>
+  );
+  const routeSections = sectionOrder === "source-destination-transform"
+    ? [sourceSection, destinationSection, transformSection]
+    : [sourceSection, transformSection, destinationSection];
 
   useDrawerEscape(onClose);
 
@@ -260,31 +294,7 @@ export function MetadataDataflowDrawer({
             <RelatedDataflows records={related} onSelect={onSelectRelatedDataflow} />
           </section>
 
-          <section className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-source">
-            <DataflowFields
-              fields={sourceFieldsForDisplay}
-              record={drawerRecord}
-              editable={canEdit}
-              onFieldChange={setField}
-              connectionOptions={connectionOptions}
-              connectionDetails={connectionDetailFields(sourceFieldsForDisplay, "source", sourceConnection, connectionColumns)}
-            />
-          </section>
-
-          <section className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-transform">
-            <DataflowFields fields={drawerRecord.transformRows} record={drawerRecord} editable={canEdit} onFieldChange={setField} />
-          </section>
-
-          <section className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-destination">
-            <DataflowFields
-              fields={destinationFieldsForDisplay}
-              record={drawerRecord}
-              editable={canEdit}
-              onFieldChange={setField}
-              connectionOptions={connectionOptions}
-              connectionDetails={connectionDetailFields(destinationFieldsForDisplay, "destination", destinationConnection, connectionColumns)}
-            />
-          </section>
+          {routeSections}
         </div>
 
         {onFocusInLineage || onOpenMetadata ? (

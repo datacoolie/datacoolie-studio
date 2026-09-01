@@ -74,6 +74,13 @@ DATAFLOW_COLUMNS = [
     "source_watermark_columns",
     "source_filter_expression",
     "source_configure",
+    "destination_connection_name",
+    "destination_schema_name",
+    "destination_table",
+    "destination_load_type",
+    "destination_merge_keys",
+    "destination_partition_columns",
+    "destination_configure",
     "transform_deduplicate_columns",
     "transform_latest_data_columns",
     "transform_filter_expression",
@@ -86,13 +93,6 @@ DATAFLOW_COLUMNS = [
     "transform_hash_columns",
     "transform_masking_rules",
     "transform_configure",
-    "destination_connection_name",
-    "destination_schema_name",
-    "destination_table",
-    "destination_load_type",
-    "destination_merge_keys",
-    "destination_partition_columns",
-    "destination_configure",
 ]
 
 SCHEMA_HINT_COLUMNS = [

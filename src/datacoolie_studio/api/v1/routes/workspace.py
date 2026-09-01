@@ -391,6 +391,7 @@ def import_datacoolie_project_sources(
             project_uri=payload.project_uri,
             metadata_subpath=payload.metadata_subpath,
             code_subpath=payload.code_subpath,
+            code_discovery_mode=payload.code_discovery_mode,
             metadata_uri=payload.metadata_uri,
             code_uri=payload.code_uri,
             include_metadata=payload.include_metadata,

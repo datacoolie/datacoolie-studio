@@ -1994,6 +1994,12 @@ export interface components {
         /** DatacoolieProjectSourceImportRequest */
         DatacoolieProjectSourceImportRequest: {
             /**
+             * Code Discovery Mode
+             * @default auto
+             * @enum {string}
+             */
+            code_discovery_mode: "auto" | "explicit";
+            /**
              * Code Subpath
              * @default functions
              */
@@ -3646,7 +3652,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "created" | "existing";
+            status: "created" | "existing" | "stale";
             /** Uri */
             uri: string;
         };
@@ -3660,6 +3666,8 @@ export interface components {
             }[];
             /** Existing */
             existing: components["schemas"]["SourceImportItemResponse"][];
+            /** Stale */
+            stale?: components["schemas"]["SourceImportItemResponse"][];
             /** Summary */
             summary: {
                 [key: string]: number;

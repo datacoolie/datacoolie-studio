@@ -32,6 +32,12 @@
   --color-surface-raised: #ffffff;
   --color-surface-grid: #e8eef6;
 
+  /* Asset stage surfaces shared by inventory rows and lineage nodes */
+  --asset-stage-source-bg: #f0faf8;
+  --asset-stage-bronze-bg: #f7eee6;
+  --asset-stage-silver-bg: #f3f6f8;
+  --asset-stage-gold-bg: #fffbea;
+
   /* Shell (dark sidebar) */
   --color-sidebar: #08111f;
   --color-sidebar-2: #0d1b2f;

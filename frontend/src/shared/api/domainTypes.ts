@@ -322,7 +322,7 @@ export interface StorageConnectionValidation {
 }
 
 export interface SourceImportItem {
-  status: "created" | "existing";
+  status: "created" | "existing" | "stale";
   id: number;
   source_kind: string;
   uri: string;
@@ -334,6 +334,7 @@ export interface SourceImportItem {
 export interface SourceImportResponse {
   created: SourceImportItem[];
   existing: SourceImportItem[];
+  stale?: SourceImportItem[];
   errors: Array<Record<string, unknown>>;
   summary: Record<string, number>;
 }

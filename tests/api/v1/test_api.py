@@ -8,6 +8,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zipfile import ZipFile
 
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
@@ -741,6 +742,153 @@ def test_project_scan_queues_metadata_and_code_initialization(tmp_path: Path, mo
             assert connection.execute(
                 "select count(*) from sync_jobs where job_type = 'initial_refresh'"
             ).fetchone()[0] == 4
+
+    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+
+
+def test_project_scan_reconciles_removed_code_artifacts_without_hard_delete(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "studio.db"
+    project_root = tmp_path / "project"
+    functions_dir = project_root / "functions"
+    functions_dir.mkdir(parents=True)
+    helper = functions_dir / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments", json={"name": "dev"}
+        ).json()
+        endpoint = f"/api/v1/environments/{environment['id']}/datacoolie-project-sources"
+
+        first = client.post(endpoint, json={"project_uri": str(project_root), "enabled": False}).json()
+        assert first["summary"]["created"] == 1
+        source_id = first["created"][0]["id"]
+
+        helper.unlink()
+        second = client.post(endpoint, json={"project_uri": str(project_root), "enabled": False}).json()
+        assert second["summary"]["stale"] == 1
+        assert second["stale"][0]["id"] == source_id
+        assert second["stale"][0]["status"] == "stale"
+
+        listed = client.get(
+            f"/api/v1/environments/{environment['id']}/code-artifacts"
+        ).json()
+        assert len(listed) == 1
+        assert listed[0]["id"] == source_id
+        assert listed[0]["enabled"] is False
+        assert listed[0]["source_config"]["discovery_state"] == "missing"
+
+        helper.write_text("VALUE = 2\n", encoding="utf-8")
+        third = client.post(endpoint, json={"project_uri": str(project_root), "enabled": False}).json()
+        assert third["summary"].get("stale", 0) == 0
+        assert third["summary"]["existing"] == 1
+        restored = client.get(
+            f"/api/v1/environments/{environment['id']}/code-artifacts"
+        ).json()[0]
+        assert restored["id"] == source_id
+        assert restored["enabled"] is False
+        assert "discovery_state" not in restored["source_config"]
+
+    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+
+
+def test_project_scan_preserves_manual_code_override_on_rescan(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "studio.db"
+    project_root = tmp_path / "project"
+    functions_dir = project_root / "functions"
+    functions_dir.mkdir(parents=True)
+    helper = functions_dir / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments", json={"name": "dev"}
+        ).json()
+        endpoint = f"/api/v1/environments/{environment['id']}/datacoolie-project-sources"
+        first = client.post(endpoint, json={"project_uri": str(project_root), "enabled": False}).json()
+        source_id = first["created"][0]["id"]
+
+        updated = client.patch(
+            f"/api/v1/environments/{environment['id']}/code-artifacts/{source_id}",
+            json={"label": "manual helper"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["source_config"]["discovery_managed"] is False
+        helper.unlink()
+
+        rescanned = client.post(endpoint, json={"project_uri": str(project_root), "enabled": False}).json()
+        assert rescanned["summary"].get("stale", 0) == 0
+        assert rescanned["created"] == []
+        assert rescanned["existing"] == []
+        listed = client.get(
+            f"/api/v1/environments/{environment['id']}/code-artifacts"
+        ).json()
+        assert listed[0]["label"] == "manual helper"
+        assert "discovery_state" not in listed[0]["source_config"]
+
+    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+
+
+def test_project_scan_does_not_mark_invalid_archive_as_missing(
+    tmp_path: Path, monkeypatch
+):
+    db_path = tmp_path / "studio.db"
+    project_root = tmp_path / "project"
+    functions_dir = project_root / "functions"
+    functions_dir.mkdir(parents=True)
+    bundle = functions_dir / "bundle.zip"
+    with ZipFile(bundle, "w") as archive:
+        archive.writestr("pkg/__init__.py", "")
+        archive.writestr("pkg/loader.py", "VALUE = 1\n")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments", json={"name": "dev"}
+        ).json()
+        endpoint = (
+            f"/api/v1/environments/{environment['id']}"
+            "/datacoolie-project-sources"
+        )
+        first = client.post(
+            endpoint, json={"project_uri": str(project_root), "enabled": False}
+        ).json()
+        source_id = first["created"][0]["id"]
+
+        bundle.write_bytes(b"not a zip")
+        second = client.post(
+            endpoint, json={"project_uri": str(project_root), "enabled": False}
+        ).json()
+
+        assert second["created"] == []
+        assert second["existing"] == []
+        assert second["stale"] == []
+        assert any(
+            error.get("code") == "artifact_index_error"
+            for error in second["errors"]
+        )
+        listed = client.get(
+            f"/api/v1/environments/{environment['id']}/code-artifacts"
+        ).json()
+        assert listed[0]["id"] == source_id
+        assert "discovery_state" not in listed[0]["source_config"]
 
     os.environ.pop("DATACOOLIE_STUDIO_DB", None)
 

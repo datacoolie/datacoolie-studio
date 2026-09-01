@@ -74,6 +74,7 @@ interface SourcesPageProps {
     project_uri: string;
     metadata_subpath?: string;
     code_subpath?: string;
+    code_discovery_mode?: "auto" | "explicit";
     metadata_uri?: string | null;
     code_uri?: string | null;
     include_metadata?: boolean;
@@ -624,6 +625,7 @@ function DatacoolieProjectForm({
     project_uri: string;
     metadata_subpath?: string;
     code_subpath?: string;
+    code_discovery_mode?: "auto" | "explicit";
     metadata_uri?: string | null;
     code_uri?: string | null;
     include_metadata?: boolean;
@@ -654,6 +656,7 @@ function DatacoolieProjectForm({
       project_uri: projectUri.trim(),
       metadata_subpath: metadataSubpath.trim() || "metadata",
       code_subpath: codeSubpath.trim() || "functions",
+      code_discovery_mode: "auto",
       include_metadata: includeMetadata,
       include_code: includeCode,
       storage: projectStorage,
@@ -695,7 +698,7 @@ function DatacoolieProjectForm({
         <form id="project-source-project-panel" role="tabpanel" aria-labelledby="project-source-project-tab" className="source-add-form source-project-form" onSubmit={submitProject}>
           <div className="source-add-heading">
             <strong>Scan project</strong>
-            <span>Defaults: metadata and functions.</span>
+            <span>Find metadata and Python artifacts from the project layout.</span>
           </div>
           <label className="source-field-wide">
             Project path
@@ -1066,6 +1069,13 @@ function SourceCard({
         : kind === "metadata" && typeof item.source_config?.discovery_mode === "string"
           ? String(item.source_config.discovery_mode).replace(/_/g, " ")
           : null;
+  const discoveryOrigin = kind === "code" && typeof item.source_config?.discovery_origin === "string"
+    ? item.source_config.discovery_origin.replace(/^pyproject\./, "").replace(/\./g, " ")
+    : null;
+  const discoveryMissing = kind === "code" && item.source_config?.discovery_state === "missing";
+  const discoveryPythonFiles = kind === "code"
+    ? validatedPythonFileCount(validation) ?? discoveredPythonFileCount(item)
+    : null;
   const primaryPath = kind === "logs"
     ? displayStorageUri(etlPath || item.uri)
     : sourceDisplayPath(item, kind);
@@ -1098,6 +1108,9 @@ function SourceCard({
         <div className="source-card-identity-row">
           <strong className="source-card-name" title={displayName}>{displayName}</strong>
           <span className="source-type-chip">{typeLabel}</span>
+          {discoveryMissing ? <span className="source-type-chip" title="The last project scan could not find this artifact">Missing</span> : null}
+          {discoveryOrigin ? <span className="source-type-chip" title={`Discovered from ${discoveryOrigin}`}>{discoveryOrigin}</span> : null}
+          {discoveryPythonFiles !== null ? <span className="source-type-chip" title="Python files in this code artifact">{discoveryPythonFiles.toLocaleString()} Python files</span> : null}
         </div>
         <div className="source-card-row-actions">
           <LabeledStatus label="Validation">
@@ -1761,13 +1774,18 @@ function importNotice(result: SourceImportResponse | null, title: string): Sourc
   const existing = result.summary.existing ?? result.existing.length;
   const metadata = result.summary.metadata_sources ?? 0;
   const code = result.summary.code_artifacts ?? 0;
+  const staleItems = result.stale ?? [];
+  const stale = result.summary.stale ?? staleItems.length;
   const initializationQueued = result.summary.initialization_queued ?? 0;
   const errors = result.errors.map((item) => String(item.message ?? item.uri ?? JSON.stringify(item)));
   return {
-    tone: errors.length ? created || existing ? "warning" : "error" : "success",
+    tone: errors.length ? created || existing ? "warning" : "error" : stale ? "warning" : "success",
     title,
-    detail: `${created} created · ${existing} reused · ${metadata} metadata · ${code} code${initializationQueued ? ` · ${initializationQueued} initializing` : ""}`,
-    errors
+    detail: `${created} created · ${existing} reused · ${metadata} metadata · ${code} code${stale ? ` · ${stale} missing` : ""}${initializationQueued ? ` · ${initializationQueued} initializing` : ""}`,
+    errors: [
+      ...errors,
+      ...staleItems.map((item) => `${item.uri} is no longer present and was disabled`),
+    ]
   };
 }
 
@@ -1788,6 +1806,19 @@ function compactValidationSummary(validation: SourceReadCheckResult) {
     return `${counts.python_files ?? 0} Python files, ${counts.modules ?? 0} modules`;
   }
   return validation.message;
+}
+
+function validatedPythonFileCount(validation: SourceReadCheckResult | null): number | null {
+  if (validation?.status !== "ok") return null;
+  const count = validation.record_counts?.python_files;
+  return typeof count === "number" && count > 0 ? count : null;
+}
+
+function discoveredPythonFileCount(item: SourcePath): number | null {
+  const counts = item.source_config?.discovery_record_counts;
+  if (!counts || typeof counts !== "object" || Array.isArray(counts)) return null;
+  const count = (counts as Record<string, unknown>).python_files;
+  return typeof count === "number" && count > 0 ? count : null;
 }
 
 function observationErrorMessage(status: SourceSyncStatus | null) {

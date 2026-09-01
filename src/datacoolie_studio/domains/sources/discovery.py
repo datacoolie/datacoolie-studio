@@ -4,11 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from datacoolie_studio.domains.code_artifacts.indexer import ArtifactIndexError, build_artifact_index
+from datacoolie_studio.domains.code_artifacts.discovery import discover_code_artifacts
 from datacoolie_studio.domains.metadata.reader import MetadataReadError, read_metadata_file
 from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
 from datacoolie_studio.domains.sources.scan_policy import (
-    CODE_SCAN_EXCLUDED_DIRECTORIES,
     METADATA_SCAN_EXCLUDED_DIRECTORIES,
 )
 from datacoolie_studio.domains.storage.adapters import StorageAdapter, StorageObject
@@ -95,6 +94,7 @@ def discover_datacoolie_project_sources(
     code_uri: str | None = None,
     include_metadata: bool = True,
     include_code: bool = True,
+    code_discovery_mode: str = "auto",
     adapter: StorageAdapter | None = None,
 ) -> SourceDiscoveryResult:
     metadata_sources: list[DiscoveredSource] = []
@@ -116,13 +116,35 @@ def discover_datacoolie_project_sources(
 
     if include_code:
         resolved_code_uri = code_uri or join_uri(project_uri, code_subpath or "functions")
-        code = _discover_code_artifact(
-            resolved_code_uri, project_uri=project_uri, adapter=adapter
+        code_result = discover_code_artifacts(
+            project_uri,
+            resolved_code_uri,
+            adapter=adapter,
+            discovery_mode=code_discovery_mode,
         )
-        if code is None:
-            errors.append({"uri": resolved_code_uri, "message": "No readable source code artifact found"})
-        else:
-            code_artifacts.append(code)
+        errors.extend(code_result.errors)
+        for candidate in code_result.candidates:
+            source_config: dict[str, Any] = {
+                "artifact_type": candidate.artifact_type,
+                "module_roots": list(candidate.module_roots),
+                "discovery_mode": "datacoolie_project",
+                "code_discovery_mode": code_discovery_mode,
+                "discovery_managed": True,
+                "discovery_origin": candidate.discovery_origin,
+                "discovery_record_counts": dict(candidate.record_counts),
+                "project_uri": project_uri,
+            }
+            if candidate.module_prefix:
+                source_config["module_prefix"] = candidate.module_prefix
+            code_artifacts.append(
+                DiscoveredSource(
+                    source_kind="code",
+                    uri=candidate.uri,
+                    label=candidate.label,
+                    source_config=source_config,
+                    record_counts=candidate.record_counts,
+                )
+            )
 
     return SourceDiscoveryResult(metadata_sources, code_artifacts, errors)
 
@@ -146,58 +168,6 @@ def _metadata_file_source(path: Path, *, base_dir: Path, label: str | None = Non
             "metadata_root_uri": str(base_dir),
         },
         record_counts=counts,
-    )
-
-
-def _discover_code_artifact(
-    uri: str,
-    *,
-    project_uri: str,
-    adapter: StorageAdapter | None = None,
-) -> DiscoveredSource | None:
-    if adapter is not None:
-        return _discover_remote_code_artifact(
-            uri, project_uri=project_uri, adapter=adapter
-        )
-    try:
-        path = require_local_path(uri)
-    except StorageProviderNotEnabled:
-        return None
-    if not path.exists():
-        return None
-    if path.is_file():
-        artifact_types = {".py": "python_file", ".zip": "zip", ".whl": "wheel"}
-        artifact_type = artifact_types.get(path.suffix.lower())
-        if artifact_type is None:
-            return None
-        if artifact_type == "python_file":
-            python_file_count = 1
-        else:
-            try:
-                indexed = build_artifact_index(str(path), artifact_type)
-            except ArtifactIndexError:
-                return None
-            python_file_count = int(indexed["manifest"]["python_files"])
-    elif path.is_dir():
-        python_file_count = sum(1 for item in path.rglob("*.py") if item.is_file())
-        artifact_type = "directory"
-    else:
-        return None
-    if not python_file_count:
-        return None
-    label = uri_basename(uri) or "source code"
-    source_config: dict[str, Any] = {
-        "artifact_type": artifact_type,
-        "module_roots": [],
-        "discovery_mode": "datacoolie_project",
-        "project_uri": project_uri,
-    }
-    return DiscoveredSource(
-        source_kind="code",
-        uri=str(path),
-        label=label,
-        source_config=source_config,
-        record_counts={"python_files": python_file_count},
     )
 
 
@@ -283,56 +253,6 @@ def _discover_remote_metadata_sources(
             }
         )
     return SourceDiscoveryResult(sources, [], errors)
-
-
-def _discover_remote_code_artifact(
-    uri: str,
-    *,
-    project_uri: str,
-    adapter: StorageAdapter,
-) -> DiscoveredSource | None:
-    canonical = adapter.canonical_uri(uri)
-    suffix = Path(canonical).suffix.lower()
-    artifact_types = {".py": "python_file", ".zip": "zip", ".whl": "wheel"}
-    artifact_type = artifact_types.get(suffix)
-    if artifact_type is None:
-        try:
-            observed = inventory(
-                adapter,
-                StorageInventoryRequest(
-                    uri=canonical,
-                    purpose="observe",
-                    recursive=True,
-                    object_types=frozenset({"file"}),
-                    suffixes=frozenset({".py"}),
-                    exclude_directories=CODE_SCAN_EXCLUDED_DIRECTORIES,
-                ),
-            )
-            python_files = list(observed.files)
-        except Exception:
-            return None
-        if not python_files:
-            return None
-        artifact_type = "directory"
-        count = len(python_files)
-    else:
-        try:
-            adapter.stat(canonical)
-        except Exception:
-            return None
-        count = 1 if artifact_type == "python_file" else 0
-    return DiscoveredSource(
-        source_kind="code",
-        uri=canonical,
-        label=uri_basename(canonical) or "source code",
-        source_config={
-            "artifact_type": artifact_type,
-            "module_roots": [],
-            "discovery_mode": "datacoolie_project",
-            "project_uri": adapter.canonical_uri(project_uri),
-        },
-        record_counts={"python_files": count},
-    )
 
 
 def _relative_uri_label(uri: str, root_uri: str) -> str:

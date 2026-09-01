@@ -5,6 +5,7 @@ import type {
   LineageDependency,
   LineageReference
 } from "../../../shared/api/domainTypes";
+import { connectionStageFamily } from "../../../shared/connectionOrder";
 import { assetIconKind, presentLineageAsset, referenceTypeAssetType } from "./presentation";
 import type {
   LineageAssetFlowNode,
@@ -29,6 +30,7 @@ export function buildLineageFlow(
   const nodes: LineageAssetFlowNode[] = visible.entities.map((entity) => {
     const focused = visible.focusNodeIds.has(entity.id);
     const selectionState = nodeSelectionState(entity.id, selectionContext);
+    const stageFamily = isLineageAsset(entity) ? connectionStageFamily(entity.connection_name) : null;
     const presentation = isLineageAsset(entity)
       ? presentLineageAsset(entity)
       : presentReference(entity);
@@ -40,6 +42,7 @@ export function buildLineageFlow(
       sourcePosition: Position.Right,
       className: [
         isLineageAsset(entity) ? "flow-asset" : "flow-reference",
+        stageFamily ? `flow-stage-${stageFamily}` : "",
         focused ? "flow-asset-focused" : "",
         `flow-selection-${selectionState}`
       ].filter(Boolean).join(" "),

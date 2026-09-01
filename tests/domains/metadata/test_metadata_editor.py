@@ -345,6 +345,8 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
     assert columns.index("source_custom_option") > columns.index("source_configure")
     assert columns.index("transform_custom_rule") > columns.index("transform_configure")
     assert columns.index("destination_custom_sink") > columns.index("destination_configure")
+    assert columns.index("source_configure") < columns.index("destination_connection_name")
+    assert columns.index("destination_configure") < columns.index("transform_deduplicate_columns")
     assert [column for column in columns if column.startswith("transform_")] == [
         "transform_deduplicate_columns",
         "transform_latest_data_columns",

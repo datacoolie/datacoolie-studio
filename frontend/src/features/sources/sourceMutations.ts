@@ -84,6 +84,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     project_uri: string;
     metadata_subpath?: string;
     code_subpath?: string;
+    code_discovery_mode?: "auto" | "explicit";
     metadata_uri?: string | null;
     code_uri?: string | null;
     include_metadata?: boolean;

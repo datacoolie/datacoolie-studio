@@ -222,6 +222,24 @@ def test_directory_index_is_static_and_respects_module_roots(tmp_path: Path):
     assert indexed["manifest"]["modules"] == 2
 
 
+def test_directory_index_ignores_build_and_environment_directories(tmp_path: Path):
+    from datacoolie_studio.domains.code_artifacts.indexer import build_artifact_index
+
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "loader.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for folder in ("build", "dist", "package-1.0.egg-info", ".venv"):
+        generated = tmp_path / folder
+        generated.mkdir()
+        (generated / "loader.py").write_text("VALUE = 0\n", encoding="utf-8")
+
+    indexed = build_artifact_index(str(tmp_path), "directory")
+
+    assert indexed["manifest"]["python_files"] == 2
+    assert "package.loader" in indexed["modules"]
+
+
 def test_directory_index_infers_package_from_root_init_and_deduplicates_prefix(tmp_path: Path):
     from datacoolie_studio.domains.code_artifacts.indexer import build_artifact_index
 
@@ -507,6 +525,267 @@ def test_project_discovery_accepts_direct_python_file(tmp_path: Path):
     assert discovered.errors == []
     assert len(discovered.code_artifacts) == 1
     assert discovered.code_artifacts[0].source_config["artifact_type"] == "python_file"
+
+
+def test_project_discovery_finds_src_layout_functions_and_nested_archives(tmp_path: Path):
+    from datacoolie_studio.domains.code_artifacts.indexer import build_artifact_index
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    package = tmp_path / "src" / "customer_package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "loaders.py").write_text("VALUE = 1\n", encoding="utf-8")
+    functions = tmp_path / "functions"
+    functions.mkdir()
+    (functions / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
+    for filename in ("shared.zip", "released.whl"):
+        with ZipFile(functions / filename, "w") as archive:
+            archive.writestr("pkg/__init__.py", "")
+            archive.writestr("pkg/loader.py", "VALUE = 3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'distribution-name'\n\n[tool.setuptools.package-dir]\n'' = 'src'\n",
+        encoding="utf-8",
+    )
+
+    discovered = discover_datacoolie_project_sources(str(tmp_path), include_metadata=False)
+
+    assert discovered.errors == []
+    assert [(Path(item.uri).relative_to(tmp_path).as_posix(), item.source_config["artifact_type"])
+            for item in discovered.code_artifacts] == [
+        ("functions", "directory"),
+        ("functions/released.whl", "wheel"),
+        ("functions/shared.zip", "zip"),
+        ("src", "directory"),
+    ]
+    src_artifact = next(item for item in discovered.code_artifacts if Path(item.uri).name == "src")
+    indexed = build_artifact_index(src_artifact.uri, "directory")
+    assert sorted(indexed["modules"]) == ["customer_package", "customer_package.loaders"]
+    assert all("src." not in module for module in indexed["modules"])
+    assert src_artifact.source_config["discovery_origin"] == "pyproject.setuptools.package-dir"
+
+
+def test_project_discovery_uses_src_convention_and_excludes_build_outputs(tmp_path: Path):
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    package = tmp_path / "src" / "demo"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "pipeline.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for folder in ("build", "dist", "demo-1.0.egg-info", ".venv"):
+        generated = tmp_path / folder
+        generated.mkdir()
+        (generated / "ignored.py").write_text("VALUE = 0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo-distribution'\n",
+        encoding="utf-8",
+    )
+
+    discovered = discover_datacoolie_project_sources(str(tmp_path), include_metadata=False)
+
+    assert discovered.errors == []
+    assert len(discovered.code_artifacts) == 1
+    assert Path(discovered.code_artifacts[0].uri).relative_to(tmp_path).as_posix() == "src"
+    assert discovered.code_artifacts[0].record_counts == {"python_files": 2}
+
+
+def test_project_discovery_reports_malformed_pyproject_but_keeps_code_scan(tmp_path: Path):
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    functions = tmp_path / "functions"
+    functions.mkdir()
+    (functions / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.setuptools\n", encoding="utf-8")
+
+    discovered = discover_datacoolie_project_sources(str(tmp_path), include_metadata=False)
+
+    assert len(discovered.code_artifacts) == 1
+    assert discovered.code_artifacts[0].source_config["artifact_type"] == "directory"
+    assert any(error.get("code") == "pyproject_parse_error" for error in discovered.errors)
+
+
+@pytest.mark.parametrize(
+    "layout,expected_root",
+    [
+        ("[tool.poetry]\npackages = [{include = 'demo', from = 'src'}]\n", "src/demo"),
+        ("[tool.hatch.build.targets.wheel]\npackages = ['src/demo']\n", "src/demo"),
+        ("[tool.pdm.build]\npackage-dir = 'src'\n", "src"),
+    ],
+)
+def test_project_discovery_supports_common_static_package_layouts(
+    tmp_path: Path, layout: str, expected_root: str
+):
+    from datacoolie_studio.domains.code_artifacts.indexer import build_artifact_index
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    package = tmp_path / "src" / "demo"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "loader.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(layout, encoding="utf-8")
+
+    discovered = discover_datacoolie_project_sources(str(tmp_path), include_metadata=False)
+
+    assert discovered.errors == []
+    assert len(discovered.code_artifacts) == 1
+    artifact = discovered.code_artifacts[0]
+    assert Path(artifact.uri).relative_to(tmp_path).as_posix() == expected_root
+    indexed = build_artifact_index(
+        artifact.uri,
+        artifact.source_config["artifact_type"],
+        artifact.source_config["module_roots"],
+        artifact.source_config.get("module_prefix"),
+    )
+    assert sorted(indexed["modules"]) == ["demo", "demo.loader"]
+
+
+def test_project_discovery_reports_namespace_package_for_unconfirmed_root(tmp_path: Path):
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    package = tmp_path / "src" / "namespace_pkg"
+    package.mkdir(parents=True)
+    (package / "loader.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.setuptools.packages.find]\nwhere = ['src']\n",
+        encoding="utf-8",
+    )
+
+    discovered = discover_datacoolie_project_sources(str(tmp_path), include_metadata=False)
+
+    assert discovered.code_artifacts == []
+    assert any(error.get("code") == "namespace_package_manual_mapping" for error in discovered.errors)
+
+
+def test_project_discovery_explicit_directory_does_not_add_nested_archives(tmp_path: Path):
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+
+    functions = tmp_path / "functions"
+    functions.mkdir()
+    (functions / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    with ZipFile(functions / "bundle.zip", "w") as archive:
+        archive.writestr("pkg/__init__.py", "")
+        archive.writestr("pkg/loader.py", "VALUE = 2\n")
+
+    discovered = discover_datacoolie_project_sources(
+        str(tmp_path), include_metadata=False, code_discovery_mode="explicit"
+    )
+
+    assert len(discovered.code_artifacts) == 1
+    assert discovered.code_artifacts[0].source_config["artifact_type"] == "directory"
+
+
+def test_remote_project_discovery_includes_package_root_and_nested_archives():
+    from datetime import datetime, timezone
+
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+    from datacoolie_studio.domains.storage.adapters import StorageObject, StorageRevision
+    from datacoolie_studio.domains.storage.inventory import StorageInventory
+
+    project = "s3://bucket/project"
+    objects_by_root = {
+        f"{project}/functions": [
+            StorageObject(canonical_uri=f"{project}/functions/helper.py", name="helper.py", object_type="file", size=10),
+            StorageObject(canonical_uri=f"{project}/functions/shared.zip", name="shared.zip", object_type="file", size=20),
+            StorageObject(canonical_uri=f"{project}/functions/released.whl", name="released.whl", object_type="file", size=20),
+        ],
+        f"{project}/src": [
+            StorageObject(canonical_uri=f"{project}/src/customer_package/__init__.py", name="__init__.py", object_type="file", size=0),
+            StorageObject(canonical_uri=f"{project}/src/customer_package/loaders.py", name="loaders.py", object_type="file", size=10),
+        ],
+    }
+
+    class FakeAdapter:
+        def canonical_uri(self, uri: str) -> str:
+            return uri.rstrip("/")
+
+        def inventory(self, request):
+            objects = objects_by_root.get(request.uri, [])
+            return StorageInventory(
+                objects=tuple(objects),
+                completeness="complete",
+                requests=1,
+                pages=1,
+                directories_visited=1,
+                objects_inspected=len(objects),
+                matching_objects=len(objects),
+                retries=0,
+                throttles=0,
+                bytes_read=0,
+                duration_ms=1,
+            )
+
+        def stat(self, uri: str):
+            if uri == f"{project}/pyproject.toml":
+                return StorageRevision(uri, 70, datetime(2026, 1, 1, tzinfo=timezone.utc), "pyproject")
+            if uri in {
+                f"{project}/functions/shared.zip",
+                f"{project}/functions/released.whl",
+            }:
+                return StorageRevision(uri, 20, datetime(2026, 1, 1, tzinfo=timezone.utc), uri)
+            raise FileNotFoundError(uri)
+
+        def open_read(self, uri: str):
+            import io
+
+            assert uri == f"{project}/pyproject.toml"
+            return io.BytesIO(
+                b"[project]\nname = 'distribution-name'\n\n[tool.setuptools.package-dir]\n'' = 'src'\n"
+            )
+
+    discovered = discover_datacoolie_project_sources(
+        project,
+        include_metadata=False,
+        adapter=FakeAdapter(),
+    )
+
+    assert discovered.errors == []
+    assert [(item.label, item.source_config["artifact_type"]) for item in discovered.code_artifacts] == [
+        ("functions", "directory"),
+        ("functions/released.whl", "wheel"),
+        ("functions/shared.zip", "zip"),
+        ("src", "directory"),
+    ]
+    assert discovered.code_artifacts[-1].record_counts == {"python_files": 2}
+
+
+def test_remote_project_discovery_does_not_accept_partial_inventory():
+    from datacoolie_studio.domains.sources.discovery import discover_datacoolie_project_sources
+    from datacoolie_studio.domains.storage.adapters import StorageObject
+    from datacoolie_studio.domains.storage.inventory import StorageInventory
+
+    class PartialAdapter:
+        def canonical_uri(self, uri: str) -> str:
+            return uri.rstrip("/")
+
+        def inventory(self, request):
+            item = StorageObject(
+                canonical_uri=f"{request.uri}/helper.py",
+                name="helper.py",
+                object_type="file",
+                size=10,
+            )
+            return StorageInventory(
+                objects=(item,),
+                completeness="partial",
+                requests=1,
+                pages=1,
+                directories_visited=1,
+                objects_inspected=1,
+                matching_objects=2,
+                retries=0,
+                throttles=0,
+                bytes_read=0,
+                duration_ms=1,
+                early_stop_reason="object_limit",
+            )
+
+    discovered = discover_datacoolie_project_sources(
+        "s3://bucket/project",
+        include_metadata=False,
+        adapter=PartialAdapter(),
+    )
+
+    assert discovered.code_artifacts == []
+    assert any(error.get("code") == "code_inventory_incomplete" for error in discovered.errors)
 
 
 @pytest.mark.parametrize("suffix,artifact_type", [(".zip", "zip"), (".whl", "wheel")])

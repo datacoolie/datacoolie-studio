@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LatestStatusResponse, LineageDataflow, LineageDependency, LineageReference } from "../../../shared/api/domainTypes";
+import type { LatestStatusResponse, LineageAsset, LineageDataflow, LineageDependency, LineageReference } from "../../../shared/api/domainTypes";
 import { dependencyEdgePath } from "../components/LineageEdges";
 import { buildLineageFlow, latestRun } from "./flow";
 import type { VisibleLineage } from "./types";
@@ -146,6 +146,38 @@ describe("lineage reference nodes", () => {
 
 });
 
+describe("lineage asset stage backgrounds", () => {
+  it("uses the same connection stage families as the Assets inventory", () => {
+    const visible: VisibleLineage = {
+      entities: [
+        asset("source", "source_orders"),
+        asset("bronze", "bronze_sales"),
+        asset("silver", "silver_customer"),
+        asset("gold", "gold_metrics"),
+        asset("custom", "warehouse"),
+        reference("reference"),
+      ],
+      dataflows: [],
+      dependencies: [],
+      focusNodeIds: new Set(),
+      focusEdgeIds: new Set(),
+      issueCountByAsset: new Map(),
+      filtersActive: false,
+      traceActive: false,
+    };
+
+    const flow = buildLineageFlow(visible, null, false, null, null);
+    const classNames = new Map(flow.nodes.map((node) => [node.id, node.className]));
+
+    expect(classNames.get("source")).toContain("flow-stage-source");
+    expect(classNames.get("bronze")).toContain("flow-stage-bronze");
+    expect(classNames.get("silver")).toContain("flow-stage-silver");
+    expect(classNames.get("gold")).toContain("flow-stage-gold");
+    expect(classNames.get("custom")).not.toContain("flow-stage-");
+    expect(classNames.get("reference")).not.toContain("flow-stage-");
+  });
+});
+
 describe("lineage selection neighborhood", () => {
   it("distinguishes a selected entity from its direct inputs, outputs, and unrelated objects", () => {
     const visible: VisibleLineage = {
@@ -228,6 +260,19 @@ function reference(id: string, provenances: LineageReference["provenances"] = ["
     consumer_asset_ids: [],
     provenances,
     dependency_count: 1,
+  };
+}
+
+function asset(id: string, connectionName: string): LineageAsset {
+  return {
+    id,
+    entity_type: "asset",
+    label: id,
+    asset_type: "table",
+    display_name: id,
+    declaration_status: "declared",
+    connection_name: connectionName,
+    table: id,
   };
 }
 

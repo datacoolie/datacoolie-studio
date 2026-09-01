@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import zipfile
 from typing import Any
@@ -25,6 +26,10 @@ from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.sources.service import (
     record_source_validation,
     stored_source_validation_error,
+)
+from datacoolie_studio.domains.sources.scan_policy import (
+    CODE_SCAN_EXCLUDED_DIRECTORIES,
+    is_excluded_code_directory,
 )
 from datacoolie_studio.domains.sources.storage_binding import binding_from_source
 from datacoolie_studio.domains.storage.factory import create_storage_adapter
@@ -512,6 +517,7 @@ def _code_validation_statistics(
                 recursive=True,
                 object_types=frozenset({"file"}),
                 suffixes=frozenset({".py"}),
+                exclude_directories=CODE_SCAN_EXCLUDED_DIRECTORIES,
                 object_limit=1 if bounded_probe else None,
                 stop_after_match=bounded_probe,
             ),
@@ -531,10 +537,17 @@ def _local_code_validation_statistics(
     if artifact_type == "directory":
         if not path.is_dir():
             raise ArtifactIndexError(f"Code artifact directory not found: {path}")
-        return {
-            "python_files": sum(
-                1 for item in path.rglob("*.py") if item.is_file()
+        python_files: list[Path] = []
+        for current, directories, names in os.walk(path, topdown=True, followlinks=False):
+            directories[:] = sorted(
+                name for name in directories if not is_excluded_code_directory(name)
             )
+            base = Path(current)
+            python_files.extend(
+                base / name for name in names if name.lower().endswith(".py")
+            )
+        return {
+            "python_files": sum(1 for item in python_files if item.is_file())
         }
     if not path.is_file():
         raise ArtifactIndexError(f"Code artifact file not found: {path}")

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import BadZipFile, ZipFile
+
+from datacoolie_studio.domains.sources.scan_policy import is_excluded_code_directory
 
 
 MAX_FILES = 10_000
@@ -90,7 +93,14 @@ def _index_directory(root: Path, module_roots: list[str], module_prefix: str | N
     resolved_root = root.resolve()
     files = []
     total_size = 0
-    for path in sorted(root.rglob("*.py")):
+    paths: list[Path] = []
+    for current, directories, names in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name for name in directories if not is_excluded_code_directory(name)
+        )
+        base = Path(current)
+        paths.extend(base / name for name in sorted(names) if name.lower().endswith(".py"))
+    for path in sorted(paths):
         if not path.is_file():
             continue
         try:

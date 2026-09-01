@@ -4069,19 +4069,19 @@ button.assets-metric-chip:hover,
 }
 
 .assets-table tbody tr.assets-stage-source {
-  background: #f0faf8;
+  background: var(--asset-stage-source-bg);
 }
 
 .assets-table tbody tr.assets-stage-bronze {
-  background: #f7eee6;
+  background: var(--asset-stage-bronze-bg);
 }
 
 .assets-table tbody tr.assets-stage-silver {
-  background: #f3f6f8;
+  background: var(--asset-stage-silver-bg);
 }
 
 .assets-table tbody tr.assets-stage-gold {
-  background: #fffbea;
+  background: var(--asset-stage-gold-bg);
 }
 
 .assets-table tbody tr.assets-connection-group-start td,
@@ -10152,6 +10152,22 @@ button.lineage-run-row:disabled {
   border-radius: 6px !important;
   background: #fbf9fd !important;
   box-shadow: 0 5px 12px rgba(64, 49, 82, 0.07);
+}
+
+.flow-asset.flow-stage-source {
+  background: var(--asset-stage-source-bg) !important;
+}
+
+.flow-asset.flow-stage-bronze {
+  background: var(--asset-stage-bronze-bg) !important;
+}
+
+.flow-asset.flow-stage-silver {
+  background: var(--asset-stage-silver-bg) !important;
+}
+
+.flow-asset.flow-stage-gold {
+  background: var(--asset-stage-gold-bg) !important;
 }
 
 .flow-asset:hover,

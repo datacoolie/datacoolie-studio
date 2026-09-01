@@ -940,6 +940,7 @@ export function MetadataExplorer({
       {selectedDataflowRecord ? (
         <MetadataDataflowDrawer
           record={selectedDataflowRecord}
+          sectionOrder="source-destination-transform"
           editable={!readOnlyDocument}
           readOnly={readOnlyDocument}
           busy={busy}

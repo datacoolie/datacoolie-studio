@@ -24,6 +24,7 @@ from datacoolie_studio.domains.credentials.store import (
 )
 from datacoolie_studio.domains.sources.scan_policy import (
     CODE_SCAN_EXCLUDED_DIRECTORIES,
+    is_excluded_code_directory,
 )
 from datacoolie_studio.domains.sources.storage_binding import binding_from_source
 from datacoolie_studio.domains.storage.adapters import (
@@ -64,7 +65,11 @@ def materialize_remote_artifact(
                 object_limit=MAX_FILES,
             ),
         )
-        objects = list(observed.files)
+        objects = [
+            item
+            for item in observed.files
+            if not _remote_code_object_excluded(source.uri, item.canonical_uri)
+        ]
         if observed.completeness != "complete":
             raise ArtifactIndexError(
                 f"Code artifact exceeds {MAX_FILES} Python files"
@@ -188,6 +193,13 @@ def _validated_directory_entries(
             )
         entries.append((relative, item))
     return entries
+
+
+def _remote_code_object_excluded(root_uri: str, object_uri: str) -> bool:
+    relative = _relative_key(root_uri, object_uri)
+    return any(
+        is_excluded_code_directory(part) for part in relative.split("/")[:-1]
+    )
 
 
 def _publish_directory_snapshot(

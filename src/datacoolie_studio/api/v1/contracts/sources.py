@@ -51,6 +51,7 @@ class DatacoolieProjectSourceImportRequest(BaseModel):
     project_uri: str
     metadata_subpath: str = "metadata"
     code_subpath: str = "functions"
+    code_discovery_mode: Literal["auto", "explicit"] = "auto"
     metadata_uri: str | None = None
     code_uri: str | None = None
     include_metadata: bool = True
@@ -60,7 +61,7 @@ class DatacoolieProjectSourceImportRequest(BaseModel):
 
 
 class SourceImportItemResponse(BaseModel):
-    status: Literal["created", "existing"]
+    status: Literal["created", "existing", "stale"]
     id: int
     source_kind: str
     uri: str
@@ -73,6 +74,7 @@ class SourceImportItemResponse(BaseModel):
 class SourceImportResponse(BaseModel):
     created: list[SourceImportItemResponse]
     existing: list[SourceImportItemResponse]
+    stale: list[SourceImportItemResponse] = Field(default_factory=list)
     errors: list[dict[str, Any]]
     summary: dict[str, int]
 

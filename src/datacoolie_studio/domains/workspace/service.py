@@ -682,6 +682,7 @@ def import_datacoolie_project_sources(
     code_uri: str | None = None,
     include_metadata: bool = True,
     include_code: bool = True,
+    code_discovery_mode: str = "auto",
     enabled: bool = True,
     storage: dict | None = None,
     secret_store: CredentialSecretStore | None = None,
@@ -774,6 +775,7 @@ def import_datacoolie_project_sources(
         code_uri=normalized_code_uri,
         include_metadata=include_metadata,
         include_code=include_code,
+        code_discovery_mode=code_discovery_mode,
         adapter=adapter,
     )
     return _import_discovered_sources(
@@ -790,6 +792,9 @@ def import_datacoolie_project_sources(
         storage=binding_payload,
         secret_store=secret_store,
         registration=registration,
+        reconcile_project_code=(
+            include_code and _project_code_reconciliation_allowed(discovery.errors)
+        ),
     )
 
 
@@ -878,11 +883,13 @@ def _import_discovered_sources(
     storage: dict | None = None,
     secret_store: CredentialSecretStore | None = None,
     registration: SourceRegistration | None = None,
+    reconcile_project_code: bool = False,
 ) -> dict:
     created: list[dict] = []
     created_sources: list[EnvironmentSource] = []
     existing: list[dict] = []
     existing_sources: list[EnvironmentSource] = []
+    stale: list[dict] = []
 
     for discovered in [*metadata_sources, *code_artifacts]:
         current = _existing_source_by_uri(
@@ -893,6 +900,18 @@ def _import_discovered_sources(
             storage,
         )
         if current is not None:
+            if (
+                discovered.source_kind == "code"
+                and registration is not None
+                and registration.purpose == "project"
+            ):
+                _refresh_managed_project_code_source(
+                    session,
+                    current,
+                    discovered,
+                    enabled=enabled,
+                    registration=registration,
+                )
             existing_sources.append(current)
             existing.append(_source_import_item(current, discovered, "existing"))
             continue
@@ -906,6 +925,14 @@ def _import_discovered_sources(
         )
         created_sources.append(current)
         created.append(_source_import_item(current, discovered, "created"))
+
+    if reconcile_project_code and registration is not None:
+        stale = _mark_missing_project_code_sources(
+            session,
+            registration,
+            seen_source_ids={source.id for source in [*created_sources, *existing_sources]},
+            storage=storage,
+        )
 
     sources_to_initialize = [
         *(created_sources if materialize_created_sources else []),
@@ -923,20 +950,191 @@ def _import_discovered_sources(
         _delete_registration_if_orphan(session, registration.id)
     session.commit()
 
+    summary = {
+        "created": len(created),
+        "existing": len(existing),
+        "errors": len(all_errors),
+        "metadata_sources": sum(1 for item in [*created, *existing] if item["source_kind"] == "metadata"),
+        "code_artifacts": sum(1 for item in [*created, *existing] if item["source_kind"] == "code"),
+        "auto_validated": initialization["auto_validated"],
+        "auto_synced": initialization["auto_synced"],
+    }
+    if stale:
+        summary["stale"] = len(stale)
     return {
         "created": created,
         "existing": existing,
+        "stale": stale,
         "errors": all_errors,
-        "summary": {
-            "created": len(created),
-            "existing": len(existing),
-            "errors": len(all_errors),
-            "metadata_sources": sum(1 for item in [*created, *existing] if item["source_kind"] == "metadata"),
-            "code_artifacts": sum(1 for item in [*created, *existing] if item["source_kind"] == "code"),
-            "auto_validated": initialization["auto_validated"],
-            "auto_synced": initialization["auto_synced"],
-        },
+        "summary": summary,
     }
+
+
+def _refresh_managed_project_code_source(
+    session: Session,
+    source: EnvironmentSource,
+    discovered: DiscoveredSource,
+    *,
+    enabled: bool,
+    registration: SourceRegistration,
+) -> None:
+    current_config = _json_object(source.source_config_json)
+    if not _is_managed_project_code_source(source, current_config):
+        return
+
+    if source.registration_id != registration.id:
+        previous_registration_id = source.registration_id
+        source.registration_id = registration.id
+        session.flush()
+        if previous_registration_id is not None:
+            _delete_registration_if_orphan(session, previous_registration_id)
+
+    binding = binding_from_source(source)
+    canonical_config, _, _ = canonicalize_location_config(
+        discovered.source_config,
+        binding,
+    )
+    changed = canonical_config != current_config
+    was_disabled_by_scan = current_config.get("discovery_disabled_by_scan") is True
+    if changed:
+        source.source_config_json = json.dumps(canonical_config, sort_keys=True)
+        _invalidate_code_artifact_state(session, source)
+    if was_disabled_by_scan:
+        source.enabled = enabled
+        if enabled:
+            resume_observation(session, source.id)
+        else:
+            reset_observation(session, source.id)
+    if changed:
+        reset_observation(session, source.id)
+    if changed or was_disabled_by_scan:
+        invalidate_environment_derived_caches(
+            session, source.environment_id, structural=True
+        )
+
+
+def _mark_missing_project_code_sources(
+    session: Session,
+    registration: SourceRegistration,
+    *,
+    seen_source_ids: set[int],
+    storage: object | None,
+) -> list[dict]:
+    target_provider, _ = _storage_identity_from_binding(
+        registration.canonical_uri,
+        storage,
+    )
+    registrations = session.scalars(
+        select(SourceRegistration).where(
+            SourceRegistration.environment_id == registration.environment_id,
+            SourceRegistration.purpose == "project",
+        )
+    ).all()
+    stale: list[dict] = []
+    for candidate_registration in registrations:
+        if normalized_source_uri(candidate_registration.canonical_uri) != normalized_source_uri(
+            registration.canonical_uri
+        ):
+            continue
+        for source in list(candidate_registration.sources):
+            if source.source_kind != "code" or source.id in seen_source_ids:
+                continue
+            if binding_from_source(source).provider != target_provider:
+                continue
+            config = _json_object(source.source_config_json)
+            if not _is_managed_project_code_source(source, config):
+                continue
+            already_missing = config.get("discovery_state") == "missing"
+            changed = not already_missing
+            config["discovery_state"] = "missing"
+            if source.enabled:
+                source.enabled = False
+                config["discovery_disabled_by_scan"] = True
+                changed = True
+            elif "discovery_disabled_by_scan" not in config:
+                config["discovery_disabled_by_scan"] = False
+            if changed:
+                source.source_config_json = json.dumps(config, sort_keys=True)
+                _invalidate_code_artifact_state(session, source)
+                reset_observation(session, source.id)
+                invalidate_environment_derived_caches(
+                    session, source.environment_id, structural=True
+                )
+            stale.append(
+                _source_import_item(
+                    source,
+                    DiscoveredSource(
+                        source_kind="code",
+                        uri=source.uri,
+                        label=source.label,
+                        source_config=config,
+                    ),
+                    "stale",
+                )
+            )
+    return stale
+
+
+def _project_code_reconciliation_allowed(errors: list[dict]) -> bool:
+    """Only reconcile missing artifacts after a complete code inventory.
+
+    A provider error or bounded/partial listing cannot distinguish a missing
+    artifact from an artifact that was not returned.  Treating either case as
+    stale would disable valid sources during a transient cloud failure.
+    """
+
+    blocking_codes = {
+        "artifact_index_error",
+        "code_inventory_error",
+        "code_inventory_incomplete",
+        "invalid_discovery_mode",
+        "namespace_package_manual_mapping",
+        "package_root_escape",
+        "pyproject_layout_error",
+        "pyproject_layout_unrecognized",
+        "pyproject_parse_error",
+        "pyproject_read_error",
+        "pyproject_too_large",
+        "empty_code_artifact",
+    }
+    return not any(
+        isinstance(error, dict) and error.get("code") in blocking_codes
+        for error in errors
+    )
+
+
+def _is_managed_project_code_source(
+    source: EnvironmentSource,
+    config: dict[str, Any],
+) -> bool:
+    if config.get("discovery_managed") is False:
+        return False
+    if config.get("discovery_managed") is True:
+        return True
+    if config.get("discovery_mode") != "datacoolie_project":
+        return False
+    project_uri = config.get("project_uri")
+    registration = source.registration
+    return registration is not None and (
+        not project_uri
+        or normalized_source_uri(str(project_uri))
+        == normalized_source_uri(registration.canonical_uri)
+    )
+
+
+def _invalidate_code_artifact_state(
+    session: Session,
+    source: EnvironmentSource,
+) -> None:
+    _clear_source_read_check(source)
+    _delete_source_sync_records(session, source)
+    for row in _source_rows(session, CodeArtifactMaterialization, source.id):
+        session.delete(row)
+    from datacoolie_studio.domains.code_artifacts.materializer import (
+        clear_remote_artifact_snapshot,
+    )
+
+    clear_remote_artifact_snapshot(source.id)
 
 
 def _initialize_discovered_sources(
@@ -1145,12 +1343,22 @@ def update_code_artifact(
     structural_changed = False
     enabled_changed = enabled is not None and source.enabled != enabled
     reenabled = enabled is True and not source.enabled
+    current_config = _json_object(source.source_config_json)
+    user_override = any(
+        value is not None
+        for value in (uri, label, enabled, source_config, storage)
+    )
+    managed_override = user_override and _is_managed_project_code_source(
+        source, current_config
+    )
+    candidate_config = (
+        dict(source_config)
+        if source_config is not None
+        else dict(current_config)
+    )
+    if managed_override:
+        candidate_config["discovery_managed"] = False
     if uri is not None or source_config is not None or storage is not None:
-        candidate_config = (
-            source_config
-            if source_config is not None
-            else _json_object(source.source_config_json)
-        )
         normalized_uri, binding = validate_and_normalize_binding(
             session,
             uri=uri if uri is not None else source.uri,
@@ -1194,11 +1402,13 @@ def update_code_artifact(
         if config_json != (source.source_config_json or "{}"):
             source.source_config_json = config_json
             structural_changed = True
+    elif managed_override:
+        config_json = json.dumps(candidate_config, sort_keys=True)
+        if config_json != (source.source_config_json or "{}"):
+            source.source_config_json = config_json
+            structural_changed = True
     if structural_changed:
-        _clear_source_read_check(source)
-        _delete_source_sync_records(session, source)
-        for row in _source_rows(session, CodeArtifactMaterialization, source.id):
-            session.delete(row)
+        _invalidate_code_artifact_state(session, source)
     if label is not None:
         source.label = label
     if enabled is not None:
