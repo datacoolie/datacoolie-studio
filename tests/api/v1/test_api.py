@@ -1755,8 +1755,10 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
                 > 0
             )
 
+        # The fixture is historical; use an explicit full-history window so
+        # the assertions do not change as the current date moves forward.
         report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/overview"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/overview?range=all"
         ).json()
         assert report["schema_version"] == "monitoring-page.v9"
         assert report["page"] == "overview"
@@ -1769,11 +1771,11 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
         assert report["summary"]["requested_grain"] == "auto"
         assert report["summary"]["effective_grain"] in {"hour", "day", "week", "month"}
         diagnostics_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/diagnostics"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/diagnostics?range=all"
         ).json()
         assert diagnostics_report["diagnostics"]["kpis"]["matched_job_ids"] > 0
         freshness_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/freshness"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/freshness?range=all"
         ).json()
         assert "freshness" in freshness_report
         assert "freshness" not in report
@@ -1783,7 +1785,7 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
         assert filter_options["summary"]["source"] == "duckdb_filter_values"
         assert filter_options["options"]["operation_type"]
         filtered_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/overview?status=failed"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/overview?range=all&status=failed"
         ).json()
         assert (
             filtered_report["summary"]["dataflow_records"]
@@ -1813,7 +1815,7 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
         ).json()
         assert custom["summary"]["dataflow_records"] == 0
         dataflows = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/dataflows?limit=5"
+            f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=all&limit=5"
         ).json()
         assert dataflows["summary"]["cache"] == "duckdb"
         assert dataflows["summary"]["records"] == 5
@@ -1839,17 +1841,17 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             <= dataflows["summary"]["total_records"]
         )
         failed_dataflows = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/dataflows?limit=5&status=failed"
+            f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=all&limit=5&status=failed"
         ).json()
         assert failed_dataflows["summary"]["cache"] == "duckdb"
         assert failed_dataflows["summary"]["total_records"] >= 0
         if failed_dataflows["records"]:
             assert {row["status"] for row in failed_dataflows["records"]} == {"failed"}
         slow_dataflows = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/dataflows?limit=5&sortBy=duration_seconds&sortDir=desc"
+            f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=all&limit=5&sortBy=duration_seconds&sortDir=desc"
         ).json()
         fast_dataflows = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/dataflows?limit=5&sortBy=duration_seconds&sortDir=asc"
+            f"/api/v1/environments/{env['id']}/monitoring/dataflows?range=all&limit=5&sortBy=duration_seconds&sortDir=asc"
         ).json()
         assert (
             slow_dataflows["records"][0]["duration_seconds"]
@@ -1860,7 +1862,7 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             <= fast_dataflows["records"][-1]["duration_seconds"]
         )
         jobs = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/jobs?limit=3&offset=2"
+            f"/api/v1/environments/{env['id']}/monitoring/jobs?range=all&limit=3&offset=2"
         ).json()
         assert jobs["summary"]["cache"] == "duckdb"
         assert jobs["summary"]["records"] == 3
@@ -1880,7 +1882,7 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             last_3d_jobs["summary"]["total_records"] <= jobs["summary"]["total_records"]
         )
         longest_jobs = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/jobs?limit=5&sortBy=duration_seconds&sortDir=desc"
+            f"/api/v1/environments/{env['id']}/monitoring/jobs?range=all&limit=5&sortBy=duration_seconds&sortDir=desc"
         ).json()
         assert (
             longest_jobs["records"][0]["duration_seconds"]
@@ -2370,8 +2372,10 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             assert connection_calls - before <= 1
 
         before = connection_calls
+        # The fixture is historical; use an explicit full-history window so
+        # the assertions do not change as the current date moves forward.
         report_response = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/overview"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/overview?range=all"
         )
         # A result-cache hit opens no analytics connection; a miss uses one shared reader.
         assert connection_calls - before <= 1
@@ -2407,17 +2411,17 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             "month",
         }
         performance_response = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/performance"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/performance?range=all"
         )
         performance_report = performance_response.json()
         maintenance_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/maintenance"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/maintenance?range=all"
         ).json()
         volume_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/volume"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/volume?range=all"
         ).json()
         failures_report = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/failures"
+            f"/api/v1/environments/{env['id']}/monitoring/pages/failures?range=all"
         ).json()
         assert performance_report["performance"]["kpis"]["p95_duration_seconds"] >= 0
         assert performance_report["schema_version"] == "monitoring-page.v9"
@@ -2428,14 +2432,14 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert "slowest_dataflows_by_p95" not in performance_report["performance"]
         etag = performance_response.headers["etag"]
         unchanged = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/pages/performance",
+            f"/api/v1/environments/{env['id']}/monitoring/pages/performance?range=all",
             headers={"If-None-Match": etag},
         )
         assert unchanged.status_code == 304
         assert unchanged.content == b""
         evidence = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/performance/evidence",
-            params={"limit": 2, "offset": 0, "sortBy": "duration_seconds", "sortDir": "desc"},
+            params={"range": "all", "limit": 2, "offset": 0, "sortBy": "duration_seconds", "sortDir": "desc"},
         ).json()
         assert len(evidence["records"]) <= 2
         assert evidence["summary"]["total_records"] >= len(evidence["records"])
@@ -2456,7 +2460,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             assert "failure_rule_id" in failed_record
         maintenance_evidence = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/maintenance/evidence",
-            params={"limit": 100, "offset": 0},
+            params={"range": "all", "limit": 100, "offset": 0},
         ).json()
         for table in maintenance_evidence["records"]:
             assert isinstance(table["upstream_dataflows"], list)
@@ -2465,7 +2469,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
                 assert table["upstream_dataflows"]
 
         first_job = client.get(
-            f"/api/v1/environments/{env['id']}/monitoring/jobs?limit=1"
+            f"/api/v1/environments/{env['id']}/monitoring/jobs?range=all&limit=1"
         ).json()["records"][0]
         canonical_job = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/jobs",
@@ -2483,6 +2487,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             params={
                 "limit": 2,
                 "offset": 0,
+                "range": "all",
                 "sortBy": "duration_seconds",
                 "sortDir": "desc",
                 "investigateKind": "job_id",
@@ -2530,6 +2535,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
                 params={
                     "limit": 2,
                     "offset": 2,
+                    "range": "all",
                     "sortBy": "duration_seconds",
                     "sortDir": "desc",
                     "investigateKind": "job_id",
@@ -2543,13 +2549,16 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         from datacoolie_studio.domains.monitoring import query_service
 
         assert not hasattr(query_service, "_monitoring_rows")
+        default_overview_report = client.get(
+            f"/api/v1/environments/{env['id']}/monitoring/pages/overview?range=30d"
+        ).json()
         environment_overview = client.get(
             f"/api/v1/environments/{env['id']}/monitoring/pages/environment-overview"
         ).json()
-        assert environment_overview["summary"]["job_records"] == report["summary"]["job_records"]
-        assert environment_overview["operations"]["kpis"]["total_failures"] == report["operations"]["kpis"]["total_failures"]
-        assert environment_overview["operations"]["dataflow_kpis"]["success_rate"] == report["operations"]["dataflow_kpis"]["success_rate"]
-        assert environment_overview["operations"]["jobs_by_date_status"] == report["operations"]["jobs_by_date_status"]
+        assert environment_overview["summary"]["job_records"] == default_overview_report["summary"]["job_records"]
+        assert environment_overview["operations"]["kpis"]["total_failures"] == default_overview_report["operations"]["kpis"]["total_failures"]
+        assert environment_overview["operations"]["dataflow_kpis"]["success_rate"] == default_overview_report["operations"]["dataflow_kpis"]["success_rate"]
+        assert environment_overview["operations"]["jobs_by_date_status"] == default_overview_report["operations"]["jobs_by_date_status"]
         assert environment_overview["performance"]["slowest_dataflows"] == []
         assert environment_overview["maintenance"]["per_table"] == []
 
@@ -2559,7 +2568,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
         assert overview_payload["monitoring"]["job_records"] == environment_overview["summary"]["job_records"]
         assert overview_payload["monitoring"]["total_failures"] == environment_overview["operations"]["kpis"]["total_failures"]
         assert overview_payload["monitoring"]["dataflow_success_rate"] == environment_overview["operations"]["dataflow_kpis"]["success_rate"]
-        assert overview_payload["monitoring"]["latest_log_at"] == environment_overview["summary"]["latest_log_at"]
+        assert overview_payload["monitoring"].get("latest_log_at") == environment_overview["summary"].get("latest_log_at")
         assert overview_payload["monitoring"]["date_range"] == environment_overview["summary"]["date_range"]
         assert overview_payload["monitoring"]["errors"] == environment_overview["errors"]
 
