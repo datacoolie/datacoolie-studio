@@ -97,6 +97,23 @@ def test_cache_rebuild_reuses_manifest_revisions_without_provider_stat() -> None
     assert candidates[0][0].revision.provider_revision == "revision-7"
 
 
+def test_revision_json_uses_remote_modified_time_not_millisecond_provider_token() -> None:
+    from datacoolie_studio.domains.logs.ingestion import _revision_json
+    from datacoolie_studio.domains.storage.adapters import StorageRevision
+
+    modified = datetime(2026, 9, 1, 12, 30, tzinfo=timezone.utc)
+    revision = StorageRevision(
+        canonical_uri="dbfs:/Volumes/catalog/schema/volume/jobs.jsonl",
+        size=17,
+        last_modified=modified,
+        provider_revision=f"{int(modified.timestamp() * 1000)}:17",
+    )
+
+    payload = json.loads(_revision_json(revision))
+
+    assert payload["mtime_ns"] == int(modified.timestamp() * 1_000_000_000)
+
+
 def _write_job_file(path: Path, job_ids: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [

@@ -697,7 +697,7 @@ wheels = [
 
 [[package]]
 name = "datacoolie-studio"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "databricks-sdk" },

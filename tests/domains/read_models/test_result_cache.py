@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from datacoolie_studio.domains.read_models.contracts import (
     CachedResult,
@@ -18,6 +18,7 @@ from datacoolie_studio.domains.read_models.coordinator import InProcessResultBui
 from datacoolie_studio.domains.read_models.database import (
     ResultCacheEntry,
     create_result_cache_session,
+    get_result_cache_engine,
     reset_result_cache_engine,
 )
 from datacoolie_studio.domains.read_models.sqlite_store import (
@@ -224,6 +225,56 @@ def test_sqlite_store_reuses_versions_and_bounds_persisted_entries(monkeypatch):
     store.invalidate(1, {"monitoring.page.performance"})
     with create_result_cache_session() as session:
         assert session.scalar(select(func.count()).select_from(ResultCacheEntry)) == 1
+
+
+def test_invalidate_many_uses_one_write_transaction_and_preserves_other_families(
+    monkeypatch,
+):
+    clear_memory_cache()
+    monkeypatch.setenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", "memory://")
+    reset_result_cache_engine()
+    store = SqliteResultCacheStore()
+    monitoring_keys = [
+        replace(_key(f"env-{environment_id}"), environment_id=environment_id)
+        for environment_id in (1, 2)
+    ]
+    asset_keys = [
+        replace(key, namespace="assets.catalog", parameters_fingerprint="assets")
+        for key in monitoring_keys
+    ]
+    for key in monitoring_keys:
+        store.put(key, {"kind": "monitoring"})
+    for key in asset_keys:
+        store.put(key, {"kind": "assets"})
+    generations_before = [store.generation(key) for key in monitoring_keys]
+
+    statements: list[str] = []
+    engine = get_result_cache_engine()
+
+    def record_statement(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement.strip().upper())
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        store.invalidate_many([1, 2, 2], {"monitoring.page.performance"})
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+
+    assert sum(statement.startswith("BEGIN IMMEDIATE") for statement in statements) == 1
+    assert sum(statement.startswith("DELETE FROM RESULT_CACHE_ENTRIES") for statement in statements) == 1
+    assert [store.get(key) for key in monitoring_keys] == [None, None]
+    assert [store.get(key).payload for key in asset_keys] == [
+        {"kind": "assets"},
+        {"kind": "assets"},
+    ]
+    assert [store.generation(key) for key in monitoring_keys] != generations_before
 
 
 def test_cache_admin_optimize_reclaims_space_on_first_call(tmp_path: Path, monkeypatch):

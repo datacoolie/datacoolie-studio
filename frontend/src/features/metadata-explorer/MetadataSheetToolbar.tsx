@@ -1,4 +1,4 @@
-import { History, Loader2, Save, Search, Upload, X } from "lucide-react";
+import { Filter, History, Loader2, Save, Search, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { displayStorageUri } from "../../shared/lib/storage";
 import { stageToneClass, type StageToneMap } from "../../shared/stagePresentation";
@@ -13,6 +13,7 @@ interface MetadataSheetToolbarProps {
   hasStoredDraft: boolean;
   filteredRowCount: number;
   totalRowCount: number;
+  activeColumnFilterCount?: number;
   mode: "view" | "edit";
   query: string;
   stageFilter?: string | null;
@@ -27,6 +28,7 @@ interface MetadataSheetToolbarProps {
   onModeChange: (mode: "view" | "edit") => void;
   onQueryChange: (query: string) => void;
   onStageFilterClear?: () => void;
+  onClearColumnFilters?: () => void;
   onSave: () => void;
   onSaveDraft: () => void;
   onValidate: () => void;
@@ -47,6 +49,7 @@ export function MetadataSheetToolbar({
   hasStoredDraft,
   filteredRowCount,
   totalRowCount,
+  activeColumnFilterCount = 0,
   mode,
   query,
   stageFilter = null,
@@ -61,13 +64,15 @@ export function MetadataSheetToolbar({
   onModeChange,
   onQueryChange,
   onStageFilterClear,
+  onClearColumnFilters,
   onSave,
   onSaveDraft,
   onValidate
 }: MetadataSheetToolbarProps) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const hasQuery = Boolean(query.trim());
-  const hasFilter = hasQuery || Boolean(stageFilter);
+  const hasColumnFilters = activeColumnFilterCount > 0;
+  const hasFilter = hasQuery || Boolean(stageFilter) || hasColumnFilters;
 
   useEffect(() => {
     const focusFind = (event: KeyboardEvent) => {
@@ -162,6 +167,15 @@ export function MetadataSheetToolbar({
             <div className={`metadata-stage-filter ${stageToneClass(stageFilter, stageToneMap)}`} role="status" title="Exact normalized stage filter">
               <span>Stage: {stageFilter}</span>
               <button type="button" onClick={onStageFilterClear} aria-label="Clear stage filter" title="Clear stage filter">
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
+          {hasColumnFilters ? (
+            <div className="metadata-column-filter-summary" role="status">
+              <Filter size={13} aria-hidden="true" />
+              <span>{activeColumnFilterCount} column filter{activeColumnFilterCount === 1 ? "" : "s"}</span>
+              <button type="button" onClick={onClearColumnFilters} aria-label="Clear column filters" title="Clear column filters">
                 <X size={14} />
               </button>
             </div>

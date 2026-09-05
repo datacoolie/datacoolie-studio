@@ -48,4 +48,12 @@ describe("MetadataSheetToolbar", () => {
     expect(markup).toContain("Clear stage filter");
     expect(markup).toContain("metadata-stage-tone");
   });
+
+  it("shows a removable summary for active column filters", () => {
+    const markup = renderToolbar({ activeColumnFilterCount: 2 });
+
+    expect(markup).toContain("2 column filters");
+    expect(markup).toContain("Clear column filters");
+    expect(markup).toContain("1 of 1 rows");
+  });
 });

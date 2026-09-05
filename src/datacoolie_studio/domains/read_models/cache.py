@@ -109,8 +109,7 @@ def invalidate_project_read_models(
         session.scalars(select(Environment.id).where(Environment.project_id == project_id))
     )
     store = result_cache_provider().store
-    for environment_id in environment_ids:
-        store.invalidate(int(environment_id), model_keys)
+    store.invalidate_many([int(environment_id) for environment_id in environment_ids], model_keys)
 
 
 @contextmanager

@@ -136,29 +136,43 @@ class SqliteResultCacheStore:
         return CachedResult(payload=payload, computed_at=computed_at)
 
     def invalidate(self, environment_id: int, namespaces: set[str] | None = None) -> None:
+        self.invalidate_many([environment_id], namespaces)
+
+    def invalidate_many(
+        self,
+        environment_ids: list[int],
+        namespaces: set[str] | None = None,
+    ) -> None:
+        normalized_ids = sorted({int(environment_id) for environment_id in environment_ids})
+        if not normalized_ids:
+            return
         with create_result_cache_session() as session:
             session.execute(text("BEGIN IMMEDIATE"))
             try:
                 if namespaces:
                     families = {namespace_family(namespace) for namespace in namespaces}
-                    for family in families:
-                        _advance_generation(session, _family_scope(environment_id, family))
+                    for environment_id in normalized_ids:
+                        for family in families:
+                            _advance_generation(session, _family_scope(environment_id, family))
                     session.execute(
                         delete(ResultCacheEntry).where(
-                            ResultCacheEntry.environment_id == environment_id,
+                            ResultCacheEntry.environment_id.in_(normalized_ids),
                             ResultCacheEntry.namespace_family.in_(families),
                         )
                     )
                 else:
-                    _advance_generation(session, _environment_scope(environment_id))
+                    for environment_id in normalized_ids:
+                        _advance_generation(session, _environment_scope(environment_id))
                     session.execute(
-                        delete(ResultCacheEntry).where(ResultCacheEntry.environment_id == environment_id)
+                        delete(ResultCacheEntry).where(
+                            ResultCacheEntry.environment_id.in_(normalized_ids)
+                        )
                     )
                 session.commit()
             except Exception:
                 session.rollback()
                 raise
-        _memory_delete(environment_id=environment_id, namespaces=namespaces)
+        _memory_delete_many(environment_ids=normalized_ids, namespaces=namespaces)
 
     def clear(
         self,
@@ -405,13 +419,27 @@ def _memory_delete(
     namespaces: set[str] | None,
     parameters_fingerprint: str | None = None,
 ) -> None:
+    _memory_delete_many(
+        environment_ids=[environment_id],
+        namespaces=namespaces,
+        parameters_fingerprint=parameters_fingerprint,
+    )
+
+
+def _memory_delete_many(
+    *,
+    environment_ids: list[int],
+    namespaces: set[str] | None,
+    parameters_fingerprint: str | None = None,
+) -> None:
     global _memory_bytes
+    environment_id_set = set(environment_ids)
     families = {namespace_family(namespace) for namespace in namespaces} if namespaces else None
     with _memory_lock:
         identities = [
             identity
             for identity in _memory_cache
-            if identity[0] == environment_id
+            if identity[0] in environment_id_set
             and (families is None or namespace_family(identity[1]) in families)
             and (parameters_fingerprint is None or identity[2] == parameters_fingerprint)
         ]

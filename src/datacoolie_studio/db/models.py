@@ -48,15 +48,24 @@ class Project(Base):
     environments: Mapped[list[Environment]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     reference_mappings: Mapped[list[ProjectReferenceMapping]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
 class Environment(Base):
     __tablename__ = "environments"
+    __table_args__ = (
+        Index(
+            "ix_environments_project_id",
+            "project_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
@@ -68,10 +77,12 @@ class Environment(Base):
     sources: Mapped[list[EnvironmentSource]] = relationship(
         back_populates="environment",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     source_registrations: Mapped[list[SourceRegistration]] = relationship(
         back_populates="environment",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -99,6 +110,13 @@ class CredentialProfile(Base):
 
 class ProjectReferenceMapping(Base):
     __tablename__ = "project_reference_mappings"
+    __table_args__ = (
+        Index(
+            "ix_project_reference_mappings_project_id",
+            "project_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
@@ -147,6 +165,11 @@ class SourceRegistration(Base):
 class EnvironmentSource(Base):
     __tablename__ = "environment_sources"
     __table_args__ = (
+        Index(
+            "ix_environment_sources_environment_id",
+            "environment_id",
+            info={"studio_ensure_existing": True},
+        ),
         Index("ix_environment_sources_storage_provider", "storage_provider"),
         Index("ix_environment_sources_credential_profile", "credential_profile_id"),
         Index("ix_environment_sources_registration", "registration_id"),
@@ -273,6 +296,11 @@ class SourceObservation(Base):
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
     __table_args__ = (
+        Index(
+            "ix_sync_jobs_environment_id",
+            "environment_id",
+            info={"studio_ensure_existing": True},
+        ),
         Index("ix_sync_jobs_retention", "source_id", "status", "completed_at", "started_at", "id"),
         Index(
             "uq_sync_jobs_running_source",
@@ -403,6 +431,13 @@ class LogStreamState(Base):
 
 class MetadataEditorDraft(Base):
     __tablename__ = "metadata_editor_drafts"
+    __table_args__ = (
+        Index(
+            "ix_metadata_editor_drafts_source_id",
+            "source_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
@@ -425,6 +460,13 @@ class EnvironmentMetadataEditorDraft(Base):
 
 class MetadataValidationResult(Base):
     __tablename__ = "metadata_validation_results"
+    __table_args__ = (
+        Index(
+            "ix_metadata_validation_results_source_id",
+            "source_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
@@ -436,6 +478,13 @@ class MetadataValidationResult(Base):
 
 class MetadataSaveEvent(Base):
     __tablename__ = "metadata_save_events"
+    __table_args__ = (
+        Index(
+            "ix_metadata_save_events_source_id",
+            "source_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
@@ -449,6 +498,18 @@ class MetadataSaveEvent(Base):
 
 class MetadataBackup(Base):
     __tablename__ = "metadata_backups"
+    __table_args__ = (
+        Index(
+            "ix_metadata_backups_environment_id",
+            "environment_id",
+            info={"studio_ensure_existing": True},
+        ),
+        Index(
+            "ix_metadata_backups_source_id",
+            "source_id",
+            info={"studio_ensure_existing": True},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(Integer, nullable=False)

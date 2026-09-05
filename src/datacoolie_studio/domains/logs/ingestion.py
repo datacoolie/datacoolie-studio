@@ -19,7 +19,7 @@ from datacoolie_studio.core.config import (
     analytics_database_path,
     source_materialization_cache_dir,
 )
-from datacoolie_studio.core.time import parse_utc_datetime
+from datacoolie_studio.core.time import epoch_value_to_nanoseconds, parse_utc_datetime
 from datacoolie_studio.db.models import (
     EnvironmentSource,
     LogFileManifest,
@@ -61,6 +61,7 @@ from datacoolie_studio.domains.sources import service as source_validation
 from datacoolie_studio.domains.storage.uri import (
     StorageProviderNotEnabled,
     join_uri,
+    parse_storage_uri,
     require_local_path,
     uri_basename,
 )
@@ -349,7 +350,7 @@ def _revision_json(revision: StorageRevision) -> str:
     )
     mtime_ns = (
         int(local_mtime_token)
-        if local_mtime_token.isdigit()
+        if parse_storage_uri(revision.canonical_uri).is_local and local_mtime_token.isdigit()
         else int(revision.last_modified.timestamp() * 1_000_000_000)
     )
     return json.dumps(
@@ -371,8 +372,11 @@ def _file_revision_from_json(file_uri: str, revision_json: str) -> StorageRevisi
     last_modified = parse_utc_datetime(payload.get("last_modified"))
     if last_modified is None and payload.get("mtime_ns") is not None:
         try:
-            last_modified = datetime.fromtimestamp(int(payload["mtime_ns"]) / 1_000_000_000, tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
+            normalized = epoch_value_to_nanoseconds(payload["mtime_ns"])
+            if normalized is None:
+                return None
+            last_modified = datetime.fromtimestamp(normalized / 1_000_000_000, tz=timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
             return None
     if last_modified is None:
         return None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -398,6 +399,56 @@ def test_storage_connection_validation_is_read_only_and_bounded(
     assert response.json()["object_type"] == "directory"
     assert response.json()["objects_scanned"] == 2
     assert response.json()["metadata_write_back_supported"] is True
+
+
+def test_storage_connection_validation_supports_remote_files(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    from datacoolie_studio.domains.storage.adapters import StorageRevision
+    from datacoolie_studio.domains.storage.errors import StorageNotFoundError
+
+    input_uri = "/Volumes/catalog/schema/volume/metadata.json"
+    canonical_uri = "dbfs:/Volumes/catalog/schema/volume/metadata.json"
+    calls: list[tuple[str, str]] = []
+
+    class FileProbeAdapter:
+        def canonical_uri(self, value: str) -> str:
+            return value
+
+        def inventory(self, _request):
+            calls.append(("inventory", canonical_uri))
+            raise StorageNotFoundError("DBFS path was not found", provider="dbfs")
+
+        def stat(self, value: str):
+            calls.append(("stat", value))
+            return StorageRevision(
+                canonical_uri=value,
+                size=12,
+                last_modified=datetime(2026, 9, 2, tzinfo=timezone.utc),
+                provider_revision="etag-1",
+            )
+
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.sources.service.create_storage_adapter",
+        lambda *_args, **_kwargs: FileProbeAdapter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/storage-connections/validate",
+            json={
+                "uri": input_uri,
+                "storage": {"provider": "dbfs", "auth_mode": "ambient"},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ok"
+    assert response.json()["object_type"] == "file"
+    assert response.json()["canonical_uri"] == canonical_uri
+    assert response.json()["provider_revision"] == "etag-1"
+    assert response.json()["metadata_write_back_supported"] is True
+    assert calls == [("inventory", canonical_uri), ("stat", canonical_uri)]
 
 
 def test_storage_connection_validation_rejects_mismatched_base_log_uri(

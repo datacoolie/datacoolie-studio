@@ -1,7 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { checkboxColumn, createTextColumn, keyColumn, type CellComponent, type Column } from "react-datasheet-grid";
+import { Filter } from "lucide-react";
 import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
 import { displayStorageUri } from "../../shared/lib/storage";
+import { MetadataColumnFilterPopover } from "./MetadataColumnFilterPopover";
+import type { MetadataFilterOption } from "./metadataColumnFilters";
+import {
+  METADATA_COLUMN_HEADER_LAYOUT,
+  fitMetadataColumnHeader,
+  normalizeMetadataColumnWidth
+} from "./metadataColumnHeaderLayout";
 import { MetadataStructuredCell } from "./MetadataStructuredCell";
 import { formatCellValue, parseCellText, structuredCellKind, type MetadataSourceOption } from "./metadataSheetOperations";
 import type { SheetRow } from "./metadataSheetTypes";
@@ -20,6 +28,14 @@ interface BuildSheetColumnsOptions {
   metadataSourceOptions: MetadataSourceOption[];
   columnWidths: Record<string, number>;
   onColumnWidthChange: (columnKey: string, width: number) => void;
+  activeFilterColumnKey?: string | null;
+  activeFilterOptions?: MetadataFilterOption[];
+  activeFilterSelectedKeys?: readonly string[];
+  isColumnFilterActive?: (columnKey: string) => boolean;
+  onColumnFilterOpen?: (columnKey: string) => void;
+  onColumnFilterApply?: (columnKey: string, selectedKeys: string[]) => void;
+  onColumnFilterClear?: (columnKey: string) => void;
+  onColumnFilterCancel?: () => void;
 }
 
 interface ConnectionColumnData {
@@ -322,26 +338,54 @@ function createStudioMetadataSourceColumn(columnKey: string, options: MetadataSo
   };
 }
 
-export function buildSheetColumns({ columns, rows, issues, editable, connectionOptions, metadataSourceOptions, columnWidths, onColumnWidthChange }: BuildSheetColumnsOptions): Column<SheetRow>[] {
+export function buildSheetColumns({
+  columns,
+  rows,
+  issues,
+  editable,
+  connectionOptions,
+  metadataSourceOptions,
+  columnWidths,
+  onColumnWidthChange,
+  activeFilterColumnKey = null,
+  activeFilterOptions = [],
+  activeFilterSelectedKeys = [],
+  isColumnFilterActive = () => false,
+  onColumnFilterOpen,
+  onColumnFilterApply,
+  onColumnFilterClear,
+  onColumnFilterCancel
+}: BuildSheetColumnsOptions): Column<SheetRow>[] {
   return columns.map((column) => {
     const studioRoutingColumn = isStudioMetadataSourceColumn(column.key);
     const baseColumn: Partial<Column<SheetRow, any, string>> = studioRoutingColumn
       ? createStudioMetadataSourceColumn(column.key, metadataSourceOptions)
       : keyColumn(column.key as keyof SheetRow, resolveBaseColumn(column.key, connectionOptions, !editable)) as Partial<Column<SheetRow, any, string>>;
-    const basis = columnWidths[column.key] ?? initialColumnWidth(column, rows);
+    const width = columnWidths[column.key] ?? fitMetadataColumnHeader(
+      initialColumnWidth(column, rows), measuredHeaderTextWidth(column)
+    );
+    const autoWidth = autoFitColumnWidth(column, rows);
     return {
       ...baseColumn,
       title: (
         <ResizableHeader
           columnKey={column.key}
           title={column.name}
-          width={basis}
-          autoWidth={autoFitColumnWidth(column, rows)}
+          width={width}
+          autoWidth={autoWidth}
           onColumnWidthChange={onColumnWidthChange}
+          filterActive={isColumnFilterActive(column.key)}
+          filterOpen={activeFilterColumnKey === column.key}
+          filterOptions={activeFilterColumnKey === column.key ? activeFilterOptions : []}
+          filterSelectedKeys={activeFilterColumnKey === column.key ? activeFilterSelectedKeys : []}
+          onColumnFilterOpen={onColumnFilterOpen}
+          onColumnFilterApply={onColumnFilterApply}
+          onColumnFilterClear={onColumnFilterClear}
+          onColumnFilterCancel={onColumnFilterCancel}
         />
       ),
-      minWidth: 72,
-      basis,
+      minWidth: METADATA_COLUMN_HEADER_LAYOUT.minimumColumnWidth,
+      basis: width,
       grow: 0,
       shrink: 0,
       headerClassName: metadataHeaderClassName(column.key),
@@ -357,12 +401,53 @@ interface ResizableHeaderProps {
   width: number;
   autoWidth: number;
   onColumnWidthChange: (columnKey: string, width: number) => void;
+  filterActive: boolean;
+  filterOpen: boolean;
+  filterOptions: MetadataFilterOption[];
+  filterSelectedKeys: readonly string[];
+  onColumnFilterOpen?: (columnKey: string) => void;
+  onColumnFilterApply?: (columnKey: string, selectedKeys: string[]) => void;
+  onColumnFilterClear?: (columnKey: string) => void;
+  onColumnFilterCancel?: () => void;
 }
 
-function ResizableHeader({ columnKey, title, width, autoWidth, onColumnWidthChange }: ResizableHeaderProps) {
+function ResizableHeader({
+  columnKey,
+  title,
+  width,
+  autoWidth,
+  onColumnWidthChange,
+  filterActive,
+  filterOpen,
+  filterOptions,
+  filterSelectedKeys,
+  onColumnFilterOpen,
+  onColumnFilterApply,
+  onColumnFilterClear,
+  onColumnFilterCancel
+}: ResizableHeaderProps) {
+  const filterButtonRef = useRef<HTMLButtonElement>(null);
   return (
     <span className="metadata-resizable-header" title={title}>
-      <span>{title}</span>
+      <span className="metadata-resizable-header-label">{title}</span>
+      <button
+        ref={filterButtonRef}
+        className={`metadata-column-filter-trigger${filterActive ? " active" : ""}`}
+        type="button"
+        data-metadata-column-filter-trigger={columnKey}
+        aria-label={`${filterActive ? "Edit" : "Filter"} ${title}`}
+        aria-haspopup="dialog"
+        aria-expanded={filterOpen}
+        title={`${filterActive ? "Edit" : "Filter"} ${title}`}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onColumnFilterOpen?.(columnKey);
+        }}
+      >
+        <Filter size={METADATA_COLUMN_HEADER_LAYOUT.filterIconSize} aria-hidden="true" />
+      </button>
       <button
         className="metadata-column-resizer"
         type="button"
@@ -380,6 +465,18 @@ function ResizableHeader({ columnKey, title, width, autoWidth, onColumnWidthChan
           onColumnWidthChange(columnKey, autoWidth);
         }}
       />
+      {filterOpen && onColumnFilterApply && onColumnFilterClear && onColumnFilterCancel ? (
+        <MetadataColumnFilterPopover
+          anchorRef={filterButtonRef}
+          columnKey={columnKey}
+          columnTitle={title}
+          options={filterOptions}
+          selectedKeys={filterSelectedKeys}
+          onApply={(selectedKeys) => onColumnFilterApply(columnKey, selectedKeys)}
+          onClear={() => onColumnFilterClear(columnKey)}
+          onCancel={onColumnFilterCancel}
+        />
+      ) : null}
     </span>
   );
 }
@@ -495,7 +592,7 @@ function initialColumnWidth(column: SheetColumn, rows: SheetRow[]) {
 }
 
 function autoFitColumnWidth(column: SheetColumn, rows: SheetRow[]) {
-  return Math.min(480, measuredColumnWidth(column, rows));
+  return fitMetadataColumnHeader(Math.min(480, measuredColumnWidth(column, rows)), measuredHeaderTextWidth(column));
 }
 
 function measuredColumnWidth(column: SheetColumn, rows: SheetRow[]) {
@@ -504,11 +601,16 @@ function measuredColumnWidth(column: SheetColumn, rows: SheetRow[]) {
     (current, row) => Math.max(current, measureCellWidth(formatCellValue(row[column.key]))),
     0
   );
-  return Math.max(72, Math.ceil(Math.max(headerWidth, cellWidth)));
+  return normalizeMetadataColumnWidth(Math.ceil(Math.max(headerWidth, cellWidth)));
 }
 
 function measuredHeaderWidth(column: SheetColumn) {
-  return Math.max(72, Math.ceil(measureNativeTextWidth(column.name, "metadata-autofit-header-ruler")));
+  // Preserve the pre-filter sizing strategy, including its original ruler padding.
+  return normalizeMetadataColumnWidth(Math.ceil(measureNativeTextWidth(column.name, "metadata-autofit-header-ruler")));
+}
+
+function measuredHeaderTextWidth(column: SheetColumn) {
+  return measureNativeTextWidth(column.name, "metadata-header-text-ruler");
 }
 
 function usesPreferredInitialWidth(key: string) {

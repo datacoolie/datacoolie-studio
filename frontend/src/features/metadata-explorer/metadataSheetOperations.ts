@@ -1,5 +1,6 @@
 import type { MetadataEditorDocument, MetadataEditorSheet } from "../../shared/api/domainTypes";
 import { normalizeStage, stageFilterMatches } from "../../shared/stagePresentation";
+import { metadataColumnFilterMatches, type MetadataColumnFilterMap } from "./metadataColumnFilters";
 import type { SheetKey, SheetRow } from "./metadataSheetTypes";
 
 export const STUDIO_METADATA_SOURCE_FIELDS = [
@@ -14,13 +15,19 @@ export function filterMetadataRows(
   rows: Array<Record<string, unknown>>,
   columns: Array<{ key: string }>,
   query: string,
-  stageFilter?: string | null
+  stageFilter?: string | null,
+  columnFilters: MetadataColumnFilterMap = {},
+  excludedColumnKey?: string,
+  targetDataflowIds: readonly string[] = []
 ): SheetRow[] {
   const needle = query.trim().toLocaleLowerCase();
   const normalizedStageFilter = normalizeStage(stageFilter);
+  const targetIds = new Set(targetDataflowIds);
   return rows
     .map<SheetRow>((row, index) => ({ ...row, __rowId: `${sheetKey}-${index}`, __rowIndex: index }))
+    .filter((row) => sheetKey !== "dataflows" || !targetIds.size || targetIds.has(formatCellValue(row.dataflow_id)))
     .filter((row) => !normalizedStageFilter || stageFilterMatches(row.stage, normalizedStageFilter))
+    .filter((row) => metadataColumnFilterMatches(row, columnFilters, excludedColumnKey))
     .filter((row) => !needle || columns.some((column) => metadataCellMatches(row[column.key], needle)));
 }
 

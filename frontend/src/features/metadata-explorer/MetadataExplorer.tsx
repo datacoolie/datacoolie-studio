@@ -23,6 +23,24 @@ import {
 } from "../dataflows/metadataDataflowModel";
 import { buildSheetColumns } from "./metadataSheetColumns";
 import {
+  METADATA_COLUMN_HEADER_LAYOUT,
+  metadataHeaderLayoutStyle,
+  normalizeMetadataColumnWidth
+} from "./metadataColumnHeaderLayout";
+import {
+  createEmptyMetadataColumnFilters,
+  metadataColumnFilterCount,
+  metadataColumnFilterMapWithoutKey,
+  metadataColumnFilterOptionKeys,
+  metadataColumnFilterOptions,
+  metadataColumnFilterSelectionIsComplete,
+  metadataColumnFilterStateForSheet,
+  metadataColumnFilterValueKey,
+  type MetadataColumnFilterMap,
+  type MetadataColumnFiltersBySheet,
+  type MetadataFilterOption
+} from "./metadataColumnFilters";
+import {
   findMetadataBoundaryCell,
   type MetadataArrowKey
 } from "./metadataSheetNavigation";
@@ -124,6 +142,8 @@ export function MetadataExplorer({
   const dataflowDrawerStackRef = useRef(dataflowDrawerStack);
   const dataflowDrawerHistoryDepthRef = useRef(0);
   const suppressNextDataflowDrawerPopRef = useRef(false);
+  const preserveColumnFiltersForNextRouteRef = useRef(false);
+  const environmentIdentityRef = useRef<string | null>(null);
   const serverBaseRef = useRef({ document: editorDocument, draft: serverDraft });
   const workingDocumentRef = useRef<MetadataEditorDocument | null>(draft);
   const acceptingServerUpdateRef = useRef(false);
@@ -133,6 +153,8 @@ export function MetadataExplorer({
     dataflows: {},
     schema_hints: {}
   });
+  const [columnFiltersBySheet, setColumnFiltersBySheet] = useState<MetadataColumnFiltersBySheet>(createEmptyMetadataColumnFilters);
+  const [activeFilterColumnKey, setActiveFilterColumnKey] = useState<string | null>(null);
   const activeColumnWidths = columnWidthsBySheet[activeSheet];
   const activeDocument = draft ?? editorDocument;
   workingDocumentRef.current = draft;
@@ -147,6 +169,35 @@ export function MetadataExplorer({
     () => metadataDraftState(sourceBaseline, serverDraft, activeDocument),
     [activeDocument, serverDraft, sourceBaseline],
   );
+  const environmentIdentity = editorDocument
+    ? `${editorDocument.source.environment_id}:${editorDocument.source.source_id}`
+    : null;
+
+  useEffect(() => {
+    const previousEnvironmentIdentity = environmentIdentityRef.current;
+    const environmentChanged = previousEnvironmentIdentity !== null && previousEnvironmentIdentity !== environmentIdentity;
+    environmentIdentityRef.current = environmentIdentity;
+
+    if (activeFilterColumnKey) {
+      const availableColumnKeys = new Set(activeDocument?.sheets[activeSheet]?.columns.map((column) => column.key) ?? []);
+      if (!availableColumnKeys.has(activeFilterColumnKey)) setActiveFilterColumnKey(null);
+    }
+    setColumnFiltersBySheet((current) => {
+      if (environmentChanged) return createEmptyMetadataColumnFilters();
+      const nextFiltersBySheet = createEmptyMetadataColumnFilters();
+      let changed = false;
+      for (const sheetKey of sheetKeys) {
+        const availableColumnKeys = new Set(activeDocument?.sheets[sheetKey]?.columns.map((column) => column.key) ?? []);
+        const currentFilters = current[sheetKey];
+        const nextFilters = Object.fromEntries(
+          Object.entries(currentFilters).filter(([columnKey]) => availableColumnKeys.has(columnKey))
+        );
+        nextFiltersBySheet[sheetKey] = nextFilters;
+        if (Object.keys(nextFilters).length !== Object.keys(currentFilters).length) changed = true;
+      }
+      return changed ? nextFiltersBySheet : current;
+    });
+  }, [activeDocument, activeFilterColumnKey, activeSheet, environmentIdentity]);
 
   useEffect(() => {
     const previous = serverBaseRef.current;
@@ -174,13 +225,20 @@ export function MetadataExplorer({
     const requestedSheet = params.get("sheet");
     const requestedQuery = params.get("q") ?? "";
     const requestedStage = params.get("stage")?.trim() ?? "";
+    const preserveColumnFilters = preserveColumnFiltersForNextRouteRef.current;
+    preserveColumnFiltersForNextRouteRef.current = false;
     if (requestedSheet && isSheetKey(requestedSheet)) {
       setActiveSheet(requestedSheet);
     }
     if (requestedStage) setActiveSheet("dataflows");
+    if (!preserveColumnFilters && (requestedQuery || requestedStage)) {
+      const filterSheet = requestedStage ? "dataflows" : requestedSheet && isSheetKey(requestedSheet) ? requestedSheet : "dataflows";
+      setColumnFiltersBySheet((current) => ({ ...current, [filterSheet]: {} }));
+    }
     setStageFilter(requestedStage || null);
     setQuery(requestedQuery);
     setTargetDataflowIds([]);
+    setActiveFilterColumnKey(null);
     gridRef.current?.setSelection(null);
     setSelection(null);
   }, [routeSearch]);
@@ -191,6 +249,8 @@ export function MetadataExplorer({
     setTargetDataflowIds(metadataNavigation.dataflowIds);
     setStageFilter(null);
     setQuery(metadataNavigation.dataflowIds.length ? "" : metadataNavigation.fallbackQuery || "");
+    setColumnFiltersBySheet((current) => ({ ...current, dataflows: {} }));
+    setActiveFilterColumnKey(null);
     gridRef.current?.setSelection(null);
     setSelection(null);
     onMetadataNavigationConsumed?.();
@@ -237,18 +297,52 @@ export function MetadataExplorer({
     () => environmentMetadataSourceOptionsForSheet(activeDocument, activeSheet),
     [activeDocument, activeSheet]
   );
-  const targetRows = useMemo(
-    () => activeSheet === "dataflows" && targetDataflowIds.length
-      ? sheet.rows.filter((row) => targetDataflowIds.includes(formatCellValue(row.dataflow_id)))
-      : sheet.rows,
-    [activeSheet, sheet.rows, targetDataflowIds],
-  );
+  const activeColumnFilters = columnFiltersBySheet[activeSheet];
+  const manualStageFilter = activeColumnFilters.stage;
+  const effectiveStageFilter = manualStageFilter ? null : stageFilter;
   const rows = useMemo<SheetRow[]>(
-    () => filterMetadataRows(activeSheet, targetRows, sheet.columns, query, stageFilter),
-    [activeSheet, query, sheet.columns, stageFilter, targetRows]
+    () => filterMetadataRows(
+      activeSheet,
+      sheet.rows,
+      sheet.columns,
+      query,
+      effectiveStageFilter,
+      activeColumnFilters,
+      undefined,
+      targetDataflowIds
+    ),
+    [activeColumnFilters, activeSheet, effectiveStageFilter, query, sheet.columns, sheet.rows, targetDataflowIds]
   );
+  const activeColumnFilterCount = metadataColumnFilterCount(activeColumnFilters);
+  const hasActiveRowSubsetFilter = Boolean(query.trim() || stageFilter || targetDataflowIds.length || activeColumnFilterCount);
+  const activeFilterRows = useMemo<SheetRow[]>(
+    () => activeFilterColumnKey
+      ? filterMetadataRows(
+          activeSheet,
+          sheet.rows,
+          sheet.columns,
+          query,
+          activeFilterColumnKey === "stage" ? null : effectiveStageFilter,
+          activeColumnFilters,
+          activeFilterColumnKey,
+          targetDataflowIds
+        )
+      : [],
+    [activeColumnFilters, activeFilterColumnKey, activeSheet, effectiveStageFilter, query, sheet.columns, sheet.rows, targetDataflowIds]
+  );
+  const activeFilterOptions = useMemo(
+    () => activeFilterColumnKey ? metadataColumnFilterOptions(activeFilterRows, activeFilterColumnKey) : { options: [] as MetadataFilterOption[], totalCount: 0 },
+    [activeFilterColumnKey, activeFilterRows]
+  );
+  const activeFilterSelectedKeys = useMemo(() => {
+    if (!activeFilterColumnKey) return [];
+    const selectedKeys = metadataColumnFilterStateForSheet(columnFiltersBySheet, activeSheet, activeFilterColumnKey);
+    if (selectedKeys) return [...selectedKeys];
+    if (activeFilterColumnKey === "stage" && stageFilter) return [metadataColumnFilterValueKey(stageFilter, activeFilterColumnKey)];
+    return metadataColumnFilterOptionKeys(activeFilterOptions.options);
+  }, [activeFilterColumnKey, activeFilterOptions.options, activeSheet, columnFiltersBySheet, stageFilter]);
   const sourceGroupStartIds = useMemo(() => metadataSourceGroupStartIds(rows), [rows]);
-  const showAddRowLine = editable && !query.trim() && !stageFilter && !targetDataflowIds.length;
+  const showAddRowLine = editable && !hasActiveRowSubsetFilter;
   const displayedRows = useMemo<SheetRow[]>(
     () => showAddRowLine
       ? [
@@ -345,9 +439,31 @@ export function MetadataExplorer({
         connectionOptions,
         metadataSourceOptions,
         columnWidths: activeColumnWidths,
-        onColumnWidthChange: resizeColumn
+        onColumnWidthChange: resizeColumn,
+        activeFilterColumnKey,
+        activeFilterOptions: activeFilterOptions.options,
+        activeFilterSelectedKeys,
+        isColumnFilterActive: (columnKey) => columnKey in activeColumnFilters
+          || (columnKey === "stage" && Boolean(stageFilter) && !("stage" in activeColumnFilters)),
+        onColumnFilterOpen: openColumnFilter,
+        onColumnFilterApply: applyColumnFilter,
+        onColumnFilterClear: clearColumnFilter,
+        onColumnFilterCancel: closeColumnFilter
       }),
-    [sheet.columns, sheet.rows, activeSheetIssues, editable, connectionOptions, metadataSourceOptions, activeColumnWidths]
+    [
+      sheet.columns,
+      sheet.rows,
+      activeSheetIssues,
+      editable,
+      connectionOptions,
+      metadataSourceOptions,
+      activeColumnWidths,
+      activeColumnFilters,
+      activeFilterColumnKey,
+      activeFilterOptions,
+      activeFilterSelectedKeys,
+      stageFilter
+    ]
   );
   const metadataGutterColumn = useMemo(() => ({
     component: ({ rowData }: { rowData: SheetRow }) => {
@@ -487,8 +603,45 @@ export function MetadataExplorer({
     const nextDataRows = nextRows.filter((row) => !row.__isAddRow);
     updateActiveSheet({
       ...sheet,
-      rows: query.trim() ? mergeFilteredRows(sheet.rows, nextDataRows) : cleanRuntimeRows(nextDataRows)
+      rows: hasActiveRowSubsetFilter ? mergeFilteredRows(sheet.rows, nextDataRows) : cleanRuntimeRows(nextDataRows)
     });
+  }
+
+  function openColumnFilter(columnKey: string) {
+    setActiveFilterColumnKey((current) => current === columnKey ? null : columnKey);
+  }
+
+  function closeColumnFilter() {
+    setActiveFilterColumnKey(null);
+  }
+
+  function clearColumnFilter(columnKey: string) {
+    setColumnFiltersBySheet((current) => ({
+      ...current,
+      [activeSheet]: metadataColumnFilterMapWithoutKey(current[activeSheet], columnKey)
+    }));
+    setActiveFilterColumnKey(null);
+    if (columnKey === "stage" && stageFilter) {
+      preserveColumnFiltersForNextRouteRef.current = true;
+      clearStageFilter();
+    }
+  }
+
+  function applyColumnFilter(columnKey: string, selectedKeys: string[]) {
+    const normalizedKeys = [...new Set(selectedKeys)];
+    const isComplete = metadataColumnFilterSelectionIsComplete(normalizedKeys, activeFilterOptions.options);
+    setColumnFiltersBySheet((current) => {
+      const currentFilters = current[activeSheet];
+      const nextFilters: MetadataColumnFilterMap = isComplete
+        ? metadataColumnFilterMapWithoutKey(currentFilters, columnKey)
+        : { ...currentFilters, [columnKey]: normalizedKeys };
+      return { ...current, [activeSheet]: nextFilters };
+    });
+    setActiveFilterColumnKey(null);
+    if (columnKey === "stage" && stageFilter) {
+      preserveColumnFiltersForNextRouteRef.current = true;
+      clearStageFilter();
+    }
   }
 
   function resizeColumn(columnKey: string, width: number) {
@@ -507,6 +660,7 @@ export function MetadataExplorer({
     gridRef.current?.setSelection(null);
     setSelection(null);
     setTargetDataflowIds([]);
+    setActiveFilterColumnKey(null);
     clearStageFilter(nextSheet);
     setActiveSheet(nextSheet);
     setQuery("");
@@ -524,10 +678,12 @@ export function MetadataExplorer({
     gridRef.current?.setSelection(null);
     setSelection(null);
     setTargetDataflowIds([]);
+    setActiveFilterColumnKey(null);
     setQuery(nextQuery);
   }
 
   function clearStageFilter(nextSheet?: SheetKey) {
+    if (onRouteSearchChange) preserveColumnFiltersForNextRouteRef.current = true;
     setStageFilter(null);
     const params = new URLSearchParams(routeSearch ?? "");
     params.delete("stage");
@@ -556,15 +712,19 @@ export function MetadataExplorer({
     event.stopPropagation();
 
     const startX = event.clientX;
-    const startWidth = Number(target.dataset.columnWidth) || activeColumnWidths[columnKey] || 140;
+    const startRenderedWidth = Number(target.dataset.columnWidth)
+      || normalizeMetadataColumnWidth(activeColumnWidths[columnKey] ?? 140);
     const gridWrap = gridWrapRef.current;
     const gridWrapLeft = gridWrap?.getBoundingClientRect().left ?? 0;
-    let nextWidth = startWidth;
+    let nextRenderedWidth = startRenderedWidth;
     gridWrap?.style.setProperty("--metadata-resize-guide-x", `${event.clientX - gridWrapLeft}px`);
     gridWrap?.classList.add("metadata-column-resize-active");
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      nextWidth = Math.max(72, Math.round(startWidth + moveEvent.clientX - startX));
+      nextRenderedWidth = Math.max(
+        METADATA_COLUMN_HEADER_LAYOUT.minimumColumnWidth,
+        Math.round(startRenderedWidth + moveEvent.clientX - startX)
+      );
       gridWrap?.style.setProperty("--metadata-resize-guide-x", `${moveEvent.clientX - gridWrapLeft}px`);
     };
     const handleMouseUp = () => {
@@ -573,7 +733,7 @@ export function MetadataExplorer({
       document.body.classList.remove("metadata-column-resizing");
       gridWrap?.classList.remove("metadata-column-resize-active");
       gridWrap?.style.removeProperty("--metadata-resize-guide-x");
-      if (nextWidth !== startWidth) resizeColumn(columnKey, nextWidth);
+      if (nextRenderedWidth !== startRenderedWidth) resizeColumn(columnKey, nextRenderedWidth);
     };
 
     document.body.classList.add("metadata-column-resizing");
@@ -698,7 +858,7 @@ export function MetadataExplorer({
 
   function moveRow(rowIndex: number | null, offset: -1 | 1) {
     if (rowIndex == null) return;
-    if (query.trim() || stageFilter || targetDataflowIds.length || !canMoveMetadataRow(activeSheet, sheet.rows, rowIndex, offset)) return;
+    if (hasActiveRowSubsetFilter || !canMoveMetadataRow(activeSheet, sheet.rows, rowIndex, offset)) return;
     const targetIndex = rowIndex + offset;
     if (targetIndex < 0 || targetIndex >= sheet.rows.length) return;
     updateActiveSheet({
@@ -806,6 +966,7 @@ export function MetadataExplorer({
           hasStoredDraft={draftState.hasStoredDraft}
           filteredRowCount={rows.length}
           totalRowCount={sheet.rows.length}
+          activeColumnFilterCount={activeColumnFilterCount}
           mode={mode}
           query={query}
           readOnly={readOnlyDocument}
@@ -823,12 +984,21 @@ export function MetadataExplorer({
           stageFilter={stageFilter}
           stageToneMap={stageToneMap}
           onStageFilterClear={clearStageFilter}
+          onClearColumnFilters={() => {
+            setColumnFiltersBySheet((current) => ({ ...current, [activeSheet]: {} }));
+            setActiveFilterColumnKey(null);
+          }}
           onSave={requestSourceSave}
           onSaveDraft={saveDraft}
           onValidate={validateDraft}
         />
 
-        <div ref={gridWrapRef} className="metadata-grid-wrap metadata-datasheet-wrap" onMouseDownCapture={startColumnResize}>
+        <div
+          ref={gridWrapRef}
+          className="metadata-grid-wrap metadata-datasheet-wrap"
+          style={metadataHeaderLayoutStyle}
+          onMouseDownCapture={startColumnResize}
+        >
           <div className="metadata-column-resize-guide" aria-hidden="true" />
           <DynamicDataSheetGrid
             ref={gridRef}
@@ -859,7 +1029,7 @@ export function MetadataExplorer({
             rowHeight={metadataRowHeight}
             headerRowHeight={metadataHeaderRowHeight}
             height={gridHeight}
-            lockRows={!editable || Boolean(query.trim()) || Boolean(stageFilter) || Boolean(targetDataflowIds.length)}
+            lockRows={!editable || hasActiveRowSubsetFilter}
             disableContextMenu={!editable}
             addRowsComponent={false}
             contextMenuComponent={
@@ -881,19 +1051,15 @@ export function MetadataExplorer({
                         onMoveRow={moveRow}
                         canMoveUp={Boolean(
                           rowIndex != null
-                          && !query.trim()
-                          && !stageFilter
-                          && !targetDataflowIds.length
+                          && !hasActiveRowSubsetFilter
                           && canMoveMetadataRow(activeSheet, sheet.rows, rowIndex, -1)
                         )}
                         canMoveDown={Boolean(
                           rowIndex != null
-                          && !query.trim()
-                          && !stageFilter
-                          && !targetDataflowIds.length
+                          && !hasActiveRowSubsetFilter
                           && canMoveMetadataRow(activeSheet, sheet.rows, rowIndex, 1)
                         )}
-                        movementDisabledReason={query.trim() || stageFilter || targetDataflowIds.length ? "Clear the active filter before moving rows" : "Rows move only within the same source/order group"}
+                        movementDisabledReason={hasActiveRowSubsetFilter ? "Clear the active filter before moving rows" : "Rows move only within the same source/order group"}
                         onPasteColumn={pasteSelectedColumn}
                         onPasteRow={pasteRowBelow}
                       />
@@ -910,7 +1076,7 @@ export function MetadataExplorer({
           />
           {!rows.length ? (
             <div className="metadata-grid-empty">
-              {stageFilter ? `No dataflows match stage "${stageFilter}"` : query.trim() ? `No rows match "${query.trim()}"` : "No rows"}
+              {stageFilter ? `No dataflows match stage "${stageFilter}"` : query.trim() ? `No rows match "${query.trim()}"` : activeColumnFilterCount ? "No rows match the active column filters" : "No rows"}
             </div>
           ) : null}
         </div>

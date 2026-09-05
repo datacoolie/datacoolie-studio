@@ -60,6 +60,12 @@ class ResultCacheStore(Protocol):
 
     def invalidate(self, environment_id: int, namespaces: set[str] | None = None) -> None: ...
 
+    def invalidate_many(
+        self,
+        environment_ids: list[int],
+        namespaces: set[str] | None = None,
+    ) -> None: ...
+
 
 class ResultBuildCoordinator(Protocol):
     def acquire(self, identity: str) -> AbstractContextManager[None]: ...

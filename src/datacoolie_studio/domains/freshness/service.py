@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
+from datacoolie_studio.core.time import epoch_value_to_nanoseconds
 from datacoolie_studio.db.models import (
     CodeArtifactMaterialization,
     Environment,
@@ -407,10 +408,15 @@ def _materialized_revision(
             )
         revisions = [_json_or_none(row.revision_json) for row in manifest_rows]
         revisions = [revision for revision in revisions if revision]
+        mtime_values = [
+            epoch_value_to_nanoseconds(revision.get("mtime_ns"))
+            for revision in revisions
+        ]
+        mtime_values = [value for value in mtime_values if value is not None]
         return {
             "object_type": "directory",
             "file_count": len(manifest_rows),
-            "max_mtime_ns": max((revision.get("mtime_ns") or 0 for revision in revisions), default=None),
+            "max_mtime_ns": max(mtime_values, default=None),
             "total_size": sum((revision.get("size") or 0 for revision in revisions), start=0),
         }
     if source.source_kind == "code":
@@ -471,9 +477,10 @@ def _revision_modified_at(revision: dict[str, Any] | None) -> datetime | None:
     if not revision:
         return None
     value = revision.get("mtime_ns") if revision.get("object_type") == "file" else revision.get("max_mtime_ns")
-    if not isinstance(value, int):
+    normalized = epoch_value_to_nanoseconds(value)
+    if normalized is None:
         return None
-    return datetime.fromtimestamp(value / 1_000_000_000, tz=timezone.utc)
+    return datetime.fromtimestamp(normalized / 1_000_000_000, tz=timezone.utc)
 
 
 def _cache_synced_at(

@@ -2133,6 +2133,7 @@ button.metadata-kpi-tile {
   width: 100%;
   height: 100%;
   min-width: 0;
+  padding-inline: var(--metadata-header-padding-inline);
 }
 
 .metadata-resizable-header {
@@ -2140,20 +2141,57 @@ button.metadata-kpi-tile {
   display: flex;
   align-items: center;
   box-sizing: border-box;
-  width: calc(100% + 20px);
+  width: calc(100% + var(--metadata-header-inline-outset));
   min-width: 0;
   height: 100%;
-  margin-inline: -10px;
-  padding-inline: 10px;
+  margin-inline: var(--metadata-header-negative-inline-offset);
+  padding-inline: var(--metadata-header-padding-inline);
 }
 
-.metadata-resizable-header > span {
+.metadata-resizable-header-label {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.metadata-column-filter-trigger {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--metadata-filter-button-size);
+  height: var(--metadata-filter-button-size);
+  margin-left: var(--metadata-filter-button-gap);
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #7b8796;
+  cursor: pointer;
+  padding: 0;
+}
+
+.metadata-column-filter-trigger:hover,
+.metadata-column-filter-trigger:focus-visible {
+  background: rgba(255, 255, 255, 0.75);
+  color: #1f6f68;
+  outline: 2px solid #8bb7b1;
+  outline-offset: 1px;
+}
+
+.metadata-column-filter-trigger.active {
+  background: #dff2ee;
+  color: #17665f;
+}
+
+.metadata-column-filter-trigger.active:hover,
+.metadata-column-filter-trigger.active:focus-visible {
+  background: #cbe9e4;
+}
+
 .metadata-autofit-header-ruler,
+.metadata-header-text-ruler,
 .metadata-autofit-cell-ruler {
   position: fixed;
   top: -10000px;
@@ -2167,10 +2205,14 @@ button.metadata-kpi-tile {
   pointer-events: none;
 }
 
-.metadata-autofit-header-ruler {
+.metadata-autofit-header-ruler,
+.metadata-header-text-ruler {
   color: #374151;
   font-size: 11px;
   font-weight: 800;
+}
+
+.metadata-autofit-header-ruler {
   padding-inline: 16px;
 }
 
@@ -2184,10 +2226,10 @@ button.metadata-kpi-tile {
 .metadata-column-resizer {
   position: absolute;
   top: -10px;
-  right: -5px;
+  right: var(--metadata-resizer-boundary-offset);
   bottom: -10px;
   z-index: 5;
-  width: 11px;
+  width: var(--metadata-resizer-hit-width);
   min-height: 0;
   border: 0;
   border-radius: 0;
@@ -2199,7 +2241,7 @@ button.metadata-kpi-tile {
 .metadata-column-resizer::after {
   position: absolute;
   top: 10px;
-  right: 5px;
+  right: var(--metadata-resizer-line-offset);
   bottom: 10px;
   width: 1px;
   background: transparent;

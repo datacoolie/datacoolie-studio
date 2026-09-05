@@ -97,7 +97,34 @@ pip install datacoolie-studio
 datacoolie-studio
 ```
 
-The launcher starts Studio at `http://127.0.0.1:8765`, creates its local workspace on first run, and opens your browser.
+The launcher starts Studio at `http://127.0.0.1:8765`, creates its local workspace on first run, and opens your browser. On a wide interactive terminal it prints a large `DataCoolie` wordmark, links to the DataCoolie and DataCoolie Studio repositories, and the URL it is starting. Narrow terminals and redirected output use a compact version of the introduction.
+
+Use `--no-banner` when only the server logs are needed:
+
+```powershell
+datacoolie-studio --no-banner
+```
+
+The startup introduction looks like this:
+
+```text
+ ____        _         ____            _ _
+|  _ \  __ _| |_ __ _ / ___|___   ___ | (_) ___
+| | | |/ _` | __/ _` | |   / _ \ / _ \| | |/ _ \
+| |_| | (_| | || (_| | |__| (_) | (_) | | |  __/
+|____/ \__,_|\__\__,_|\____\___/ \___/|_|_|\___|
+
+Studio v<version>
+Explore DataCoolie metadata, lineage, and ETL logs.
+
+DataCoolie - Metadata-driven ETL framework
+  https://github.com/datacoolie/datacoolie
+DataCoolie Studio - Local web app for DataCoolie projects
+  https://github.com/datacoolie/datacoolie-studio
+
+Starting at: http://127.0.0.1:8765
+Press Ctrl+C to stop.
+```
 
 Install only the cloud integrations you need:
 

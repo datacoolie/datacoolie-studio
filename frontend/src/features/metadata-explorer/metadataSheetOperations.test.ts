@@ -45,6 +45,26 @@ describe("metadata row grouping and filtering", () => {
     expect([...metadataSourceGroupStartIds(runtimeRows)]).toEqual(["dataflows-0", "dataflows-3"]);
   });
 
+  it("keeps source row indexes when target and column filters narrow the grid", () => {
+    const filtered = filterMetadataRows(
+      "dataflows",
+      [
+        { dataflow_id: "flow-a", stage: "silver", region: "America" },
+        { dataflow_id: "flow-b", stage: "gold", region: "Japan" },
+        { dataflow_id: "flow-c", stage: "gold", region: "America" }
+      ],
+      [{ key: "stage" }, { key: "region" }],
+      "",
+      null,
+      { stage: ["metadata-filter:value:string:gold"], region: ["metadata-filter:value:string:Japan"] },
+      undefined,
+      ["flow-b", "flow-c"]
+    );
+
+    expect(filtered.map((row) => row.dataflow_id)).toEqual(["flow-b"]);
+    expect(filtered[0].__rowIndex).toBe(1);
+  });
+
   it("allows movement only within the same canonical bucket", () => {
     expect(canMoveMetadataRow("dataflows", rows, 0, 1)).toBe(true);
     expect(canMoveMetadataRow("dataflows", rows, 1, 1)).toBe(false);

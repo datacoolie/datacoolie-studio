@@ -81,3 +81,16 @@ class ResilientResultCacheStore:
             self._store.invalidate(environment_id, namespaces)
         except Exception:
             logger.exception("Result cache invalidation failed for environment %s", environment_id)
+
+    def invalidate_many(
+        self,
+        environment_ids: list[int],
+        namespaces: set[str] | None = None,
+    ) -> None:
+        try:
+            self._store.invalidate_many(environment_ids, namespaces)
+        except Exception:
+            logger.exception(
+                "Result cache invalidation failed for %s environments",
+                len(environment_ids),
+            )

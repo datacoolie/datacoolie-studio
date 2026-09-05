@@ -23,6 +23,7 @@ def _configure_sqlite_connection(dbapi_connection, _record) -> None:
     # upgrade) serialize writes instead of failing immediately with "database is locked".
     cursor = dbapi_connection.cursor()
     try:
+        cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
     finally:
@@ -47,6 +48,7 @@ def init_db() -> None:
     _migrate_project_reference_mappings(engine)
     _replace_source_observation_schema(engine)
     Base.metadata.create_all(bind=engine)
+    _ensure_declared_indexes(engine)
     _ensure_source_observation_pause_column(engine)
     _ensure_sync_job_running_index(engine)
     _migrate_current_materializations(engine)
@@ -63,6 +65,16 @@ def init_db() -> None:
     _migrate_log_file_manifest(engine)
     _backfill_last_successful_sync_at(engine)
     _ensure_log_file_manifest_unique_index(engine)
+
+
+def _ensure_declared_indexes(engine) -> None:
+    """Create additive indexes that must also exist on upgraded databases."""
+
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            for index in table.indexes:
+                if index.info.get("studio_ensure_existing"):
+                    index.create(bind=connection, checkfirst=True)
 
 
 def _replace_source_observation_schema(engine) -> None:
@@ -202,6 +214,7 @@ def _migrate_current_materializations(engine) -> None:
                         FROM metadata_source_snapshots
                     ) ranked
                     WHERE row_rank = 1
+                      AND source_id IN (SELECT id FROM environment_sources)
                     """
                 )
             ).mappings()
@@ -257,6 +270,7 @@ def _migrate_current_materializations(engine) -> None:
                         FROM code_artifact_snapshots
                     ) ranked
                     WHERE row_rank = 1
+                      AND source_id IN (SELECT id FROM environment_sources)
                     """
                 )
             ).mappings()
@@ -327,7 +341,10 @@ def _materialization_fingerprint(revision_json: str, transformer_version: str, s
 
 def _verify_materialization_migration(connection, legacy_table: str, target_table: str) -> None:
     legacy_count = connection.execute(
-        text(f"SELECT COUNT(DISTINCT source_id) FROM {legacy_table}")
+        text(
+            f"SELECT COUNT(DISTINCT source_id) FROM {legacy_table} "
+            "WHERE source_id IN (SELECT id FROM environment_sources)"
+        )
     ).scalar_one()
     target_count = connection.execute(
         text(
@@ -731,6 +748,7 @@ def _migrate_environment_sources(engine) -> None:
                     INSERT INTO environment_sources (environment_id, source_kind, uri, label, enabled, created_at, updated_at)
                     SELECT m.environment_id, 'metadata', m.uri, m.label, m.enabled, m.created_at, m.created_at
                     FROM metadata_sources m
+                    JOIN environments e ON e.id = m.environment_id
                     WHERE NOT EXISTS (
                         SELECT 1 FROM environment_sources s
                         WHERE s.environment_id = m.environment_id
@@ -747,6 +765,7 @@ def _migrate_environment_sources(engine) -> None:
                     INSERT INTO environment_sources (environment_id, source_kind, uri, label, enabled, created_at, updated_at)
                     SELECT p.environment_id, 'logs', p.uri, p.label, p.enabled, p.created_at, p.created_at
                     FROM etl_log_paths p
+                    JOIN environments e ON e.id = p.environment_id
                     WHERE NOT EXISTS (
                         SELECT 1 FROM environment_sources s
                         WHERE s.environment_id = p.environment_id
@@ -780,9 +799,13 @@ def _migrate_source_registrations(engine) -> None:
                 """
                 SELECT id, environment_id, source_kind, uri,
                        storage_provider, storage_config_json
-                FROM environment_sources
+                FROM environment_sources source
                 WHERE registration_id IS NULL
-                ORDER BY id
+                  AND EXISTS (
+                      SELECT 1 FROM environments environment
+                      WHERE environment.id = source.environment_id
+                  )
+                ORDER BY source.id
                 """
             )
         ).mappings()
@@ -912,6 +935,10 @@ def _migrate_log_file_manifest(engine) -> None:
                     WHERE new.source_id = old.log_path_id
                       AND new.file_uri = old.file_uri
                 )
+                  AND EXISTS (
+                    SELECT 1 FROM environment_sources source
+                    WHERE source.id = old.log_path_id
+                  )
                 """
             )
         )

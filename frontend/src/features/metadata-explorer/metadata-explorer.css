@@ -197,6 +197,196 @@
   outline-offset: 1px;
 }
 
+.metadata-column-filter-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  max-width: 180px;
+  border: 1px solid #bfd8d3;
+  border-radius: 999px;
+  background: #edf8f6;
+  color: #246f68;
+  padding: 0 5px 0 9px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.metadata-column-filter-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metadata-column-filter-summary button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.metadata-column-filter-summary button:hover,
+.metadata-column-filter-summary button:focus-visible {
+  background: rgba(255, 255, 255, 0.8);
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+.metadata-column-filter-popover {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  max-height: calc(100vh - 16px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.2), 0 2px 7px rgba(15, 23, 42, 0.12);
+  color: #202733;
+  font-size: 12px;
+}
+
+.metadata-column-filter-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 38px;
+  border-bottom: 1px solid #e7ebf0;
+  padding: 0 8px 0 12px;
+}
+
+.metadata-column-filter-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metadata-column-filter-heading button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.metadata-column-filter-heading button:hover,
+.metadata-column-filter-heading button:focus-visible {
+  background: #f1f5f9;
+  color: #1f2937;
+  outline: 2px solid #8bb7b1;
+  outline-offset: 1px;
+}
+
+.metadata-column-filter-search {
+  width: auto;
+  min-height: 30px;
+  margin: 9px 10px 7px;
+  border: 1px solid #cfd6df;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.metadata-column-filter-search:focus-within {
+  border-color: #6b91c9;
+  box-shadow: 0 0 0 2px rgba(74, 123, 191, 0.14);
+}
+
+.metadata-column-filter-search svg {
+  top: 7px;
+}
+
+.metadata-column-filter-search input {
+  min-height: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 0;
+  padding-right: 7px;
+  box-shadow: none;
+}
+
+.metadata-column-filter-options {
+  min-height: 48px;
+  max-height: 310px;
+  overflow: auto;
+  padding: 0 7px 7px;
+}
+
+.metadata-column-filter-option {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 27px;
+  gap: 5px;
+  border-radius: 4px;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+
+.metadata-column-filter-option:hover {
+  background: #f1f5f9;
+}
+
+.metadata-column-filter-option input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #246f68;
+}
+
+.metadata-column-filter-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metadata-column-filter-option small {
+  color: #8a95a5;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metadata-column-filter-select-all {
+  border-bottom: 1px solid #edf0f4;
+  border-radius: 0;
+  margin-bottom: 3px;
+  font-weight: 750;
+}
+
+.metadata-column-filter-empty,
+.metadata-column-filter-notice {
+  padding: 9px 7px 4px;
+  color: #7a8494;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.metadata-column-filter-notice {
+  color: #657286;
+}
+
+.metadata-column-filter-actions {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 45px;
+  border-top: 1px solid #e7ebf0;
+  padding: 7px 10px;
+}
+
 .metadata-datasheet .dsg-cell.metadata-filter-match {
   background: #fff6c8;
   box-shadow: inset 0 0 0 1px #e2c45c;

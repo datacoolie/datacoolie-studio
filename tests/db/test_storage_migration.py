@@ -131,6 +131,26 @@ def test_legacy_source_storage_config_is_backfilled_idempotently(
 ):
     db_path = tmp_path / "studio.db"
     with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE projects (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR(255) NOT NULL UNIQUE,
+                description TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE environments (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO projects (id, name) VALUES (1, 'legacy');
+            INSERT INTO environments (id, project_id, name) VALUES (1, 1, 'dev');
+            """
+        )
         connection.execute(
             """
             CREATE TABLE environment_sources (
@@ -172,6 +192,13 @@ def test_legacy_source_storage_config_is_backfilled_idempotently(
                 ),
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO environment_sources (
+                id, environment_id, source_kind, uri, source_config_json
+            ) VALUES (2, 999, 'metadata', 'orphan.json', '{}')
+            """
+        )
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
 
     init_db()
@@ -205,6 +232,9 @@ def test_legacy_source_storage_config_is_backfilled_idempotently(
                 """
             )
         ).mappings().one()
+        orphan_registration_id = connection.execute(
+            text("SELECT registration_id FROM environment_sources WHERE id = 2")
+        ).scalar_one()
     assert row["storage_provider"] == "s3"
     assert row["storage_auth_mode"] == "ambient"
     assert json.loads(row["storage_config_json"]) == {
@@ -217,6 +247,7 @@ def test_legacy_source_storage_config_is_backfilled_idempotently(
     assert registration["input_uri"] == "s3://analytics/metadata.json"
     assert registration["canonical_uri"] == "s3://analytics/metadata.json"
     assert registration["registration_id"] is not None
+    assert orphan_registration_id is None
 
 
 def test_log_manifest_duplicates_are_reduced_before_unique_index(
@@ -287,6 +318,19 @@ def test_adls_metadata_uri_is_repaired_from_its_discovery_root(
     monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
     init_db()
     with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects (id, name, created_at, updated_at) "
+                "VALUES (1, 'adls-repair', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO environments "
+                "(id, project_id, name, created_at, updated_at) "
+                "VALUES (1, 1, 'dev', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
         connection.execute(
             text(
                 """

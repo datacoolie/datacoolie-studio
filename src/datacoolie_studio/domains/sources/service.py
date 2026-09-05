@@ -18,7 +18,10 @@ from datacoolie_studio.domains.sources.storage_binding import (
     binding_from_source,
     validate_and_normalize_binding,
 )
-from datacoolie_studio.domains.storage.errors import StorageError
+from datacoolie_studio.domains.storage.errors import (
+    StorageError,
+    StorageNotFoundError,
+)
 from datacoolie_studio.domains.storage.concurrency import map_storage_io
 from datacoolie_studio.domains.storage.factory import create_storage_adapter
 from datacoolie_studio.domains.storage.inventory import (
@@ -60,29 +63,53 @@ def validate_storage_connection(
             path = require_local_path(canonical_uri)
             if path.is_file():
                 revision = adapter.stat(canonical_uri)
-                return {
-                    "status": "ok",
-                    "provider": binding.provider,
-                    "canonical_uri": revision.canonical_uri,
-                    "object_type": "file",
-                    "objects_scanned": 1,
-                    "provider_revision": revision.provider_revision,
-                    "metadata_write_back_supported": True,
-                    "message": "Storage file is readable",
-                }
+                return _storage_file_validation_result(
+                    provider=binding.provider,
+                    canonical_uri=revision.canonical_uri,
+                    provider_revision=revision.provider_revision,
+                )
             if not path.is_dir():
                 raise FileNotFoundError(canonical_uri)
-        observed = inventory(
-            adapter,
-            StorageInventoryRequest(
-                uri=canonical_uri,
-                purpose="probe",
-                object_limit=(
-                    1 if binding.provider in {"onelake", "dbfs"} else 100
+        try:
+            observed = inventory(
+                adapter,
+                StorageInventoryRequest(
+                    uri=canonical_uri,
+                    purpose="probe",
+                    object_limit=(
+                        1 if binding.provider in {"onelake", "dbfs"} else 100
+                    ),
+                    stop_after_match=binding.provider in {"onelake", "dbfs"},
                 ),
-                stop_after_match=binding.provider in {"onelake", "dbfs"},
+            )
+        except StorageNotFoundError:
+            # A remote URI may identify a file rather than a directory.  Some
+            # providers answer a directory-list request for that file with a
+            # 404, so fall back to the adapter's file metadata operation.
+            stat = getattr(adapter, "stat", None)
+            if not callable(stat):
+                raise
+            revision = stat(canonical_uri)
+            return _storage_file_validation_result(
+                provider=binding.provider,
+                canonical_uri=revision.canonical_uri,
+                provider_revision=revision.provider_revision,
+            )
+
+        matching_file = next(
+            (
+                item
+                for item in observed.files
+                if item.canonical_uri.rstrip("/") == canonical_uri.rstrip("/")
             ),
+            None,
         )
+        if matching_file is not None:
+            return _storage_file_validation_result(
+                provider=binding.provider,
+                canonical_uri=matching_file.canonical_uri,
+                provider_revision=matching_file.provider_revision,
+            )
         return {
             "status": "ok",
             "provider": binding.provider,
@@ -129,6 +156,24 @@ def validate_storage_connection(
                 **({"message": detail} if detail else {}),
             },
         }
+
+
+def _storage_file_validation_result(
+    *,
+    provider: str,
+    canonical_uri: str,
+    provider_revision: str | None,
+) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "provider": provider,
+        "canonical_uri": canonical_uri,
+        "object_type": "file",
+        "objects_scanned": 1,
+        "provider_revision": provider_revision,
+        "metadata_write_back_supported": provider in METADATA_WRITE_BACK_PROVIDERS,
+        "message": "Storage file is readable",
+    }
 
 
 def is_validated_empty_log_source(source: EnvironmentSource) -> bool:
