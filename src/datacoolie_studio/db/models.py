@@ -324,7 +324,7 @@ class SyncJob(Base):
 
 
 class AnalyticsUpgrade(Base):
-    """Durable state for the single disposable DuckDB cache upgrade."""
+    """Durable state for disposable DuckDB cache maintenance."""
 
     __tablename__ = "analytics_upgrades"
 
@@ -332,11 +332,18 @@ class AnalyticsUpgrade(Base):
     source_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     target_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False)
+    operation_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="schema_upgrade", server_default="schema_upgrade"
+    )
+    reason_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     completed_source_ids_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    episode_attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_path: Mapped[str | None] = mapped_column(Text, nullable=True)

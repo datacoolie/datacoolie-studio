@@ -15,6 +15,10 @@ from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 
 
 analytics_maintenance_lock = RLock()
+# A complete candidate rebuild owns the cache lifecycle from assessment through
+# atomic swap. External source refreshes take the same lock; per-source repairs do
+# not, so a repair can continue alongside unrelated source refreshes.
+analytics_global_rebuild_lock = RLock()
 
 
 def connect(path: Path, *, read_only: bool = False):

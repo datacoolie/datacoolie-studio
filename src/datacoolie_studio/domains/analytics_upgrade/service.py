@@ -5,6 +5,7 @@ import logging
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,6 @@ from datacoolie_studio.db.models import (
 )
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.analytics import access, schema, store
-from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.analytics.migrations import validate_registry
 from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
 from datacoolie_studio.domains.source_observation.repository import (
@@ -42,6 +42,27 @@ UPGRADE_POLL_SECONDS = 30
 # Max Log sources materialized/parsed concurrently during a rebuild. DuckDB writes stay
 # serialized by analytics_maintenance_lock; this only parallelizes network/parse work.
 UPGRADE_BUILD_CONCURRENCY = 8
+
+
+@dataclass(frozen=True)
+class CacheAssessment:
+    action: str
+    source_version: int | None
+    reason_code: str
+    missing_source_ids: tuple[int, ...] = ()
+    extra_source_ids: tuple[int, ...] = ()
+
+    @property
+    def operation_kind(self) -> str:
+        if self.action == "source_repair":
+            return "source_repair"
+        if self.action == "initialize":
+            return "initialize"
+        if self.reason_code == "schema_mismatch":
+            return "schema_upgrade"
+        if self.reason_code == "source_scope_changed":
+            return "scope_reconcile"
+        return "cache_rebuild"
 
 # Serializes overlapping upgrade RUNS without holding the DuckDB maintenance lock, so
 # per-source publishes (which acquire analytics_maintenance_lock) can run from worker
@@ -78,6 +99,8 @@ def run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any]
 def _build_sources_parallel(
     source_ids: list[int],
     candidate: Path,
+    *,
+    job_type: str = "analytics_upgrade",
 ) -> dict[int, dict[str, Any]]:
     """Replay each source into the candidate concurrently, one session per worker.
 
@@ -105,7 +128,7 @@ def _build_sources_parallel(
             result = refresh_log_source_cache(
                 worker_session,
                 source,
-                job_type="analytics_upgrade",
+                job_type=job_type,
                 database_path_override=candidate,
                 force_analytics_replay=True,
             )
@@ -135,12 +158,13 @@ def _build_sources_parallel(
 
 
 def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any]:
-    """Rebuild all eligible Log sources and atomically publish one generation."""
+    """Maintain the analytics cache using the smallest safe operation."""
 
     validate_registry()
     checked_at = now or utc_now()
     session = create_session()
     candidate: Path | None = None
+    global_rebuild_lock_acquired = False
     try:
         sources = _eligible_sources(session)
         source_ids = [source.id for source in sources]
@@ -148,22 +172,31 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
         if not source_ids:
             _mark_current_state_succeeded(session, [], checked_at)
             return {"state": "not_required", "source_ids": []}
-        if _cache_is_current(live_path, source_ids):
+
+        assessment = _assess_cache(live_path, source_ids)
+        if assessment.action == "current":
             _mark_current_state_succeeded(session, source_ids, checked_at)
             return {"state": "current", "source_ids": source_ids}
 
-        if _external_sync_in_progress(session, source_ids):
+        operation_source_ids = list(
+            assessment.missing_source_ids
+            if assessment.action == "source_repair"
+            else source_ids
+        )
+        if _external_sync_in_progress(session, operation_source_ids):
             # A user/scheduled sync is currently writing the cache. Defer the
             # upgrade to the next cycle so the two writers never collide.
             return current_upgrade_status(session) or {
                 "state": "pending",
-                "source_ids": source_ids,
+                "source_ids": operation_source_ids,
             }
 
         upgrade = _get_or_create_upgrade(
             session,
-            source_version=_live_schema_version(live_path),
-            source_ids=source_ids,
+            source_version=assessment.source_version,
+            source_ids=operation_source_ids,
+            operation_kind=assessment.operation_kind,
+            reason_code=assessment.reason_code,
         )
         if (
             upgrade.state == "failed"
@@ -172,6 +205,20 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
         ):
             return upgrade_status(upgrade, session)
 
+        if assessment.action == "source_repair":
+            return _run_source_repair_once(
+                session,
+                upgrade,
+                source_ids=list(assessment.missing_source_ids),
+                live_path=live_path,
+                checked_at=checked_at,
+            )
+
+        # Keep the complete rebuild claim across assessment, candidate writes and
+        # atomic swap. Normal source refreshes use this lock as well; source repair
+        # intentionally does not, so it remains source-scoped.
+        access.analytics_global_rebuild_lock.acquire()
+        global_rebuild_lock_acquired = True
         candidate = access.candidate_path(live_path)
         _begin_attempt(upgrade, source_ids, candidate, checked_at)
         session.commit()
@@ -197,6 +244,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
 
         busy_error: AnalyticsUpgradeSourceError | None = None
         hard_error: AnalyticsUpgradeSourceError | None = None
+        warning_source_ids: list[int] = []
         for source_id in sorted(build_results):
             result = build_results[source_id]
             status = result.get("status")
@@ -235,6 +283,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             # so it drops out of the upgrade scope and Monitoring coverage instead of
             # wedging every future upgrade, then keep building the remaining sources.
             _park_unbuildable_source(session, source_id, code, message, utc_now())
+            warning_source_ids.append(source_id)
 
         # A real dependency/environment failure aborts (retry with backoff); a transient
         # sync collision defers softly. Both are raised after parking the rest.
@@ -248,9 +297,16 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             # Nothing could be rebuilt; leave the live cache untouched and settle.
             access.discard_candidate(candidate)
             upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID) or upgrade
-            upgrade.source_ids_json = json.dumps([])
+            upgrade.source_ids_json = json.dumps(source_ids)
             upgrade.completed_source_ids_json = json.dumps([])
-            _mark_succeeded(upgrade, utc_now())
+            completed_at = utc_now()
+            _mark_succeeded(upgrade, completed_at)
+            if warning_source_ids:
+                _mark_completed_with_warnings(
+                    upgrade,
+                    warning_source_ids=warning_source_ids,
+                    completed_at=completed_at,
+                )
             session.commit()
             return upgrade_status(upgrade, session)
 
@@ -267,12 +323,21 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             raise AnalyticsUpgradeScopeChangedError()
 
         upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID) or upgrade
-        upgrade.source_ids_json = json.dumps(completed_ids)
+        upgrade.source_ids_json = json.dumps(
+            source_ids if warning_source_ids else completed_ids
+        )
         upgrade.state = "publishing"
         upgrade.updated_at = utc_now()
         session.commit()
         access.swap_candidate(candidate, live_path)
-        _mark_succeeded(upgrade, utc_now())
+        completed_at = utc_now()
+        _mark_succeeded(upgrade, completed_at)
+        if warning_source_ids:
+            _mark_completed_with_warnings(
+                upgrade,
+                warning_source_ids=warning_source_ids,
+                completed_at=completed_at,
+            )
         session.commit()
         return upgrade_status(upgrade, session)
     except Exception as exc:
@@ -306,7 +371,64 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             logger.warning("Analytics cache upgrade failed: %s", exc)
         return status
     finally:
+        if global_rebuild_lock_acquired:
+            access.analytics_global_rebuild_lock.release()
         session.close()
+
+
+def _run_source_repair_once(
+    session: Session,
+    upgrade: AnalyticsUpgrade,
+    *,
+    source_ids: list[int],
+    live_path: Path,
+    checked_at: datetime,
+) -> dict[str, Any]:
+    """Refresh only sources missing from an otherwise compatible live cache."""
+
+    _begin_attempt(upgrade, source_ids, None, checked_at)
+    session.commit()
+    build_results = _build_sources_parallel(
+        source_ids,
+        live_path,
+        job_type="analytics_repair",
+    )
+    completed_ids: list[int] = []
+    for source_id in sorted(build_results):
+        result = build_results[source_id]
+        if result.get("status") == "ok":
+            _mark_source_completed(upgrade, source_id)
+            completed_ids.append(source_id)
+            session.commit()
+            continue
+        error = result.get("error") or {}
+        code = str(
+            error.get("code")
+            or (
+                "source_sync_busy"
+                if result.get("status") == "running"
+                else "source_repair_failed"
+            )
+        )
+        message = str(
+            error.get("message")
+            or (
+                "Another source sync is still running"
+                if result.get("status") == "running"
+                else "Log source could not be repaired"
+            )
+        )
+        raise AnalyticsUpgradeSourceError(source_id, code=code, message=message)
+
+    if sorted(completed_ids) != sorted(source_ids):
+        raise AnalyticsUpgradeSourceError(
+            next(source_id for source_id in source_ids if source_id not in completed_ids),
+            code="source_repair_incomplete",
+            message="Not every missing Log source was repaired",
+        )
+    _mark_succeeded(upgrade, utc_now())
+    session.commit()
+    return upgrade_status(upgrade, session)
 
 
 def current_upgrade_status(session: Session | None = None) -> dict[str, Any] | None:
@@ -334,7 +456,7 @@ def analytics_upgrade_is_building(session: Session | None = None) -> bool:
 
 
 def _external_sync_in_progress(session: Session, source_ids: list[int]) -> bool:
-    """Return whether a non-upgrade sync job is running for any of these sources."""
+    """Return whether another source sync owns any of these sources."""
     if not source_ids:
         return False
     return (
@@ -342,7 +464,7 @@ def _external_sync_in_progress(session: Session, source_ids: list[int]) -> bool:
             select(SyncJob.id)
             .where(
                 SyncJob.source_id.in_(source_ids),
-                SyncJob.status == "running",
+                SyncJob.status.in_({"queued", "initializing", "running"}),
                 SyncJob.job_type != "analytics_upgrade",
             )
             .limit(1)
@@ -355,13 +477,14 @@ def request_analytics_upgrade_retry(session: Session) -> dict[str, Any]:
     upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID)
     if upgrade is None:
         return {"state": "not_required"}
-    if upgrade.state in {"building", "validating", "publishing"}:
+    if upgrade.state in {"building", "repairing", "validating", "publishing"}:
         return upgrade_status(upgrade, session)
     upgrade.state = "pending"
     upgrade.error_code = None
     upgrade.error_message = None
     upgrade.next_retry_at = None
     upgrade.completed_at = None
+    upgrade.episode_attempt_count = 0
     upgrade.updated_at = utc_now()
     session.commit()
     return upgrade_status(upgrade, session)
@@ -383,6 +506,8 @@ def upgrade_status(
     )
     return {
         "state": upgrade.state,
+        "operation_kind": upgrade.operation_kind,
+        "reason_code": upgrade.reason_code,
         "source_schema_version": upgrade.source_schema_version,
         "target_schema_version": upgrade.target_schema_version,
         "source_ids": _json_ids(upgrade.source_ids_json),
@@ -391,6 +516,7 @@ def upgrade_status(
         # Project those committed jobs so live progress never lags per-source details.
         "completed_source_ids": sorted(completed_source_ids),
         "attempt_count": upgrade.attempt_count,
+        "episode_attempt_count": upgrade.episode_attempt_count,
         "error_code": upgrade.error_code,
         "error_message": upgrade.error_message,
         "candidate_path": upgrade.candidate_path,
@@ -428,9 +554,12 @@ def _source_progress(
             select(EnvironmentSource).where(EnvironmentSource.id.in_(source_ids))
         )
     }
+    job_types = ["analytics_upgrade"]
+    if upgrade.operation_kind == "source_repair":
+        job_types.append("analytics_repair")
     statement = select(SyncJob).where(
         SyncJob.source_id.in_(source_ids),
-        SyncJob.job_type == "analytics_upgrade",
+        SyncJob.job_type.in_(job_types),
     )
     if upgrade.started_at is not None:
         statement = statement.where(SyncJob.started_at >= upgrade.started_at)
@@ -540,42 +669,106 @@ def _resumable_candidate_sources(candidate: Path, source_ids: list[int]) -> set[
 
 
 def _cache_is_current(path: Path, source_ids: list[int]) -> bool:
+    return _assess_cache(path, source_ids).action == "current"
+
+
+def _assess_cache(path: Path, source_ids: list[int]) -> CacheAssessment:
+    """Classify cache maintenance without starting a rebuild.
+
+    Schema incompatibility and an unreadable cache require a complete candidate.
+    A structurally compatible cache with only missing source coverage can be repaired
+    directly in the live cache, preserving healthy source generations.
+    """
+
     if not path.exists():
-        return False
+        return CacheAssessment(
+            action="initialize",
+            source_version=None,
+            reason_code="missing_database",
+            missing_source_ids=tuple(source_ids),
+        )
     try:
         conn = access.connect(path, read_only=True)
     except duckdb.Error:
-        return False
-    try:
-        access.validate_source_complete_candidate(conn, source_ids)
-        return True
-    except (AnalyticsRebuildRequired, duckdb.Error):
-        return False
-    finally:
-        conn.close()
-
-
-def _live_schema_version(path: Path) -> int | None:
-    if not path.exists():
-        return None
-    try:
-        conn = access.connect(path, read_only=True)
-    except duckdb.Error:
-        return None
+        return CacheAssessment(
+            action="cache_rebuild",
+            source_version=None,
+            reason_code="cache_unavailable",
+            missing_source_ids=tuple(source_ids),
+        )
     try:
         meta = store.analytics_meta(conn)
-        return int(meta["schema_version"]) if meta is not None else None
+        source_version = (
+            int(meta["schema_version"])
+            if meta is not None and meta.get("schema_version") is not None
+            else None
+        )
+        if not schema.typed_cache_schema_is_ready(conn):
+            return CacheAssessment(
+                action="cache_rebuild",
+                source_version=source_version,
+                reason_code=(
+                    "schema_mismatch"
+                    if source_version != schema.ANALYTICS_SCHEMA_VERSION
+                    else "cache_schema_incompatible"
+                ),
+                missing_source_ids=tuple(source_ids),
+            )
+        if meta is None or source_version != schema.ANALYTICS_SCHEMA_VERSION:
+            return CacheAssessment(
+                action="cache_rebuild",
+                source_version=source_version,
+                reason_code="schema_mismatch",
+                missing_source_ids=tuple(source_ids),
+            )
+        if meta["build_state"] != "ready":
+            return CacheAssessment(
+                action="cache_rebuild",
+                source_version=source_version,
+                reason_code="cache_not_ready",
+                missing_source_ids=tuple(source_ids),
+            )
+        cached_source_ids = store.cache_source_ids(conn)
+        expected_source_ids = set(source_ids)
+        missing = tuple(sorted(expected_source_ids - cached_source_ids))
+        extra = tuple(sorted(cached_source_ids - expected_source_ids))
+        if not missing and not extra:
+            return CacheAssessment(
+                action="current",
+                source_version=source_version,
+                reason_code="current",
+            )
+        if missing and not extra:
+            return CacheAssessment(
+                action="source_repair",
+                source_version=source_version,
+                reason_code="missing_source_coverage",
+                missing_source_ids=missing,
+            )
+        return CacheAssessment(
+            action="cache_rebuild",
+            source_version=source_version,
+            reason_code="source_scope_changed",
+            missing_source_ids=missing,
+            extra_source_ids=extra,
+        )
     except duckdb.Error:
-        return None
+        return CacheAssessment(
+            action="cache_rebuild",
+            source_version=None,
+            reason_code="cache_unavailable",
+            missing_source_ids=tuple(source_ids),
+        )
     finally:
         conn.close()
-
 
 def _get_or_create_upgrade(
     session: Session,
     *,
     source_version: int | None,
     source_ids: list[int],
+    operation_kind: str,
+    reason_code: str,
 ) -> AnalyticsUpgrade:
     upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID)
     if upgrade is None:
@@ -584,33 +777,53 @@ def _get_or_create_upgrade(
             source_schema_version=source_version,
             target_schema_version=schema.ANALYTICS_SCHEMA_VERSION,
             state="pending",
+            operation_kind=operation_kind,
+            reason_code=reason_code,
             source_ids_json=json.dumps(source_ids),
         )
         session.add(upgrade)
         session.flush()
-    elif upgrade.target_schema_version != schema.ANALYTICS_SCHEMA_VERSION:
+    elif (
+        upgrade.target_schema_version != schema.ANALYTICS_SCHEMA_VERSION
+        or upgrade.operation_kind != operation_kind
+        or upgrade.reason_code != reason_code
+        or _json_ids(upgrade.source_ids_json) != sorted(source_ids)
+    ):
         upgrade.source_schema_version = source_version
         upgrade.target_schema_version = schema.ANALYTICS_SCHEMA_VERSION
+        upgrade.operation_kind = operation_kind
+        upgrade.reason_code = reason_code
+        upgrade.source_ids_json = json.dumps(source_ids)
+        upgrade.episode_attempt_count = 0
+        upgrade.next_retry_at = None
+    elif upgrade.state in {"succeeded", "current", "completed_with_warnings"}:
+        # A later cache regression starts a fresh failure episode, while the terminal
+        # status still retains the attempt count for the operation just completed.
+        upgrade.episode_attempt_count = 0
+        upgrade.next_retry_at = None
     return upgrade
 
 
 def _begin_attempt(
     upgrade: AnalyticsUpgrade,
     source_ids: list[int],
-    candidate: Path,
+    candidate: Path | None,
     started_at: datetime,
 ) -> None:
     upgrade.target_schema_version = schema.ANALYTICS_SCHEMA_VERSION
-    upgrade.state = "building"
+    upgrade.state = (
+        "repairing" if upgrade.operation_kind == "source_repair" else "building"
+    )
     upgrade.source_ids_json = json.dumps(source_ids)
     upgrade.completed_source_ids_json = "[]"
     upgrade.attempt_count += 1
     upgrade.error_code = None
     upgrade.error_message = None
-    upgrade.candidate_path = str(candidate)
+    upgrade.candidate_path = str(candidate) if candidate is not None else None
     upgrade.next_retry_at = None
     upgrade.started_at = started_at
     upgrade.completed_at = None
+    upgrade.episode_attempt_count += 1
     upgrade.updated_at = started_at
 
 
@@ -632,6 +845,23 @@ def _mark_succeeded(upgrade: AnalyticsUpgrade, completed_at: datetime) -> None:
     upgrade.updated_at = completed_at
 
 
+def _mark_completed_with_warnings(
+    upgrade: AnalyticsUpgrade,
+    *,
+    warning_source_ids: list[int],
+    completed_at: datetime,
+) -> None:
+    upgrade.state = "completed_with_warnings"
+    upgrade.error_code = "source_replay_partial"
+    upgrade.error_message = (
+        f"{len(warning_source_ids)} Log source(s) could not be published; "
+        "the previous cache was preserved for those sources"
+    )
+    upgrade.next_retry_at = None
+    upgrade.completed_at = completed_at
+    upgrade.updated_at = completed_at
+
+
 def _mark_current_state_succeeded(
     session: Session,
     source_ids: list[int],
@@ -640,11 +870,32 @@ def _mark_current_state_succeeded(
     upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID)
     if upgrade is None:
         return
-    upgrade.source_ids_json = json.dumps(source_ids)
-    upgrade.completed_source_ids_json = json.dumps(source_ids)
+    previous_source_ids = _json_ids(upgrade.source_ids_json)
+    if (
+        (
+            upgrade.state == "completed_with_warnings"
+            or (
+                upgrade.state == "failed"
+                and upgrade.operation_kind == "source_repair"
+            )
+        )
+        and previous_source_ids
+        and previous_source_ids != sorted(source_ids)
+    ):
+        # A failed source may have been paused after repeated failures. The healthy
+        # scope is current, but the last partial maintenance result remains visible.
+        upgrade.state = "completed_with_warnings"
+        upgrade.completed_at = upgrade.completed_at or completed_at
+        upgrade.next_retry_at = None
+        upgrade.updated_at = completed_at
+        session.commit()
+        return
     # Preserve the real last-publish time across no-op "still current" checks so the
     # UI can show when the cache was actually last upgraded (not the last check).
     already_current = upgrade.state == "succeeded" and upgrade.completed_at is not None
+    if not already_current:
+        upgrade.source_ids_json = json.dumps(source_ids)
+        upgrade.completed_source_ids_json = json.dumps(source_ids)
     _mark_succeeded(
         upgrade, upgrade.completed_at if already_current else completed_at
     )
@@ -670,7 +921,7 @@ def _mark_failed(
 ) -> None:
     delay_seconds = min(
         RETRY_MAX_SECONDS,
-        RETRY_BASE_SECONDS * (2 ** max(upgrade.attempt_count - 1, 0)),
+        RETRY_BASE_SECONDS * (2 ** max(upgrade.episode_attempt_count - 1, 0)),
     )
     upgrade.state = "failed"
     upgrade.error_code = str(getattr(exc, "code", "analytics_upgrade_failed"))

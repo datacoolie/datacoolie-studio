@@ -51,6 +51,7 @@ def init_db() -> None:
     _ensure_declared_indexes(engine)
     _ensure_source_observation_pause_column(engine)
     _ensure_sync_job_running_index(engine)
+    _ensure_analytics_upgrade_columns(engine)
     _migrate_current_materializations(engine)
     _drop_legacy_derived_cache_tables(engine)
     _ensure_scan_run_columns(engine)
@@ -116,6 +117,37 @@ def _ensure_source_observation_pause_column(engine) -> None:
         connection.execute(
             text("UPDATE source_observations SET failure_streak = 0")
         )
+
+
+def _ensure_analytics_upgrade_columns(engine) -> None:
+    """Add cache-maintenance metadata to existing workspaces."""
+
+    inspector = inspect(engine)
+    if "analytics_upgrades" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"] for column in inspector.get_columns("analytics_upgrades")
+    }
+    statements = []
+    if "operation_kind" not in columns:
+        statements.append(
+            "ALTER TABLE analytics_upgrades "
+            "ADD COLUMN operation_kind VARCHAR(32) NOT NULL DEFAULT 'schema_upgrade'"
+        )
+    if "reason_code" not in columns:
+        statements.append(
+            "ALTER TABLE analytics_upgrades ADD COLUMN reason_code VARCHAR(100)"
+        )
+    if "episode_attempt_count" not in columns:
+        statements.append(
+            "ALTER TABLE analytics_upgrades "
+            "ADD COLUMN episode_attempt_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if not statements:
+        return
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 def _drop_legacy_derived_cache_tables(engine) -> None:

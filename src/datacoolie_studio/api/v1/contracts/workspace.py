@@ -215,11 +215,14 @@ class AnalyticsUpgradeSourceProgressResponse(BaseModel):
 
 class AnalyticsUpgradeStatusResponse(BaseModel):
     state: str
+    operation_kind: str = "schema_upgrade"
+    reason_code: str | None = None
     source_schema_version: int | None = None
     target_schema_version: int | None = None
     source_ids: list[int] = Field(default_factory=list)
     completed_source_ids: list[int] = Field(default_factory=list)
     attempt_count: int = 0
+    episode_attempt_count: int = 0
     error_code: str | None = None
     error_message: str | None = None
     next_retry_at: datetime | None = None

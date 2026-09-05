@@ -26,6 +26,7 @@ from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.code_artifacts.service import refresh_code_artifact, validate_code_artifact
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.db.models import Environment, utc_now
+from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics_upgrade.service import analytics_upgrade_is_building
 from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
 from datacoolie_studio.domains.logs.discovery import LogSyncMode, LogSyncSpec, LookbackRange
@@ -284,15 +285,21 @@ def refresh_log_source(
             status_code=409,
             detail="Analytics cache upgrade in progress; try syncing again shortly",
         )
-    with sync.source_refresh_guard(path.id) as acquired:
-        if not acquired:
-            raise HTTPException(status_code=409, detail="Log source refresh is already running")
-        return refresh_log_source_cache(
-            session,
-            path,
-            sync_spec=_log_sync_spec(payload),
-            secret_store=secret_store,
-        )
+    with analytics_access.analytics_global_rebuild_lock:
+        if analytics_upgrade_is_building(session):
+            raise HTTPException(
+                status_code=409,
+                detail="Analytics cache upgrade in progress; try syncing again shortly",
+            )
+        with sync.source_refresh_guard(path.id) as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail="Log source refresh is already running")
+            return refresh_log_source_cache(
+                session,
+                path,
+                sync_spec=_log_sync_spec(payload),
+                secret_store=secret_store,
+            )
 
 
 def _log_sync_spec(payload: LogSyncRequest) -> LogSyncSpec:

@@ -1297,12 +1297,24 @@ export interface components {
             completed_source_ids?: number[];
             /** Duration Seconds */
             duration_seconds?: number | null;
+            /**
+             * Episode Attempt Count
+             * @default 0
+             */
+            episode_attempt_count: number;
             /** Error Code */
             error_code?: string | null;
             /** Error Message */
             error_message?: string | null;
             /** Next Retry At */
             next_retry_at?: string | null;
+            /**
+             * Operation Kind
+             * @default schema_upgrade
+             */
+            operation_kind: string;
+            /** Reason Code */
+            reason_code?: string | null;
             /** Source Ids */
             source_ids?: number[];
             /** Source Progress */

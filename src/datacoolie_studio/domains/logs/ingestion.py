@@ -415,16 +415,38 @@ def refresh_log_source_cache(
 ) -> dict[str, Any]:
     operation_started = time.perf_counter()
     try:
-        return _refresh_log_source_cache_impl(
-            session,
-            source,
-            job_type=job_type,
-            sync_spec=sync_spec,
-            secret_store=secret_store,
-            database_path_override=database_path_override,
-            force_analytics_replay=force_analytics_replay,
-            operation_started=operation_started,
-        )
+        def refresh() -> dict[str, Any]:
+            return _refresh_log_source_cache_impl(
+                session,
+                source,
+                job_type=job_type,
+                sync_spec=sync_spec,
+                secret_store=secret_store,
+                database_path_override=database_path_override,
+                force_analytics_replay=force_analytics_replay,
+                operation_started=operation_started,
+            )
+
+        if database_path_override is None and job_type not in {
+            "analytics_upgrade",
+            "analytics_repair",
+        }:
+            if job_type == "auto_refresh":
+                # Source initialization must not be reported as successful while a
+                # complete rebuild owns the live-cache lifecycle. Wait for that
+                # owner, then let the normal refresh path re-check its state.
+                with analytics_access.analytics_global_rebuild_lock:
+                    return refresh()
+            acquired = analytics_access.analytics_global_rebuild_lock.acquire(
+                blocking=False
+            )
+            if not acquired:
+                return sync.source_sync_status(session, source)
+            try:
+                return refresh()
+            finally:
+                analytics_access.analytics_global_rebuild_lock.release()
+        return refresh()
     except sync.SyncJobOverlapError:
         return sync.source_sync_status(session, source)
     except Exception as exc:

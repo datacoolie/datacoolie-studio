@@ -203,6 +203,122 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
         assert connection.execute("SELECT count(*) FROM etl_job_runs").fetchone()[0] == 2
 
 
+def test_same_schema_repairs_only_missing_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A compatible cache adds one missing source without replaying healthy rows."""
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    session.close()
+    healthy_id, missing_id = (source.id for source in sources)
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path, source_id=healthy_id, schema_version=10)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+    real_refresh = upgrade.refresh_log_source_cache
+    refreshed_ids: list[int] = []
+
+    def counted_refresh(worker_session, source, **kwargs):
+        refreshed_ids.append(source.id)
+        return real_refresh(worker_session, source, **kwargs)
+
+    monkeypatch.setattr(upgrade, "refresh_log_source_cache", counted_refresh)
+
+    result = upgrade.run_analytics_upgrade_once()
+
+    assert result["state"] == "succeeded"
+    assert result["operation_kind"] == "source_repair"
+    assert result["reason_code"] == "missing_source_coverage"
+    assert result["source_ids"] == [missing_id]
+    assert refreshed_ids == [missing_id]
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        cached_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source_id FROM etl_cache_sources ORDER BY source_id"
+            ).fetchall()
+        ]
+        generations = dict(
+            connection.execute(
+                "SELECT source_id, generation FROM etl_cache_sources"
+            ).fetchall()
+        )
+        job_rows_by_source = dict(
+            connection.execute(
+                "SELECT _source_id, count(*) FROM etl_job_runs GROUP BY _source_id"
+            ).fetchall()
+        )
+    assert cached_sources == [healthy_id, missing_id]
+    assert generations[healthy_id] == 1
+    assert generations[missing_id] == 1
+    assert job_rows_by_source[healthy_id] == 1
+    assert job_rows_by_source[missing_id] == 1
+    assert not analytics_path.with_name("analytics.candidate.duckdb").exists()
+
+    second = upgrade.run_analytics_upgrade_once()
+    assert second["state"] == "current"
+
+
+def test_same_schema_complete_cache_is_a_noop(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=1)
+    session.close()
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path, source_id=sources[0].id, schema_version=10)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+
+    result = upgrade.run_analytics_upgrade_once()
+
+    assert result["state"] == "current"
+    assert result["source_ids"] == [sources[0].id]
+    assert result.get("attempt_count") is None
+    assert not analytics_path.with_name("analytics.candidate.duckdb").exists()
+
+
+def test_source_repair_failure_backoff_keeps_healthy_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    session.close()
+    healthy_id, missing_id = (source.id for source in sources)
+    analytics_path = tmp_path / "analytics.duckdb"
+    _write_old_live_cache(analytics_path, source_id=healthy_id, schema_version=10)
+    monkeypatch.setattr(upgrade, "analytics_database_path", lambda: analytics_path)
+    calls: list[int] = []
+
+    def fail_refresh(_session, source, **_kwargs):
+        calls.append(source.id)
+        return {
+            "status": "error",
+            "error": {"code": "file_read_failed", "message": "Unreadable log"},
+        }
+
+    monkeypatch.setattr(upgrade, "refresh_log_source_cache", fail_refresh)
+    checked_at = datetime(2026, 8, 3, tzinfo=timezone.utc)
+
+    first = upgrade.run_analytics_upgrade_once(now=checked_at)
+    second = upgrade.run_analytics_upgrade_once(now=checked_at)
+
+    assert first["state"] == "failed"
+    assert first["operation_kind"] == "source_repair"
+    assert first["error_code"] == "file_read_failed"
+    assert first["episode_attempt_count"] == 1
+    assert second["state"] == "failed"
+    assert calls == [missing_id]
+    with duckdb.connect(str(analytics_path), read_only=True) as connection:
+        assert connection.execute(
+            "SELECT source_id FROM etl_cache_sources ORDER BY source_id"
+        ).fetchall() == [(healthy_id,)]
+
+
 def test_healthy_sources_publish_when_one_source_is_unbuildable(
     tmp_path: Path,
     monkeypatch,
@@ -233,8 +349,8 @@ def test_healthy_sources_publish_when_one_source_is_unbuildable(
 
     result = upgrade.run_analytics_upgrade_once()
 
-    assert result["state"] == "succeeded"
-    assert result["source_ids"] == [healthy_id]
+    assert result["state"] == "completed_with_warnings"
+    assert result["source_ids"] == [healthy_id, broken_id]
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         cached_sources = [
             row[0]
@@ -293,8 +409,8 @@ def test_unbuildable_source_is_parked_and_does_not_block_manual_sync(
     result = upgrade.run_analytics_upgrade_once(now=checked_at)
 
     # The upgrade settles instead of staying "failed" and retrying forever.
-    assert result["state"] == "succeeded"
-    assert result["source_ids"] == []
+    assert result["state"] == "completed_with_warnings"
+    assert result["source_ids"] == [sources[0].id]
 
     verify_session = create_session()
     try:

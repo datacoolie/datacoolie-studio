@@ -72,12 +72,13 @@ export function SettingsPage({
   const analyticsCache = cache.status?.analytics_cache;
   const analyticsUpgrade = analyticsCache?.upgrade;
   const upgradeActive = analyticsUpgrade
-    ? ["pending", "building", "validating", "publishing"].includes(analyticsUpgrade.state)
+    ? ["pending", "building", "repairing", "validating", "publishing"].includes(analyticsUpgrade.state)
     : false;
   const upgradeFailed = analyticsUpgrade?.state === "failed";
   const upgradeUpToDate = analyticsUpgrade
-    ? ["succeeded", "current", "not_required"].includes(analyticsUpgrade.state)
+    ? ["succeeded", "current", "completed_with_warnings", "not_required"].includes(analyticsUpgrade.state)
     : false;
+  const upgradeHasWarnings = analyticsUpgrade?.state === "completed_with_warnings";
   const upgradeProgress = analyticsUpgrade?.source_ids?.length
     ? ` · ${analyticsUpgrade.completed_source_ids?.length ?? 0}/${analyticsUpgrade.source_ids.length}`
     : "";
@@ -308,9 +309,9 @@ export function SettingsPage({
                     <span>{analyticsUpgradeLabel(analyticsUpgrade!.state)}{upgradeProgress}</span>
                   </span>
                 ) : upgradeUpToDate ? (
-                  <span className="analytics-upgrade-indicator is-current" role="status">
-                    <CheckCircle2 size={13} />
-                    <span>Up to date{upgradeVersionText}</span>
+                  <span className={`analytics-upgrade-indicator is-current${upgradeHasWarnings ? " is-warning" : ""}`} role="status">
+                    {upgradeHasWarnings ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                    <span>{upgradeHasWarnings ? "Current with warnings" : "Up to date"}{upgradeVersionText}</span>
                   </span>
                 ) : null}
                 {analyticsUpgrade?.state === "failed" ? (
@@ -373,7 +374,12 @@ export function SettingsPage({
                     ) : null}
                   </>
                 ) : upgradeUpToDate ? (
-                  <StatRow label="Last upgraded" value={lastUpgradeAt ? (formatRelativeTime(lastUpgradeAt) ?? "—") : "—"} />
+                  <>
+                    {upgradeHasWarnings ? (
+                      <StatRow label="Upgrade" value={analyticsUpgradeLabel(analyticsUpgrade?.state ?? "completed_with_warnings")} />
+                    ) : null}
+                    <StatRow label="Last upgraded" value={lastUpgradeAt ? (formatRelativeTime(lastUpgradeAt) ?? "—") : "—"} />
+                  </>
                 ) : null}
                 <StatRow
                   label="Rows"
@@ -482,6 +488,8 @@ function analyticsUpgradeLabel(state: string): string {
     publishing: "Publishing atomically",
     succeeded: "Current",
     current: "Current",
+    repairing: "Repairing source cache",
+    completed_with_warnings: "Current with warnings",
     failed: "Retry scheduled",
     not_required: "Not required",
   };

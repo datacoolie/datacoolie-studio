@@ -25,9 +25,9 @@ export function AnalyticsUpgradeDetailsDrawer({ upgrade, onClose }: AnalyticsUpg
         <header className="metadata-drawer-header">
           <div>
             <span className="eyebrow">Analytics cache</span>
-            <h2>Upgrade details</h2>
+            <h2>{operationTitle(upgrade)}</h2>
             <small className="settings-drawer-summary">
-              Current attempt and source processing times
+              Current maintenance attempt and source processing times
             </small>
           </div>
           <button className="icon-action small" type="button" onClick={onClose} aria-label="Close analytics upgrade details">
@@ -43,14 +43,15 @@ export function AnalyticsUpgradeDetailsDrawer({ upgrade, onClose }: AnalyticsUpg
             </div>
             <dl className="analytics-upgrade-summary-grid">
               <Detail label="Schema" value={schemaLabel(upgrade)} />
-              <Detail label="Attempt" value={String(upgrade.attempt_count ?? 0)} />
+              <Detail label="Reason" value={reasonLabel(upgrade)} />
+              <Detail label="Attempt" value={attemptLabel(upgrade)} />
               <Detail label="Progress" value={sourceCount ? `${completedCount} / ${sourceCount} sources` : "No sources"} />
               <Detail label="Duration" value={formatDuration(upgrade.duration_seconds)} />
               <Detail label="Started" value={formatTimestamp(upgrade.started_at)} />
               <Detail label="Completed" value={formatTimestamp(upgrade.completed_at)} />
             </dl>
             {upgrade.error_message ? (
-              <div className="analytics-upgrade-message is-error">
+              <div className={`analytics-upgrade-message ${upgrade.state === "completed_with_warnings" ? "is-warning" : "is-error"}`}>
                 <strong>{upgrade.error_code ?? "Upgrade error"}</strong>
                 <span>{upgrade.error_message}</span>
               </div>
@@ -124,10 +125,48 @@ function formatTimestamp(value?: string | null): string {
 function schemaLabel(upgrade: AnalyticsUpgradeStatus): string {
   const source = upgrade.source_schema_version == null ? "unknown" : `v${upgrade.source_schema_version}`;
   const target = upgrade.target_schema_version == null ? "unknown" : `v${upgrade.target_schema_version}`;
+  if (upgrade.operation_kind === "source_repair" && source === target) return `Schema ${source}`;
   return `${source} → ${target}`;
 }
 
+function operationTitle(upgrade: AnalyticsUpgradeStatus): string {
+  switch (upgrade.operation_kind) {
+    case "schema_upgrade":
+      return "Upgrade analytics schema";
+    case "source_repair":
+      return "Repair source cache";
+    case "cache_rebuild":
+    case "scope_reconcile":
+      return "Rebuild analytics cache";
+    case "initialize":
+      return "Initialize analytics cache";
+    default:
+      return "Upgrade details";
+  }
+}
+
+function reasonLabel(upgrade: AnalyticsUpgradeStatus): string {
+  const labels: Record<string, string> = {
+    missing_database: "Cache database missing",
+    missing_source_coverage: "Source cache missing",
+    schema_mismatch: "Schema migration required",
+    cache_schema_incompatible: "Cache schema incompatible",
+    cache_not_ready: "Cache not ready",
+    cache_unavailable: "Cache unavailable",
+    source_scope_changed: "Source scope changed",
+  };
+  return labels[upgrade.reason_code ?? ""] ?? upgrade.reason_code ?? "Maintenance requested";
+}
+
+function attemptLabel(upgrade: AnalyticsUpgradeStatus): string {
+  const total = upgrade.attempt_count ?? 0;
+  const episode = upgrade.episode_attempt_count;
+  return episode && episode !== total ? `${episode} (total ${total})` : String(total);
+}
+
 function upgradeStateLabel(state: string): string {
+  if (state === "repairing") return "Repairing source cache";
+  if (state === "completed_with_warnings") return "Current with warnings";
   return state.replace(/_/gu, " ");
 }
 
@@ -138,6 +177,7 @@ function sourceStatusLabel(status: string): string {
 
 function statusTone(status: string): TagTone {
   if (["succeeded", "completed", "current", "not_required"].includes(status)) return "success";
+  if (status === "completed_with_warnings") return "warning";
   if (status === "failed") return "danger";
   if (["pending", "queued"].includes(status)) return "neutral";
   return "info";

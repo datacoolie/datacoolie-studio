@@ -164,12 +164,15 @@ export interface StudioResultCacheStatus {
 }
 
 export interface AnalyticsUpgradeStatus {
-  state: "not_required" | "current" | "pending" | "building" | "validating" | "publishing" | "succeeded" | "failed";
+  state: "not_required" | "current" | "pending" | "building" | "repairing" | "validating" | "publishing" | "succeeded" | "completed_with_warnings" | "failed";
+  operation_kind?: "schema_upgrade" | "cache_rebuild" | "source_repair" | "initialize" | "scope_reconcile" | string;
+  reason_code?: string | null;
   source_schema_version?: number | null;
   target_schema_version?: number | null;
   source_ids?: number[];
   completed_source_ids?: number[];
   attempt_count?: number;
+  episode_attempt_count?: number;
   error_code?: string | null;
   error_message?: string | null;
   next_retry_at?: string | null;

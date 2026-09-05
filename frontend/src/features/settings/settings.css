@@ -114,6 +114,11 @@
   color: var(--color-success, #16a34a);
 }
 
+.analytics-upgrade-indicator.is-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
 .settings-section-action {
   min-height: 28px;
   border: 1px solid var(--color-border);
@@ -314,6 +319,11 @@
 .analytics-upgrade-message.is-error {
   background: color-mix(in srgb, var(--color-danger) 7%, var(--color-surface));
   color: var(--color-danger);
+}
+
+.analytics-upgrade-message.is-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
 }
 
 .analytics-upgrade-source-list {

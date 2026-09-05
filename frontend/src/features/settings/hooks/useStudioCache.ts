@@ -56,7 +56,7 @@ export function useStudioCache(onChanged?: () => void | Promise<void>): StudioCa
 
   const upgradeState = status?.analytics_cache.upgrade?.state;
   useEffect(() => {
-    if (!upgradeState || !["pending", "building", "validating", "publishing"].includes(upgradeState)) {
+    if (!upgradeState || !["pending", "building", "repairing", "validating", "publishing"].includes(upgradeState)) {
       return undefined;
     }
     const timer = window.setInterval(() => {

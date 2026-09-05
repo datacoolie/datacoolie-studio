@@ -44,6 +44,54 @@ describe("AnalyticsUpgradeDetailsDrawer", () => {
     expect(html).toContain("Analytics rows rebuilt.");
   });
 
+  it("labels same-version source repair separately from schema upgrade", () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsUpgradeDetailsDrawer
+        onClose={vi.fn()}
+        upgrade={{
+          state: "repairing",
+          operation_kind: "source_repair",
+          reason_code: "missing_source_coverage",
+          source_schema_version: 10,
+          target_schema_version: 10,
+          source_ids: [118],
+          episode_attempt_count: 1,
+          attempt_count: 70,
+          source_progress: [{ source_id: 118, status: "running" }],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Repair source cache");
+    expect(html).toContain("Schema v10");
+    expect(html).toContain("Source cache missing");
+    expect(html).toContain("1 (total 70)");
+    expect(html).not.toContain("v10 → v10");
+  });
+
+  it("keeps partial completion visibly distinct from a successful upgrade", () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsUpgradeDetailsDrawer
+        onClose={vi.fn()}
+        upgrade={{
+          state: "completed_with_warnings",
+          operation_kind: "schema_upgrade",
+          reason_code: "schema_mismatch",
+          source_schema_version: 9,
+          target_schema_version: 10,
+          source_ids: [7, 8],
+          completed_source_ids: [7],
+          error_code: "source_replay_partial",
+          error_message: "1 Log source could not be published.",
+        }}
+      />,
+    );
+
+    expect(html).toContain("Current with warnings");
+    expect(html).toContain("analytics-upgrade-message is-warning");
+    expect(html).not.toContain("analytics-upgrade-message is-error");
+  });
+
   it("counts completed source jobs when the upgrade checkpoint is still stale", () => {
     expect(completedSourceCount({
       state: "building",
