@@ -52,12 +52,16 @@ describe("assetsOrdering", () => {
     const rows = orderAssetsByConnection([
       asset("3", "silver_delta", "Orders"),
       asset("2", "bronze_parquet", "Orders"),
+      asset("5", "wwi_bronze_orders", "Orders"),
+      asset("6", "wwi_silver_orders_bronze_archive", "Orders"),
       asset("4", "analytics", "Orders"),
       asset("1", "wwi_sqlserver", "Customers"),
     ]);
     expect(rows.map((row) => `${row.connection_name}:${row.display_name}`)).toEqual([
       "bronze_parquet:Orders",
+      "wwi_bronze_orders:Orders",
       "silver_delta:Orders",
+      "wwi_silver_orders_bronze_archive:Orders",
       "analytics:Orders",
       "wwi_sqlserver:Customers",
     ]);

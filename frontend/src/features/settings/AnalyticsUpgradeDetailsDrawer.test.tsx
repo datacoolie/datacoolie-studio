@@ -23,7 +23,11 @@ describe("AnalyticsUpgradeDetailsDrawer", () => {
           source_progress: [
             {
               source_id: 7,
+              project_name: "Orders",
+              environment_name: "prod",
+              source_kind: "logs",
               label: "Production logs",
+              uri: "D:/data/orders/logs",
               status: "succeeded",
               started_at: "2026-08-11T03:00:00Z",
               completed_at: "2026-08-11T03:00:42Z",
@@ -40,6 +44,9 @@ describe("AnalyticsUpgradeDetailsDrawer", () => {
     expect(html).toContain("1 / 2 sources");
     expect(html).toContain("1m 15s");
     expect(html).toContain("Production logs");
+    expect(html).toContain("Orders / prod");
+    expect(html).toContain("Logs source");
+    expect(html).toContain("Source ID 7");
     expect(html).toContain("42s");
     expect(html).toContain("Analytics rows rebuilt.");
   });
@@ -57,7 +64,7 @@ describe("AnalyticsUpgradeDetailsDrawer", () => {
           source_ids: [118],
           episode_attempt_count: 1,
           attempt_count: 70,
-          source_progress: [{ source_id: 118, status: "running" }],
+          source_progress: [{ source_id: 118, source_kind: "logs", status: "running" }],
         }}
       />,
     );
@@ -66,6 +73,9 @@ describe("AnalyticsUpgradeDetailsDrawer", () => {
     expect(html).toContain("Schema v10");
     expect(html).toContain("Source cache missing");
     expect(html).toContain("1 (total 70)");
+    expect(html).toContain("Not registered");
+    expect(html).toContain("Project / environment no longer available");
+    expect(html).toContain("This source is no longer registered in the current workspace.");
     expect(html).not.toContain("v10 → v10");
   });
 

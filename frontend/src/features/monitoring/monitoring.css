@@ -168,6 +168,26 @@
   font-size: 11px;
 }
 
+.monitor-stage-source {
+  --monitor-stage-background: var(--asset-stage-source-bg);
+}
+
+.monitor-stage-bronze {
+  --monitor-stage-background: var(--asset-stage-bronze-bg);
+}
+
+.monitor-stage-silver {
+  --monitor-stage-background: var(--asset-stage-silver-bg);
+}
+
+.monitor-stage-gold {
+  --monitor-stage-background: var(--asset-stage-gold-bg);
+}
+
+.monitor-endpoint-cell:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold) {
+  background: var(--monitor-stage-background);
+}
+
 .monitor-child-summary {
   display: inline-flex;
   align-items: center;
@@ -842,6 +862,10 @@
   background: #f1f7f6;
 }
 
+.monitoring-filter-menu button:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold) {
+  box-shadow: inset 3px 0 var(--monitor-stage-background);
+}
+
 .monitoring-filter-menu button > span {
   min-width: 0;
   overflow: hidden;
@@ -861,6 +885,15 @@
   color: #155e59;
   font-size: 10px;
   text-transform: uppercase;
+}
+
+.dataflow-route-endpoint:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold),
+.monitoring-dataflow-route-endpoint:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold),
+.failure-route-node:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold),
+.maintenance-source-cell:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold) {
+  background: var(--monitor-stage-background);
+  border-radius: 5px;
+  padding: 3px 5px;
 }
 
 .monitoring-filter-field {
@@ -1444,6 +1477,12 @@
   color: #506075;
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
+}
+
+.monitoring-maintenance-header-context:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold) {
+  border-radius: 5px;
+  padding: 3px 6px;
+  background: var(--monitor-stage-background);
 }
 
 .monitoring-detail-drawer.is-maintenance .monitoring-detail-section {
@@ -2872,6 +2911,14 @@
 .monitoring-maintenance-table .maintenance-no-op-cell.has-no-op > strong,
 .monitoring-maintenance-table .maintenance-no-op-cell.has-no-op > small {
   color: var(--color-warning);
+}
+
+.monitoring-maintenance-table tbody tr:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold) {
+  background: var(--monitor-stage-background);
+}
+
+.monitoring-maintenance-table tbody tr:is(.monitor-stage-source, .monitor-stage-bronze, .monitor-stage-silver, .monitor-stage-gold):hover {
+  background: #f3f7fb;
 }
 
 .overview-health-strip.monitoring-diagnostics-health-strip {

@@ -41,7 +41,8 @@ from datacoolie_studio.domains.storage.inventory import StorageInventory
 
 @pytest.fixture
 def cloud_source(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     monkeypatch.setattr(
         "datacoolie_studio.domains.metadata.storage_io.backup_dir",
         lambda: tmp_path / "backups",

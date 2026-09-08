@@ -118,20 +118,96 @@ def test_browser_uses_display_url_and_port_zero_does_not_open(monkeypatch):
     assert scheduled == []
 
 
-def test_storage_arguments_keep_configuring_the_existing_environment(monkeypatch):
+def test_storage_arguments_configure_the_selected_environment(monkeypatch, tmp_path):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["datacoolie-studio", "--database-url", "sqlite:///workspace.db", "--no-banner", "--no-open"],
+        [
+            "datacoolie-studio",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--database-url",
+            "sqlite:///workspace.db",
+            "--result-cache-url",
+            "sqlite:///result-cache.db",
+            "--no-banner",
+            "--no-open",
+        ],
     )
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATA_DIR", raising=False)
     monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", raising=False)
     monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: None)
 
     cli.main()
 
+    assert os.environ["DATACOOLIE_STUDIO_DATA_DIR"] == str(tmp_path / "data")
     assert os.environ["DATACOOLIE_STUDIO_DATABASE_URL"] == "sqlite:///workspace.db"
-    assert "DATACOOLIE_STUDIO_DB" not in os.environ
+    assert os.environ["DATACOOLIE_STUDIO_RESULT_CACHE_URL"] == "sqlite:///result-cache.db"
+
+
+def test_environment_arguments_are_used_when_cli_omits_them(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["datacoolie-studio", "--no-banner", "--no-open"])
+    monkeypatch.setenv("DATACOOLIE_STUDIO_HOST", "0.0.0.0")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_PORT", "9876")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", "D:/studio-data")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", "sqlite:///workspace.db")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", "memory://")
+    started: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: started.append((args, kwargs)))
+
+    cli.main()
+
+    assert started[0][1]["host"] == "0.0.0.0"
+    assert started[0][1]["port"] == 9876
+    assert os.environ["DATACOOLIE_STUDIO_DATA_DIR"] == "D:/studio-data"
+
+
+def test_explicit_cli_arguments_override_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "datacoolie-studio",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8765",
+            "--data-dir",
+            str(tmp_path / "cli-data"),
+            "--database-url",
+            "sqlite:///cli-workspace.db",
+            "--result-cache-url",
+            "memory://",
+            "--no-banner",
+            "--no-open",
+        ],
+    )
+    monkeypatch.setenv("DATACOOLIE_STUDIO_HOST", "0.0.0.0")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_PORT", "9876")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", "D:/env-data")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", "sqlite:///env-workspace.db")
+    monkeypatch.setenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", "sqlite:///env-cache.db")
+    started: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: started.append((args, kwargs)))
+
+    cli.main()
+
+    assert started[0][1]["host"] == "127.0.0.1"
+    assert started[0][1]["port"] == 8765
+    assert os.environ["DATACOOLIE_STUDIO_DATA_DIR"] == str(tmp_path / "cli-data")
+    assert os.environ["DATACOOLIE_STUDIO_DATABASE_URL"] == "sqlite:///cli-workspace.db"
+    assert os.environ["DATACOOLIE_STUDIO_RESULT_CACHE_URL"] == "memory://"
+
+
+def test_invalid_environment_port_is_rejected(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["datacoolie-studio", "--no-banner", "--no-open"])
+    monkeypatch.setenv("DATACOOLIE_STUDIO_PORT", "not-a-port")
+
+    with pytest.raises(SystemExit) as error:
+        cli.parse_args()
+
+    assert error.value.code == 2
 
 
 def test_help_does_not_print_banner_or_start_server(monkeypatch, capsys):
@@ -144,4 +220,7 @@ def test_help_does_not_print_banner_or_start_server(monkeypatch, capsys):
     assert error.value.code == 0
     output = capsys.readouterr().out
     assert "--no-banner" in output
+    assert "--data-dir" in output
+    assert "--result-cache-url" in output
+    assert "--db" not in output
     assert "DataCoolie Studio v" not in output

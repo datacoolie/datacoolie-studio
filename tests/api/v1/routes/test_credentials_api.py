@@ -17,7 +17,8 @@ from tests.support.credentials import MemorySecretStore
 def test_credential_api_roundtrip_is_write_only_for_secrets(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     store = MemorySecretStore()
     app.dependency_overrides[get_credential_secret_store] = lambda: store
     try:
@@ -81,7 +82,8 @@ def test_credential_api_roundtrip_is_write_only_for_secrets(
 def test_capabilities_fail_closed_when_keyring_is_unavailable(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     store = MemorySecretStore(available=False)
     app.dependency_overrides[get_credential_secret_store] = lambda: store
     try:

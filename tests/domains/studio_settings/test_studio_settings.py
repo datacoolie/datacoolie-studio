@@ -19,7 +19,8 @@ def _empty_analytics_stats() -> dict:
 
 
 def test_studio_settings_and_diagnostics_have_separate_read_costs(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -72,12 +73,13 @@ def test_studio_settings_and_diagnostics_have_separate_read_costs(tmp_path: Path
         assert diagnostics.json()["analytics_cache"]["scope"] == "studio"
         assert analytics_calls == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_workspace_database_compaction_is_confirmed_and_preserves_core_rows(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -100,7 +102,7 @@ def test_workspace_database_compaction_is_confirmed_and_preserves_core_rows(tmp_
         assert projects.status_code == 200
         assert [item["name"] for item in projects.json()] == ["preserved"]
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_workspace_database_compaction_rejects_non_sqlite(monkeypatch):
@@ -118,7 +120,8 @@ def test_workspace_database_compaction_rejects_non_sqlite(monkeypatch):
 
 
 def test_studio_settings_update_is_atomic_and_avoids_noop_commits(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
     from sqlalchemy.orm import Session
@@ -180,4 +183,4 @@ def test_studio_settings_update_is_atomic_and_avoids_noop_commits(tmp_path: Path
         assert reset.json()["source_check_interval_seconds"] == 45
         assert commit_count == 2
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

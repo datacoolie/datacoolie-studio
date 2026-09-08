@@ -37,7 +37,8 @@ def _source_status(client, environment_id: int, source_id: int) -> dict:
 
 
 def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -59,7 +60,7 @@ def test_workspace_api_roundtrip(tmp_path: Path, monkeypatch):
         assert source["configured_location"]["input_uri"] == "metadata.json"
         assert client.get("/api/projects").status_code == 404
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_observation_pause_recovery_api(tmp_path: Path, monkeypatch):
@@ -69,7 +70,8 @@ def test_source_observation_pause_recovery_api(tmp_path: Path, monkeypatch):
         '{"connections": [], "dataflows": [], "schema_hints": []}',
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -170,7 +172,7 @@ def test_source_observation_pause_recovery_api(tmp_path: Path, monkeypatch):
             == "paused"
         )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeypatch):
@@ -178,7 +180,8 @@ def test_monitoring_bypasses_validated_empty_log_sources(tmp_path: Path, monkeyp
     analytics_path = tmp_path / "analytics.duckdb"
     empty_logs = tmp_path / "empty-logs"
     empty_logs.mkdir()
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -251,7 +254,8 @@ def test_environment_overview_is_available_when_monitoring_cache_is_missing(
 ):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -338,7 +342,8 @@ def test_environment_overview_is_available_when_monitoring_cache_is_missing(
 def test_environment_context_is_narrow_and_versions_dependencies(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -397,14 +402,15 @@ def test_environment_context_is_narrow_and_versions_dependencies(
         missing = client.get("/api/v1/environments/999999/context")
         assert missing.status_code == 404
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_reference_mapping_crud_and_project_cascade(
     tmp_path: Path, monkeypatch
 ):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -487,14 +493,15 @@ def test_project_reference_mapping_crud_and_project_cascade(
             ).fetchone()[0]
             assert count == 0
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_reference_mapping_migrates_legacy_reference_kind_column(
     tmp_path: Path, monkeypatch
 ):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -545,13 +552,14 @@ def test_project_reference_mapping_migrates_legacy_reference_kind_column(
         }
         assert "project_asset_mappings" not in tables
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_reference_mapping_accepts_unknown_reference_type(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -573,12 +581,13 @@ def test_project_reference_mapping_accepts_unknown_reference_type(
         assert payload["reference_type"] == "unknown"
         assert payload["reference_signature"]["reference_type"] == "unknown"
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -668,7 +677,7 @@ def test_source_management_api_roundtrip(tmp_path: Path, monkeypatch):
             == []
         )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_scan_queues_metadata_and_code_initialization(tmp_path: Path, monkeypatch):
@@ -683,7 +692,8 @@ def test_project_scan_queues_metadata_and_code_initialization(tmp_path: Path, mo
         encoding="utf-8",
     )
     (functions_dir / "transform.py").write_text("def transform(value):\n    return value\n", encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -743,7 +753,7 @@ def test_project_scan_queues_metadata_and_code_initialization(tmp_path: Path, mo
                 "select count(*) from sync_jobs where job_type = 'initial_refresh'"
             ).fetchone()[0] == 4
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_scan_reconciles_removed_code_artifacts_without_hard_delete(tmp_path: Path, monkeypatch):
@@ -753,7 +763,8 @@ def test_project_scan_reconciles_removed_code_artifacts_without_hard_delete(tmp_
     functions_dir.mkdir(parents=True)
     helper = functions_dir / "helper.py"
     helper.write_text("VALUE = 1\n", encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -795,7 +806,7 @@ def test_project_scan_reconciles_removed_code_artifacts_without_hard_delete(tmp_
         assert restored["enabled"] is False
         assert "discovery_state" not in restored["source_config"]
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_scan_preserves_manual_code_override_on_rescan(tmp_path: Path, monkeypatch):
@@ -805,7 +816,8 @@ def test_project_scan_preserves_manual_code_override_on_rescan(tmp_path: Path, m
     functions_dir.mkdir(parents=True)
     helper = functions_dir / "helper.py"
     helper.write_text("VALUE = 1\n", encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -838,7 +850,7 @@ def test_project_scan_preserves_manual_code_override_on_rescan(tmp_path: Path, m
         assert listed[0]["label"] == "manual helper"
         assert "discovery_state" not in listed[0]["source_config"]
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_scan_does_not_mark_invalid_archive_as_missing(
@@ -852,7 +864,8 @@ def test_project_scan_does_not_mark_invalid_archive_as_missing(
     with ZipFile(bundle, "w") as archive:
         archive.writestr("pkg/__init__.py", "")
         archive.writestr("pkg/loader.py", "VALUE = 1\n")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -890,11 +903,12 @@ def test_project_scan_does_not_mark_invalid_archive_as_missing(
         assert listed[0]["id"] == source_id
         assert "discovery_state" not in listed[0]["source_config"]
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_project_scan_preserves_remote_storage_binding(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1043,7 +1057,8 @@ def test_project_scan_preserves_remote_storage_binding(tmp_path: Path, monkeypat
 def test_new_log_source_queues_validation_and_sync(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1088,11 +1103,12 @@ def test_new_log_source_queues_validation_and_sync(tmp_path: Path, monkeypatch):
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 2
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_detail_routes_require_matching_environment_scope(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1154,11 +1170,12 @@ def test_source_detail_routes_require_matching_environment_scope(tmp_path: Path,
         assert "/api/v1/environments/{environment_id}/log-sources/{source_id}" in paths
         assert "/api/v1/environments/{environment_id}/code-artifacts/{source_id}" in paths
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_project_summary_api(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1185,12 +1202,13 @@ def test_project_summary_api(tmp_path: Path, monkeypatch):
         assert summaries[0]["etl_log_path_count"] == 1
         assert summaries[0]["environments"][0]["name"] == "dev"
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1258,7 +1276,7 @@ def test_source_refresh_records_revision_and_sync_job(tmp_path: Path, monkeypatc
                 == 0
             )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_fast_stat_omits_content_hash(tmp_path: Path):
@@ -1301,7 +1319,8 @@ def test_environment_freshness_reports_materialized_cache_state(
     os.utime(metadata_new, (1_700_000_300, 1_700_000_300))
     os.utime(log_old, (1_700_000_100, 1_700_000_100))
     os.utime(log_new, (1_700_000_600, 1_700_000_600))
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1354,7 +1373,7 @@ def test_environment_freshness_reports_materialized_cache_state(
         assert first_item["status"] == "current"
         assert source_freshness["source_cache_version"] != initial_source_cache_version
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_source(
@@ -1372,7 +1391,8 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
         """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1466,13 +1486,14 @@ def test_metadata_api_uses_current_materialization_and_auto_refreshes_stale_sour
         status = _source_status(client, env["id"], source["id"])
         assert status["status"] == "error"
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_refresh_reports_missing_path_without_crashing(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1499,13 +1520,14 @@ def test_source_refresh_reports_missing_path_without_crashing(
         ).json()
         assert listed[0]["latest_validation"] is None
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_source_uri_update_clears_read_check_and_sync_status(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1532,7 +1554,7 @@ def test_source_uri_update_clears_read_check_and_sync_status(
         assert status["status"] == "unknown"
         assert status["latest_job"] is None
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, monkeypatch):
@@ -1544,7 +1566,8 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1588,7 +1611,7 @@ def test_automatic_metadata_refresh_has_no_per_source_schedule(tmp_path: Path, m
             f"/api/v1/environments/{env['id']}/sources/observe-local"
         ).json()["changed"] == 0
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path, monkeypatch):
@@ -1597,7 +1620,8 @@ def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path
     code_path.mkdir()
     module_path = code_path / "transform.py"
     module_path.write_text("def transform(value):\n    return value\n", encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1631,11 +1655,12 @@ def test_automatic_code_refresh_rebuilds_only_after_source_change(tmp_path: Path
         with sqlite3.connect(db_path) as connection:
             assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1898,7 +1923,7 @@ def test_etl_log_path_refresh_records_directory_revision(tmp_path: Path, monkeyp
             second_refresh["latest_job"]["result"]["record_counts"]["parsed_files"] == 0
         )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch):
@@ -1919,7 +1944,9 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
     for folder in (analyst_jobs, debug_jobs):
         shutil.copy2(job_sample, folder / job_sample.name)
 
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     from fastapi.testclient import TestClient
 
     from datacoolie_studio.domains.logs import ingestion as log_ingestion
@@ -2026,7 +2053,7 @@ def test_base_log_path_reads_only_analyst_etl_folder(tmp_path: Path, monkeypatch
         freshness_after_analyst_change = client.get(f"/api/v1/environments/{env['id']}/freshness").json()
         assert freshness_after_analyst_change["etl_logs"]["status"] == "not_cached"
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
@@ -2034,7 +2061,8 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
     scheduled_logs = tmp_path / "scheduled-logs"
     shutil.copytree(SAMPLE_LOGS, scheduled_logs)
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -2199,13 +2227,14 @@ def test_delete_etl_log_path_purges_duckdb_cache(tmp_path: Path, monkeypatch):
                 == 0
             )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_delete_project_purges_disposable_caches(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -2286,13 +2315,14 @@ def test_delete_project_purges_disposable_caches(tmp_path: Path, monkeypatch):
                 == 0
             )
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_environment_api_accepts_custom_name_and_rejects_invalid_name(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -2313,13 +2343,14 @@ def test_environment_api_accepts_custom_name_and_rejects_invalid_name(
         )
         assert invalid.status_code == 422
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -2592,7 +2623,7 @@ def test_monitoring_page_api_roundtrip(tmp_path: Path, monkeypatch):
             f"/api/v1/environments/{env['id']}/monitoring/overview"
         ).status_code == 404
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_environment_overview_summary_cache_and_lineage_projection(tmp_path: Path, monkeypatch):
@@ -2618,7 +2649,8 @@ def test_environment_overview_summary_cache_and_lineage_projection(tmp_path: Pat
         }),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -2699,7 +2731,7 @@ def test_environment_overview_summary_cache_and_lineage_projection(tmp_path: Pat
         assert after_mapping.json()["cache"]["state"] == "miss"
         assert calls == 3
 
-    with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+    with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
         assert connection.execute("select count(*) from result_cache_entries where namespace = 'environment-overview'").fetchone()[0] == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

@@ -6,6 +6,7 @@ import { formatTimestampForDisplay } from "../../../shared/time";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
 import type { TableSort } from "../MonitoringCharts";import { CompactNumberValue, DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TableDateTimeValue, TablePager, baseChartOption, bottomAnchoredValueXAxis, formatBytes, formatBytesShort, formatCompact, formatNumber, formatPercent, formatSeconds, horizontalBarDataZoom, monitoringTimezone, normalizeTrendBucketKey, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys } from "../components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
 
 const MAINTENANCE_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
 type EfficiencyScaleMode = "linear" | "log";
@@ -314,6 +315,7 @@ function MaintenanceRegistryTable({
       onRowClick={onInspect}
       timezoneName={timezoneName}
       className="monitoring-maintenance-table"
+      rowClassName={(row) => maintenanceStageClass(row) || undefined}
       fixedLayout
     />
   );
@@ -324,8 +326,9 @@ function MaintenanceTargetCell({ row }: { row: MonitoringRecord }) {
   const target = String(row.target_display ?? targetIdentity);
   const format = String(row.destination_format ?? row.format ?? row.destination_connection_type ?? "table");
   const meta = [row.destination_name ?? row.destination_connection_name, row.destination_connection_type].filter(Boolean).join(" · ");
+  const stageClass = maintenanceStageClass(row);
   return (
-    <span className="monitor-endpoint-cell" title={`Target: ${targetIdentity}\n${meta}`}>
+    <span className={["monitor-endpoint-cell", stageClass].filter(Boolean).join(" ")} title={`Target: ${targetIdentity}\n${meta}`}>
       <span className="monitor-endpoint-icon">
         <LineageFormatIcon kind={maintenanceFormatIconKind(format)} label={format} size={18} />
       </span>
@@ -335,6 +338,10 @@ function MaintenanceTargetCell({ row }: { row: MonitoringRecord }) {
       </span>
     </span>
   );
+}
+
+function maintenanceStageClass(row: MonitoringRecord) {
+  return monitoringConnectionStageClass(row.destination_name ?? row.destination_connection_name);
 }
 
 function MaintenanceTableHealthCell({ row }: { row: MonitoringRecord }) {

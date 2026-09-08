@@ -337,6 +337,9 @@ class AnalyticsUpgrade(Base):
     )
     reason_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    source_context_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
     completed_source_ids_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )

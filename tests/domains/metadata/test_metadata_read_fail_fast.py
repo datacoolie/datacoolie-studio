@@ -6,7 +6,8 @@ import json
 def test_environment_metadata_read_routes_fail_fast_on_persisted_validation_error(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 

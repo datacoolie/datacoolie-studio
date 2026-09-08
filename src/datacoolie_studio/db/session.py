@@ -138,6 +138,11 @@ def _ensure_analytics_upgrade_columns(engine) -> None:
         statements.append(
             "ALTER TABLE analytics_upgrades ADD COLUMN reason_code VARCHAR(100)"
         )
+    if "source_context_json" not in columns:
+        statements.append(
+            "ALTER TABLE analytics_upgrades "
+            "ADD COLUMN source_context_json TEXT NOT NULL DEFAULT '{}'"
+        )
     if "episode_attempt_count" not in columns:
         statements.append(
             "ALTER TABLE analytics_upgrades "

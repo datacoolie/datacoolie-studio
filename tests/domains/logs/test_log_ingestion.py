@@ -276,7 +276,8 @@ def _workspace_rows(database_path: Path, sql: str) -> list[tuple[object, ...]]:
 def _test_client(tmp_path: Path, monkeypatch):
     database_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(database_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(database_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{database_path.as_posix()}")
 
     from datacoolie_studio.domains.logs import ingestion as log_ingestion
     from datacoolie_studio.main import app

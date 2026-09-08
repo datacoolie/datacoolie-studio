@@ -828,7 +828,8 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "pipeline.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -904,4 +905,4 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
             assert connection.execute("select count(*) from source_observations").fetchone()[0] == 0
             assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 0
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

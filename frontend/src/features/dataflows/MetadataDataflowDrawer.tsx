@@ -2,6 +2,7 @@ import { ArrowLeft, Check, Copy, Database, GitBranch, Maximize2, Minimize2, X } 
 import { Fragment, useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { formatPrettySql } from "../../shared/components/SqlSyntax";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { displayStorageUri } from "../../shared/lib/storage";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
@@ -20,7 +21,7 @@ import {
   sourceFields,
 } from "./metadataDataflowModel";
 import { formatCellValue, formatPrettyStructuredValue, parseCellText, structuredCellKind } from "../metadata-explorer/metadataSheetOperations";
-import { formatPrettySql, highlightStructuredValue } from "../metadata-explorer/MetadataStructuredCell";
+import { highlightStructuredValue } from "../metadata-explorer/MetadataStructuredCell";
 
 interface MetadataDataflowDrawerProps {
   record: MetadataDataflowRecord;
@@ -641,7 +642,7 @@ function StructuredValue({ fieldKey, value }: { fieldKey: string; value: unknown
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
       </div>
-      <pre className={`dataflow-structured-value${compact ? " is-compact" : ""}`}>
+      <pre className={`dataflow-structured-value sql-syntax-light${compact ? " is-compact" : ""}`}>
         <code>{highlightStructuredValue(prettyValue, structuredKind)}</code>
       </pre>
     </div>

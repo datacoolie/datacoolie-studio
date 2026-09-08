@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
 import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { formatPrettySql, highlightSql } from "../../../shared/components/SqlSyntax";
 import type { MonitoringRecord } from "../../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
 import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../../shared/time";
@@ -19,6 +20,7 @@ import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealth
 import { CompactNumberValue } from "../CompactNumberValue";
 import { formatAgeNumber, formatExactBytes } from "../monitoringNumberFormat";
 import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
 import { SystemLogViewer } from "../SystemLogViewer";
 
 export type DetailRow = [label: string, value: unknown, field?: string];
@@ -105,8 +107,9 @@ export function DataflowRouteEndpoint({
   direction: "source" | "destination";
   endpoint: { asset: string; connection: string; format: string };
 }) {
+  const stageClass = monitoringConnectionStageClass(endpoint.connection);
   return (
-    <div className={`monitoring-dataflow-route-endpoint is-${direction}`}>
+    <div className={["monitoring-dataflow-route-endpoint", `is-${direction}`, stageClass].filter(Boolean).join(" ")}>
       <span>{direction}</span>
       <strong>{endpoint.asset}</strong>
       <small>{endpoint.connection} · {endpoint.format}</small>
@@ -412,8 +415,11 @@ export function semanticIntentStyle(intent: SemanticIntent): CSSProperties | und
 
 export function CodeBlock({ value, kind }: { value: unknown; kind: "json" | "list" | "sql" }) {
   const [copied, setCopied] = useState(false);
-  const formatted = kind === "sql" ? formatSqlBlock(value) : kind === "list" ? formatListBlock(value) : formatCompactJsonBlock(value);
-  const isJsonLike = kind !== "sql";
+  const formatted = kind === "sql"
+    ? formatPrettySql(String(value ?? ""))
+    : kind === "list"
+      ? formatListBlock(value)
+      : formatCompactJsonBlock(value);
   return (
     <div className={`monitoring-code-box monitoring-code-box-${kind}`}>
       <button
@@ -429,8 +435,8 @@ export function CodeBlock({ value, kind }: { value: unknown; kind: "json" | "lis
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
       </button>
-      <pre className="monitoring-code-block">
-        {isJsonLike ? highlightJson(formatted) : formatted}
+      <pre className={`monitoring-code-block${kind === "sql" ? " sql-syntax-light" : ""}`}>
+        {kind === "sql" ? highlightSql(formatted) : highlightJson(formatted)}
       </pre>
     </div>
   );
@@ -488,16 +494,6 @@ export function formatListBlock(value: unknown) {
     if (values.length > 1) return formatCompactJsonArray(values);
   }
   return formatCompactJsonBlock(value);
-}
-
-export function formatSqlBlock(value: unknown) {
-  const sql = String(value).trim().replace(/\s+/g, " ");
-  if (!sql) return "-";
-  return sql
-    .replace(/\b(left join|right join|inner join|outer join|union all|group by|order by|from|where|join|having|union)\b/giu, "\n$1")
-    .replace(/\b(and|or)\b/giu, "\n  $1")
-    .replace(/\s*,\s*/gu, ",\n  ")
-    .trim();
 }
 
 export function parseJsonLike(value: unknown) {

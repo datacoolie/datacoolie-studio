@@ -27,7 +27,8 @@ def _key(environment_id: int, namespace: str) -> ResultCacheKey:
 
 def test_cache_admin_is_scoped_and_preserves_core_state(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     monkeypatch.delenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", raising=False)
     reset_result_cache_engine()
 
@@ -90,7 +91,8 @@ def test_cache_admin_is_scoped_and_preserves_core_state(tmp_path: Path, monkeypa
 
 
 def test_cache_admin_rejects_unknown_environment(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     monkeypatch.delenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", raising=False)
     reset_result_cache_engine()
 
@@ -113,7 +115,8 @@ def test_cache_admin_rejects_unknown_environment(tmp_path: Path, monkeypatch):
 def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     monkeypatch.delenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", raising=False)
     reset_result_cache_engine()
 
@@ -228,7 +231,8 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
 def test_reenabled_log_source_requires_fresh_analytics_publish(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
     analytics_path = tmp_path / "analytics.duckdb"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     monkeypatch.delenv("DATACOOLIE_STUDIO_RESULT_CACHE_URL", raising=False)
     reset_result_cache_engine()
 

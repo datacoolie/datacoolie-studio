@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import type { AnalyticsUpgradeStatus } from "../../shared/api/domainTypes";
+import type { AnalyticsUpgradeSourceProgress, AnalyticsUpgradeStatus } from "../../shared/api/domainTypes";
 import { Tag, type TagTone } from "../../shared/components/Tag";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { formatAbsoluteTime } from "../../shared/time";
@@ -69,11 +69,28 @@ export function AnalyticsUpgradeDetailsDrawer({ upgrade, onClose }: AnalyticsUpg
                   <article className="analytics-upgrade-source" key={source.source_id}>
                     <div className="analytics-upgrade-source-header">
                       <div>
-                        <strong>{source.label || `Source ${source.source_id}`}</strong>
-                        <small>Source ID {source.source_id}</small>
+                        <strong>{sourceDisplayName(source)}</strong>
+                        <small>{sourceContextLabel(source)}</small>
                       </div>
-                      <Tag tone={statusTone(source.status)}>{sourceStatusLabel(source.status)}</Tag>
+                      <div className="analytics-upgrade-source-status">
+                        {sourceIsUnavailable(source) ? <Tag tone="warning">Not registered</Tag> : null}
+                        <Tag tone={statusTone(source.status)}>{sourceStatusLabel(source.status)}</Tag>
+                      </div>
                     </div>
+                    <div className="analytics-upgrade-source-meta">
+                      <span>{sourceKindLabel(source.source_kind)}</span>
+                      <span>Source ID {source.source_id}</span>
+                    </div>
+                    {source.uri ? (
+                      <p className="analytics-upgrade-source-uri" title={source.uri}>
+                        <code>{source.uri}</code>
+                      </p>
+                    ) : null}
+                    {sourceIsUnavailable(source) ? (
+                      <p className="analytics-upgrade-source-message">
+                        This source is no longer registered in the current workspace. The maintenance attempt can no longer process it.
+                      </p>
+                    ) : null}
                     <dl className="analytics-upgrade-source-timing">
                       <Detail label="Duration" value={formatDuration(source.duration_seconds)} />
                       <Detail label="Started" value={formatTimestamp(source.started_at)} />
@@ -120,6 +137,32 @@ export function completedSourceCount(upgrade: AnalyticsUpgradeStatus): number {
 
 function formatTimestamp(value?: string | null): string {
   return formatAbsoluteTime(value) ?? "—";
+}
+
+function sourceDisplayName(source: AnalyticsUpgradeSourceProgress): string {
+  return source.label || source.uri || `Source ${source.source_id}`;
+}
+
+function sourceContextLabel(source: AnalyticsUpgradeSourceProgress): string {
+  const context = [source.project_name, source.environment_name].filter(Boolean).join(" / ");
+  if (context) return context;
+  return sourceIsUnavailable(source)
+    ? "Project / environment no longer available"
+    : "Project / environment unavailable";
+}
+
+function sourceIsUnavailable(source: AnalyticsUpgradeSourceProgress): boolean {
+  return source.is_registered === false
+    || (source.is_registered == null && !source.label && !source.uri);
+}
+
+function sourceKindLabel(sourceKind?: string | null): string {
+  const labels: Record<string, string> = {
+    logs: "Logs source",
+    metadata: "Metadata source",
+    code: "Code source",
+  };
+  return labels[sourceKind ?? ""] ?? sourceKind ?? "Source";
 }
 
 function schemaLabel(upgrade: AnalyticsUpgradeStatus): string {

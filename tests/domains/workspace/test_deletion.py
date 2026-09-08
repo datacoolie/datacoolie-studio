@@ -29,7 +29,8 @@ def test_environment_delete_uses_foreign_key_cascade(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     db_session.init_db()
     engine = db_session.get_engine()
 
@@ -175,7 +176,8 @@ def test_project_delete_statement_count_is_bounded_by_database_cascade(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     db_session.init_db()
     engine = db_session.get_engine()
 

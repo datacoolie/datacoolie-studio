@@ -1273,16 +1273,30 @@ export interface components {
             completed_at?: string | null;
             /** Duration Seconds */
             duration_seconds?: number | null;
+            /** Environment Id */
+            environment_id?: number | null;
+            /** Environment Name */
+            environment_name?: string | null;
+            /** Is Registered */
+            is_registered?: boolean | null;
             /** Label */
             label?: string | null;
             /** Message */
             message?: string | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Project Name */
+            project_name?: string | null;
             /** Source Id */
             source_id: number;
+            /** Source Kind */
+            source_kind?: string | null;
             /** Started At */
             started_at?: string | null;
             /** Status */
             status: string;
+            /** Uri */
+            uri?: string | null;
         };
         /** AnalyticsUpgradeStatusResponse */
         AnalyticsUpgradeStatusResponse: {

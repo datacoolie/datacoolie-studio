@@ -166,7 +166,8 @@ def test_remote_metadata_validation_preserves_safe_storage_error(monkeypatch):
 def test_local_source_defaults_to_typed_local_binding(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     metadata = tmp_path / "metadata.json"
     metadata.write_text("{}", encoding="utf-8")
     with TestClient(app) as client:
@@ -192,7 +193,8 @@ def test_local_source_defaults_to_typed_local_binding(
 def test_cloud_source_binding_validates_profile_and_rejects_secret_config(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     store = MemorySecretStore()
     app.dependency_overrides[get_credential_secret_store] = lambda: store
     try:
@@ -265,7 +267,8 @@ def test_log_credential_change_preserves_learned_state_but_storage_change_resets
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     store = MemorySecretStore()
     app.dependency_overrides[get_credential_secret_store] = lambda: store
     try:
@@ -380,7 +383,8 @@ def test_log_credential_change_preserves_learned_state_but_storage_change_resets
 def test_storage_connection_validation_is_read_only_and_bounded(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     root = tmp_path / "metadata"
     root.mkdir()
     (root / "one.json").write_text("{}", encoding="utf-8")
@@ -404,7 +408,8 @@ def test_storage_connection_validation_is_read_only_and_bounded(
 def test_storage_connection_validation_supports_remote_files(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     from datacoolie_studio.domains.storage.adapters import StorageRevision
     from datacoolie_studio.domains.storage.errors import StorageNotFoundError
 
@@ -454,7 +459,8 @@ def test_storage_connection_validation_supports_remote_files(
 def test_storage_connection_validation_rejects_mismatched_base_log_uri(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     root = tmp_path / "metadata"
     root.mkdir()
 
@@ -512,7 +518,8 @@ def test_cloud_connection_probe_supports_write_back_and_is_bounded(
     uri: str,
     expected_limit: int,
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     from datacoolie_studio.domains.storage.adapters import StorageObject
     from datacoolie_studio.domains.storage.inventory import StorageInventory
 
@@ -573,7 +580,8 @@ def test_cloud_connection_probe_supports_write_back_and_is_bounded(
 def test_adls_aliases_share_one_source_registration_and_keep_first_input(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     storage = {"provider": "adls", "auth_mode": "ambient"}
     abfss_uri = (
         "abfss://test@datateamtest01.dfs.core.windows.net/metadata/assets.json"
@@ -612,7 +620,8 @@ def test_adls_aliases_share_one_source_registration_and_keep_first_input(
 def test_onelake_files_aliases_share_registration_and_tables_are_rejected(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     storage = {"provider": "onelake", "auth_mode": "ambient"}
     abfss_uri = (
         "abfss://Analytics%20Workspace@onelake.dfs.fabric.microsoft.com/"
@@ -671,7 +680,8 @@ def test_editing_only_an_adls_alias_preserves_source_sync_state(
     tmp_path: Path, monkeypatch
 ) -> None:
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     storage = {"provider": "adls", "auth_mode": "ambient"}
     canonical = "abfs://test@datateamtest01.dfs.core.windows.net/metadata/assets.json"
     alias = "https://datateamtest01.dfs.core.windows.net/test/metadata/assets.json"
@@ -714,7 +724,8 @@ def test_editing_only_an_adls_alias_preserves_source_sync_state(
 def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     etl_input = "abfss://test@account.dfs.core.windows.net/logs/etl"
     system_input = "https://account.dfs.core.windows.net/test/logs/system"
     with TestClient(app) as client:
@@ -772,7 +783,8 @@ def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input
 def test_legacy_log_location_aliases_are_normalized_and_update_registration(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     source_root = tmp_path / "source"
     old_root = tmp_path / "old-logs"
     new_root = tmp_path / "new-logs"
@@ -831,7 +843,8 @@ def test_legacy_log_location_aliases_are_normalized_and_update_registration(
 def test_equal_minio_uris_on_different_endpoints_are_distinct_sources(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "minio-scope"}).json()
         environment = client.post(
@@ -861,7 +874,8 @@ def test_equal_minio_uris_on_different_endpoints_are_distinct_sources(
 def test_dbfs_source_accepts_volume_aliases_and_persists_canonical_uri(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
         environment = client.post(
@@ -894,7 +908,8 @@ def test_dbfs_source_accepts_volume_aliases_and_persists_canonical_uri(
 
 
 def test_remote_client_cannot_attach_stored_profile(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     with TestClient(app, client=("203.0.113.8", 50000)) as client:
         project = client.post("/api/v1/projects", json={"name": "demo"}).json()
         environment = client.post(

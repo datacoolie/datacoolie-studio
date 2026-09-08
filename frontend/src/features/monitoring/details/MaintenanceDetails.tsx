@@ -17,6 +17,7 @@ import {
 } from "../diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
 import { CompactNumberValue, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
 import { formatExactBytes } from "../monitoringNumberFormat";
 import { SystemLogViewer } from "../SystemLogViewer";
 import { GroupedDetailCard, IssueCell, MaintenanceHealthChip, detailValue, hasValue } from "./detailPrimitives";
@@ -212,9 +213,10 @@ export function MaintenanceDataflowCell({ row }: { row: Record<string, unknown> 
 
 export function MaintenanceSourceCell({ row }: { row: Record<string, unknown> }) {
   const source = maintenanceSourceParts(row);
+  const stageClass = monitoringConnectionStageClass(source.connection);
   return (
     <span
-      className="maintenance-source-cell"
+      className={["maintenance-source-cell", stageClass].filter(Boolean).join(" ")}
       title={[
         `Source connection: ${source.connection}`,
         `Source object: ${source.object}`,

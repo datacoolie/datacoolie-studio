@@ -17,6 +17,7 @@ import {
 } from "./diagnosticsPresentation";
 import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
 import { CompactNumberValue, formatCompactNumber, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
 import { SystemLogViewer } from "./SystemLogViewer";
 import { FreshnessDrawerHealthTone, FreshnessRunTimeCell, IssueCell, MaintenanceHealthChip, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, freshnessRunTimeLines, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
 import "./monitoring.css";
@@ -521,10 +522,11 @@ function MaintenanceHeaderContext({ row, title }: { row: Record<string, unknown>
   const connection = String(firstValue(row, ["destination_name", "destination_connection_name"]) ?? "unknown connection");
   const connectionType = String(row.destination_connection_type ?? "unknown");
   const format = String(row.destination_format ?? row.format ?? "table");
+  const stageClass = monitoringConnectionStageClass(connection);
   const normalize = (value: string) => value.replace(/`/g, "").trim().toLowerCase();
   const showCanonicalTarget = Boolean(canonicalTarget && normalize(canonicalTarget) !== normalize(title));
   return (
-    <div className="monitoring-maintenance-header-context">
+    <div className={["monitoring-maintenance-header-context", stageClass].filter(Boolean).join(" ")}>
       <span>{connection} · {connectionType} · {format}</span>
       {showCanonicalTarget ? <code title={canonicalTarget}>{canonicalTarget}</code> : null}
     </div>

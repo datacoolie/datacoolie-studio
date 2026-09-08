@@ -166,7 +166,8 @@ def test_build_assets_inventory_covers_canonical_assets_references_provenance_an
 
 
 def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -316,7 +317,7 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         assert cleared_row["resolution"]["state"] == "unresolved"
         assert cleared_row["mapping"] is None
 
-        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute(
                 "select count(*) from result_cache_entries where namespace = 'assets.catalog'"
             ).fetchone()[0] == 1
@@ -332,7 +333,7 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         assert client.get("/api/v1/environments/999999/assets").status_code == 404
         assert client.get("/api/v1/environments/999999/asset-references").status_code == 404
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_asset_detail_definition_formats_sql_and_resolves_python_source(tmp_path: Path):

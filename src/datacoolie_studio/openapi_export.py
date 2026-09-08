@@ -18,11 +18,15 @@ def normalized_openapi() -> str:
         previous = {
             name: os.environ.get(name)
             for name in (
-                "DATACOOLIE_STUDIO_DB",
+                "DATACOOLIE_STUDIO_DATA_DIR",
+                "DATACOOLIE_STUDIO_DATABASE_URL",
                 "DATACOOLIE_STUDIO_RESULT_CACHE_URL",
             )
         }
-        os.environ["DATACOOLIE_STUDIO_DB"] = str(root / "studio.db")
+        os.environ["DATACOOLIE_STUDIO_DATA_DIR"] = str(root)
+        os.environ["DATACOOLIE_STUDIO_DATABASE_URL"] = (
+            f"sqlite:///{(root / 'db' / 'studio.db').as_posix()}"
+        )
         os.environ["DATACOOLIE_STUDIO_RESULT_CACHE_URL"] = "memory://"
         try:
             from datacoolie_studio.main import app

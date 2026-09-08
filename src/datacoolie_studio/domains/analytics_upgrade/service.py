@@ -13,11 +13,12 @@ from typing import Any
 import duckdb
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from datacoolie_studio.core.config import analytics_database_path
 from datacoolie_studio.db.models import (
     AnalyticsUpgrade,
+    Environment,
     EnvironmentSource,
     SourceObservation,
     SyncJob,
@@ -195,6 +196,7 @@ def _run_analytics_upgrade_once(*, now: datetime | None = None) -> dict[str, Any
             session,
             source_version=assessment.source_version,
             source_ids=operation_source_ids,
+            source_context=_source_context_map(sources),
             operation_kind=assessment.operation_kind,
             reason_code=assessment.reason_code,
         )
@@ -542,16 +544,32 @@ def _source_progress(
     if not source_ids:
         return []
     completed_ids = set(_json_ids(upgrade.completed_source_ids_json))
+    snapshot_context = _json_source_context(upgrade.source_context_json)
     if session is None:
         return [
-            {"source_id": source_id, "status": "completed" if source_id in completed_ids else "pending"}
+            {
+                "source_id": source_id,
+                **snapshot_context.get(str(source_id), {}),
+                "is_registered": None,
+                "status": "completed" if source_id in completed_ids else "pending",
+                "message": None,
+                "started_at": None,
+                "completed_at": None,
+                "duration_seconds": None,
+            }
             for source_id in source_ids
         ]
 
     sources = {
         source.id: source
         for source in session.scalars(
-            select(EnvironmentSource).where(EnvironmentSource.id.in_(source_ids))
+            select(EnvironmentSource)
+            .options(
+                selectinload(EnvironmentSource.environment).selectinload(
+                    Environment.project
+                )
+            )
+            .where(EnvironmentSource.id.in_(source_ids))
         )
     }
     job_types = ["analytics_upgrade"]
@@ -571,11 +589,13 @@ def _source_progress(
     for source_id in source_ids:
         source = sources.get(source_id)
         job = jobs.get(source_id)
+        context = _source_context(source) if source is not None else snapshot_context.get(str(source_id), {})
         job_started = _as_utc(job.started_at) if job else None
         job_completed = _as_utc(job.completed_at) if job and job.completed_at else None
         progress.append({
             "source_id": source_id,
-            "label": (source.label or source.uri) if source else None,
+            **context,
+            "is_registered": source is not None,
             "status": job.status if job else ("completed" if source_id in completed_ids else "pending"),
             "message": job.message if job else None,
             "started_at": _iso_or_none(job.started_at) if job else None,
@@ -589,10 +609,35 @@ def _source_progress(
     return progress
 
 
+def _source_context_map(sources: list[EnvironmentSource]) -> dict[str, dict[str, Any]]:
+    return {str(source.id): _source_context(source) for source in sources}
+
+
+def _source_context(source: EnvironmentSource) -> dict[str, Any]:
+    environment = source.environment
+    project = environment.project if environment is not None else None
+    return {
+        "project_id": project.id if project is not None else None,
+        "project_name": project.name if project is not None else None,
+        "environment_id": environment.id if environment is not None else None,
+        "environment_name": environment.name if environment is not None else None,
+        "source_kind": source.source_kind,
+        # Preserve the existing display-label contract while also returning the
+        # raw URI for explicit source identification in the drawer.
+        "label": source.label or source.uri,
+        "uri": source.uri,
+    }
+
+
 def _eligible_sources(session: Session) -> list[EnvironmentSource]:
     sources = list(
         session.scalars(
             select(EnvironmentSource)
+            .options(
+                selectinload(EnvironmentSource.environment).selectinload(
+                    Environment.project
+                )
+            )
             .where(
                 EnvironmentSource.source_kind == "logs",
                 EnvironmentSource.enabled.is_(True),
@@ -767,9 +812,11 @@ def _get_or_create_upgrade(
     *,
     source_version: int | None,
     source_ids: list[int],
+    source_context: dict[str, dict[str, Any]] | None,
     operation_kind: str,
     reason_code: str,
 ) -> AnalyticsUpgrade:
+    source_context = source_context or {}
     upgrade = session.get(AnalyticsUpgrade, UPGRADE_ID)
     if upgrade is None:
         upgrade = AnalyticsUpgrade(
@@ -780,10 +827,16 @@ def _get_or_create_upgrade(
             operation_kind=operation_kind,
             reason_code=reason_code,
             source_ids_json=json.dumps(source_ids),
+            source_context_json=json.dumps(source_context, sort_keys=True),
         )
         session.add(upgrade)
         session.flush()
-    elif (
+    else:
+        merged_context = _json_source_context(upgrade.source_context_json)
+        merged_context.update(source_context)
+        if merged_context != _json_source_context(upgrade.source_context_json):
+            upgrade.source_context_json = json.dumps(merged_context, sort_keys=True)
+    if upgrade is not None and (
         upgrade.target_schema_version != schema.ANALYTICS_SCHEMA_VERSION
         or upgrade.operation_kind != operation_kind
         or upgrade.reason_code != reason_code
@@ -939,6 +992,20 @@ def _json_ids(value: str | None) -> list[int]:
     if not isinstance(loaded, list):
         return []
     return sorted({int(item) for item in loaded})
+
+
+def _json_source_context(value: str | None) -> dict[str, dict[str, Any]]:
+    try:
+        loaded = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        str(source_id): context
+        for source_id, context in loaded.items()
+        if isinstance(context, dict)
+    }
 
 
 def _iso_or_none(value: datetime | None) -> str | None:

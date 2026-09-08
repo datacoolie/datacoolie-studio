@@ -205,7 +205,14 @@ class StudioCacheStatusResponse(BaseModel):
 
 class AnalyticsUpgradeSourceProgressResponse(BaseModel):
     source_id: int
+    project_id: int | None = None
+    project_name: str | None = None
+    environment_id: int | None = None
+    environment_name: str | None = None
+    source_kind: str | None = None
     label: str | None = None
+    uri: str | None = None
+    is_registered: bool | None = None
     status: str
     message: str | None = None
     started_at: datetime | None = None

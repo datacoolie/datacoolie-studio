@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";import { failureDiagnosticTags } from "./details/FailureDetails";
-import { formatRuntimeTimestampForDisplay, phaseRuntimeStatusClass } from "./details/detailPrimitives";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import { failureDiagnosticTags } from "./details/FailureDetails";
+import { CodeBlock, formatRuntimeTimestampForDisplay, phaseRuntimeStatusClass } from "./details/detailPrimitives";
 
 describe("dataflow run drawer runtime status", () => {
   it.each([
@@ -16,6 +19,14 @@ describe("dataflow run drawer runtime status", () => {
   it("formats naive runtime End timestamps consistently with explicit UTC Start timestamps", () => {
     expect(formatRuntimeTimestampForDisplay("2026-07-22T01:02:03Z", "Asia/Saigon"))
       .toBe(formatRuntimeTimestampForDisplay("2026-07-22T01:02:03", "Asia/Saigon"));
+  });
+
+  it("renders SQL query values with syntax token classes", () => {
+    const markup = renderToStaticMarkup(createElement(CodeBlock, { value: "SELECT id FROM customers WHERE id = 42", kind: "sql" }));
+
+    expect(markup).toContain("sql-token sql-keyword");
+    expect(markup).toContain("sql-token sql-number");
+    expect(markup).toContain("monitoring-code-block sql-syntax-light");
   });
 });
 

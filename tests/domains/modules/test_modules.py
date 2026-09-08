@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 def test_modules_catalog_and_toggle(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -31,11 +32,12 @@ def test_modules_catalog_and_toggle(tmp_path: Path, monkeypatch):
         enabled = client.patch("/api/v1/studio/modules/metadata", json={"enabled": True}).json()
         assert enabled["enabled"] is True
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_modules_toggle_rejects_unknown_and_non_togglable(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -46,4 +48,4 @@ def test_modules_toggle_rejects_unknown_and_non_togglable(tmp_path: Path, monkey
         # master-data is not togglable (coming soon).
         assert client.patch("/api/v1/studio/modules/master-data", json={"enabled": True}).status_code == 409
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

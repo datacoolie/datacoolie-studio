@@ -158,12 +158,17 @@ Metadata is required. Logs and code artifacts are optional.
 
 ## Configure Studio
 
-Studio stores local state under `~\.datacoolie\datacoolie-studio\`:
+Studio stores persistent local state under `~\.datacoolie\datacoolie-studio\`
+by default. Set `--data-dir` or `DATACOOLIE_STUDIO_DATA_DIR` to move the
+entire local root:
 
 ```text
+<data-dir>/
 db\studio.db
 backups\
-cache\
+cache\read-models.sqlite3
+cache\analytics.duckdb
+cache\source-materializations\
 logs\
 ```
 
@@ -172,8 +177,9 @@ Common launcher options:
 ```powershell
 datacoolie-studio --port 8765
 datacoolie-studio --host 127.0.0.1
-datacoolie-studio --db .\.scratch\studio.db
+datacoolie-studio --data-dir .\.scratch\datacoolie-studio
 datacoolie-studio --database-url "postgresql+psycopg://user:password@host:5432/datacoolie_studio"
+datacoolie-studio --result-cache-url "sqlite:///D:/data/datacoolie-studio/cache/read-models.sqlite3"
 datacoolie-studio --no-open
 ```
 
@@ -181,9 +187,23 @@ You can also configure storage with environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `DATACOOLIE_STUDIO_DB` | SQLite workspace database path |
-| `DATACOOLIE_STUDIO_DATABASE_URL` | SQLAlchemy database URL; overrides the SQLite path |
-| `DATACOOLIE_STUDIO_RESULT_CACHE_URL` | Result-cache SQLite URL |
+| `DATACOOLIE_STUDIO_DATA_DIR` | Persistent local root for the workspace database, result cache, analytics cache, backups, logs, and source materializations |
+| `DATACOOLIE_STUDIO_DATABASE_URL` | Workspace SQLAlchemy database URL; defaults to SQLite under `DATA_DIR` |
+| `DATACOOLIE_STUDIO_RESULT_CACHE_URL` | Result-cache URL; currently SQLite or `memory://`, defaulting to SQLite under `DATA_DIR` |
+| `DATACOOLIE_STUDIO_HOST` | Bind host; defaults to `127.0.0.1` |
+| `DATACOOLIE_STUDIO_PORT` | Bind port; defaults to `8765` |
+
+CLI values take precedence over environment variables. The workspace URL accepts
+SQLite URLs such as `sqlite:///D:/data/datacoolie-studio/db/studio.db` and other
+SQLAlchemy URLs supported by the installed drivers. The result-cache provider
+currently accepts SQLite URLs and `memory://`; remote Redis/PostgreSQL result
+cache backends are not enabled.
+
+`--db` and `DATACOOLIE_STUDIO_DB` are not part of the current configuration
+contract. Configure a local deployment with `--data-dir` or
+`DATACOOLIE_STUDIO_DATA_DIR`; use `--database-url` or
+`DATACOOLIE_STUDIO_DATABASE_URL` only when an explicit workspace database URL
+is required.
 
 Studio binds to `127.0.0.1` by default. Choose a shared database and review network access before hosting it for multiple users.
 

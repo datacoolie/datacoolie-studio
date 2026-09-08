@@ -1,0 +1,1 @@
+import{n as e}from"./connectionOrder-CTNDAG4L.js";function t(t){let n=e(t);return n?`monitor-stage-${n}`:``}export{t};

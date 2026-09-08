@@ -2439,6 +2439,23 @@ button.metadata-kpi-tile {
   color: #94a3b8;
 }
 
+.sql-syntax-light .sql-token.sql-keyword {
+  color: #1d4ed8;
+}
+
+.sql-syntax-light .sql-token.sql-string {
+  color: #15803d;
+}
+
+.sql-syntax-light .sql-token.sql-number {
+  color: #a16207;
+}
+
+.sql-syntax-light .sql-token.sql-comment,
+.sql-syntax-light .sql-token.sql-punctuation {
+  color: #64748b;
+}
+
 .metadata-json-tooltip.hover .json-token.json-key {
   color: #1d4ed8;
 }
@@ -2460,26 +2477,6 @@ button.metadata-kpi-tile {
 }
 
 .metadata-json-tooltip.hover .json-token.json-punctuation {
-  color: #64748b;
-}
-
-.metadata-json-tooltip.hover .sql-token.sql-keyword {
-  color: #1d4ed8;
-}
-
-.metadata-json-tooltip.hover .sql-token.sql-string {
-  color: #15803d;
-}
-
-.metadata-json-tooltip.hover .sql-token.sql-number {
-  color: #a16207;
-}
-
-.metadata-json-tooltip.hover .sql-token.sql-comment {
-  color: #64748b;
-}
-
-.metadata-json-tooltip.hover .sql-token.sql-punctuation {
   color: #64748b;
 }
 
@@ -7378,18 +7375,15 @@ button.reference-occurrence-row:focus-visible {
   font: inherit;
 }
 
-.dataflow-structured-value .json-token.json-key,
-.dataflow-structured-value .sql-token.sql-keyword {
+.dataflow-structured-value .json-token.json-key {
   color: #1d4ed8;
 }
 
-.dataflow-structured-value .json-token.json-string,
-.dataflow-structured-value .sql-token.sql-string {
+.dataflow-structured-value .json-token.json-string {
   color: #15803d;
 }
 
-.dataflow-structured-value .json-token.json-number,
-.dataflow-structured-value .sql-token.sql-number {
+.dataflow-structured-value .json-token.json-number {
   color: #a16207;
 }
 
@@ -7401,9 +7395,7 @@ button.reference-occurrence-row:focus-visible {
   color: #b91c1c;
 }
 
-.dataflow-structured-value .json-token.json-punctuation,
-.dataflow-structured-value .sql-token.sql-comment,
-.dataflow-structured-value .sql-token.sql-punctuation {
+.dataflow-structured-value .json-token.json-punctuation {
   color: #64748b;
 }
 

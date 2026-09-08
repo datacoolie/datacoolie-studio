@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";import { freshnessDrawerHealth, freshnessRunTimeLines } from "./details/detailPrimitives";
 import { freshnessEndpointLabel, isFreshnessWatermarkConfigured } from "./details/FreshnessDetails";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
 
 describe("Freshness registry drawer semantics", () => {
   it("formats runtime phase contribution with one decimal place", () => {
@@ -16,6 +17,13 @@ describe("Freshness registry drawer semantics", () => {
       "2026-07-14 07:19:22 UTC",
       "→ 2026-07-14 07:19:24 UTC",
     ]);
+  });
+
+  it("uses connection stage tokens for endpoint surfaces without using flow stage", () => {
+    expect(monitoringConnectionStageClass("wwi_bronze_orders")).toBe("monitor-stage-bronze");
+    expect(monitoringConnectionStageClass("wwi_bronze_orders_silver_summary")).toBe("monitor-stage-bronze");
+    expect(monitoringConnectionStageClass("wwi_silver_orders_bronze_archive")).toBe("monitor-stage-silver");
+    expect(monitoringConnectionStageClass("external_resource")).toBe("");
   });
 
   it("uses the fixed seven-day boundary for current and stale rows", () => {

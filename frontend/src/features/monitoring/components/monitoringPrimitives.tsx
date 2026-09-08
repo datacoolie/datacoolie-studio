@@ -22,6 +22,7 @@ import { formatTimestampForDisplay, resolveIntlTimezone } from "../../../shared/
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
 import { formatConfigValue, isMeaningfulConfigValue } from "../pages/JobsPageSupport";
+import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
 const formatNumber = formatExactNumber;
 export { useEffect, useMemo, useRef, useState, createPortal, BarList, DataTable, MetricGrid, Panel, ScatterPlot, StatusCell, CompactNumberValue, formatBytes, formatNumber, formatSeconds, num, ReportChart, baseChartOption, reportChartPalette, formatTimestampForDisplay, resolveIntlTimezone, formatCompactNumber, formatExactBytes, formatExactNumber, LineageFormatIcon, assetIconKind, formatConfigValue, isMeaningfulConfigValue };
 export type { JobRecord, MonitoringRecord, MonitoringReport, CSSProperties, ReactPointerEvent, ReactNode, MonitoringFilters, MonitoringTabKey, TableSort };
@@ -2196,8 +2197,9 @@ export function dataflowNameStatusHealthOption(rows: Array<Record<string, string
 }
 
 export function EndpointRouteNode({ endpoint }: { endpoint: { locator: string; connection: string; connectionType: string; format: string } }) {
+  const stageClass = monitoringConnectionStageClass(endpoint.connection);
   return (
-    <span className="dataflow-route-endpoint is-connection-only" title={`${endpoint.connection}\n${endpoint.connectionType}${endpoint.format ? `\n${endpoint.format}` : ""}`}>
+    <span className={["dataflow-route-endpoint", "is-connection-only", stageClass].filter(Boolean).join(" ")} title={`${endpoint.connection}\n${endpoint.connectionType}${endpoint.format ? `\n${endpoint.format}` : ""}`}>
       {endpoint.format ? (
         <span className="dataflow-route-endpoint-icon" aria-hidden="true">
           <LineageFormatIcon kind={assetIconKind(endpoint.format)} label={endpoint.format} size={18} />
@@ -2676,8 +2678,9 @@ export function monitoringTimezone(report: MonitoringReport) {
 
 export function EndpointCell({ row, direction }: { row: MonitoringRecord; direction: "source" | "destination" }) {
   const endpoint = monitoringEndpointPresentation(row, direction);
+  const stageClass = monitoringConnectionStageClass(endpoint.connection);
   return (
-    <span className="monitor-endpoint-cell" title={endpoint.title}>
+    <span className={["monitor-endpoint-cell", stageClass].filter(Boolean).join(" ")} title={endpoint.title}>
       {endpoint.format ? (
         <span className="monitor-endpoint-icon" aria-hidden="true">
           <LineageFormatIcon kind={assetIconKind(endpoint.format)} label={endpoint.format} size={18} />

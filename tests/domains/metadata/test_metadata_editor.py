@@ -30,7 +30,8 @@ def _editor_document(client, environment_id: int) -> dict:
 
 
 def test_metadata_editor_document_loads_json_yaml_and_xlsx(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -86,7 +87,7 @@ def test_metadata_editor_document_loads_json_yaml_and_xlsx(tmp_path: Path, monke
             assert first_connection["connection_id"] == str(uuid.uuid5(DATACOOLIE_NS, first_connection["name"]))
             assert read_csv["dataflow_id"] == str(uuid.uuid5(DATACOOLIE_NS, "read__csv"))
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def _column_keys(document: dict, sheet: str) -> list[str]:
@@ -216,7 +217,8 @@ def test_environment_metadata_save_applies_connection_rename_to_references(tmp_p
         }),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
     from datacoolie_studio.main import app
@@ -247,7 +249,7 @@ def test_environment_metadata_save_applies_connection_rename_to_references(tmp_p
     assert saved["dataflows"][0]["source"]["connection_name"] == "silver_curated"
     assert saved["dataflows"][0]["destination"]["connection_name"] == "silver_curated"
     assert saved["schema_hints"][0]["connection_name"] == "silver_curated"
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def _source_revision(document: dict, source_id: int) -> dict:
@@ -256,7 +258,8 @@ def _source_revision(document: dict, source_id: int) -> dict:
 
 
 def test_metadata_editor_validation_catches_invalid_references(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -277,7 +280,7 @@ def test_metadata_editor_validation_catches_invalid_references(tmp_path: Path, m
         assert validation["status"] == "error"
         assert any(issue["column"] == "source_connection_name" and issue["severity"] == "error" for issue in validation["issues"])
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_values(tmp_path: Path, monkeypatch):
@@ -310,7 +313,8 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -384,7 +388,7 @@ def test_metadata_editor_expands_dynamic_nested_columns_and_stringifies_complex_
     assert saved_transform["hash_columns"][0]["target_column"] == "email_hash"
     assert saved_transform["masking_rules"][0]["value"] == "[PRIVATE]"
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_environment_metadata_merge_reorders_columns_from_stale_materializations():
@@ -487,7 +491,8 @@ def test_metadata_editor_materializes_default_is_active_for_studio(tmp_path: Pat
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -509,7 +514,7 @@ def test_metadata_editor_materializes_default_is_active_for_studio(tmp_path: Pat
     assert dataflows == {"flow": True, "disabled_flow": False}
     assert schema_hints == {"id": True, "old_id": False}
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monkeypatch):
@@ -530,7 +535,8 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -673,7 +679,7 @@ def test_metadata_editor_draft_and_safe_save_create_backup(tmp_path: Path, monke
             ).fetchone()[0]
             assert env_drafts == 0
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path, monkeypatch):
@@ -711,7 +717,8 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -827,7 +834,7 @@ def test_environment_metadata_editor_draft_and_save_split_sources(tmp_path: Path
         assert dataflow_row["__metadata_source_id"] == dataflow_source["id"]
         assert dataflow_row["__metadata_source_name"] == "dataflows/source2bronze_v2.json"
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_environment_save_allows_preexisting_errors_but_rejects_new_errors(
@@ -854,7 +861,8 @@ def test_environment_save_allows_preexisting_errors_but_rejects_new_errors(
     }
     first_path.write_text(json.dumps(duplicated_metadata), encoding="utf-8")
     second_path.write_text(json.dumps(duplicated_metadata), encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -919,7 +927,7 @@ def test_environment_save_allows_preexisting_errors_but_rejects_new_errors(
             for issue in invalid_response.json()["detail"]["issues"]
         )
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_file_serializers_omit_runtime_ids(tmp_path: Path):
@@ -1038,7 +1046,8 @@ def test_file_serializers_follow_editor_column_order(tmp_path: Path):
 def test_metadata_editor_save_rejects_stale_revision(tmp_path: Path, monkeypatch):
     metadata_path = tmp_path / "metadata.json"
     metadata_path.write_text(json.dumps({"connections": [{"name": "lake"}], "dataflows": [], "schema_hints": []}), encoding="utf-8")
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1064,7 +1073,7 @@ def test_metadata_editor_save_rejects_stale_revision(tmp_path: Path, monkeypatch
         )
         assert response.status_code == 409
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_metadata_backup_restore_rejects_stale_current_revision(tmp_path: Path, monkeypatch):
@@ -1077,7 +1086,8 @@ def test_metadata_backup_restore_rejects_stale_current_revision(tmp_path: Path, 
         }),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -1119,4 +1129,4 @@ def test_metadata_backup_restore_rejects_stale_current_revision(tmp_path: Path, 
         assert response.status_code == 409
         assert json.loads(metadata_path.read_text(encoding="utf-8"))["connections"][0]["name"] == "external"
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)

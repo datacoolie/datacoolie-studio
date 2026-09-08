@@ -50,7 +50,8 @@ def test_log_partition_key_columns_are_added_idempotently(
             )
             """
         )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     init_db()
     init_db()
@@ -70,7 +71,8 @@ def test_source_observation_hard_cutover_drops_only_superseded_state(
     tmp_path: Path, monkeypatch
 ) -> None:
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     init_db()
     with get_engine().begin() as connection:
         connection.execute(
@@ -199,7 +201,8 @@ def test_legacy_source_storage_config_is_backfilled_idempotently(
             ) VALUES (2, 999, 'metadata', 'orphan.json', '{}')
             """
         )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     init_db()
     init_db()
@@ -284,7 +287,8 @@ def test_log_manifest_duplicates_are_reduced_before_unique_index(
                 (2, '{"provider_revision":"new"}', "2026-07-22"),
             ],
         )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     init_db()
     init_db()
@@ -315,7 +319,8 @@ def test_adls_metadata_uri_is_repaired_from_its_discovery_root(
     tmp_path: Path, monkeypatch
 ) -> None:
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
     init_db()
     with get_engine().begin() as connection:
         connection.execute(

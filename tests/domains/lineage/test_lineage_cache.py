@@ -48,7 +48,8 @@ def read_orders(engine, source):
         }),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -93,7 +94,7 @@ def read_orders(engine, source):
             f"/api/v1/environments/{environment['id']}/lineage",
             headers={"If-None-Match": first_response.headers["etag"]},
         ).status_code == 304
-        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
         def fail_if_analyzed(*_args, **_kwargs):
@@ -104,10 +105,10 @@ def read_orders(engine, source):
         assert second == first
 
         client.delete(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}")
-        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 0
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: Path, monkeypatch):
@@ -143,7 +144,8 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         }),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -164,7 +166,7 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         first = client.get(f"/api/v1/environments/{environment['id']}/lineage").json()
         assert first["summary"]["unresolved_dependencies"] == 1
         assert first["references"][0]["resolution"]["reason"] == "multiple_matches"
-        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
         mapping = client.post(
@@ -188,7 +190,7 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         assert reference_detail.status_code == 200
         assert reference_detail.json()["reference"]["id"] == mapped_reference["id"]
         assert reference_detail.json()["occurrences"]
-        with sqlite3.connect(tmp_path / "read-models.sqlite3") as connection:
+        with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DB", None)
+    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

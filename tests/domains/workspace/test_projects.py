@@ -75,7 +75,8 @@ def test_project_summaries_use_one_query_and_preserve_empty_projects() -> None:
 
 
 def test_project_create_normalizes_and_rejects_invalid_names(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -108,14 +109,15 @@ def test_project_create_normalizes_and_rejects_invalid_names(tmp_path: Path, mon
         after_conflict = client.post("/api/v1/projects", json={"name": "next"})
         assert after_conflict.status_code == 200
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_project_and_environment_rename_preserve_identity_and_validate_conflicts(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -207,7 +209,7 @@ def test_project_and_environment_rename_preserve_identity_and_validate_conflicts
         assert renamed_from_list["name"] == "UAT_1"
         assert renamed_from_list["project_id"] == project["id"]
 
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)
 
 
 def test_project_reference_registry_loads_each_catalog_once_and_isolates_failures(monkeypatch) -> None:
@@ -264,7 +266,8 @@ def test_project_reference_registry_loads_each_catalog_once_and_isolates_failure
 
 
 def test_project_reference_registry_returns_404_for_missing_project(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "registry.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'registry.db').as_posix()}")
 
     from fastapi.testclient import TestClient
 
@@ -274,4 +277,4 @@ def test_project_reference_registry_returns_404_for_missing_project(tmp_path: Pa
         response = client.get("/api/v1/projects/999/reference-registry")
 
     assert response.status_code == 404
-    monkeypatch.delenv("DATACOOLIE_STUDIO_DB", raising=False)
+    monkeypatch.delenv("DATACOOLIE_STUDIO_DATABASE_URL", raising=False)

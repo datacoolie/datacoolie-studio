@@ -185,7 +185,14 @@ export interface AnalyticsUpgradeStatus {
 
 export interface AnalyticsUpgradeSourceProgress {
   source_id: number;
+  project_id?: number | null;
+  project_name?: string | null;
+  environment_id?: number | null;
+  environment_name?: string | null;
+  source_kind?: string | null;
   label?: string | null;
+  uri?: string | null;
+  is_registered?: boolean | null;
   status: string;
   message?: string | null;
   started_at?: string | null;

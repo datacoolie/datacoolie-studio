@@ -21,6 +21,7 @@ import { formatTimestampForDisplay } from "../../../shared/time";
 import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
 import { assetIconKind } from "../../lineage/model/presentation";
 import { CompactValue, FAILURE_PHASES, FAILURE_PHASE_COLORS, FAILURE_PHASE_LABELS, FAILURE_TREND_COLORS, IssuePreview, MonitoringChartLegend, TableDateTimeValue, humanize } from "../components/monitoringPrimitives";
+import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
 
 export function FailureQueueTable({
   rows,
@@ -130,16 +131,18 @@ export function FailureRouteCell({ row }: { row: Record<string, unknown> }) {
   const destination = String(row.destination_name ?? "unknown");
   const sourceFormat = String(row.source_format ?? row.source_connection_type ?? "");
   const destinationFormat = String(row.destination_format ?? row.destination_connection_type ?? "");
+  const sourceStageClass = monitoringConnectionStageClass(source);
+  const destinationStageClass = monitoringConnectionStageClass(destination);
   return (
     <span className="failure-route-cell" title={`${source} -> ${destination}`}>
-      <span className="failure-route-node">
+      <span className={["failure-route-node", sourceStageClass].filter(Boolean).join(" ")}>
         <span className="monitor-endpoint-icon" aria-hidden="true">
           <LineageFormatIcon kind={assetIconKind(sourceFormat || "unknown")} label={sourceFormat || "source"} size={16} />
         </span>
         <strong>{source}</strong>
       </span>
       <span className="failure-route-arrow">→</span>
-      <span className="failure-route-node">
+      <span className={["failure-route-node", destinationStageClass].filter(Boolean).join(" ")}>
         <span className="monitor-endpoint-icon" aria-hidden="true">
           <LineageFormatIcon kind={assetIconKind(destinationFormat || "unknown")} label={destinationFormat || "destination"} size={16} />
         </span>

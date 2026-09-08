@@ -8,6 +8,7 @@ import type { JobRecord, MonitoringFilterOptionsResponse, MonitoringRecord } fro
 import type { FilterOption, MonitoringFilters } from "./monitoringFilters";
 import { DEFAULT_MONITORING_FILTERS, hasActiveFilters } from "./monitoringFilters";
 import { CompactNumberValue } from "./CompactNumberValue";
+import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
 
 interface MonitoringFilterBarProps {
   environmentId: number;
@@ -248,6 +249,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           label="Connection"
           value={filters.connection}
           options={connectionOptions}
+          stageAware
           open={openFilter === "connection"}
           onOpen={() => setOpenFilter(openFilter === "connection" ? null : "connection")}
           onChange={(value) => setFilter("connection", value as never)}
@@ -512,7 +514,8 @@ function FilterDropdown({
   open,
   onOpen,
   onChange,
-  onClose
+  onClose,
+  stageAware = false
 }: {
   label: string;
   value: string;
@@ -521,6 +524,7 @@ function FilterDropdown({
   onOpen: () => void;
   onChange: (value: string) => void;
   onClose: () => void;
+  stageAware?: boolean;
 }) {
   const selected = splitFilterValues(value);
   const selectedSet = new Set(selected);
@@ -567,11 +571,12 @@ function FilterDropdown({
           <div className="monitoring-filter-menu">
             {options.map((option) => {
               const active = option.value === "all" ? isDefault : selectedSet.has(option.value);
+              const stageClass = stageAware ? monitoringConnectionStageClass(option.value) : "";
               return (
                 <button
                   key={option.value}
                   type="button"
-                  className={active ? "active" : ""}
+                  className={["monitoring-filter-option", stageClass, active ? "active" : ""].filter(Boolean).join(" ")}
                   onClick={(event) => chooseOption(option.value, event)}
                 >
                   <span>{option.label}</span>

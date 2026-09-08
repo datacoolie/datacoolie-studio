@@ -21,6 +21,10 @@ import {
 import { useDrawerEscape } from "../hooks/useDrawerEscape";
 import { formatRelativeTime } from "../time";
 import {
+  createNotificationReadDwellController,
+  type NotificationReadDwellController,
+} from "./notificationReadDwell";
+import {
   addNotificationRecord,
   applyNotificationEvent,
   createNotificationRecord,
@@ -197,12 +201,46 @@ export function NotificationCenter() {
   const [open, setOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const notificationsRef = useRef(notifications);
+  const markReadRef = useRef(markRead);
+  notificationsRef.current = notifications;
+  markReadRef.current = markRead;
+  const [readDwellController] = useState<NotificationReadDwellController>(() => createNotificationReadDwellController((id) => {
+    if (notificationsRef.current.some((record) => record.id === id && record.readAt === null)) {
+      markReadRef.current(id);
+    }
+  }));
   const close = useCallback(() => {
+    readDwellController.cancel();
     setOpen(false);
     setExpandedId(null);
-  }, []);
+  }, [readDwellController]);
+  const cancelReadDwell = useCallback(() => {
+    readDwellController.cancel();
+  }, [readDwellController]);
+  const scheduleReadDwell = useCallback((id: string, pointerType?: string) => {
+    const record = notificationsRef.current.find((candidate) => candidate.id === id);
+    if (!record || record.readAt !== null || (pointerType && pointerType !== "mouse" && pointerType !== "pen")) {
+      cancelReadDwell();
+      return;
+    }
+    readDwellController.schedule(id);
+  }, [cancelReadDwell, readDwellController]);
 
   useDrawerEscape(close, open);
+
+  useEffect(() => () => readDwellController.dispose(), [readDwellController]);
+
+  useEffect(() => {
+    if (!open) cancelReadDwell();
+  }, [cancelReadDwell, open]);
+
+  useEffect(() => {
+    const pendingId = readDwellController.pendingId();
+    if (!pendingId) return;
+    const pendingRecord = notifications.find((record) => record.id === pendingId);
+    if (!pendingRecord || pendingRecord.readAt !== null) cancelReadDwell();
+  }, [cancelReadDwell, notifications, readDwellController]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -258,7 +296,12 @@ export function NotificationCenter() {
                     type="button"
                     className={`notification-center-row tone-${record.tone}${record.readAt ? " is-read" : " is-unread"}`}
                     aria-expanded={expanded}
+                    onPointerEnter={(event) => scheduleReadDwell(record.id, event.pointerType)}
+                    onPointerLeave={cancelReadDwell}
+                    onFocus={() => scheduleReadDwell(record.id)}
+                    onBlur={cancelReadDwell}
                     onClick={() => {
+                      cancelReadDwell();
                       markRead(record.id);
                       setExpandedId((current) => current === record.id ? null : record.id);
                     }}

@@ -30,6 +30,20 @@ describe("connectionOrder", () => {
     expect(connectionStageRank("external_database")).toBe(CONNECTION_STAGE_FAMILIES.length);
   });
 
+  it("recognizes embedded stage tokens and lets the first token win", () => {
+    expect(connectionStageFamily("wwi_bronze_orders")).toBe("bronze");
+    expect(connectionStageFamily("wwi_bronze_orders_silver_summary")).toBe("bronze");
+    expect(connectionStageFamily("wwi_silver_orders_bronze_archive")).toBe("silver");
+    expect(connectionStageFamily("WWI-GOLD-ORDERS")).toBe("gold");
+    expect(connectionStageFamily("silver10_delta")).toBe("silver");
+  });
+
+  it("requires stage boundaries instead of matching arbitrary substrings", () => {
+    expect(connectionStageFamily("bronzed_table")).toBeNull();
+    expect(connectionStageFamily("external_resource")).toBeNull();
+    expect(connectionStageFamily("xbronze_orders")).toBeNull();
+  });
+
   it("sorts connections naturally within a family and keeps blanks last", () => {
     expect(["bronze10", "bronze2", "bronze"].sort(compareConnectionNames)).toEqual([
       "bronze",

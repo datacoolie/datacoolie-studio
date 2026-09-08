@@ -6,7 +6,8 @@ from pathlib import Path
 
 def test_legacy_snapshots_migrate_latest_payload_only(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "studio.db"
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(db_path))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
     from datacoolie_studio.db.session import get_engine, init_db
 

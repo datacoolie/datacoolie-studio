@@ -67,7 +67,9 @@ def _workspace_with_sources(tmp_path: Path, monkeypatch, count: int = 2):
     from datacoolie_studio.db.models import Environment, EnvironmentSource, Project
     from datacoolie_studio.db.session import create_session, init_db
 
-    monkeypatch.setenv("DATACOOLIE_STUDIO_DB", str(tmp_path / "studio.db"))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
     init_db()
     session = create_session()
     project = Project(name=f"upgrade-{tmp_path.name}")
@@ -144,6 +146,8 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
 ) -> None:
     from datacoolie_studio.domains.analytics import schema
     from datacoolie_studio.domains.analytics_upgrade import service as upgrade
+    from datacoolie_studio.db.models import AnalyticsUpgrade
+    from datacoolie_studio.db.session import create_session
 
     session, sources = _workspace_with_sources(tmp_path, monkeypatch)
     session.close()
@@ -160,6 +164,13 @@ def test_startup_upgrade_replays_all_sources_and_swaps_once(
     assert result["state"] == "succeeded"
     assert result["source_ids"] == [source.id for source in sources]
     assert result["completed_source_ids"] == [source.id for source in sources]
+    verify_session = create_session()
+    persisted_upgrade = verify_session.get(AnalyticsUpgrade, 1)
+    assert persisted_upgrade is not None
+    persisted_context = json.loads(persisted_upgrade.source_context_json)
+    assert persisted_context[str(sources[0].id)]["project_name"] == f"upgrade-{tmp_path.name}"
+    assert persisted_context[str(sources[0].id)]["environment_name"] == "dev"
+    verify_session.close()
     with duckdb.connect(str(analytics_path), read_only=True) as connection:
         meta = connection.execute(
             "SELECT schema_version, build_state FROM etl_analytics_meta WHERE singleton_id = 1"
@@ -587,10 +598,14 @@ def test_reconcile_orphaned_sync_jobs_fails_running_jobs(
 
 
 def test_upgrade_status_projects_per_source_timing(tmp_path: Path, monkeypatch) -> None:
-    from datacoolie_studio.db.models import AnalyticsUpgrade, SyncJob
+    from datacoolie_studio.db.models import AnalyticsUpgrade, Environment, Project, SyncJob
     from datacoolie_studio.domains.analytics_upgrade.service import upgrade_status
 
     session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=2)
+    environment = session.get(Environment, sources[0].environment_id)
+    assert environment is not None
+    project = session.get(Project, environment.project_id)
+    assert project is not None
     started_at = datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc)
     completed_at = started_at + timedelta(seconds=12.5)
     upgrade = AnalyticsUpgrade(
@@ -620,12 +635,23 @@ def test_upgrade_status_projects_per_source_timing(tmp_path: Path, monkeypatch) 
 
     status = upgrade_status(upgrade, session)
 
+    source_context = {
+        "project_id": project.id,
+        "project_name": project.name,
+        "environment_id": environment.id,
+        "environment_name": environment.name,
+        "source_kind": "logs",
+        "label": str(sources[0].uri),
+        "uri": str(sources[0].uri),
+        "is_registered": True,
+    }
+
     assert status["duration_seconds"] >= 12.5
     assert status["completed_source_ids"] == [sources[0].id]
     assert status["source_progress"] == [
         {
             "source_id": sources[0].id,
-            "label": str(sources[0].uri),
+            **source_context,
             "status": "succeeded",
             "message": "Log source cache refreshed",
             "started_at": started_at.isoformat(),
@@ -634,7 +660,14 @@ def test_upgrade_status_projects_per_source_timing(tmp_path: Path, monkeypatch) 
         },
         {
             "source_id": sources[1].id,
+            "project_id": project.id,
+            "project_name": project.name,
+            "environment_id": environment.id,
+            "environment_name": environment.name,
+            "source_kind": "logs",
             "label": str(sources[1].uri),
+            "uri": str(sources[1].uri),
+            "is_registered": True,
             "status": "pending",
             "message": None,
             "started_at": None,
@@ -642,6 +675,67 @@ def test_upgrade_status_projects_per_source_timing(tmp_path: Path, monkeypatch) 
             "duration_seconds": None,
         },
     ]
+    session.close()
+
+
+def test_upgrade_status_uses_snapshot_when_source_is_removed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from datacoolie_studio.db.models import AnalyticsUpgrade, Environment, Project
+    from datacoolie_studio.domains.analytics_upgrade.service import upgrade_status
+
+    session, sources = _workspace_with_sources(tmp_path, monkeypatch, count=1)
+    source = sources[0]
+    environment = session.get(Environment, source.environment_id)
+    assert environment is not None
+    project = session.get(Project, environment.project_id)
+    assert project is not None
+    upgrade = AnalyticsUpgrade(
+        id=1,
+        source_schema_version=10,
+        target_schema_version=10,
+        state="completed_with_warnings",
+        operation_kind="source_repair",
+        reason_code="missing_source_coverage",
+        source_ids_json=json.dumps([source.id]),
+        source_context_json=json.dumps({
+            str(source.id): {
+                "project_id": project.id,
+                "project_name": project.name,
+                "environment_id": environment.id,
+                "environment_name": environment.name,
+                "source_kind": "logs",
+                "label": "Historical logs",
+                "uri": str(source.uri),
+            }
+        }),
+    )
+    session.add(upgrade)
+    session.commit()
+
+    session.delete(source)
+    session.commit()
+    session.expire_all()
+
+    status = upgrade_status(session.get(AnalyticsUpgrade, 1), session)
+
+    assert status["source_progress"] == [{
+        "source_id": source.id,
+        "project_id": project.id,
+        "project_name": project.name,
+        "environment_id": environment.id,
+        "environment_name": environment.name,
+        "source_kind": "logs",
+        "label": "Historical logs",
+        "uri": str(source.uri),
+        "is_registered": False,
+        "status": "pending",
+        "message": None,
+        "started_at": None,
+        "completed_at": None,
+        "duration_seconds": None,
+    }]
     session.close()
 
 

@@ -152,6 +152,8 @@ describe("lineage asset stage backgrounds", () => {
       entities: [
         asset("source", "source_orders"),
         asset("bronze", "bronze_sales"),
+        asset("embedded-bronze", "wwi_bronze_orders_silver_summary"),
+        asset("embedded-silver", "wwi_silver_orders_bronze_archive"),
         asset("silver", "silver_customer"),
         asset("gold", "gold_metrics"),
         asset("custom", "warehouse"),
@@ -171,6 +173,8 @@ describe("lineage asset stage backgrounds", () => {
 
     expect(classNames.get("source")).toContain("flow-stage-source");
     expect(classNames.get("bronze")).toContain("flow-stage-bronze");
+    expect(classNames.get("embedded-bronze")).toContain("flow-stage-bronze");
+    expect(classNames.get("embedded-silver")).toContain("flow-stage-silver");
     expect(classNames.get("silver")).toContain("flow-stage-silver");
     expect(classNames.get("gold")).toContain("flow-stage-gold");
     expect(classNames.get("custom")).not.toContain("flow-stage-");
