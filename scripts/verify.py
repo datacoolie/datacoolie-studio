@@ -79,7 +79,8 @@ def studio_root() -> Path:
 
 
 def _python_executable() -> str:
-    return str(Path(sys.executable).resolve())
+    # POSIX venv interpreters may be symlinks; resolving selects base Python.
+    return sys.executable
 
 
 def _npm_executable() -> str:

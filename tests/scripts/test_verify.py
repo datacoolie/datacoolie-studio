@@ -54,6 +54,17 @@ def test_command_plan_uses_python_module_invocation_and_explicit_test_filter(
     assert "scripts" in backend[0].argv
 
 
+def test_command_plan_preserves_virtualenv_interpreter(monkeypatch, tmp_path, verify_module):
+    executable = str(tmp_path / ".venv" / "bin" / "python")
+    monkeypatch.setattr(verify_module.sys, "executable", executable)
+
+    def unexpected_resolve(*args, **kwargs):
+        raise AssertionError("Resolving a POSIX venv symlink selects base Python")
+
+    monkeypatch.setattr(verify_module.Path, "resolve", unexpected_resolve)
+    assert verify_module._python_executable() == executable
+
+
 def test_runner_stops_on_first_failed_command(monkeypatch, tmp_path, verify_module):
     command = verify_module.Command(
         "failing command",
