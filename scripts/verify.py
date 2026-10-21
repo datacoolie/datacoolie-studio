@@ -41,10 +41,26 @@ try:
 import importlib.util
 from importlib.resources import files
 import re
+import json
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import duckdb
+from datacoolie_studio.main import app
 from datacoolie_studio.domains.analytics.log_contract import log_validator
 from datacoolie_studio.domains.analytics.schema_compiler import SCHEMA_DOCUMENT
 from jsonschema_rs import Draft202012Validator
 validator = log_validator()
+assert callable(app)
+connection = duckdb.connect()
+assert connection.execute("SELECT current_timestamp").fetchall()[0][0].tzinfo is not None
+connection.create_function('studio_wheel_smoke', lambda value: value, ['BIGINT'], 'BIGINT')
+assert connection.execute('SELECT studio_wheel_smoke(7)').fetchall() == [(7,)]
+connection.close()
 assert SCHEMA_DOCUMENT['$defs']['dataflowRecord']['properties']['log_schema_version']['const'] == 6
 dates = Draft202012Validator({'type':'string','format':'date-time'}, validate_formats=True)
 assert dates.is_valid('2026-10-04T12:00:00Z')
@@ -57,7 +73,33 @@ assert references, 'Packaged frontend entrypoint has no asset references'
 for reference in references:
     assert static.joinpath(reference.lstrip('/')).is_file(), reference
 print('Offline packaged v6 schema and datetime validation passed')
+print('Installed application import, DuckDB timestamps and Python UDF passed')
 print(f'Packaged frontend entrypoint resolves all {len(references)} assets')
+with tempfile.TemporaryDirectory(prefix='studio-wheel-startup-') as data_dir:
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+    process = subprocess.Popen([sys.executable, '-m', 'datacoolie_studio',
+        '--host', '127.0.0.1', '--port', str(port), '--data-dir', data_dir,
+        '--no-open', '--no-banner'])
+    try:
+        for attempt in range(60):
+            if process.poll() is not None:
+                raise RuntimeError('Installed application exited before readiness')
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
+                    assert json.load(response) == {'status': 'ok'}
+                break
+            except (urllib.error.URLError, TimeoutError):
+                time.sleep(0.5)
+        else:
+            raise RuntimeError('Installed application health timeout')
+        with urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=5) as response:
+            assert b'/assets/' in response.read()
+        print('Installed application startup, health and frontend serving passed')
+    finally:
+        process.terminate()
+        process.wait(timeout=20)
 '''], check=True, cwd=environment)
 finally:
     shutil.rmtree(environment, ignore_errors=True)

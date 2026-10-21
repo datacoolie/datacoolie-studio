@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "datacoolie-studio"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local web studio for inspecting DataCoolie metadata, lineage, and ETL logs."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "alembic>=1.16,<2.0",
-  "duckdb>=1.5.3",
+  "duckdb>=1.5.3,<2.0",
   "databricks-sdk>=0.121,<0.122",
   "fastapi>=0.115",
   "keyring>=25.0",
@@ -31,6 +31,7 @@ dependencies = [
   "libcst>=1.8",
   "numpy>=1.26",
   "openpyxl>=3.1",
+  "pyarrow>=14.0",
   "pydantic>=2.8",
   "pytz>=2024.1",
   "pyyaml>=6.0",
@@ -82,7 +83,6 @@ dev = [
   "build>=1.2",
   "httpx>=0.28,<1.0",
   "pip-audit>=2.10",
-  "pyarrow>=14.0",
   "pytest>=8.0",
   "ruff>=0.11,<1.0",
   "twine>=6.0",
@@ -99,7 +99,6 @@ all = [
   "google-cloud-storage>=3.0",
   "httpx>=0.28,<1.0",
   "pip-audit>=2.10",
-  "pyarrow>=14.0",
   "pytest>=8.0",
   "ruff>=0.11,<1.0",
   "s3fs>=2025.3",

@@ -20,7 +20,7 @@ creating a merged metadata file.
 See [release notes](docs/release-notes.md) for the DataCoolie 0.2 compatibility
 update and the removed metadata-validation API.
 
-Studio 0.2.0 supports DataCoolie log schemas v6 and v7 for Monitoring. Older log records
+Studio 0.2.x supports DataCoolie log schemas v6 and v7 for Monitoring. Older log records
 are excluded with a warning; source files remain intact. Existing analytics
 caches from schema17 upgrade from stored data. Optional new log fields migrate
 without historical backfill; previously loaded rows receive null for those fields.

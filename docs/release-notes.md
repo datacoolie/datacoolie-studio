@@ -1,5 +1,12 @@
 # Release notes
 
+## Studio 0.2.1
+
+The initial public 0.2 release includes all changes below. PyArrow, NumPy and
+pytz are included in the base installation, so installing without extras starts
+the application and supports Monitoring's native analytics paths. Release
+verification checks the installed application and these DuckDB integrations.
+
 ## Studio 0.2.0
 
 Studio consumes DataCoolie log schemas v6 and v7. Records with older or unsupported

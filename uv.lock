@@ -811,7 +811,7 @@ wheels = [
 
 [[package]]
 name = "datacoolie-studio"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -825,6 +825,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "openpyxl" },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pytz" },
     { name = "pyyaml" },
@@ -852,7 +853,6 @@ all = [
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "pip-audit" },
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "s3fs" },
@@ -873,7 +873,6 @@ dev = [
     { name = "build" },
     { name = "httpx" },
     { name = "pip-audit" },
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "twine" },
@@ -919,7 +918,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'all'", specifier = ">=1.2" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "databricks-sdk", specifier = ">=0.121,<0.122" },
-    { name = "duckdb", specifier = ">=1.5.3" },
+    { name = "duckdb", specifier = ">=1.5.3,<2.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "gcsfs", marker = "extra == 'all'", specifier = ">=2025.3" },
     { name = "gcsfs", marker = "extra == 'cloud'", specifier = ">=2025.3" },
@@ -937,8 +936,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pip-audit", marker = "extra == 'all'", specifier = ">=2.10" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10" },
-    { name = "pyarrow", marker = "extra == 'all'", specifier = ">=14.0" },
-    { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=14.0" },
+    { name = "pyarrow", specifier = ">=14.0" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'all'", specifier = ">=8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
