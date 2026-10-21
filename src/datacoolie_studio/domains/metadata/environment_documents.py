@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -213,6 +213,20 @@ def source_token(value: str) -> str:
     return value.strip().replace("\\", "/").lower()
 
 
+def _is_absolute_or_rooted_path(value: str) -> bool:
+    """Reject native and Windows path anchors on every host platform."""
+
+    native = Path(value)
+    windows = PureWindowsPath(value)
+    return (
+        native.is_absolute()
+        or bool(native.drive)
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or bool(windows.root)
+    )
+
+
 def apply_row_routing(row: dict[str, Any], source: EnvironmentSource) -> None:
     row["__metadata_source_id"] = source.id
     row["__metadata_source_name"] = metadata_source_name(source)
@@ -326,8 +340,7 @@ def safe_metadata_object_name(source_name: str) -> str:
     candidate = Path(normalized)
     if (
         parsed.provider != "local"
-        or candidate.is_absolute()
-        or bool(candidate.drive)
+        or _is_absolute_or_rooted_path(normalized)
         or any(
             part in {"", ".", ".."} for part in normalized.split("/")
         )
@@ -354,8 +367,7 @@ def metadata_source_uri_for_new_name(source_name: str, base_dir: Path) -> str:
     candidate = Path(normalized)
     if (
         not normalized
-        or candidate.is_absolute()
-        or bool(candidate.drive)
+        or _is_absolute_or_rooted_path(normalized)
         or any(part in {"", ".", ".."} for part in normalized.split("/") )
     ):
         raise MetadataReadError(

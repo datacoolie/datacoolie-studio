@@ -22,6 +22,7 @@ from datacoolie_studio.domains.metadata.source_policy import source_is_read_only
         "nested/../../outside.json",
         "/absolute/outside.json",
         "C:/absolute/outside.json",
+        r"\\server\share\outside.json",
         "nested/",
         "",
     ],
@@ -43,7 +44,13 @@ def test_local_dynamic_metadata_target_is_resolved_under_root(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "source_name",
-    ["../outside.json", "/absolute.json", "C:/absolute.json", "nested/"],
+    [
+        "../outside.json",
+        "/absolute.json",
+        "C:/absolute.json",
+        r"\\server\share\absolute.json",
+        "nested/",
+    ],
 )
 def test_cloud_dynamic_metadata_object_name_rejects_escape_names(source_name: str):
     with pytest.raises(MetadataReadError):

@@ -46,14 +46,24 @@ def studio_paths(tmp_path: Path) -> StudioTestPaths:
             analytics_path=analytics_path,
         )
     finally:
-        analytics_maintenance.clear_cache()
-        reset_result_cache_engine()
-        _dispose_engine()
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        # Cleanup may touch optional analytics integrations. Always release
+        # process-local engines and restore the test environment even when
+        # that cleanup reports an error; otherwise the next test can inherit
+        # this workspace's cache URL and observe a different SQLite file.
+        try:
+            analytics_maintenance.clear_cache()
+        finally:
+            try:
+                reset_result_cache_engine()
+            finally:
+                try:
+                    _dispose_engine()
+                finally:
+                    for key, value in previous.items():
+                        if value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = value
 
 
 @pytest.fixture
