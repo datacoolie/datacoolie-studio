@@ -317,6 +317,10 @@ class SqliteResultCacheStore:
 def namespace_family(namespace: str) -> str:
     if namespace.startswith("monitoring.page."):
         return "monitoring.page"
+    if namespace.startswith("assets.identity-map."):
+        return "assets.identity-map"
+    if namespace.startswith("assets.identity-catalog."):
+        return "assets.identity-catalog"
     return namespace
 
 

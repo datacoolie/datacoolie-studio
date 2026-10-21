@@ -214,7 +214,7 @@ export function EnvironmentsPage({
                       <span className="env-row-name">{env.name}</span>
                       <span className="env-row-stats">
                         <span title="Metadata sources"><Database size={11} />{env.metadata_source_count} src</span>
-                        <span title="Log paths"><FolderOpen size={11} />{env.etl_log_path_count} log</span>
+                        <span title="Log sources"><FolderOpen size={11} />{env.log_source_count} log</span>
                         <span title="Code artifacts"><Code2 size={11} />{env.code_artifact_count ?? 0} code</span>
                       </span>
                       {status === "ready" ? (

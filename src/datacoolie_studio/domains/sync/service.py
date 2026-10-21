@@ -6,9 +6,10 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -301,7 +302,8 @@ def source_sync_status(session: Session, source: EnvironmentSource, latest_job: 
     active_job = _latest_active_job(jobs)
     latest_job = latest_job or active_job or (jobs[-1] if jobs else None)
     latest_sync_job = _latest_qualifying_job(jobs)
-    return _source_sync_status(source, observation, latest_job, latest_sync_job)
+    result = _source_sync_status(source, observation, latest_job, latest_sync_job)
+    return _with_log_admission(session, source, result)
 
 
 def source_sync_statuses(
@@ -329,10 +331,280 @@ def source_sync_statuses(
         .order_by(SyncJob.source_id, SyncJob.id)
     ):
         jobs_by_source.setdefault(job.source_id, []).append(job)
+    from datacoolie_studio.domains.logs.admission import source_admissions
+    admissions = source_admissions(session, [source.id for source in sources if source.source_kind == "logs"])
     return [
-        _source_sync_status_for_jobs(source, observations.get(source.id), jobs_by_source.get(source.id, []))
+        _with_log_admission(session, source, _source_sync_status_for_jobs(source, observations.get(source.id), jobs_by_source.get(source.id, [])), admissions.get(source.id))
         for source in sources
     ]
+
+
+def source_sync_statuses_compact(
+    session: Session,
+    sources: list[EnvironmentSource],
+    *,
+    observations: dict[int, SourceObservation] | None = None,
+) -> list[dict[str, Any]]:
+    """Read source status using only the jobs needed for the current state.
+
+    The full Sources workspace keeps the existing history-backed assembler for
+    backwards compatibility.  Consumers that only need the current status
+    should not hydrate every retained ``SyncJob.result_json`` document.  This
+    projection selects the latest all-job row, highest-priority active job and
+    latest qualifying sync job per source in SQL, then passes those selected
+    rows through the same status assembler used by the full workspace response.
+    """
+
+    source_ids = [source.id for source in sources]
+    if not source_ids:
+        return []
+    if observations is None:
+        observations = {
+            item.source_id: item
+            for item in session.scalars(
+                select(SourceObservation).where(SourceObservation.source_id.in_(source_ids))
+            )
+        }
+
+    active_jobs, latest_jobs, latest_sync_jobs = _compact_sync_jobs(session, source_ids)
+    from datacoolie_studio.domains.logs.admission import source_admissions
+
+    admissions = source_admissions(
+        session,
+        [source.id for source in sources if source.source_kind == "logs"],
+    )
+    statuses: list[dict[str, Any]] = []
+    for source in sources:
+        status = _source_sync_status(
+            source,
+            observations.get(source.id),
+            active_jobs.get(source.id) or latest_jobs.get(source.id),
+            latest_sync_jobs.get(source.id),
+        )
+        statuses.append(
+            _with_log_admission(
+                session,
+                source,
+                status,
+                admissions.get(source.id),
+            )
+        )
+    return statuses
+
+
+def _compact_sync_jobs(
+    session: Session,
+    source_ids: list[int],
+) -> tuple[
+    dict[int, SimpleNamespace],
+    dict[int, SimpleNamespace],
+    dict[int, SimpleNamespace],
+]:
+    """Return selected jobs without loading retained result documents.
+
+    Ranking queries only project scalar job columns.  The active-operation
+    scalar is read for initial-refresh candidates because it controls the
+    canonical validation exclusion; active-operation and error are then
+    extracted once for the selected rows used by the status assembler.
+    """
+
+    columns = _compact_sync_job_columns()
+    active_jobs = _rank_compact_jobs(
+        session,
+        columns,
+        source_ids,
+        SyncJob.status.in_(("queued", "initializing", "running")),
+        order_by=(
+            case(
+                (SyncJob.status == "initializing", 0),
+                (SyncJob.status == "running", 1),
+                (SyncJob.status == "queued", 2),
+                else_=3,
+            ).asc(),
+            SyncJob.id.desc(),
+        ),
+    )
+    latest_jobs = _rank_compact_jobs(
+        session,
+        columns,
+        source_ids,
+        None,
+        order_by=(SyncJob.id.desc(),),
+    )
+
+    qualifying_status = SyncJob.status.in_(
+        ("queued", "initializing", "running", "succeeded", "failed")
+    )
+    qualifying_types = SyncJob.job_type.in_(tuple(QUALIFYING_SYNC_JOB_TYPES))
+    latest_non_initial = _rank_compact_jobs(
+        session,
+        columns,
+        source_ids,
+        qualifying_status & qualifying_types & (SyncJob.job_type != "initial_refresh"),
+        order_by=(SyncJob.started_at.desc(), SyncJob.id.desc()),
+    )
+
+    # Initial refresh can be either the first cache sync or validation-only
+    # initialization.  Inspect only this small candidate family's scalar
+    # operation marker, then choose the same latest qualifying identity as the
+    # full history-backed assembler.
+    active_operation = _compact_active_operation_expression()
+    initial_qualifying = (
+        active_operation.is_(None) | (active_operation != "validate")
+    )
+    initial_rank = func.row_number().over(
+        partition_by=SyncJob.source_id,
+        order_by=(SyncJob.started_at.desc(), SyncJob.id.desc()),
+    ).label("_rank")
+    initial_ranked = select(*columns, active_operation, initial_rank).where(
+            SyncJob.source_id.in_(source_ids),
+            qualifying_status,
+            SyncJob.job_type == "initial_refresh",
+            initial_qualifying,
+        ).subquery()
+    initial_rows = session.execute(
+        select(initial_ranked).where(initial_ranked.c._rank == 1)
+    ).mappings()
+    initial_by_source: dict[int, list[SimpleNamespace]] = {}
+    for row in initial_rows:
+        initial_by_source.setdefault(int(row["source_id"]), []).append(
+            _compact_sync_job(row)
+        )
+
+    latest_sync_jobs: dict[int, SimpleNamespace] = {}
+    for source_id in source_ids:
+        candidates = []
+        if source_id in latest_non_initial:
+            candidates.append(latest_non_initial[source_id])
+        candidates.extend(initial_by_source.get(source_id, []))
+        if candidates:
+            latest_sync_jobs[source_id] = max(
+                candidates,
+                key=lambda job: (_normalized_datetime(job.started_at), job.id),
+            )
+
+    selected_jobs = {
+        job.id: job
+        for jobs in (active_jobs, latest_jobs, latest_sync_jobs)
+        for job in jobs.values()
+    }
+    _enrich_compact_job_results(session, selected_jobs)
+    return active_jobs, latest_jobs, latest_sync_jobs
+
+
+def _compact_sync_job_columns():
+    return (
+        SyncJob.id,
+        SyncJob.source_id,
+        SyncJob.job_type,
+        SyncJob.status,
+        SyncJob.message,
+        SyncJob.started_at,
+        SyncJob.completed_at,
+    )
+
+
+def _rank_compact_jobs(
+    session: Session,
+    columns,
+    source_ids: list[int],
+    predicate,
+    *,
+    order_by,
+) -> dict[int, SimpleNamespace]:
+    rank = func.row_number().over(
+        partition_by=SyncJob.source_id,
+        order_by=order_by,
+    ).label("_rank")
+    statement = select(*columns, rank).where(SyncJob.source_id.in_(source_ids))
+    if predicate is not None:
+        statement = statement.where(predicate)
+    ranked = statement.subquery()
+    rows = session.execute(select(ranked).where(ranked.c._rank == 1)).mappings()
+    return {
+        int(row["source_id"]): _compact_sync_job(row)
+        for row in rows
+    }
+
+
+def _compact_active_operation_expression():
+    """Extract only the small operation marker needed for job selection."""
+
+    return case(
+        (
+            func.json_valid(SyncJob.result_json) == 1,
+            func.json_extract(SyncJob.result_json, "$.active_operation"),
+        ),
+        else_=None,
+    ).label("_active_operation")
+
+
+def _enrich_compact_job_results(
+    session: Session,
+    jobs: dict[int, SimpleNamespace],
+) -> None:
+    if not jobs:
+        return
+    active_operation = _compact_active_operation_expression()
+    error_json = case(
+        (
+            func.json_valid(SyncJob.result_json) == 1,
+            func.json_extract(SyncJob.result_json, "$.error"),
+        ),
+        else_=None,
+    ).label("_error_json")
+    for row in session.execute(
+        select(SyncJob.id, active_operation, error_json).where(
+            SyncJob.id.in_(list(jobs))
+        )
+    ).mappings():
+        _set_compact_job_result(jobs[int(row["id"])], row)
+
+
+def _compact_sync_job(row: Any) -> SimpleNamespace:
+    job = SimpleNamespace(
+        id=row["id"],
+        source_id=row["source_id"],
+        job_type=row["job_type"],
+        status=row["status"],
+        message=row["message"],
+        result_json=None,
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+    )
+    _set_compact_job_result(job, row)
+    return job
+
+
+def _set_compact_job_result(job: SimpleNamespace, row: Any) -> None:
+    result: dict[str, Any] = {}
+    active_operation = row.get("_active_operation")
+    if active_operation is not None:
+        result["active_operation"] = active_operation
+    error = row.get("_error_json")
+    if isinstance(error, str):
+        try:
+            error = json.loads(error)
+        except json.JSONDecodeError:
+            error = None
+    if isinstance(error, dict):
+        result["error"] = error
+    job.result_json = json.dumps(result, sort_keys=True) if result else None
+
+
+def _with_log_admission(session, source, result, admission=None):
+    if source.source_kind == "logs":
+        from datacoolie_studio.domains.logs.admission import source_admission
+        if admission is None:
+            admission = source_admission(session, source.id)
+        if admission["excluded"]:
+            execution = result["sync_execution"]
+            execution["result"] = {**(execution.get("result") or {}), "log_admission": admission}
+            execution["summary"] = "Unsupported log schema records excluded; no v6 records available" if admission["unsupported_only"] else "Unsupported log schema records excluded"
+            if result["status"] not in {"error", "running"}:
+                result["status"] = "warning"
+            result["message"] = execution["summary"]
+    return result
 
 
 def _source_sync_status_for_jobs(
@@ -359,9 +631,15 @@ def _source_sync_status(
     active_operation = _active_operation(latest_job)
     validation = _validation_status(source, active_operation)
     observation_status = _observation_status(observation, observed)
+    execution_job = (
+        latest_job
+        if latest_job is not None
+        and latest_job.job_type in {"analytics_upgrade", "analytics_repair"}
+        else latest_sync_job
+    )
     sync_execution = _sync_execution_status(
         source,
-        latest_sync_job,
+        execution_job,
         active_operation=active_operation,
     )
     return {
@@ -377,17 +655,6 @@ def _source_sync_status(
             else "unknown"
         ),
         "message": _status_message(observation, latest_job),
-        "revision": observed["revision"],
-        "error": observed["error"],
-        "checked_at": observed["checked_at"],
-        "last_observed_at": observed["last_observed_at"],
-        "next_check_at": observed["next_check_at"],
-        "pending_changes": observed["pending_changes"],
-        "observation_state": observed["observation_state"],
-        "observation_failure_count": observed["observation_failure_count"],
-        "observation_paused_at": observed["observation_paused_at"],
-        "active_operation": active_operation,
-        "latest_job": _job_to_dict(latest_job) if latest_job else None,
         "validation": validation,
         "observation": observation_status,
         "sync_execution": sync_execution,
@@ -534,6 +801,7 @@ def _sync_execution_status(
     return {
         "state": state,
         "trigger": sync_trigger_for_job_type(job.job_type) if job else None,
+        "job_id": job.id if job else None,
         "started_at": _as_utc(job.started_at) if job else None,
         "completed_at": (
             _as_utc(job.completed_at)
@@ -549,6 +817,7 @@ def _sync_execution_status(
         ),
         "summary": job.message if job else "Last successful sync is outside retained job history" if state == "succeeded" else None,
         "error": error,
+        "result": result,
     }
 
 
@@ -657,21 +926,6 @@ def _status_message(
         return "Source revision recorded"
     error = _json_or_none(observation.error_json)
     return str(error.get("message") if isinstance(error, dict) else "Source refresh failed")
-
-
-def _job_to_dict(job: SyncJob) -> dict[str, Any]:
-    return {
-        "id": job.id,
-        "environment_id": job.environment_id,
-        "source_id": job.source_id,
-        "source_kind": job.source_kind,
-        "job_type": job.job_type,
-        "status": job.status,
-        "message": job.message,
-        "result": _json_or_none(job.result_json),
-        "started_at": _as_utc(job.started_at),
-        "completed_at": _as_utc(job.completed_at) if job.completed_at else None,
-    }
 
 
 def _json_or_none(value: str | None) -> dict[str, Any] | None:

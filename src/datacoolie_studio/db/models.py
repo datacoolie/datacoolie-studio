@@ -340,6 +340,12 @@ class AnalyticsUpgrade(Base):
     source_context_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="{}", server_default="{}"
     )
+    source_snapshot_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
+    batch_checkpoint_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
     completed_source_ids_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )
@@ -373,6 +379,27 @@ class LogFileManifest(Base):
             "file_uri",
             name="uq_log_file_manifest_source_kind_uri",
         ),
+        Index(
+            "ix_log_file_manifest_source_kind_session",
+            "source_id",
+            "file_kind",
+            "log_session_id",
+            info={"studio_ensure_existing": True},
+        ),
+        Index(
+            "ix_log_file_manifest_source_kind_filename_job",
+            "source_id",
+            "file_kind",
+            "filename_job_id",
+            info={"studio_ensure_existing": True},
+        ),
+        Index(
+            "ix_log_file_manifest_source_kind_filename_job_alt",
+            "source_id",
+            "file_kind",
+            "filename_job_id_alt",
+            info={"studio_ensure_existing": True},
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -383,9 +410,19 @@ class LogFileManifest(Base):
     partition_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
     revision_json: Mapped[str] = mapped_column(Text, nullable=False)
+    admission_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     job_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    filename_job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    filename_job_id_alt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     log_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    event_min_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    event_max_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     run_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -411,16 +448,6 @@ class LogStreamState(Base):
     root_uri: Mapped[str] = mapped_column(Text, nullable=False)
     partition_format: Mapped[str | None] = mapped_column(String(100), nullable=True)
     partition_granularity: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    checkpoint_partition_value: Mapped[date | None] = mapped_column(Date, nullable=True)
-    checkpoint_partition_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    boundary_last_modified: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    last_scanned_partition_value: Mapped[date | None] = mapped_column(
-        Date,
-        nullable=True,
-    )
     last_scanned_partition_key: Mapped[str | None] = mapped_column(
         String(32),
         nullable=True,
@@ -527,7 +554,104 @@ class MetadataBackup(Base):
     source_id: Mapped[int] = mapped_column(ForeignKey("environment_sources.id", ondelete="CASCADE"), nullable=False)
     source_uri: Mapped[str] = mapped_column(Text, nullable=False)
     backup_path: Mapped[str] = mapped_column(Text, nullable=False)
+    backup_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backup_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    backup_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     saved_revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     save_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class MetadataWriteOperation(Base):
+    """Durable environment-scoped metadata/SQL publication saga."""
+
+    __tablename__ = "metadata_write_operations"
+    __table_args__ = (
+        UniqueConstraint("operation_key", name="uq_metadata_write_operations_key"),
+        Index(
+            "ix_metadata_write_operations_environment_state",
+            "environment_id",
+            "state",
+        ),
+        Index(
+            "ix_metadata_write_operations_expires_at",
+            "expires_at",
+        ),
+        Index(
+            "uq_metadata_write_operations_active_environment",
+            "environment_id",
+            unique=True,
+            sqlite_where=text("state IN ('prepared', 'applying', 'partial', 'failed')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    environment_id: Mapped[int] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    editor_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MetadataWriteItem(Base):
+    """One independently checkpointed metadata or staged-SQL publication."""
+
+    __tablename__ = "metadata_write_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "item_order",
+            name="uq_metadata_write_items_operation_order",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            "target_uri",
+            name="uq_metadata_write_items_operation_target",
+        ),
+        Index("ix_metadata_write_items_operation_state", "operation_id", "state"),
+        Index("ix_metadata_write_items_source_id", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation_id: Mapped[int] = mapped_column(
+        ForeignKey("metadata_write_operations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    item_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("environment_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    target_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    target_descriptor_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    binding_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expected_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_provider_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backup_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backup_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    backup_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    applied_revision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)

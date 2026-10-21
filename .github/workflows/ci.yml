@@ -1,16 +1,37 @@
 name: ci
 
 on:
+  workflow_call:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  validate:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install locked Python dependencies
+        run: |
+          python -m pip install uv
+          python -m uv sync --locked --all-extras
+
+      - name: Run shared backend verification
+        run: python -m uv run --no-sync python scripts/verify.py backend
+
+  release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -19,8 +40,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
       - uses: actions/setup-node@v4
         with:
@@ -28,46 +47,25 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade "pip>=24" ".[all]"
+      - name: Install locked Python dependencies
+        run: |
+          python -m pip install uv
+          python -m uv sync --locked --all-extras
 
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
 
-      - name: Run backend tests
-        run: python -m pytest
+      - name: Run shared release verification
+        run: python -m uv run --no-sync python scripts/verify.py release
 
-      - name: Check OpenAPI contract
-        run: python -m datacoolie_studio.openapi_export --check
-
-      - name: Check generated frontend API types
+      - name: Install lifecycle test browser
         working-directory: frontend
-        run: npm run api:check
+        run: npx playwright install --with-deps chromium
 
-      - name: Run frontend tests
+      - name: Verify frontend lifecycles
         working-directory: frontend
-        run: npm test
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Audit frontend dependencies
-        working-directory: frontend
-        run: npm audit --audit-level=high
-
-      - name: Build distributions
-        run: python -m build
-
-      - name: Check distributions
-        run: python -m twine check dist/*
-
-      - name: Smoke-test the built wheel
-        run: |
-          python -m venv /tmp/datacoolie-studio-wheel
-          /tmp/datacoolie-studio-wheel/bin/python -m pip install dist/*.whl
-          /tmp/datacoolie-studio-wheel/bin/datacoolie-studio --help
+        run: npm run test:lifecycle
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4

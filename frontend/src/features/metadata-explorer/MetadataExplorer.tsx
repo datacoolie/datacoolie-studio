@@ -4,8 +4,21 @@ import "./metadata-explorer.css";
 import { DynamicDataSheetGrid, type Column, type DataSheetGridRef } from "react-datasheet-grid";
 import { Database } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import type { MetadataBackup, MetadataEditorDocument, MetadataEditorIssue } from "../../shared/api/domainTypes";
+import type {
+  MetadataBackup,
+  MetadataEditorDocument,
+  MetadataEditorIssue,
+  MetadataWriteOperation,
+} from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
+import { formatCellValue, parseCellText } from "../../shared/metadata/metadataCellValues";
+import {
+  buildMetadataDataflowRecords,
+  findMetadataDataflowRecord,
+  isEditableMetadataDataflowRecord,
+  type MetadataDataflowSelection,
+  updateMetadataDataflowDocument,
+} from "../../shared/metadata/metadataDataflowModel";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { createStageToneMap, stageToneClass } from "../../shared/stagePresentation";
@@ -15,12 +28,6 @@ import { MetadataMetrics } from "./MetadataMetrics";
 import { MetadataSheetContextMenu } from "./MetadataSheetContextMenu";
 import { MetadataSheetToolbar } from "./MetadataSheetToolbar";
 import { MetadataDataflowDrawer } from "../dataflows/MetadataDataflowDrawer";
-import {
-  buildMetadataDataflowRecords,
-  findMetadataDataflowRecord,
-  type MetadataDataflowSelection,
-  updateMetadataDataflowRow,
-} from "../dataflows/metadataDataflowModel";
 import { buildSheetColumns } from "./metadataSheetColumns";
 import {
   METADATA_COLUMN_HEADER_LAYOUT,
@@ -51,7 +58,6 @@ import {
   createEmptyRow,
   environmentMetadataSourceOptionsForSheet,
   filterMetadataRows,
-  formatCellValue,
   insertAt,
   isStudioMetadataSourceField,
   mergeFilteredRows,
@@ -59,7 +65,6 @@ import {
   metadataSourceGroupStartIds,
   moveAt,
   normalizeFieldName,
-  parseCellText,
   parseDelimitedRow,
   readClipboard,
   rowFromValues,
@@ -69,8 +74,8 @@ import {
 } from "./metadataSheetOperations";
 import type { SelectionState, SheetKey, SheetRow } from "./metadataSheetTypes";
 import { metadataDraftState, metadataServerUpdateConflicts } from "./metadataDraftState";
-import { metadataSaveConfirmation } from "./metadataSaveConfirmation";
-import { MetadataSourceSaveConfirmationDialog } from "./MetadataSourceSaveConfirmationDialog";
+import { metadataWriteConfirmation } from "../../shared/metadata/metadataSaveConfirmation";
+import { MetadataSourceSaveConfirmationDialog } from "../../shared/metadata/MetadataSourceSaveConfirmationDialog";
 
 interface MetadataExplorerProps {
   editorDocument: MetadataEditorDocument | null;
@@ -83,10 +88,11 @@ interface MetadataExplorerProps {
   loading: boolean;
   busy: boolean;
   savingDraft: boolean;
-  onValidate: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onDiscardDraft: () => Promise<void>;
-  onSave: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  onPrepareSave: (document: MetadataEditorDocument) => Promise<MetadataWriteOperation>;
+  onApplySave: (operation: MetadataWriteOperation) => Promise<MetadataEditorDocument>;
+  onAbandonSave: (operation: MetadataWriteOperation) => Promise<MetadataWriteOperation>;
   onListBackups: () => Promise<MetadataBackup[]>;
   onPreviewBackup: (backupId: number) => Promise<MetadataEditorDocument>;
   onRestoreBackup: (backup: MetadataBackup, document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
@@ -110,10 +116,11 @@ export function MetadataExplorer({
   loading,
   busy,
   savingDraft,
-  onValidate,
   onSaveDraft,
   onDiscardDraft,
-  onSave,
+  onPrepareSave,
+  onApplySave,
+  onAbandonSave,
   onListBackups,
   onPreviewBackup,
   onRestoreBackup,
@@ -134,7 +141,10 @@ export function MetadataExplorer({
   const [draft, setDraft] = useState<MetadataEditorDocument | null>(null);
   const [sourceBaseline, setSourceBaseline] = useState<MetadataEditorDocument | null>(editorDocument);
   const [serverConflict, setServerConflict] = useState(false);
-  const [pendingSourceSave, setPendingSourceSave] = useState<MetadataEditorDocument | null>(null);
+  const [pendingSourceSave, setPendingSourceSave] = useState<{
+    document: MetadataEditorDocument;
+    operation: MetadataWriteOperation;
+  } | null>(null);
   const [selection, setSelection] = useState<SelectionState>(null);
   const [selectedDataflow, setSelectedDataflow] = useState<MetadataDataflowSelection | null>(null);
   const [dataflowDrawerStack, setDataflowDrawerStack] = useState<MetadataDataflowSelection[]>([]);
@@ -582,7 +592,9 @@ export function MetadataExplorer({
   }
 
   const dirty = draftState.hasLocalChanges;
-  const sourceSaveConfirmation = pendingSourceSave ? metadataSaveConfirmation(editorDocument, pendingSourceSave) : null;
+  const sourceSaveConfirmation = pendingSourceSave
+    ? metadataWriteConfirmation(pendingSourceSave.operation)
+    : null;
   const enabledDataflows = countEnabled(activeDocument.sheets.dataflows?.rows ?? []);
   const selectedRowIndex = selection ? rows[selection.min.row]?.__rowIndex ?? null : null;
   const selectedColumnKey = selection?.min.colId && selection.min.colId !== "__gutter" ? selection.min.colId : null;
@@ -741,17 +753,6 @@ export function MetadataExplorer({
     document.addEventListener("mouseup", handleMouseUp, { once: true });
   }
 
-  async function validateDraft(document = activeDocument, updateEditor = true) {
-    if (!document) return;
-    try {
-      const validated = await onValidate(document);
-      if (updateEditor) setDraft(validated);
-      return validated;
-    } catch {
-      return undefined;
-    }
-  }
-
   async function saveDraft(document = activeDocument) {
     if (!document) return;
     acceptingServerUpdateRef.current = true;
@@ -783,35 +784,44 @@ export function MetadataExplorer({
     }
   }
 
-  async function saveChanges(document = activeDocument) {
+  async function requestSourceSave(document = activeDocument) {
     if (!document) return;
+    try {
+      const operation = await onPrepareSave(document);
+      setPendingSourceSave({ document, operation });
+    } catch {
+      setServerConflict(true);
+    }
+  }
+
+  async function confirmSourceSave() {
+    if (!pendingSourceSave) return;
     acceptingServerUpdateRef.current = true;
     try {
-      const saved = await onSave(document);
+      const saved = await onApplySave(pendingSourceSave.operation);
       setSourceBaseline(saved);
       setDraft(saved);
       setMode("view");
       setServerConflict(false);
-      clearEditorSelectionAfterDocumentChange();
-      return saved;
-    } catch {
-      return undefined;
+      setPendingSourceSave(null);
+      closeDataflowDrawer();
+    } catch (reason) {
+      const operation = (reason as { operation?: MetadataWriteOperation }).operation;
+      if (operation) {
+        setPendingSourceSave((current) => current ? { ...current, operation } : current);
+      }
     } finally {
       acceptingServerUpdateRef.current = false;
     }
   }
 
-  function requestSourceSave(document = activeDocument) {
-    if (!document) return;
-    setPendingSourceSave(document);
-  }
-
-  async function confirmSourceSave() {
+  async function cancelSourceSave() {
     if (!pendingSourceSave) return;
-    const saved = await saveChanges(pendingSourceSave);
-    if (saved) {
+    try {
+      await onAbandonSave(pendingSourceSave.operation);
       setPendingSourceSave(null);
-      closeDataflowDrawer();
+    } catch {
+      return;
     }
   }
 
@@ -923,7 +933,10 @@ export function MetadataExplorer({
       __metadata_source_id: Number.isFinite(sourceId) ? sourceId : activeStudioRouting.__metadata_source_id,
       __metadata_source_name: formatCellValue(row.__metadata_source_name) || activeStudioRouting.__metadata_source_name,
       __metadata_source_uri: formatCellValue(row.__metadata_source_uri) || activeStudioRouting.__metadata_source_uri,
-      __metadata_source_kind: formatCellValue(row.__metadata_source_kind) || activeStudioRouting.__metadata_source_kind
+      __metadata_source_kind: formatCellValue(row.__metadata_source_kind) || activeStudioRouting.__metadata_source_kind,
+      __metadata_source_read_only: row.__metadata_source_read_only === true
+        ? true
+        : activeStudioRouting.__metadata_source_read_only
     };
   }
 
@@ -988,9 +1001,8 @@ export function MetadataExplorer({
             setColumnFiltersBySheet((current) => ({ ...current, [activeSheet]: {} }));
             setActiveFilterColumnKey(null);
           }}
-          onSave={requestSourceSave}
+          onSave={() => void requestSourceSave()}
           onSaveDraft={saveDraft}
-          onValidate={validateDraft}
         />
 
         <div
@@ -1099,29 +1111,27 @@ export function MetadataExplorer({
         <MetadataSourceSaveConfirmationDialog
           busy={busy}
           confirmation={sourceSaveConfirmation}
-          onCancel={() => setPendingSourceSave(null)}
+          onCancel={() => void cancelSourceSave()}
           onConfirm={() => void confirmSourceSave()}
         />
       ) : null}
       {selectedDataflowRecord ? (
         <MetadataDataflowDrawer
           record={selectedDataflowRecord}
+          environmentId={activeDocument.source.environment_id}
+          pendingSqlFiles={activeDocument.sql_files ?? []}
           sectionOrder="source-destination-transform"
-          editable={!readOnlyDocument}
-          readOnly={readOnlyDocument}
+          editable={isEditableMetadataDataflowRecord(activeDocument, selectedDataflowRecord)}
+          readOnly={readOnlyDocument || Boolean(selectedDataflowRecord.readOnly)}
           busy={busy}
           connectionRows={activeDocument?.sheets.connections?.rows ?? []}
           connectionColumns={activeDocument?.sheets.connections?.columns ?? []}
           relatedDataflows={dataflowRecords}
-          onSave={(nextRow) => requestSourceSave(
-            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
+                        onSave={(nextRow, sqlOperation) => void requestSourceSave(
+            activeDocument ? updateMetadataDataflowDocument(activeDocument, selectedDataflowRecord.rowIndex, nextRow, sqlOperation) : null,
           )}
-          onSaveDraft={(nextRow) => saveDraft(
-            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
-          )}
-          onValidate={(nextRow) => validateDraft(
-            activeDocument ? updateMetadataDataflowRow(activeDocument, selectedDataflowRecord.rowIndex, nextRow) : null,
-            false,
+          onSaveDraft={(nextRow, sqlOperation) => saveDraft(
+            activeDocument ? updateMetadataDataflowDocument(activeDocument, selectedDataflowRecord.rowIndex, nextRow, sqlOperation) : null,
           )}
           onBack={dataflowDrawerStack.length ? popDataflowDrawer : undefined}
           onSelectRelatedDataflow={(related) => pushDataflowDrawer({

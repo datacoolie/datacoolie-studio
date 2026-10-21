@@ -3,43 +3,53 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _avg,
-    _dataflow_id,
-    _dataflow_operation_type,
-    _date_bucket,
-    _dimension_value,
-    _dominant_dataflow_operation_type,
-    _duration_stats,
-    _error_preview,
-    _failure_enriched_dataflow,
-    _num,
-    _percentile,
-    _percentile_clean,
-    _performance_phase_duration,
-    _phase_duration_summary,
-    _phase_health,
-    _rate,
-    _row_timestamp,
-    _status,
-    _sum,
-    _time_value,
-    _trend_context,
+from datacoolie_studio.domains.monitoring.metrics.row_normalization import (
+    dataflow_id as _dataflow_id,
+    dataflow_operation_type as _dataflow_operation_type,
+    dimension_value as _dimension_value,
+    dominant_dataflow_operation_type as _dominant_dataflow_operation_type,
+)
+from datacoolie_studio.domains.monitoring.metrics.investigation import (
+    error_preview as _error_preview,
+    failure_enriched_dataflow as _failure_enriched_dataflow,
+    performance_phase_duration as _performance_phase_duration,
+    phase_duration_summary as _phase_duration_summary,
+    phase_health as _phase_health,
+)
+from datacoolie_studio.domains.monitoring.metrics.aggregates import (
+    average as _avg,
+    duration_stats as _duration_stats,
+    numeric_value as _num,
+    percentile as _percentile,
+    percentile_clean as _percentile_clean,
+    rate as _rate,
+    status as _status,
+    sum_observed as _sum,
+)
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import (
+    date_bucket as _date_bucket,
+    row_timestamp,
+    time_value as _time_value,
+    trend_context as _trend_context,
 )
 
 
 def _performance_page(
     rows: list[dict[str, Any]],
     trend_context: dict[str, Any] | None = None,
+    *,
+    version_mode: str = "v6",
 ) -> dict[str, Any]:
     phase_runs = [
         row for row in rows if _status(row) in {"succeeded", "failed", "skipped"}
     ]
+    observed_runs = [
+        row for row in rows if _status(row) in {"succeeded", "failed"}
+    ]
     executable = [
         row
-        for row in rows
-        if _status(row) in {"succeeded", "failed"}
-        and _num(row, "duration_seconds") is not None
+        for row in observed_runs
+        if _num(row, "duration_seconds") is not None
     ]
     durations = [_num(row, "duration_seconds") or 0 for row in executable]
     duration_stats = _duration_stats(executable)
@@ -64,12 +74,33 @@ def _performance_page(
         if phase_total_duration > 0
         else "unknown"
     )
-    throughput_duration = sum(_num(row, "duration_seconds") or 0 for row in executable)
-    total_rows_read = _sum(executable, "source_rows_read")
-    total_rows_written = _sum(executable, "destination_rows_written")
+    throughput_rows = [
+        row for row in observed_runs
+        if _num(row, "source_rows_read") is not None
+    ]
+    throughput_durations = [
+        _num(row, "duration_seconds") for row in throughput_rows
+    ]
+    throughput_duration = (
+        sum(throughput_durations)
+        if throughput_rows and all(duration is not None for duration in throughput_durations)
+        else None
+    )
+    total_rows_read = _sum(observed_runs, "source_rows_read", mode=version_mode)
+    total_rows_written = _sum(
+        observed_runs, "destination_rows_written", mode=version_mode
+    )
+    throughput_rate = (
+        _safe_ratio(total_rows_read, throughput_duration)
+        if throughput_rows and throughput_duration is not None
+        else (0 if not executable else None)
+    )
     return {
         "kpis": {
             "run_count": len(executable),
+            "total_run_time_seconds": round(sum(durations), 3) if durations else None,
+            "duration_runs_measured": len(executable),
+            "duration_runs_eligible": len(observed_runs),
             "avg_duration_seconds": duration_stats.get("avg_duration_seconds", 0),
             "p50_duration_seconds": duration_stats.get("p50_duration_seconds", 0),
             "p75_duration_seconds": duration_stats.get("q3_duration_seconds", 0),
@@ -116,7 +147,7 @@ def _performance_page(
             "overhead_duration_percent": _rate(
                 phase_totals["overhead"], phase_total_duration
             ),
-            "rows_read_per_second": _safe_ratio(total_rows_read, throughput_duration),
+            "rows_read_per_second": throughput_rate,
             "total_rows_read": total_rows_read,
             "total_rows_written": total_rows_written,
             "optimization_candidate_count": sum(
@@ -184,7 +215,8 @@ def _performance_enriched_run(
         if any(phase_totals.values())
         else "unknown"
     )
-    duration = _num(row, "duration_seconds") or 0
+    duration_value = _num(row, "duration_seconds")
+    duration = duration_value or 0
     matched_reasons = _performance_candidate_reasons(
         duration=duration,
         rows_processed=rows_processed,
@@ -200,9 +232,7 @@ def _performance_enriched_run(
         "rows_processed": rows_processed,
         "maintenance_bytes_processed": maintenance_bytes,
         "maintenance_files_processed": maintenance_files,
-        "rows_read_per_second": _safe_ratio(
-            _num(row, "source_rows_read") or 0, duration
-        ),
+        "rows_read_per_second": _metric_rate(row, "source_rows_read", duration_value),
         "lakehouse_bytes_moved": (_num(row, "destination_bytes_added") or 0)
         + (_num(row, "destination_bytes_removed") or 0),
         "source_duration_seconds": source_duration,
@@ -507,7 +537,8 @@ def _performance_workload_efficiency_points(
 
     points = []
     for row in selected:
-        duration = _num(row, "duration_seconds") or 0
+        duration_value = _num(row, "duration_seconds")
+        duration = duration_value or 0
         rows_processed = _performance_rows_processed(row)
         points.append(
             {
@@ -521,9 +552,7 @@ def _performance_workload_efficiency_points(
                 "operation_type": _dataflow_operation_type(row),
                 "status": _status(row),
                 "rows_processed": rows_processed,
-                "rows_read_per_second": _safe_ratio(
-                    _num(row, "source_rows_read") or 0, duration
-                ),
+                "rows_read_per_second": _metric_rate(row, "source_rows_read", duration_value),
                 "duration_seconds": duration,
                 "lakehouse_bytes_moved": (_num(row, "destination_bytes_added") or 0)
                 + (_num(row, "destination_bytes_removed") or 0),
@@ -568,7 +597,7 @@ def _performance_slowest_dataflow_profiles(
         ]
         if not durations:
             continue
-        latest = max(items, key=lambda item: _row_timestamp(item) or datetime.min)
+        latest = max(items, key=lambda item: row_timestamp(item) or datetime.min)
         phase_totals = _performance_phase_totals(items)
         bottleneck_phase = (
             max(phase_totals.items(), key=lambda item: item[1])[0]
@@ -629,8 +658,24 @@ def _performance_runtime_context_profiles(
             for item in items
             if _num(item, "duration_seconds") is not None
         ]
-        total_duration = sum(durations)
+        throughput_items = [
+            item for item in items
+            if _num(item, "source_rows_read") is not None
+        ]
+        throughput_durations = [
+            _num(item, "duration_seconds") for item in throughput_items
+        ]
+        total_duration = (
+            sum(throughput_durations)
+            if throughput_items and all(duration is not None for duration in throughput_durations)
+            else None
+        )
         rows_read = _sum(items, "source_rows_read")
+        throughput_rate = (
+            _safe_ratio(rows_read, total_duration)
+            if throughput_items and total_duration is not None
+            else (0 if not items else None)
+        )
         result.append(
             {
                 "platform_name": platform,
@@ -643,7 +688,7 @@ def _performance_runtime_context_profiles(
                 "avg_duration_seconds": _avg(durations),
                 "p50_duration_seconds": _percentile_clean(durations, 0.50),
                 "p95_duration_seconds": _percentile_clean(durations, 0.95),
-                "rows_read_per_second": _safe_ratio(rows_read, total_duration),
+                "rows_read_per_second": throughput_rate,
                 "slow_candidate_count": sum(
                     1 for item in items if item.get("performance_candidate_code")
                 ),
@@ -793,6 +838,15 @@ def _safe_ratio(
     if denominator_value <= 0:
         return 0
     return round(numerator_value / denominator_value, 3)
+
+
+def _metric_rate(
+    row: dict[str, Any], key: str, duration: float | int | None
+) -> float | None:
+    value = _num(row, key)
+    if value is None or duration is None:
+        return None
+    return _safe_ratio(value, duration)
 
 
 def _title_word(value: Any) -> str:

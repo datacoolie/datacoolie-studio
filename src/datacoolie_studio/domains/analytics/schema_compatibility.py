@@ -12,8 +12,25 @@ INTEGRAL_TYPES = frozenset(
         "INTEGER",
         "BIGINT",
         "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
     }
 )
+_BIGINT_SAFE_INTEGRAL_TYPES = frozenset(
+    {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+    }
+)
+_BIGINT_VALUE_VALIDATED_TYPES = frozenset({"HUGEINT", "UBIGINT", "UHUGEINT"})
 FLOATING_TYPES = frozenset({"FLOAT", "DOUBLE"})
 
 
@@ -45,13 +62,16 @@ def classify_type(target_type: str, source_type: str) -> TypeCompatibility:
     """Classify one source type against its canonical analytics target.
 
     The only narrowing conversion allowed here is a value-validated conversion
-    to BIGINT. Value validation happens against the actual Parquet file before
-    the projection is executed.
+    to BIGINT. Value validation happens against the staged source relation
+    before the projection is executed.
     """
 
     target = normalize_type(target_type)
     source = normalize_type(source_type)
     if types_match(source, target):
+        return TypeCompatibility(target, source, target)
+
+    if target == "BIGINT" and source in _BIGINT_SAFE_INTEGRAL_TYPES:
         return TypeCompatibility(target, source, target)
 
     if target == "BIGINT" and source in FLOATING_TYPES:
@@ -63,7 +83,7 @@ def classify_type(target_type: str, source_type: str) -> TypeCompatibility:
             requires_projection_cast=True,
         )
 
-    if target == "BIGINT" and source == "HUGEINT":
+    if target == "BIGINT" and source in _BIGINT_VALUE_VALIDATED_TYPES:
         return TypeCompatibility(
             target,
             source,
@@ -91,7 +111,7 @@ def lossless_integer_predicate(quoted_column: str, source_type: str) -> str:
             f"OR {quoted_column} != floor({quoted_column}) "
             f"OR TRY_CAST({quoted_column} AS BIGINT) IS NULL"
         )
-    if source == "HUGEINT":
+    if source in _BIGINT_VALUE_VALIDATED_TYPES:
         return f"TRY_CAST({quoted_column} AS BIGINT) IS NULL"
     raise ValueError(f"lossless BIGINT validation is not defined for {source}")
 

@@ -489,7 +489,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/environments/{environment_id}/metadata-editor-document": {
+    "/api/v1/environments/{environment_id}/metadata-backups/{backup_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -497,9 +497,43 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Put Environment Metadata Editor Document */
-        put: operations["put_environment_metadata_editor_document_api_v1_environments__environment_id__metadata_editor_document_put"];
+        put?: never;
         post?: never;
+        /** Delete Metadata Backup */
+        delete: operations["delete_metadata_backup_api_v1_environments__environment_id__metadata_backups__backup_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-backups/{backup_id}/editor-document": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Metadata Backup Editor Document */
+        get: operations["get_metadata_backup_editor_document_api_v1_environments__environment_id__metadata_backups__backup_id__editor_document_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-backups/{backup_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore Metadata Backup */
+        post: operations["restore_metadata_backup_api_v1_environments__environment_id__metadata_backups__backup_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -519,23 +553,6 @@ export interface paths {
         post?: never;
         /** Discard Environment Metadata Editor Draft */
         delete: operations["discard_environment_metadata_editor_draft_api_v1_environments__environment_id__metadata_editor_document_draft_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/environments/{environment_id}/metadata-editor-document/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Validate Environment Metadata Editor Document */
-        post: operations["validate_environment_metadata_editor_document_api_v1_environments__environment_id__metadata_editor_document_validate_post"];
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -679,6 +696,131 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/environments/{environment_id}/metadata-write-operations/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare Environment Metadata Write */
+        post: operations["prepare_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations_prepare_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-write-operations/{operation_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Environment Metadata Write Operation */
+        get: operations["get_environment_metadata_write_operation_api_v1_environments__environment_id__metadata_write_operations__operation_key__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-write-operations/{operation_key}/abandon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Abandon Environment Metadata Write */
+        post: operations["abandon_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__abandon_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-write-operations/{operation_key}/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply Environment Metadata Write */
+        post: operations["apply_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/metadata-write-operations/{operation_key}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Environment Metadata Write */
+        post: operations["retry_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/monitoring/dataflow-registry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Monitoring Dataflow Registry
+         * @description Return one entity row per environment/dataflow for all Monitoring facets.
+         */
+        get: operations["get_monitoring_dataflow_registry_api_v1_environments__environment_id__monitoring_dataflow_registry_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/monitoring/dataflow-registry/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Monitoring Dataflow Registry Detail
+         * @description Resolve one entity from the shared registry using its exact ID.
+         */
+        get: operations["get_monitoring_dataflow_registry_detail_api_v1_environments__environment_id__monitoring_dataflow_registry_detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/environments/{environment_id}/monitoring/dataflows": {
         parameters: {
             query?: never;
@@ -747,6 +889,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/environments/{environment_id}/monitoring/pages/diagnostics/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Monitoring Diagnostics Evidence
+         * @description Page Diagnostics finding groups, or one group's affected objects.
+         */
+        get: operations["get_monitoring_diagnostics_evidence_api_v1_environments__environment_id__monitoring_pages_diagnostics_evidence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/environments/{environment_id}/monitoring/pages/{page}": {
         parameters: {
             query?: never;
@@ -790,6 +952,23 @@ export interface paths {
         };
         /** Get System Logs */
         get: operations["get_system_logs_api_v1_environments__environment_id__monitoring_system_logs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/monitoring/system-logs/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download System Logs */
+        get: operations["download_system_logs_api_v1_environments__environment_id__monitoring_system_logs_download_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -866,7 +1045,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/metadata-backups/{backup_id}": {
+    "/api/v1/environments/{environment_id}/sql-reference": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Read Sql Reference */
+        post: operations["read_sql_reference_api_v1_environments__environment_id__sql_reference_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/sql-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Sql Sources */
+        get: operations["get_sql_sources_api_v1_environments__environment_id__sql_sources_get"];
+        put?: never;
+        /** Post Sql Source */
+        post: operations["post_sql_source_api_v1_environments__environment_id__sql_sources_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/sql-sources/{source_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -876,22 +1090,23 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete Metadata Backup */
-        delete: operations["delete_metadata_backup_api_v1_metadata_backups__backup_id__delete"];
+        /** Delete Sql Source */
+        delete: operations["delete_sql_source_api_v1_environments__environment_id__sql_sources__source_id__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Patch Sql Source */
+        patch: operations["patch_sql_source_api_v1_environments__environment_id__sql_sources__source_id__patch"];
         trace?: never;
     };
-    "/api/v1/metadata-backups/{backup_id}/editor-document": {
+    "/api/v1/environments/{environment_id}/sql-sources/{source_id}/delete-impact": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Metadata Backup Editor Document */
-        get: operations["get_metadata_backup_editor_document_api_v1_metadata_backups__backup_id__editor_document_get"];
+        /** Get Sql Source Delete Impact */
+        get: operations["get_sql_source_delete_impact_api_v1_environments__environment_id__sql_sources__source_id__delete_impact_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -900,7 +1115,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/metadata-backups/{backup_id}/restore": {
+    "/api/v1/environments/{environment_id}/sql-sources/{source_id}/refresh": {
         parameters: {
             query?: never;
             header?: never;
@@ -909,8 +1124,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Restore Metadata Backup */
-        post: operations["restore_metadata_backup_api_v1_metadata_backups__backup_id__restore_post"];
+        /** Refresh Sql Source */
+        post: operations["refresh_sql_source_api_v1_environments__environment_id__sql_sources__source_id__refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/sql-sources/{source_id}/retry-observation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Sql Source Observation */
+        post: operations["retry_sql_source_observation_api_v1_environments__environment_id__sql_sources__source_id__retry_observation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environments/{environment_id}/sql-sources/{source_id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate Sql Source */
+        post: operations["validate_sql_source_api_v1_environments__environment_id__sql_sources__source_id__validate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1875,13 +2124,13 @@ export interface components {
         ConfiguredSourceLocationResponse: {
             /** Canonical Locations */
             canonical_locations?: {
-                [key: string]: string;
+                [key: string]: string | string[];
             };
             /** Canonical Uri */
             canonical_uri: string;
             /** Input Locations */
             input_locations?: {
-                [key: string]: string;
+                [key: string]: string | string[];
             };
             /** Input Uri */
             input_uri: string;
@@ -1889,7 +2138,7 @@ export interface components {
              * Purpose
              * @enum {string}
              */
-            purpose: "project" | "metadata" | "code" | "logs";
+            purpose: "project" | "metadata" | "sql" | "code" | "logs";
             /** Registration Id */
             registration_id: number;
         };
@@ -2025,11 +2274,8 @@ export interface components {
              * @enum {string}
              */
             code_discovery_mode: "auto" | "explicit";
-            /**
-             * Code Subpath
-             * @default functions
-             */
-            code_subpath: string;
+            /** Code Subpaths */
+            code_subpaths?: string[] | null;
             /** Code Uri */
             code_uri?: string | null;
             /**
@@ -2037,25 +2283,14 @@ export interface components {
              * @default true
              */
             enabled: boolean;
-            /**
-             * Include Code
-             * @default true
-             */
-            include_code: boolean;
-            /**
-             * Include Metadata
-             * @default true
-             */
-            include_metadata: boolean;
-            /**
-             * Metadata Subpath
-             * @default metadata
-             */
-            metadata_subpath: string;
+            /** Metadata Subpath */
+            metadata_subpath?: string | null;
             /** Metadata Uri */
             metadata_uri?: string | null;
             /** Project Uri */
             project_uri: string;
+            /** Sql Subpaths */
+            sql_subpaths?: string[] | null;
             storage?: components["schemas"]["StorageBindingRequest"] | null;
         };
         /** EnvironmentContextEnvironmentResponse */
@@ -2069,7 +2304,7 @@ export interface components {
         };
         /** EnvironmentContextFreshnessResponse */
         EnvironmentContextFreshnessResponse: {
-            etl_logs: components["schemas"]["FreshnessGroupResponse"];
+            logs: components["schemas"]["FreshnessGroupResponse"];
             /** Max Source Modified At */
             max_source_modified_at?: string | null;
             /** Message */
@@ -2134,11 +2369,11 @@ export interface components {
         EnvironmentFreshnessResponse: {
             /** Environment Id */
             environment_id: number;
-            /** Etl Log Path Count */
-            etl_log_path_count: number;
-            etl_logs: components["schemas"]["FreshnessGroupResponse"];
             /** Items */
             items: components["schemas"]["FreshnessSourceItemResponse"][];
+            /** Log Source Count */
+            log_source_count: number;
+            logs: components["schemas"]["FreshnessGroupResponse"];
             /** Max Source Modified At */
             max_source_modified_at?: string | null;
             /** Message */
@@ -2517,8 +2752,14 @@ export interface components {
         };
         /** MetadataBackupResponse */
         MetadataBackupResponse: {
+            /** Backup Hash */
+            backup_hash?: string | null;
             /** Backup Path */
-            backup_path: string;
+            backup_path?: string | null;
+            /** Backup Ref */
+            backup_ref?: string | null;
+            /** Backup Size */
+            backup_size?: number | null;
             /**
              * Created At
              * Format: date-time
@@ -2561,6 +2802,16 @@ export interface components {
             issues: {
                 [key: string]: unknown;
             }[];
+            /** Metadata Document */
+            metadata_document?: {
+                [key: string]: unknown;
+            };
+            /** Metadata Documents */
+            metadata_documents?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
             /** Sheets */
             sheets: {
                 [key: string]: unknown;
@@ -2569,29 +2820,27 @@ export interface components {
             source: {
                 [key: string]: unknown;
             };
-        };
-        /** MetadataEditorSaveRequest */
-        MetadataEditorSaveRequest: {
-            /**
-             * Confirm Overwrite
-             * @default false
-             */
-            confirm_overwrite: boolean;
-            editor_document: components["schemas"]["MetadataEditorValidationRequest"];
-            /** Expected Revision */
-            expected_revision: {
-                [key: string]: unknown;
-            };
-        };
-        /** MetadataEditorValidationRequest */
-        MetadataEditorValidationRequest: {
-            /**
-             * Issues
-             * @default []
-             */
-            issues: {
+            /** Sql Files */
+            sql_files?: {
                 [key: string]: unknown;
             }[];
+        };
+        /** MetadataEditorPayloadRequest */
+        MetadataEditorPayloadRequest: {
+            /** Issues */
+            issues?: {
+                [key: string]: unknown;
+            }[];
+            /** Metadata Document */
+            metadata_document?: {
+                [key: string]: unknown;
+            };
+            /** Metadata Documents */
+            metadata_documents?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
             /** Sheets */
             sheets: {
                 [key: string]: unknown;
@@ -2600,19 +2849,10 @@ export interface components {
             source?: {
                 [key: string]: unknown;
             } | null;
-        };
-        /** MetadataEditorValidationResponse */
-        MetadataEditorValidationResponse: {
-            /** Issues */
-            issues: {
+            /** Sql Files */
+            sql_files?: {
                 [key: string]: unknown;
             }[];
-            /** Status */
-            status: string;
-            /** Summary */
-            summary: {
-                [key: string]: unknown;
-            };
         };
         /** MetadataEditorWorkspaceResponse */
         MetadataEditorWorkspaceResponse: {
@@ -2693,6 +2933,99 @@ export interface components {
             /** Uri */
             uri: string;
         };
+        /** MetadataWriteAbandonRequest */
+        MetadataWriteAbandonRequest: {
+            /**
+             * Confirm Abandon
+             * @default false
+             */
+            confirm_abandon: boolean;
+        };
+        /** MetadataWriteApplyRequest */
+        MetadataWriteApplyRequest: {
+            /**
+             * Confirm Apply
+             * @default false
+             */
+            confirm_apply: boolean;
+        };
+        /** MetadataWriteItemResponse */
+        MetadataWriteItemResponse: {
+            /** Action */
+            action: string;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Order */
+            order: number;
+            /** Provider */
+            provider?: string | null;
+            /** Sheets */
+            sheets?: string[];
+            /** Source Id */
+            source_id?: number | null;
+            /** Source Name */
+            source_name?: string | null;
+            /** Source Uri */
+            source_uri: string;
+            /** State */
+            state: string;
+            /** Target Uri */
+            target_uri: string;
+            /** Write Safety */
+            write_safety?: ("strong_cas" | "cooperative" | "verified" | "read_only") | null;
+        };
+        /** MetadataWriteOperationResponse */
+        MetadataWriteOperationResponse: {
+            /** Completed At */
+            completed_at?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Environment Id */
+            environment_id: number;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Items */
+            items: components["schemas"]["MetadataWriteItemResponse"][];
+            /** Operation Key */
+            operation_key: string;
+            /** State */
+            state: string;
+            /** Summary */
+            summary: {
+                [key: string]: number;
+            };
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** MetadataWritePrepareRequest */
+        MetadataWritePrepareRequest: {
+            editor_document: components["schemas"]["MetadataEditorPayloadRequest"];
+            /** Expected Revision */
+            expected_revision: {
+                [key: string]: unknown;
+            };
+        };
         /** ModuleInfo */
         ModuleInfo: {
             /** Default Enabled */
@@ -2738,226 +3071,893 @@ export interface components {
             target: string;
             /** Title */
             title: string;
+        };
+        /** MonitoringCoverageResponse */
+        MonitoringCoverageResponse: {
+            /** Dataflow Job Ids */
+            dataflow_job_ids?: string | null;
+            /** Dataflow Records */
+            dataflow_records?: string | null;
+            /** Enabled Log Base Paths */
+            enabled_log_base_paths?: string | null;
+            /** Job Ids */
+            job_ids?: string | null;
+            /** Job Records */
+            job_records?: string | null;
+            /** Jobs Without Dataflow Records */
+            jobs_without_dataflow_records?: string | null;
+            /** Linked Job Ids */
+            linked_job_ids?: string | null;
+            /** Log Bytes Dropped */
+            log_bytes_dropped?: string | null;
+            /** Log Bytes Dropped Observed Subtotal */
+            log_bytes_dropped_observed_subtotal?: string | null;
+            /** Log Bytes Dropped Reporting Jobs */
+            log_bytes_dropped_reporting_jobs?: string | null;
+            /** Log Bytes Loss Coverage */
+            log_bytes_loss_coverage?: number | null;
+            /** Log Loss Coverage */
+            log_loss_coverage?: number | null;
+            /** Log Loss Job Count */
+            log_loss_job_count?: string | null;
+            /** Log Loss Unknown Jobs */
+            log_loss_unknown_jobs?: string | null;
+            /** Log Records Dropped */
+            log_records_dropped?: string | null;
+            /** Log Records Dropped Observed Subtotal */
+            log_records_dropped_observed_subtotal?: string | null;
+            /** Log Records Dropped Reporting Jobs */
+            log_records_dropped_reporting_jobs?: string | null;
+            /** Orphan Dataflow Job Ids */
+            orphan_dataflow_job_ids?: string | null;
+            /** Read Errors */
+            read_errors?: string | null;
+            /** Scope Coverage */
+            scope_coverage?: string | null;
+            /** Status */
+            status?: string | null;
+        };
+        /** MonitoringDataflowRecordResponse */
+        MonitoringDataflowRecordResponse: {
+            /** Datacoolie Version */
+            datacoolie_version?: string | null;
+            /** Dataflow Id */
+            dataflow_id?: string | null;
+            /** Dataflow Name */
+            dataflow_name?: string | null;
+            /** Dataflow Run Id */
+            dataflow_run_id?: string | null;
+            /** Destination Connection Type */
+            destination_connection_type?: string | null;
+            /** Destination Format */
+            destination_format?: string | null;
+            /** Destination Message */
+            destination_message?: string | null;
+            /** Destination Name */
+            destination_name?: string | null;
+            /** Destination Status */
+            destination_status?: string | null;
+            /** Duration Seconds */
+            duration_seconds?: number | null;
+            /** End Time */
+            end_time?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Event Time */
+            event_time?: string | null;
+            /** Failure Category */
+            failure_category?: string | null;
+            /** Failure Kind */
+            failure_kind?: string | null;
+            /** Failure Message */
+            failure_message?: string | null;
+            /** Failure Phase */
+            failure_phase?: string | null;
+            /** Failure Rule Id */
+            failure_rule_id?: string | null;
+            /** Failure Signature */
+            failure_signature?: string | null;
+            /** Failure Tags */
+            failure_tags?: string[];
+            /** Failure Target */
+            failure_target?: string | null;
+            /** Failure Time */
+            failure_time?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Message Truncated */
+            message_truncated?: boolean | null;
+            /** Normalized Status */
+            normalized_status?: string | null;
+            /** Operation Type */
+            operation_type?: string | null;
+            /** Raw Record Json */
+            raw_record_json?: string | null;
+            /** Source Connection Type */
+            source_connection_type?: string | null;
+            /** Source Format */
+            source_format?: string | null;
+            /** Source Message */
+            source_message?: string | null;
+            /** Source Name */
+            source_name?: string | null;
+            /** Source Status */
+            source_status?: string | null;
+            /** Stage */
+            stage?: string | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Transform Message */
+            transform_message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringDataflowRecordsResponse */
+        MonitoringDataflowRecordsResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringDataflowRecordResponse"][];
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /**
+         * MonitoringDataflowRegistryResponse
+         * @description Validate each bounded payload using its section's declared grain.
+         */
+        MonitoringDataflowRegistryResponse: components["schemas"]["MonitoringRegistryEntityResponse"] | components["schemas"]["MonitoringRegistryExecutionResponse"] | components["schemas"]["MonitoringRegistryRuntimeResponse"];
+        /** MonitoringDateBucketResponse */
+        MonitoringDateBucketResponse: {
+            /** Bucket */
+            bucket?: string | null;
+            /** Bucket End */
+            bucket_end?: string | null;
+            /** Bucket Start */
+            bucket_start?: string | null;
+            /** Date */
+            date?: string | null;
+            /** Grain */
+            grain?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringDiagnosticCaptureResponse */
+        MonitoringDiagnosticCaptureResponse: {
+            /** By Reason */
+            by_reason?: components["schemas"]["MonitoringNamedCountResponse"][];
+            /** Evidence */
+            evidence?: components["schemas"]["MonitoringDiagnosticIssueResponse"][];
+            summary: components["schemas"]["MonitoringDiagnosticCaptureSummaryResponse"];
+        };
+        /** MonitoringDiagnosticCaptureSummaryResponse */
+        MonitoringDiagnosticCaptureSummaryResponse: {
+            /**
+             * Affected Records
+             * @default 0
+             */
+            affected_records: string;
+            /**
+             * Evidence Limit
+             * @default 50
+             */
+            evidence_limit: number;
+            /**
+             * Evidence Records Count
+             * @default 0
+             */
+            evidence_records_count: string;
+            /**
+             * Known Markers
+             * @default 0
+             */
+            known_markers: string;
+            /**
+             * Omitted Marker Records
+             * @default 0
+             */
+            omitted_marker_records: string;
+            /**
+             * Overflow Records
+             * @default 0
+             */
+            overflow_records: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringDiagnosticIssueResponse */
+        MonitoringDiagnosticIssueResponse: {
+            /** Dataflow Id */
+            dataflow_id?: string | null;
+            /** Dataflow Name */
+            dataflow_name?: string | null;
+            /** Dataflow Run Id */
+            dataflow_run_id?: string | null;
+            /** Field */
+            field: string;
+            /** Job Id */
+            job_id?: string | null;
+            /** Latest Time */
+            latest_time?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Reason */
+            reason: string;
+            /** Record Type */
+            record_type?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringDiagnosticsAssessmentReasonResponse */
+        MonitoringDiagnosticsAssessmentReasonResponse: {
+            /** Code */
+            code: string;
+            /**
+             * Count
+             * @default 0
+             */
+            count: string;
+            /** Scope Coverage */
+            scope_coverage?: string | null;
+            /** Severity */
+            severity: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringDiagnosticsAssessmentResponse */
+        MonitoringDiagnosticsAssessmentResponse: {
+            /** Coverage */
+            coverage?: string | null;
+            /** Reasons */
+            reasons?: components["schemas"]["MonitoringDiagnosticsAssessmentReasonResponse"][];
+            /** Status */
+            status: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * MonitoringDiagnosticsEvidenceResponse
+         * @description Finding groups (registry) or one group's affected objects (detail).
+         */
+        MonitoringDiagnosticsEvidenceResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            group?: components["schemas"]["MonitoringDiagnosticsFindingGroupResponse"] | null;
+            /** Groups */
+            groups?: components["schemas"]["MonitoringDiagnosticsFindingGroupResponse"][];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "registry" | "detail";
+            /** Objects */
+            objects?: components["schemas"]["MonitoringDiagnosticsFindingObjectResponse"][];
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /**
+         * MonitoringDiagnosticsFindingGroupResponse
+         * @description One structural finding group; counts use the declared subject unit.
+         */
+        MonitoringDiagnosticsFindingGroupResponse: {
+            /** Affected Objects */
+            affected_objects: string;
+            /** Checks */
+            checks?: string | null;
+            /** Group Key */
+            group_key: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "issue" | "warning" | "limitation" | "notice";
+            /** Latest Time */
+            latest_time?: string | null;
+            /** Occurrences */
+            occurrences?: string | null;
+            /** Reason */
+            reason: string;
+            /** Rule */
+            rule: string;
+            /**
+             * Section
+             * @default
+             */
+            section: string;
+            /**
+             * Subject Kind
+             * @enum {string}
+             */
+            subject_kind: "job" | "dataflow_record" | "field_group";
+        };
+        /** MonitoringDiagnosticsFindingMetricResponse */
+        MonitoringDiagnosticsFindingMetricResponse: {
+            /** Difference */
+            difference?: string | null;
+            /** Expected */
+            expected?: string | null;
+            /** Metric */
+            metric: string;
+            /** Observed */
+            observed?: string | null;
+        };
+        /** MonitoringDiagnosticsFindingObjectCountResponse */
+        MonitoringDiagnosticsFindingObjectCountResponse: {
+            /** Count */
+            count: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "issue" | "warning" | "limitation" | "notice";
+            /**
+             * Subject Kind
+             * @enum {string}
+             */
+            subject_kind: "job" | "dataflow_record" | "field_group";
+        };
+        /**
+         * MonitoringDiagnosticsFindingObjectResponse
+         * @description One affected object with the exact identity needed for drill-in.
+         */
+        MonitoringDiagnosticsFindingObjectResponse: {
+            /** Bytes Dropped */
+            bytes_dropped?: string | null;
+            /** Checks */
+            checks?: string | null;
+            /** Dataflow Id */
+            dataflow_id?: string | null;
+            /** Dataflow Name */
+            dataflow_name?: string | null;
+            /** Dataflow Run Id */
+            dataflow_run_id?: string | null;
+            /** Excluded Dataflow Records */
+            excluded_dataflow_records?: string | null;
+            field_group?: components["schemas"]["MonitoringExtensionRowResponse"] | null;
+            /** File Kind */
+            file_kind?: string | null;
+            /** File Uri */
+            file_uri?: string | null;
+            /** Filtered Dataflow Records */
+            filtered_dataflow_records?: string | null;
+            /** Group Key */
+            group_key: string;
+            /** Job Id */
+            job_id?: string | null;
+            /** Job Status */
+            job_status?: string | null;
+            /** Job Total Dataflows */
+            job_total_dataflows?: string | null;
+            /** Latest Time */
+            latest_time?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Metrics */
+            metrics?: components["schemas"]["MonitoringDiagnosticsFindingMetricResponse"][];
+            /** Observed At */
+            observed_at?: string | null;
+            /** Occurrences */
+            occurrences?: string | null;
+            /** Reason */
+            reason: string;
+            /** Record Line */
+            record_line?: string | null;
+            /** Recorded Dataflow Records */
+            recorded_dataflow_records?: string | null;
+            /** Records Dropped */
+            records_dropped?: string | null;
+            /** Rule */
+            rule: string;
+            /**
+             * Section
+             * @default
+             */
+            section: string;
+            /** Source Id */
+            source_id?: number | null;
+            /**
+             * Subject Kind
+             * @enum {string}
+             */
+            subject_kind: "job" | "dataflow_record" | "field_group";
+        };
+        /** MonitoringDiagnosticsFindingsSummaryResponse */
+        MonitoringDiagnosticsFindingsSummaryResponse: {
+            /** Affected Objects */
+            affected_objects?: components["schemas"]["MonitoringDiagnosticsFindingObjectCountResponse"][];
+            /** Analytics Generation */
+            analytics_generation?: string | null;
+            /** As Of */
+            as_of?: string | null;
+            /**
+             * Group Limit
+             * @default 50
+             */
+            group_limit: number;
+            /**
+             * Groups Loaded
+             * @default 0
+             */
+            groups_loaded: string;
+            /**
+             * Groups Total
+             * @default 0
+             */
+            groups_total: string;
+            /**
+             * Issue Groups
+             * @default 0
+             */
+            issue_groups: string;
+            /**
+             * Limitation Groups
+             * @default 0
+             */
+            limitation_groups: string;
+            /** Restrictions */
+            restrictions?: string[];
+            /**
+             * Scope
+             * @default none
+             * @enum {string}
+             */
+            scope: "full" | "subset" | "none";
+            /**
+             * Warning Groups
+             * @default 0
+             */
+            warning_groups: string;
+        };
+        /** MonitoringDiagnosticsRegistrySummaryResponse */
+        MonitoringDiagnosticsRegistrySummaryResponse: {
+            /**
+             * Limit
+             * @default 200
+             */
+            limit: number;
+            /**
+             * Loaded Issues
+             * @default 0
+             */
+            loaded_issues: string;
+            /**
+             * Total Issues
+             * @default 0
+             */
+            total_issues: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
         } & {
             [key: string]: unknown;
         };
         /** MonitoringDiagnosticsResponse */
         MonitoringDiagnosticsResponse: {
-            /**
-             * Job Id Evidence
-             * @default []
-             */
-            job_id_evidence: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: unknown;
+            assessment?: components["schemas"]["MonitoringDiagnosticsAssessmentResponse"] | null;
+            diagnostic_capture?: components["schemas"]["MonitoringDiagnosticCaptureResponse"] | null;
+            /** Field Completeness */
+            field_completeness?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Finding Groups */
+            finding_groups?: components["schemas"]["MonitoringDiagnosticsFindingGroupResponse"][];
+            findings_summary?: components["schemas"]["MonitoringDiagnosticsFindingsSummaryResponse"] | null;
+            /** Investigation Queue */
+            investigation_queue?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Id Evidence */
+            job_id_evidence?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Linkage Summary */
+            job_linkage_summary?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | boolean | null;
             };
+            /** Read Errors */
+            read_errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Reconciliation By Metric */
+            reconciliation_by_metric?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Record Evidence By Date */
+            record_evidence_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            registry_summary?: components["schemas"]["MonitoringDiagnosticsRegistrySummaryResponse"] | null;
+            /** Scope Notices */
+            scope_notices?: components["schemas"]["MonitoringDiagnosticsScopeNoticeResponse"][];
+            /** Source Coverage */
+            source_coverage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+        };
+        /** MonitoringDiagnosticsScopeNoticeResponse */
+        MonitoringDiagnosticsScopeNoticeResponse: {
+            /** Checks */
+            checks: string;
+            /** Code */
+            code: string;
+            /** Group Key */
+            group_key: string;
+            /** Jobs */
+            jobs: string;
+            /** Restrictions */
+            restrictions?: string[];
+        };
+        /** MonitoringErrorCategoryResponse */
+        MonitoringErrorCategoryResponse: {
             /**
-             * Read Errors
-             * @default []
+             * Category
+             * @default Unspecified
              */
-            read_errors: {
-                [key: string]: unknown;
-            }[];
+            category: string;
+            /**
+             * Count
+             * @default 0
+             */
+            count: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringEvidenceResponse */
+        MonitoringEvidenceResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /**
+         * MonitoringExtensionRowResponse
+         * @description A metric row whose additional columns are intentionally provider-defined.
+         */
+        MonitoringExtensionRowResponse: {
+            [key: string]: unknown;
+        };
+        /** MonitoringFailureTrendResponse */
+        MonitoringFailureTrendResponse: {
+            /** Date */
+            date?: string | null;
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: string;
         } & {
             [key: string]: unknown;
         };
         /** MonitoringFailuresResponse */
         MonitoringFailuresResponse: {
-            /**
-             * Error Categories
-             * @default []
-             */
-            error_categories: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Failed By Stage
-             * @default []
-             */
-            failed_by_stage: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Failed Records
-             * @default []
-             */
-            failed_records: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Failure Trend By Date
-             * @default []
-             */
-            failure_trend_by_date: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: unknown;
+            /** Endpoint Impact */
+            endpoint_impact?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Error Categories */
+            error_categories?: components["schemas"]["MonitoringErrorCategoryResponse"][];
+            /** Failed By Source Connection Type */
+            failed_by_source_connection_type?: components["schemas"]["MonitoringNamedCountResponse"][];
+            /** Failed By Stage */
+            failed_by_stage?: components["schemas"]["MonitoringNamedCountResponse"][];
+            /** Failed Records */
+            failed_records?: components["schemas"]["MonitoringDataflowRecordResponse"][];
+            /** Failure By Phase */
+            failure_by_phase?: components["schemas"]["MonitoringNamedCountResponse"][];
+            /** Failure Category Phase Matrix */
+            failure_category_phase_matrix?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Failure Trend By Date */
+            failure_trend_by_date?: components["schemas"]["MonitoringFailureTrendResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | boolean | null;
             };
-            /**
-             * Top Failing Dataflows
-             * @default []
-             */
-            top_failing_dataflows: {
-                [key: string]: unknown;
-            }[];
-        } & {
-            [key: string]: unknown;
+            /** Latest Queue */
+            latest_queue?: components["schemas"]["MonitoringDataflowRecordResponse"][];
+            /** Recovered Attempts */
+            recovered_attempts?: components["schemas"]["MonitoringRecoveredAttemptResponse"][];
+            /** Repeated Signatures */
+            repeated_signatures?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Top Failing Dataflows */
+            top_failing_dataflows?: components["schemas"]["MonitoringExtensionRowResponse"][];
+        };
+        /** MonitoringFilterOptionResponse */
+        MonitoringFilterOptionResponse: {
+            /** Count */
+            count?: number | null;
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /** MonitoringFilterOptionsResponse */
+        MonitoringFilterOptionsResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Options */
+            options?: {
+                [key: string]: components["schemas"]["MonitoringFilterOptionResponse"][];
+            };
+            summary: components["schemas"]["MonitoringFilterOptionsSummaryResponse"];
+        };
+        /** MonitoringFilterOptionsSummaryResponse */
+        MonitoringFilterOptionsSummaryResponse: {
+            /** Fields */
+            fields: number;
+            /** Source */
+            source: string;
         };
         /** MonitoringFreshnessResponse */
         MonitoringFreshnessResponse: {
-            /**
-             * Age By Dataflow
-             * @default []
-             */
-            age_by_dataflow: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: number;
+            /** Age By Dataflow */
+            age_by_dataflow?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Age Distribution */
+            age_distribution?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | null;
             };
-            /**
-             * Watermark Movement By Date
-             * @default []
-             */
-            watermark_movement_by_date: {
-                [key: string]: unknown;
-            }[];
-        } & {
-            [key: string]: unknown;
+            /** Latest Freshness By Dataflow */
+            latest_freshness_by_dataflow?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Read Boundary Adjustment By Dataflow */
+            read_boundary_adjustment_by_dataflow?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Skipped Patterns */
+            skipped_patterns?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Skipped Streak Distribution */
+            skipped_streak_distribution?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Stale Candidates */
+            stale_candidates?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Watermark Coverage By Stage */
+            watermark_coverage_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Watermark Movement */
+            watermark_movement?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Watermark Movement By Date */
+            watermark_movement_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
         };
         /** MonitoringHealthResponse */
         MonitoringHealthResponse: {
+            /** Failed Dataflows Last 3 Days */
+            failed_dataflows_last_3_days?: string | null;
+            /** Failed Dataflows Last 7 Days */
+            failed_dataflows_last_7_days?: string | null;
+            /** Failed Jobs Last 3 Days */
+            failed_jobs_last_3_days?: string | null;
+            /** Failed Jobs Last 7 Days */
+            failed_jobs_last_7_days?: string | null;
             /**
              * Label
              * @default Unknown
              */
             label: string;
+            /** Latest Dataflow Log At */
+            latest_dataflow_log_at?: string | null;
+            /** Latest Job Log At */
+            latest_job_log_at?: string | null;
+            /** Latest Log Age Days */
+            latest_log_age_days?: number | null;
             /** Latest Log At */
             latest_log_at?: string | null;
-            /**
-             * Reasons
-             * @default []
-             */
-            reasons: string[];
+            /** Maintenance Failed Last 14 Days */
+            maintenance_failed_last_14_days?: string | null;
+            /** Maintenance Failed Last 7 Days */
+            maintenance_failed_last_7_days?: string | null;
+            /** Maintenance Skipped Last 7 Days */
+            maintenance_skipped_last_7_days?: string | null;
+            /** Reasons */
+            reasons?: string[];
             /**
              * Status
              * @default unknown
              */
             status: string;
+        };
+        /** MonitoringJobRecordResponse */
+        MonitoringJobRecordResponse: {
+            /** Datacoolie Version */
+            datacoolie_version?: string | null;
+            /** Duration Seconds */
+            duration_seconds?: number | null;
+            /** End Time */
+            end_time?: string | null;
+            /** Engine Name */
+            engine_name?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Error Message Truncated */
+            error_message_truncated?: boolean | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Log Bytes Dropped */
+            log_bytes_dropped?: string | null;
+            /** Log Records Dropped */
+            log_records_dropped?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Message Truncated */
+            message_truncated?: boolean | null;
+            /** Metadata Provider Name */
+            metadata_provider_name?: string | null;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Platform Name */
+            platform_name?: string | null;
+            /** Raw Record Json */
+            raw_record_json?: string | null;
+            /** Run Attributes */
+            run_attributes?: string | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Total Bytes Added */
+            total_bytes_added?: string | null;
+            /** Total Bytes Removed */
+            total_bytes_removed?: string | null;
+            /** Total Dataflows */
+            total_dataflows?: string | null;
+            /** Total Rows Read */
+            total_rows_read?: string | null;
+            /** Total Rows Written */
+            total_rows_written?: string | null;
         } & {
             [key: string]: unknown;
         };
+        /** MonitoringJobRecordsResponse */
+        MonitoringJobRecordsResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringJobRecordResponse"][];
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /** MonitoringLatestStatusResponse */
+        MonitoringLatestStatusResponse: {
+            /** Ambiguous Names */
+            ambiguous_names?: string[];
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Latest By Id */
+            latest_by_id?: {
+                [key: string]: components["schemas"]["MonitoringDataflowRecordResponse"];
+            };
+            /** Latest By Name */
+            latest_by_name?: {
+                [key: string]: components["schemas"]["MonitoringDataflowRecordResponse"];
+            };
+        };
         /** MonitoringMaintenanceResponse */
         MonitoringMaintenanceResponse: {
-            /**
-             * Bytes Reclaimed By Date
-             * @default []
-             */
-            bytes_reclaimed_by_date: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Format Comparison
-             * @default []
-             */
-            format_comparison: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: unknown;
+            /** Bytes Reclaimed By Date */
+            bytes_reclaimed_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Bytes Reclaimed By Table */
+            bytes_reclaimed_by_table?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Duration Vs Files Removed */
+            duration_vs_files_removed?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Format Comparison */
+            format_comparison?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | boolean | null;
             };
+            /** Maintenance Status Counts */
+            maintenance_status_counts?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Operation Type Counts */
+            operation_type_counts?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Per Table */
+            per_table?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Reclaim By Date */
+            reclaim_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Status By Date */
+            status_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Table Efficiency Points */
+            table_efficiency_points?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Table Outcome */
+            table_outcome?: components["schemas"]["MonitoringExtensionRowResponse"][];
+        };
+        /** MonitoringNamedCountResponse */
+        MonitoringNamedCountResponse: {
+            /** Category */
+            category?: string | null;
             /**
-             * Reclaim By Date
-             * @default []
+             * Count
+             * @default 0
              */
-            reclaim_by_date: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Status By Date
-             * @default []
-             */
-            status_by_date: {
-                [key: string]: unknown;
-            }[];
+            count: string;
+            /** Name */
+            name?: string | null;
+            /** Status */
+            status?: string | null;
         } & {
             [key: string]: unknown;
         };
         /** MonitoringOperationsResponse */
         MonitoringOperationsResponse: {
-            /**
-             * Dataflows By Date Status
-             * @default []
-             */
-            dataflows_by_date_status: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Failed Jobs
-             * @default []
-             */
-            failed_jobs: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Jobs By Date Status
-             * @default []
-             */
-            jobs_by_date_status: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: number;
+            /** Dataflow Duration By Stage */
+            dataflow_duration_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Duration Stats */
+            dataflow_duration_stats?: {
+                [key: string]: string | number | null;
+            } | null;
+            /** Dataflow Endpoint Health */
+            dataflow_endpoint_health?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Kpis */
+            dataflow_kpis?: {
+                [key: string]: string | number | null;
             };
-            /**
-             * Status By Stage
-             * @default []
-             */
-            status_by_stage: {
-                [key: string]: unknown;
-            }[];
-        } & {
-            [key: string]: unknown;
+            /** Dataflow Name Status Health */
+            dataflow_name_status_health?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Runs By Destination Operation Type */
+            dataflow_runs_by_destination_operation_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Runs By Operation Type */
+            dataflow_runs_by_operation_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Status By Stage */
+            dataflow_status_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflow Watermark Summary */
+            dataflow_watermark_summary?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Dataflows By Date Status */
+            dataflows_by_date_status?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Failed Jobs */
+            failed_jobs?: components["schemas"]["MonitoringJobRecordResponse"][];
+            /** Job Attention */
+            job_attention?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Child Fanout Distribution */
+            job_child_fanout_distribution?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Duration By Operation Types */
+            job_duration_by_operation_types?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Duration Stats */
+            job_duration_stats?: {
+                [key: string]: string | number | null;
+            } | null;
+            /** Job Runs By Dataflow Operation Type */
+            job_runs_by_dataflow_operation_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Runs By Operation Type */
+            job_runs_by_operation_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Status By Stage */
+            job_status_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Job Status Distribution */
+            job_status_distribution?: components["schemas"]["MonitoringStatusCountResponse"][];
+            /** Job Workload Efficiency */
+            job_workload_efficiency?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Jobs By Child Impact */
+            jobs_by_child_impact?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Jobs By Date Status */
+            jobs_by_date_status?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Jobs By Engine Provider */
+            jobs_by_engine_provider?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | null;
+            };
+            latest_failed_job?: components["schemas"]["MonitoringJobRecordResponse"] | null;
+            /** Phase Health */
+            phase_health?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Phase Health By Stage */
+            phase_health_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Slowest Jobs */
+            slowest_jobs?: components["schemas"]["MonitoringJobRecordResponse"][];
+            /** Status By Stage */
+            status_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Windows */
+            windows?: {
+                [key: string]: {
+                    [key: string]: string | number | null;
+                };
+            };
         };
         /** MonitoringPageResponse */
         MonitoringPageResponse: {
             /** Attention */
             attention?: components["schemas"]["MonitoringAttentionResponse"][] | null;
-            /** Coverage */
-            coverage?: {
-                [key: string]: unknown;
-            } | null;
+            coverage?: components["schemas"]["MonitoringCoverageResponse"] | null;
             diagnostics?: components["schemas"]["MonitoringDiagnosticsResponse"] | null;
             /** Errors */
-            errors?: {
-                [key: string]: unknown;
-            }[] | null;
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][] | null;
             failures?: components["schemas"]["MonitoringFailuresResponse"] | null;
             freshness?: components["schemas"]["MonitoringFreshnessResponse"] | null;
             health?: components["schemas"]["MonitoringHealthResponse"] | null;
+            /** Log Admission */
+            log_admission?: {
+                [key: string]: unknown;
+            } | null;
             maintenance?: components["schemas"]["MonitoringMaintenanceResponse"] | null;
             operations?: components["schemas"]["MonitoringOperationsResponse"] | null;
             /**
@@ -2971,50 +3971,349 @@ export interface components {
              * Schema Version
              * @constant
              */
-            schema_version: "monitoring-page.v9";
+            schema_version: "monitoring-page.v12";
             summary: components["schemas"]["MonitoringSummaryResponse"];
             volume?: components["schemas"]["MonitoringVolumeResponse"] | null;
         };
         /** MonitoringPerformanceResponse */
         MonitoringPerformanceResponse: {
-            /**
-             * Duration Distribution By Stage
-             * @default []
-             */
-            duration_distribution_by_stage: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: unknown;
+            /** Duration Breakdown */
+            duration_breakdown?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Duration By Stage */
+            duration_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Duration Distribution By Stage */
+            duration_distribution_by_stage?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Duration Vs Rows */
+            duration_vs_rows?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Engine Stage Matrix */
+            engine_stage_matrix?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | boolean | null;
             };
-            /**
-             * Performance Trend
-             * @default []
-             */
-            performance_trend: {
-                [key: string]: unknown;
-            }[];
+            /** Performance Trend */
+            performance_trend?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Phase Contribution By Stage Operation */
+            phase_contribution_by_stage_operation?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Runtime Context Profiles */
+            runtime_context_profiles?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Slowest Dataflow Profiles */
+            slowest_dataflow_profiles?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Slowest Dataflows */
+            slowest_dataflows?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Workload Efficiency Points */
+            workload_efficiency_points?: ((string | number | boolean | null)[] | components["schemas"]["MonitoringExtensionRowResponse"])[];
+        };
+        /** MonitoringReconciliationCheckResponse */
+        MonitoringReconciliationCheckResponse: {
+            /** Difference */
+            difference?: string | null;
+            /** Expected */
+            expected?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Latest Child Time */
+            latest_child_time?: string | null;
+            /** Log Bytes Dropped */
+            log_bytes_dropped?: string | null;
+            /** Log Records Dropped */
+            log_records_dropped?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Metric */
+            metric?: string | null;
+            /** Observed */
+            observed?: string | null;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Raw Record Json */
+            raw_record_json?: string | null;
+            /** Scope Coverage */
+            scope_coverage?: string | null;
+            /** Severity */
+            severity?: string | null;
         } & {
             [key: string]: unknown;
         };
         /** MonitoringReconciliationResponse */
         MonitoringReconciliationResponse: {
-            /**
-             * Checks
-             * @default []
-             */
-            checks: {
-                [key: string]: unknown;
-            }[];
+            /** Checks */
+            checks?: components["schemas"]["MonitoringReconciliationCheckResponse"][];
             /**
              * Mismatch Count
              * @default 0
              */
-            mismatch_count: number;
+            mismatch_count: string;
+            /** Scope Coverage */
+            scope_coverage?: string | null;
+            /**
+             * Status
+             * @default unknown
+             */
+            status: string;
+            summary?: components["schemas"]["MonitoringReconciliationSummaryResponse"] | null;
+        };
+        /** MonitoringReconciliationSummaryResponse */
+        MonitoringReconciliationSummaryResponse: {
+            /**
+             * Comparable Checks Count
+             * @default 0
+             */
+            comparable_checks_count: string;
+            /**
+             * Comparable Jobs Count
+             * @default 0
+             */
+            comparable_jobs_count: string;
+            /**
+             * Mismatch Checks Count
+             * @default 0
+             */
+            mismatch_checks_count: string;
+            /**
+             * Mismatch Jobs Count
+             * @default 0
+             */
+            mismatch_jobs_count: string;
+            /** Scope Coverage */
+            scope_coverage?: string | null;
+            /**
+             * Total Checks Count
+             * @default 0
+             */
+            total_checks_count: string;
+            /**
+             * Total Jobs Count
+             * @default 0
+             */
+            total_jobs_count: string;
+            /**
+             * Unassessed Checks Count
+             * @default 0
+             */
+            unassessed_checks_count: string;
+            /**
+             * Unassessed Jobs Count
+             * @default 0
+             */
+            unassessed_jobs_count: string;
+            /** Unassessed Reason */
+            unassessed_reason?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringRecordsSummaryResponse */
+        MonitoringRecordsSummaryResponse: {
+            /** Analytics Generation */
+            analytics_generation?: string | null;
+            /** As Of */
+            as_of?: string | null;
+            /** Cache */
+            cache?: string | null;
+            /** Identity Version */
+            identity_version?: string | null;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Records */
+            records: number;
+            /** Total Records */
+            total_records: number;
+        };
+        /** MonitoringRecoveredAttemptResponse */
+        MonitoringRecoveredAttemptResponse: {
+            /** Attempt Message */
+            attempt_message?: string | null;
+            /** Attempt Number */
+            attempt_number: string;
+            /** Attempt Record Json */
+            attempt_record_json: string;
+            /** Dataflow Id */
+            dataflow_id?: string | null;
+            /** Dataflow Name */
+            dataflow_name?: string | null;
+            /** Dataflow Run Id */
+            dataflow_run_id: string;
+            /** Event Time */
+            event_time?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Status */
+            status: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringRegistryEntityResponse */
+        MonitoringRegistryEntityResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringRegistryRowResponse"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            section: "configuration" | "list" | "overview" | "read-watermark" | "technical";
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /** MonitoringRegistryExecutionResponse */
+        MonitoringRegistryExecutionResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringRegistryRunReferenceResponse"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            section: "execution";
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /** MonitoringRegistryProfileSnapshotResponse */
+        MonitoringRegistryProfileSnapshotResponse: {
+            /** File Kind */
+            _file_kind?: string | null;
+            /** File Uri */
+            _file_uri?: string | null;
+            /** Record Line */
+            _record_line?: number | null;
+            /** Source Id */
+            _source_id: number;
+            /** Dataflow Description */
+            dataflow_description?: string | null;
+            /** Dataflow Id */
+            dataflow_id: string;
+            /** Dataflow Name */
+            dataflow_name?: string | null;
+            /** Dataflow Run Id */
+            dataflow_run_id: string;
+            /** Event Time */
+            event_time?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /**
+             * Outside Filter
+             * @default false
+             */
+            outside_filter: boolean;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * MonitoringRegistryRowResponse
+         * @description Declared entity/runtime boundaries; facet metrics keep their existing owners.
+         */
+        MonitoringRegistryRowResponse: {
+            /** Dataflow Id */
+            dataflow_id?: string | null;
+            /** Engine Name */
+            engine_name?: string | null;
+            /** Latest File Kind */
+            latest_file_kind?: string | null;
+            /** Latest File Uri */
+            latest_file_uri?: string | null;
+            /** Latest Log Session Id */
+            latest_log_session_id?: string | null;
+            /** Latest Record Line */
+            latest_record_line?: number | null;
+            /** Latest Run At */
+            latest_run_at?: string | null;
+            /** Latest Run Id */
+            latest_run_id?: string | null;
+            /** Latest Source Id */
+            latest_source_id?: number | null;
+            /** Metadata Provider Name */
+            metadata_provider_name?: string | null;
+            /** Platform Name */
+            platform_name?: string | null;
+            profile_snapshot?: components["schemas"]["MonitoringRegistryProfileSnapshotResponse"] | null;
+            /** Recent Runs */
+            recent_runs?: components["schemas"]["MonitoringRegistryRunReferenceResponse"][];
+            /** Run Count */
+            run_count?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringRegistryRunReferenceResponse */
+        MonitoringRegistryRunReferenceResponse: {
+            /** File Kind */
+            _file_kind?: string | null;
+            /** File Uri */
+            _file_uri?: string | null;
+            /** Record Line */
+            _record_line?: number | null;
+            /** Source Id */
+            _source_id: number;
+            /** Dataflow Id */
+            dataflow_id: string;
+            /** Dataflow Run Id */
+            dataflow_run_id: string;
+            /** Event Time */
+            event_time?: string | null;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringRegistryRuntimeResponse */
+        MonitoringRegistryRuntimeResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringRegistryRuntimeRowResponse"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            section: "runtime";
+            summary: components["schemas"]["MonitoringRecordsSummaryResponse"];
+        };
+        /** MonitoringRegistryRuntimeRowResponse */
+        MonitoringRegistryRuntimeRowResponse: {
+            /** Dataflow Id */
+            dataflow_id: string;
+            /** Engine Name */
+            engine_name?: string | null;
+            /** Latest File Kind */
+            latest_file_kind?: string | null;
+            /** Latest File Uri */
+            latest_file_uri?: string | null;
+            /** Latest Log Session Id */
+            latest_log_session_id?: string | null;
+            /** Latest Record Line */
+            latest_record_line?: number | null;
+            /** Latest Run At */
+            latest_run_at?: string | null;
+            /** Latest Run Id */
+            latest_run_id: string;
+            /** Latest Source Id */
+            latest_source_id: number;
+            /** Metadata Provider Name */
+            metadata_provider_name?: string | null;
+            /** Platform Name */
+            platform_name?: string | null;
+            profile_snapshot?: components["schemas"]["MonitoringRegistryProfileSnapshotResponse"] | null;
+            /** Recent Runs */
+            recent_runs?: components["schemas"]["MonitoringRegistryRunReferenceResponse"][];
+            /** Run Count */
+            run_count: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MonitoringStatusCountResponse */
+        MonitoringStatusCountResponse: {
+            /**
+             * Count
+             * @default 0
+             */
+            count: string;
             /**
              * Status
              * @default unknown
@@ -3029,31 +4328,30 @@ export interface components {
              * Active Engines
              * @default 0
              */
-            active_engines: number;
+            active_engines: string;
             /**
              * Active Metadata Providers
              * @default 0
              */
-            active_metadata_providers: number;
+            active_metadata_providers: string;
             /**
              * Dataflow Records
              * @default 0
              */
-            dataflow_records: number;
-            /**
-             * Date Range
-             * @default {}
-             */
-            date_range: {
+            dataflow_records: string;
+            /** Date Range */
+            date_range?: {
                 [key: string]: string | null;
             };
             /** Effective Grain */
             effective_grain?: string | null;
+            /** Identity Version */
+            identity_version?: string | null;
             /**
              * Job Records
              * @default 0
              */
-            job_records: number;
+            job_records: string;
             /** Latest Dataflow Log At */
             latest_dataflow_log_at?: string | null;
             /** Latest Job Log At */
@@ -3061,51 +4359,75 @@ export interface components {
             /** Latest Log At */
             latest_log_at?: string | null;
             /**
-             * Log Paths
+             * Log Base Paths
              * @default 0
              */
-            log_paths: number;
+            log_base_paths: string;
             /** Requested Grain */
             requested_grain?: string | null;
             /** Timezone */
             timezone?: string | null;
             /** Timezone Source */
             timezone_source?: string | null;
-        } & {
-            [key: string]: unknown;
+        };
+        /** MonitoringSystemLogFileResponse */
+        MonitoringSystemLogFileResponse: {
+            /** Event Max Timestamp */
+            event_max_timestamp?: string | null;
+            /** Event Min Timestamp */
+            event_min_timestamp?: string | null;
+            /** File Kind */
+            file_kind: string;
+            /** File Uri */
+            file_uri: string;
+            /** Log Session Id */
+            log_session_id?: string | null;
+            /** Log Timestamp */
+            log_timestamp?: string | null;
+            /** Row Count */
+            row_count: number;
+            /** Run Date */
+            run_date?: string | null;
+            /** Source Id */
+            source_id: number;
+        };
+        /** MonitoringSystemLogsResponse */
+        MonitoringSystemLogsResponse: {
+            /** Errors */
+            errors?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Files */
+            files?: components["schemas"]["MonitoringSystemLogFileResponse"][];
+            /** Records */
+            records?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Total */
+            total: number;
         };
         /** MonitoringVolumeResponse */
         MonitoringVolumeResponse: {
-            /**
-             * Bytes By Date
-             * @default []
-             */
-            bytes_by_date: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Kpis
-             * @default {}
-             */
-            kpis: {
-                [key: string]: number;
+            /** Bytes By Date */
+            bytes_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Kpis */
+            kpis?: {
+                [key: string]: string | number | null;
             };
-            /**
-             * Rows By Date
-             * @default []
-             */
-            rows_by_date: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Volume By Load Type
-             * @default []
-             */
-            volume_by_load_type: {
-                [key: string]: unknown;
-            }[];
-        } & {
-            [key: string]: unknown;
+            /** Route Volume */
+            route_volume?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Rows By Date */
+            rows_by_date?: components["schemas"]["MonitoringDateBucketResponse"][];
+            /** Top Dataflows By Bytes Added */
+            top_dataflows_by_bytes_added?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Top Dataflows By Lakehouse Rows Written */
+            top_dataflows_by_lakehouse_rows_written?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Top Dataflows By Net Bytes */
+            top_dataflows_by_net_bytes?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Top Dataflows By Rows Read */
+            top_dataflows_by_rows_read?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Top Dataflows By Rows Written */
+            top_dataflows_by_rows_written?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Volume By Load Type */
+            volume_by_load_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
+            /** Volume By Workload Type */
+            volume_by_workload_type?: components["schemas"]["MonitoringExtensionRowResponse"][];
         };
         /** OverviewCacheResponse */
         OverviewCacheResponse: {
@@ -3177,7 +4499,7 @@ export interface components {
         /** OverviewMonitoringResponse */
         OverviewMonitoringResponse: {
             /** Active Engines */
-            active_engines: number;
+            active_engines: string;
             /** Dataflow Success Rate */
             dataflow_success_rate: number;
             /** Date Range */
@@ -3190,14 +4512,14 @@ export interface components {
             }[];
             /** Failed Job Windows */
             failed_job_windows: {
-                [key: string]: number;
+                [key: string]: string;
             };
             /** Job Records */
-            job_records: number;
+            job_records: string;
             /** Latest Log At */
             latest_log_at?: string | null;
             /** Total Failures */
-            total_failures: number;
+            total_failures: string;
         };
         /** OverviewNamedCountResponse */
         OverviewNamedCountResponse: {
@@ -3242,10 +4564,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
-            /** Etl Log Path Count */
-            etl_log_path_count: number;
             /** Id */
             id: number;
+            /** Log Source Count */
+            log_source_count: number;
             /** Metadata Source Count */
             metadata_source_count: number;
             /** Name */
@@ -3498,10 +4820,10 @@ export interface components {
             environment_count: number;
             /** Environments */
             environments: components["schemas"]["ProjectEnvironmentSummaryResponse"][];
-            /** Etl Log Path Count */
-            etl_log_path_count: number;
             /** Id */
             id: number;
+            /** Log Source Count */
+            log_source_count: number;
             /** Metadata Source Count */
             metadata_source_count: number;
             /** Name */
@@ -3775,8 +5097,14 @@ export interface components {
             error?: {
                 [key: string]: unknown;
             } | null;
+            /** Job Id */
+            job_id?: number | null;
             /** Last Successful At */
             last_successful_at?: string | null;
+            /** Result */
+            result?: {
+                [key: string]: unknown;
+            } | null;
             /** Started At */
             started_at?: string | null;
             /** State */
@@ -3786,80 +5114,20 @@ export interface components {
             /** Trigger */
             trigger?: string | null;
         };
-        /** SourceSyncJobResponse */
-        SourceSyncJobResponse: {
-            /** Completed At */
-            completed_at?: string | null;
-            /** Environment Id */
-            environment_id: number;
-            /** Id */
-            id: number;
-            /** Job Type */
-            job_type: string;
-            /** Message */
-            message?: string | null;
-            /** Result */
-            result?: {
-                [key: string]: unknown;
-            } | null;
-            /** Source Id */
-            source_id: number;
-            /** Source Kind */
-            source_kind: string;
-            /**
-             * Started At
-             * Format: date-time
-             */
-            started_at: string;
-            /** Status */
-            status: string;
-        };
         /** SourceSyncStatusResponse */
         SourceSyncStatusResponse: {
-            /** Active Operation */
-            active_operation?: ("validate" | "sync") | null;
-            /** Checked At */
-            checked_at?: string | null;
-            /** Error */
-            error?: {
-                [key: string]: unknown;
-            } | null;
             freshness?: components["schemas"]["SourceFreshnessStatusResponse"] | null;
-            /** Last Observed At */
-            last_observed_at?: string | null;
-            latest_job?: components["schemas"]["SourceSyncJobResponse"] | null;
             /** Message */
             message: string;
-            /** Next Check At */
-            next_check_at?: string | null;
-            observation?: components["schemas"]["SourceObservationStatusResponse"] | null;
-            /**
-             * Observation Failure Count
-             * @default 0
-             */
-            observation_failure_count: number;
-            /** Observation Paused At */
-            observation_paused_at?: string | null;
-            /**
-             * Observation State
-             * @default active
-             * @enum {string}
-             */
-            observation_state: "active" | "retrying" | "paused";
-            /** Pending Changes */
-            pending_changes?: boolean | null;
-            /** Revision */
-            revision?: {
-                [key: string]: unknown;
-            } | null;
+            observation: components["schemas"]["SourceObservationStatusResponse"];
             /** Source Id */
             source_id: number;
             /** Source Kind */
             source_kind: string;
             /** Status */
             status: string;
-            sync_execution?: components["schemas"]["SourceSyncExecutionStatusResponse"] | null;
-            validation?: components["schemas"]["SourceValidationStatusResponse"] | null;
+            sync_execution: components["schemas"]["SourceSyncExecutionStatusResponse"];
+            validation: components["schemas"]["SourceValidationStatusResponse"];
         };
         /** SourceUpdate */
         SourceUpdate: {
@@ -3894,6 +5162,8 @@ export interface components {
             }[];
             /** Message */
             message: string;
+            /** Metadata Write Back Supported */
+            metadata_write_back_supported?: boolean | null;
             /**
              * Record Counts
              * @default {}
@@ -3947,8 +5217,79 @@ export interface components {
              * @constant
              */
             schema_version: "sources-workspace.v1";
+            /** Sql Sources */
+            sql_sources: components["schemas"]["SqlSourceRead"][];
             /** Statuses */
             statuses: components["schemas"]["SourceSyncStatusResponse"][];
+        };
+        /** SqlReferenceRequest */
+        SqlReferenceRequest: {
+            /** Query */
+            query: string;
+            /** Source Id */
+            source_id: number;
+        };
+        /** SqlReferenceResponse */
+        SqlReferenceResponse: {
+            /** Base Kind */
+            base_kind?: string | null;
+            /** Base Uri */
+            base_uri?: string | null;
+            /** Config Revision */
+            config_revision?: {
+                [key: string]: unknown;
+            } | null;
+            /** Content */
+            content: string;
+            /** Declared Query */
+            declared_query: string;
+            /** File Uri */
+            file_uri?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "inline" | "file";
+            /** Relative Path */
+            relative_path?: string | null;
+            /** Revision */
+            revision?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "sql-reference.v1";
+            /** Source Id */
+            source_id: number;
+            /** Source Uri */
+            source_uri: string;
+        };
+        /** SqlSourceRead */
+        SqlSourceRead: {
+            configured_location?: components["schemas"]["ConfiguredSourceLocationResponse"] | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Environment Id */
+            environment_id: number;
+            /** Id */
+            id: number;
+            /** Label */
+            label?: string | null;
+            latest_validation?: components["schemas"]["SourceValidationResponse"] | null;
+            /** Source Config */
+            source_config?: {
+                [key: string]: unknown;
+            } | null;
+            storage: components["schemas"]["StorageBindingResponse"];
+            /** Uri */
+            uri: string;
         };
         /** StorageBindingRequest */
         StorageBindingRequest: {
@@ -4042,7 +5383,7 @@ export interface components {
              * @default rebuild_required
              * @enum {string}
              */
-            build_state: "ready" | "rebuild_required";
+            build_state: "ready" | "building" | "rebuild_required";
             /**
              * Cached Source Count
              * @default 0
@@ -4078,6 +5419,10 @@ export interface components {
             path: string;
             /** Published At */
             published_at?: string | null;
+            /** Resource Limits */
+            resource_limits?: {
+                [key: string]: unknown;
+            };
             /** Schema Version */
             schema_version?: number | null;
             /**
@@ -5032,7 +6377,10 @@ export interface operations {
     };
     get_lineage_api_v1_environments__environment_id__lineage_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Compose the current Studio draft without publishing it */
+                draft?: boolean;
+            };
             header?: never;
             path: {
                 environment_id: number;
@@ -5416,18 +6764,81 @@ export interface operations {
             };
         };
     };
-    put_environment_metadata_editor_document_api_v1_environments__environment_id__metadata_editor_document_put: {
+    delete_metadata_backup_api_v1_environments__environment_id__metadata_backups__backup_id__delete: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 environment_id: number;
+                backup_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_metadata_backup_editor_document_api_v1_environments__environment_id__metadata_backups__backup_id__editor_document_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                backup_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataEditorDocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_metadata_backup_api_v1_environments__environment_id__metadata_backups__backup_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                backup_id: number;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["MetadataEditorSaveRequest"];
+                "application/json": components["schemas"]["MetadataBackupRestoreRequest"];
             };
         };
         responses: {
@@ -5462,7 +6873,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["MetadataEditorValidationRequest"];
+                "application/json": components["schemas"]["MetadataEditorPayloadRequest"];
             };
         };
         responses: {
@@ -5503,41 +6914,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    validate_environment_metadata_editor_document_api_v1_environments__environment_id__metadata_editor_document_validate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                environment_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MetadataEditorValidationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MetadataEditorValidationResponse"];
-                };
             };
             /** @description Validation Error */
             422: {
@@ -5876,6 +7252,294 @@ export interface operations {
             };
         };
     };
+    prepare_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations_prepare_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataWritePrepareRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataWriteOperationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_environment_metadata_write_operation_api_v1_environments__environment_id__metadata_write_operations__operation_key__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                operation_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataWriteOperationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    abandon_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__abandon_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                operation_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataWriteAbandonRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataWriteOperationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                operation_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataWriteApplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataWriteOperationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_environment_metadata_write_api_v1_environments__environment_id__metadata_write_operations__operation_key__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                operation_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataWriteApplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataWriteOperationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_monitoring_dataflow_registry_api_v1_environments__environment_id__monitoring_dataflow_registry_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                sortBy?: string;
+                sortDir?: "asc" | "desc";
+                facet?: "all" | "freshness" | "performance" | "volume";
+                range?: string;
+                grain?: string;
+                startTime?: string;
+                endTime?: string;
+                status?: string;
+                stage?: string;
+                connection?: string;
+                engine?: string;
+                provider?: string;
+                sourceType?: string;
+                destinationType?: string;
+                loadType?: string;
+                operationType?: string;
+                search?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
+                investigateValue?: string;
+                asOf?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
+            };
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitoringDataflowRegistryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_monitoring_dataflow_registry_detail_api_v1_environments__environment_id__monitoring_dataflow_registry_detail_get: {
+        parameters: {
+            query: {
+                dataflowId: string;
+                section?: "overview" | "execution" | "runtime" | "read-watermark" | "configuration" | "technical";
+                limit?: number;
+                offset?: number;
+                sortBy?: ("event_time" | "latest_run_at" | "dataflow_run_id" | "stage" | "duration_seconds" | "status" | "phase_health" | "source_rows_read" | "destination_rows_written" | "message" | "platform_name" | "engine_name" | "metadata_provider_name" | "run_count") | null;
+                sortDir?: "asc" | "desc";
+                range?: string;
+                grain?: string;
+                startTime?: string;
+                endTime?: string;
+                status?: string;
+                stage?: string;
+                connection?: string;
+                engine?: string;
+                provider?: string;
+                sourceType?: string;
+                destinationType?: string;
+                loadType?: string;
+                operationType?: string;
+                search?: string;
+                asOf?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
+            };
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitoringDataflowRegistryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_dataflow_logs_api_v1_environments__environment_id__monitoring_dataflows_get: {
         parameters: {
             query?: {
@@ -5896,8 +7560,11 @@ export interface operations {
                 loadType?: string;
                 operationType?: string;
                 search?: string;
-                investigateKind?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
                 investigateValue?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
             };
             header?: never;
             path: {
@@ -5913,7 +7580,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringDataflowRecordsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5929,7 +7596,11 @@ export interface operations {
     };
     get_monitoring_filter_options_api_v1_environments__environment_id__monitoring_filter_options_get: {
         parameters: {
-            query?: never;
+            query?: {
+                range?: "all" | "24h" | "3d" | "7d" | "30d" | "90d" | "custom" | "today";
+                startTime?: string;
+                endTime?: string;
+            };
             header?: never;
             path: {
                 environment_id: number;
@@ -5944,7 +7615,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringFilterOptionsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5978,8 +7649,11 @@ export interface operations {
                 loadType?: string;
                 operationType?: string;
                 search?: string;
-                investigateKind?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
                 investigateValue?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
             };
             header?: never;
             path: {
@@ -5995,7 +7669,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringJobRecordsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6026,7 +7700,67 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringLatestStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_monitoring_diagnostics_evidence_api_v1_environments__environment_id__monitoring_pages_diagnostics_evidence_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                view?: "registry" | "detail";
+                findingGroup?: string | null;
+                sortBy?: string | null;
+                sortDir?: ("asc" | "desc") | null;
+                findingKind?: ("all" | "findings" | "limitations") | null;
+                asOf?: string;
+                expectedGeneration?: string | null;
+                range?: string;
+                grain?: string;
+                startTime?: string;
+                endTime?: string;
+                status?: string;
+                stage?: string;
+                connection?: string;
+                engine?: string;
+                provider?: string;
+                sourceType?: string;
+                destinationType?: string;
+                loadType?: string;
+                operationType?: string;
+                search?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
+                investigateValue?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
+            };
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitoringDiagnosticsEvidenceResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6057,8 +7791,11 @@ export interface operations {
                 loadType?: string;
                 operationType?: string;
                 search?: string;
-                investigateKind?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
                 investigateValue?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
             };
             header?: never;
             path: {
@@ -6096,6 +7833,9 @@ export interface operations {
                 offset?: number;
                 sortBy?: string;
                 sortDir?: string;
+                view?: "detail" | "registry" | "destination-runs";
+                expectedIdentityVersion?: string | null;
+                destinationTarget?: string;
                 range?: string;
                 grain?: string;
                 startTime?: string;
@@ -6110,8 +7850,11 @@ export interface operations {
                 loadType?: string;
                 operationType?: string;
                 search?: string;
-                investigateKind?: string;
+                investigateKind?: "" | "job_id" | "dataflow_run_id" | "dataflow_id" | "declared_destination" | "physical_destination" | "dataflow" | "destination_table";
                 investigateValue?: string;
+                log_session_scope?: "all" | "null" | "exact";
+                log_session_id?: string | null;
+                investigateSourceId?: number | null;
             };
             header?: never;
             path: {
@@ -6128,7 +7871,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringEvidenceResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6146,7 +7889,12 @@ export interface operations {
         parameters: {
             query: {
                 job_id: string;
+                source_id?: number | null;
+                log_session_id?: string | null;
+                log_session_scope?: "all" | "null" | "exact";
                 dataflow_id?: string;
+                dataflow_run_id?: string;
+                event_name?: string;
                 include_dataflow_logs?: boolean;
                 level?: string;
                 q?: string;
@@ -6167,7 +7915,43 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MonitoringSystemLogsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_system_logs_api_v1_environments__environment_id__monitoring_system_logs_download_get: {
+        parameters: {
+            query: {
+                job_id: string;
+                source_id?: number | null;
+                log_session_id?: string | null;
+                log_session_scope?: "all" | "null" | "exact";
+            };
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Original system log lines as a binary JSONL attachment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
                 };
             };
             /** @description Validation Error */
@@ -6277,7 +8061,9 @@ export interface operations {
     };
     get_sources_workspace_api_v1_environments__environment_id__sources_workspace_get: {
         parameters: {
-            query?: never;
+            query?: {
+                view?: "full" | "logs-summary";
+            };
             header?: never;
             path: {
                 environment_id: number;
@@ -6306,12 +8092,114 @@ export interface operations {
             };
         };
     };
-    delete_metadata_backup_api_v1_metadata_backups__backup_id__delete: {
+    read_sql_reference_api_v1_environments__environment_id__sql_reference_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                backup_id: number;
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SqlReferenceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SqlReferenceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sql_sources_api_v1_environments__environment_id__sql_sources_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SqlSourceRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_sql_source_api_v1_environments__environment_id__sql_sources_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SqlSourceRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_sql_source_api_v1_environments__environment_id__sql_sources__source_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                source_id: number;
             };
             cookie?: never;
         };
@@ -6335,16 +8223,21 @@ export interface operations {
             };
         };
     };
-    get_metadata_backup_editor_document_api_v1_metadata_backups__backup_id__editor_document_get: {
+    patch_sql_source_api_v1_environments__environment_id__sql_sources__source_id__patch: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                backup_id: number;
+                environment_id: number;
+                source_id: number;
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceUpdate"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -6352,7 +8245,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MetadataEditorDocumentResponse"];
+                    "application/json": components["schemas"]["SqlSourceRead"];
                 };
             };
             /** @description Validation Error */
@@ -6366,20 +8259,17 @@ export interface operations {
             };
         };
     };
-    restore_metadata_backup_api_v1_metadata_backups__backup_id__restore_post: {
+    get_sql_source_delete_impact_api_v1_environments__environment_id__sql_sources__source_id__delete_impact_get: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                backup_id: number;
+                environment_id: number;
+                source_id: number;
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MetadataBackupRestoreRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -6387,7 +8277,103 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MetadataEditorWorkspaceResponse"];
+                    "application/json": components["schemas"]["SourceDeleteImpactResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refresh_sql_source_api_v1_environments__environment_id__sql_sources__source_id__refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                source_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceSyncStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_sql_source_observation_api_v1_environments__environment_id__sql_sources__source_id__retry_observation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                source_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceSyncStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_sql_source_api_v1_environments__environment_id__sql_sources__source_id__validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                environment_id: number;
+                source_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceValidationResponse"];
                 };
             };
             /** @description Validation Error */

@@ -1,6 +1,10 @@
 const TIMEZONE_SUFFIX = /(Z|[+-]\d{2}:\d{2})$/i;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const EXPLICIT_TIMEZONE_SUFFIX = /(Z|[+-]\d{2}:?\d{2}|\s(?:UTC|GMT)(?:[+-]\d{1,2}(?::?\d{2})?)?)$/i;
+const TIMEZONE_CACHE_LIMIT = 32;
+const FORMATTER_CACHE_LIMIT = 32;
+const timezoneCache = new Map<string, string>();
+const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 export function parseTimestamp(value?: string | null) {
   if (!value) return null;
@@ -67,20 +71,51 @@ export function formatTimestampForDisplay(value: unknown, timezoneName?: string 
   return formatTimestampInTimezone(timestamp, resolveIntlTimezone(timezoneName));
 }
 
+/**
+ * Format event timestamps for the System Log viewer without changing the
+ * precision contract used by ordinary Monitoring tables. Valid date-times
+ * always show milliseconds; date-only, naive legacy, and invalid values keep
+ * the established display behavior and never receive an invented instant.
+ */
+export function formatTimestampForLogDisplay(value: unknown, timezoneName?: string | null, fallback = "-") {
+  if (value === null || value === undefined || value === "") return fallback;
+  const rawValue = String(value).trim();
+  if (!rawValue) return fallback;
+  if (DATE_ONLY.test(rawValue)) return rawValue;
+
+  if (!hasExplicitTimezone(rawValue)) {
+    const timestamp = parseTimestamp(rawValue);
+    if (timestamp === null || !/T|\s\d{2}:\d{2}/.test(rawValue)) {
+      return tidyTimestamp(rawValue);
+    }
+    return formatNaiveTimestampWithMilliseconds(rawValue);
+  }
+
+  const timestamp = Date.parse(rawValue);
+  if (!Number.isFinite(timestamp)) return tidyTimestamp(rawValue);
+  return formatTimestampInTimezone(timestamp, resolveIntlTimezone(timezoneName), true);
+}
+
 export function resolveIntlTimezone(timezoneName?: string | null) {
   const candidate = timezoneName?.trim() || "UTC";
+  const cached = timezoneCache.get(candidate);
+  if (cached) return cached;
+
+  let resolvedTimezone: string;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
-    return candidate;
+    resolvedTimezone = candidate;
   } catch {
     const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     try {
       new Intl.DateTimeFormat("en-US", { timeZone: browserTimezone }).format();
-      return browserTimezone;
+      resolvedTimezone = browserTimezone;
     } catch {
-      return "UTC";
+      resolvedTimezone = "UTC";
     }
   }
+
+  return setBoundedCacheValue(timezoneCache, candidate, resolvedTimezone, TIMEZONE_CACHE_LIMIT);
 }
 
 export function elapsedWholeDays(value?: string | null, now = Date.now()) {
@@ -89,8 +124,24 @@ export function elapsedWholeDays(value?: string | null, now = Date.now()) {
   return Math.max(0, Math.floor((now - timestamp) / 86_400_000));
 }
 
-function formatTimestampInTimezone(timestamp: number, timezoneName: string) {
-  const formatter = new Intl.DateTimeFormat("en-US", {
+/**
+ * Preserve the compact locale timestamp used in status-history tooltips while
+ * reusing the formatter for each resolved timezone.
+ */
+export function formatTimestampForStatusHistory(value: string, timezoneName: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const timezone = resolveIntlTimezone(timezoneName);
+  return getCachedDateTimeFormatter(
+    undefined,
+    timezone,
+    "status-history",
+    { dateStyle: "short", timeStyle: "medium", timeZone: timezone },
+  ).format(date);
+}
+
+function formatTimestampInTimezone(timestamp: number, timezoneName: string, includeMilliseconds = false) {
+  const formatter = getCachedDateTimeFormatter("en-US", timezoneName, "display", {
     timeZone: timezoneName,
     year: "numeric",
     month: "2-digit",
@@ -100,7 +151,7 @@ function formatTimestampInTimezone(timestamp: number, timezoneName: string) {
     second: "2-digit",
     hour12: false,
     hourCycle: "h23",
-    timeZoneName: "short"
+    timeZoneName: "short",
   });
   const parts = formatter.formatToParts(new Date(timestamp));
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
@@ -111,7 +162,15 @@ function formatTimestampInTimezone(timestamp: number, timezoneName: string) {
   const minute = part("minute");
   const second = part("second");
   const timezone = part("timeZoneName");
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}${timezone ? ` ${timezone}` : ""}`.trim();
+  const milliseconds = includeMilliseconds ? `.${String(new Date(timestamp).getUTCMilliseconds()).padStart(3, "0")}` : "";
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}${milliseconds}${timezone ? ` ${timezone}` : ""}`.trim();
+}
+
+function formatNaiveTimestampWithMilliseconds(value: string) {
+  const tidy = value.replace("T", " ").trim();
+  const fraction = tidy.match(/\.(\d+)$/)?.[1] ?? "";
+  const base = tidy.replace(/\.\d+$/, "");
+  return `${base}.${fraction.padEnd(3, "0").slice(0, 3)}`;
 }
 
 function tidyTimestamp(value: string) {
@@ -119,6 +178,32 @@ function tidyTimestamp(value: string) {
     .replace("T", " ")
     .replace(/\.\d+/, "")
     .trim();
+}
+
+function getCachedDateTimeFormatter(
+  locale: string | undefined,
+  timezoneName: string,
+  formatKey: string,
+  options: Intl.DateTimeFormatOptions,
+) {
+  const key = `${locale ?? "default"}|${timezoneName}|${formatKey}`;
+  const cached = dateTimeFormatterCache.get(key);
+  if (cached) return cached;
+  return setBoundedCacheValue(
+    dateTimeFormatterCache,
+    key,
+    new Intl.DateTimeFormat(locale, options),
+    FORMATTER_CACHE_LIMIT,
+  );
+}
+
+function setBoundedCacheValue<T>(cache: Map<string, T>, key: string, value: T, limit: number) {
+  if (!cache.has(key) && cache.size >= limit) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) cache.delete(oldestKey);
+  }
+  cache.set(key, value);
+  return value;
 }
 
 function formatUnit(value: number, unit: string) {

@@ -60,6 +60,10 @@ export function ModuleView(props: ModuleViewProps) {
 function ResolveModule({ router, workspace, settings, diagnostics, modules, environmentContext }: ModuleViewProps) {
   const { route } = router;
   const { publish } = useNotificationCenter();
+  useEffect(() => {
+    if (!workspace.metadataWarning || !route.environmentId) return;
+    publish({ tone: "warning", title: "Source saved; refresh needs attention", location: route.module, message: workspace.metadataWarning, dedupeKey: `environment:${route.environmentId}:metadata-refresh:${workspace.metadataWarning}` });
+  }, [publish, route.environmentId, route.module, workspace.metadataWarning]);
   const metadataWarning = route.module === "metadata"
     ? errorListMessage(workspace.metadataEditorDocument?.source.revision?.errors)
     : null;
@@ -94,7 +98,7 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           <ProjectDetailPage
             project={workspace.selectedProjectSummary}
             projectId={route.projectId}
-            projectName={workspace.selectedProject?.name ?? workspace.selectedProjectSummary?.name ?? null}
+            projectName={workspace.selectedProjectSummary?.name ?? null}
             section={route.projectSection ?? "overview"}
             busy={workspace.busy}
             routeSearch={route.search}
@@ -171,13 +175,15 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
       return (
         <SourcesPage
           metadataSources={workspace.metadataSources}
-          logPaths={workspace.logPaths}
+          sqlSources={workspace.sqlSources}
+          logBasePaths={workspace.logBasePaths}
           codeArtifacts={workspace.codeArtifacts}
           busy={workspace.busy || workspace.loading}
           selectedEnvironmentId={route.environmentId}
           onImportMetadataSources={workspace.importMetadataSources}
+          onAddSqlSource={workspace.addSqlSource}
           onImportDatacoolieProjectSources={workspace.importDatacoolieProjectSources}
-          onAddLogPath={workspace.addLogPath}
+          onAddLogBasePath={workspace.addLogBasePath}
           onAddCodeArtifact={workspace.addCodeArtifact}
           onUpdateSource={workspace.updateSource}
           onDeleteSource={workspace.deleteSource}
@@ -214,10 +220,11 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           loading={workspace.loading}
           busy={workspace.busy}
           savingDraft={workspace.metadataEditorSavingDraft}
-          onValidate={workspace.validateMetadataEditorDocument}
           onSaveDraft={workspace.saveMetadataEditorDraft}
           onDiscardDraft={workspace.discardMetadataEditorDraft}
-          onSave={workspace.saveMetadataEditorDocument}
+          onPrepareSave={workspace.prepareMetadataEditorDocument}
+          onApplySave={workspace.applyMetadataEditorWrite}
+          onAbandonSave={workspace.abandonMetadataEditorWrite}
           onListBackups={workspace.listMetadataBackups}
           onPreviewBackup={workspace.previewMetadataBackup}
           onRestoreBackup={workspace.restoreMetadataBackup}
@@ -234,9 +241,10 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
           metadataEditorDraft={workspace.metadataEditorDraft}
           onEnsureMetadataEditor={workspace.ensureMetadataEditorContext}
           metadataBusy={workspace.busy}
-          onValidateMetadata={workspace.validateMetadataEditorDocument}
           onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
-          onSaveMetadata={workspace.saveMetadataEditorDocument}
+          onPrepareMetadataWrite={workspace.prepareMetadataEditorDocument}
+          onApplyMetadataWrite={workspace.applyMetadataEditorWrite}
+          onAbandonMetadataWrite={workspace.abandonMetadataEditorWrite}
           routeSearch={route.search}
           onFocusInLineage={(assetId) => {
             router.navigate("lineage", `focusAsset=${encodeURIComponent(assetId)}`);
@@ -267,8 +275,20 @@ function ResolveModule({ router, workspace, settings, diagnostics, modules, envi
       return (
         <MonitoringRoute
           environmentId={route.environmentId}
+          timezoneName={settings.settings?.timezone ?? null}
+          timezoneRevision={settings.settings?.updated_at ?? null}
+          identityRevision={environmentContext
+            ? JSON.stringify([
+              environmentContext.versions.metadata_catalog,
+              environmentContext.versions.operations,
+            ])
+            : null}
+          timezoneLoading={settings.loading}
+          timezoneError={settings.error}
           activePage={route.monitoringPage ?? monitoringDefaultPage}
           onPageChange={router.navigateMonitoringPage}
+          routeSearch={route.search}
+          onSearchChange={router.replaceSearch}
           onOpenSources={() => router.navigate("sources")}
         />
       );
@@ -284,7 +304,8 @@ function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, timezo
   timezoneName: string | null;
   onOpenMetadata: StudioRouter["navigateMetadata"];
 }) {
-  const graph = useLineageGraph(environmentId);
+  const draftPreview = workspace.metadataEditorDraft !== null;
+  const graph = useLineageGraph(environmentId, draftPreview);
   if (graph.isError && !graph.data) {
     return <EmptyState title="Unable to load lineage" detail={graph.error instanceof Error ? graph.error.message : "Lineage request failed"} action={<button type="button" onClick={() => void graph.refetch()}>Retry</button>} />;
   }
@@ -294,14 +315,16 @@ function EnvironmentLineageRoute({ environmentId, workspace, routeSearch, timezo
       key={environmentId}
       environmentId={environmentId}
       lineage={graph.data}
+      draftPreview={draftPreview}
       onRefreshLineage={graph.refetch}
       metadataEditorDocument={workspace.metadataEditorDocument}
       metadataEditorDraft={workspace.metadataEditorDraft}
       onEnsureMetadataEditor={workspace.ensureMetadataEditorContext}
       busy={workspace.busy}
-      onValidateMetadata={workspace.validateMetadataEditorDocument}
       onSaveMetadataDraft={workspace.saveMetadataEditorDraft}
-      onSaveMetadata={workspace.saveMetadataEditorDocument}
+      onPrepareMetadataWrite={workspace.prepareMetadataEditorDocument}
+      onApplyMetadataWrite={workspace.applyMetadataEditorWrite}
+      onAbandonMetadataWrite={workspace.abandonMetadataEditorWrite}
       timezoneName={timezoneName}
       routeSearch={routeSearch}
       onOpenMetadata={onOpenMetadata}

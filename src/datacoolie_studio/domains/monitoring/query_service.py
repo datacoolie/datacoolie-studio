@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -15,11 +14,15 @@ from datacoolie_studio.domains.monitoring.log_repository import (
     query_cached_job_logs,
     query_cached_latest_dataflow_runs,
 )
-from datacoolie_studio.domains.monitoring.repository import (
-    monitoring_filter_options_read_model,
-)
 from datacoolie_studio.domains.monitoring.context import (
     materialization_token as analytics_materialization_token,
+    reader as analytics_reader,
+)
+from datacoolie_studio.domains.monitoring.evidence_hydration import (
+    EvidenceGenerationMismatch,
+    MAX_HYDRATION_ROWS,
+    cache_payload,
+    hydrate_payload,
 )
 from datacoolie_studio.domains.read_models.cache import (
     cached_read_model,
@@ -29,15 +32,17 @@ from datacoolie_studio.domains.read_models.cache import (
     replace_read_model,
 )
 from datacoolie_studio.domains.read_models.keys import LINEAGE_LATEST_RUNS
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _enrich_dataflow_run_for_investigation,
-    _enrich_job_run_for_investigation,
-    _normalize_monitoring_filters_for_timezone,
-    _rate,
-    _time_value,
+from datacoolie_studio.domains.monitoring.metrics.investigation import (
+    enrich_dataflow_run_for_investigation as _enrich_dataflow_run_for_investigation,
+    enrich_job_run_for_investigation as _enrich_job_run_for_investigation,
 )
+from datacoolie_studio.domains.monitoring.metrics.aggregates import rate as _rate
+from datacoolie_studio.domains.monitoring.metrics.filtering import (
+    normalize_monitoring_filters_for_timezone,
+)
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import time_value as _time_value
 
-_LATEST_RUNS_PRODUCER_VERSION = "lineage-latest-runs-v1"
+_LATEST_RUNS_PRODUCER_VERSION = "lineage-latest-runs-v3"
 
 
 def cached_environment_overview_summary(
@@ -109,7 +114,7 @@ def dataflow_logs(
 ) -> dict[str, Any]:
     if session is None:
         raise ValueError("Monitoring dataflow queries require a database session")
-    normalized_filters = _normalize_monitoring_filters_for_timezone(
+    normalized_filters = normalize_monitoring_filters_for_timezone(
         filters or {},
         timezone_info=timezone_info,
     )
@@ -124,7 +129,7 @@ def dataflow_logs(
     )
     if cached is None:
         raise _analytics_unavailable(paths)
-    rows, total, errors = cached
+    rows, total, errors, analytics_generation = cached
     rows = [_enrich_dataflow_run_for_investigation(row) for row in rows]
     return {
         "records": rows,
@@ -135,6 +140,7 @@ def dataflow_logs(
             "limit": limit,
             "offset": offset,
             "cache": "duckdb",
+            "analytics_generation": analytics_generation,
         },
     }
 
@@ -151,7 +157,7 @@ def job_logs(
 ) -> dict[str, Any]:
     if session is None:
         raise ValueError("Monitoring job queries require a database session")
-    normalized_filters = _normalize_monitoring_filters_for_timezone(
+    normalized_filters = normalize_monitoring_filters_for_timezone(
         filters or {},
         timezone_info=timezone_info,
     )
@@ -188,41 +194,57 @@ def latest_status(
         raise ValueError("Latest Monitoring status requires a database session")
     environment_id = paths[0].environment_id if paths else None
     parameters_fingerprint = empty_parameters_fingerprint()
-    input_fingerprint = (
-        _latest_runs_input_fingerprint(session, paths) if session is not None else ""
-    )
-    if session is not None and environment_id is not None:
+    if environment_id is None:
+        raise _analytics_unavailable(paths)
+
+    # Keep the reader fence open across cache lookup, rebuild and response
+    # hydration.  A cache hit produced by an older analytics generation is
+    # discarded before any codec call.
+    with analytics_reader(paths) as analytics_fence:
+        analytics_generation = analytics_fence[2]
+        input_fingerprint = _latest_runs_input_fingerprint(session, paths)
+
+        def hydrated_cached(model: Any) -> dict[str, Any] | None:
+            if model is None:
+                return None
+            try:
+                return hydrate_payload(
+                    model.payload,
+                    analytics_fence,
+                    expected_generation=analytics_generation,
+                    expected_input_fingerprint=input_fingerprint,
+                    max_rows=MAX_HYDRATION_ROWS,
+                )
+            except EvidenceGenerationMismatch:
+                return None
+
         cached_model = cached_read_model(
-            session,
             environment_id=environment_id,
             model_key=LINEAGE_LATEST_RUNS,
             parameters_fingerprint=parameters_fingerprint,
             input_fingerprint=input_fingerprint,
             producer_version=_LATEST_RUNS_PRODUCER_VERSION,
         )
-        if cached_model is not None:
-            return cached_model.payload
+        cached_response = hydrated_cached(cached_model)
+        if cached_response is not None:
+            return cached_response
 
-    build_key = f"{environment_id}:{LINEAGE_LATEST_RUNS}:{parameters_fingerprint}"
-    lock = (
-        read_model_build_lock(build_key)
-        if session is not None and environment_id is not None
-        else nullcontext()
-    )
-    generation: str | None = None
-    with lock:
-        if session is not None and environment_id is not None:
+        build_key = f"{environment_id}:{LINEAGE_LATEST_RUNS}:{parameters_fingerprint}"
+        with read_model_build_lock(build_key):
+            # Another request may have rebuilt the entry while this request
+            # waited for the lock.  Recheck it under the same fence.
             input_fingerprint = _latest_runs_input_fingerprint(session, paths)
             cached_model = cached_read_model(
-                session,
                 environment_id=environment_id,
                 model_key=LINEAGE_LATEST_RUNS,
                 parameters_fingerprint=parameters_fingerprint,
                 input_fingerprint=input_fingerprint,
                 producer_version=_LATEST_RUNS_PRODUCER_VERSION,
             )
-            if cached_model is not None:
-                return cached_model.payload
+            cached_response = hydrated_cached(cached_model)
+            if cached_response is not None:
+                return cached_response
+
             generation = read_model_generation(
                 environment_id=environment_id,
                 model_key=LINEAGE_LATEST_RUNS,
@@ -230,26 +252,36 @@ def latest_status(
                 input_fingerprint=input_fingerprint,
                 producer_version=_LATEST_RUNS_PRODUCER_VERSION,
             )
-            focused = query_cached_latest_dataflow_runs(session, paths)
-        else:
-            focused = None
-        if focused is not None:
-            rows, ambiguous_names, errors = focused
-        else:
-            raise _analytics_unavailable(paths)
-        response = _latest_runs_response(rows, errors, ambiguous_names)
-        if session is not None and environment_id is not None:
-            replace_read_model(
+            focused = query_cached_latest_dataflow_runs(
                 session,
+                paths,
+                analytics_context=analytics_fence,
+            )
+            if focused is None:
+                raise _analytics_unavailable(paths)
+            rows, ambiguous_names, errors = focused
+            response = _latest_runs_response(rows, errors, ambiguous_names)
+            safe_response = cache_payload(
+                response,
+                generation=analytics_generation,
+                input_fingerprint=input_fingerprint,
+            )
+            replace_read_model(
                 environment_id=environment_id,
                 model_key=LINEAGE_LATEST_RUNS,
                 parameters_fingerprint=parameters_fingerprint,
                 input_fingerprint=input_fingerprint,
                 producer_version=_LATEST_RUNS_PRODUCER_VERSION,
-                payload=response,
+                payload=safe_response,
                 expected_generation=generation,
             )
-        return response
+            return hydrate_payload(
+                safe_response,
+                analytics_fence,
+                expected_generation=analytics_generation,
+                expected_input_fingerprint=input_fingerprint,
+                max_rows=MAX_HYDRATION_ROWS,
+            )
 
 
 def latest_status_etag(session: Session, paths: list[EnvironmentSource]) -> str:
@@ -308,19 +340,6 @@ def _latest_runs_input_fingerprint(
     session: Session, paths: list[EnvironmentSource]
 ) -> str:
     return monitoring_input_fingerprint(session, paths)
-
-
-def monitoring_filter_options(
-    paths: list[EnvironmentSource], session: Session
-) -> dict[str, Any]:
-    del session
-    read_model = monitoring_filter_options_read_model(paths)
-    values = read_model["options"]
-    return {
-        "options": values,
-        "summary": {"source": "duckdb_filter_values", "fields": len(values)},
-        "errors": [],
-    }
 
 
 def _is_later(candidate: dict[str, Any], current: dict[str, Any]) -> bool:

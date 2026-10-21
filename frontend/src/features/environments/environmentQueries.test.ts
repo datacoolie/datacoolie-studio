@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { QueryClient } from "@tanstack/react-query";
 import type { EnvironmentContext, MetadataEditorWorkspace } from "../../shared/api/domainTypes";
-import { environmentInvalidationTargets, metadataWorkspaceSatisfiesCatalogVersion } from "./environmentQueries";
+import { environmentInvalidationTargets, environmentQueryKeys, installEnvironmentVersionReconciliation, metadataWorkspaceSatisfiesCatalogVersion } from "./environmentQueries";
 
 const base: EnvironmentContext["versions"] = {
   source_registry: "source-1",
@@ -18,7 +19,7 @@ describe("environmentInvalidationTargets", () => {
 
   it("invalidates structural consumers for a metadata catalog change", () => {
     expect(environmentInvalidationTargets(base, { ...base, metadata_catalog: "metadata-2" }))
-      .toEqual(["metadata", "assets", "lineage", "overview"]);
+      .toEqual(["metadata", "assets", "lineage", "monitoring", "overview"]);
   });
 
   it("keeps operations changes away from structural resources", () => {
@@ -42,5 +43,25 @@ describe("metadataWorkspaceSatisfiesCatalogVersion", () => {
   it("requires a refetch for an external catalog version", () => {
     expect(metadataWorkspaceSatisfiesCatalogVersion(workspace, "metadata-3")).toBe(false);
     expect(metadataWorkspaceSatisfiesCatalogVersion(undefined, "metadata-2")).toBe(false);
+  });
+});
+
+describe("installEnvironmentVersionReconciliation", () => {
+  it("does not cancel active reads when the first context version is published", async () => {
+    const queryClient = new QueryClient();
+    const cancelQueries = vi.spyOn(queryClient, "cancelQueries");
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const dispose = installEnvironmentVersionReconciliation(queryClient);
+
+    queryClient.setQueryData(environmentQueryKeys.context(1), {
+      environment: { id: 1 },
+      versions: base,
+    } as EnvironmentContext);
+    await Promise.resolve();
+
+    expect(cancelQueries).not.toHaveBeenCalled();
+    expect(invalidateQueries).toHaveBeenCalledWith(expect.objectContaining({ refetchType: "none" }));
+    dispose();
+    queryClient.clear();
   });
 });

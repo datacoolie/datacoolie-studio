@@ -1,4 +1,5 @@
 import type { MonitoringPageKey } from "../../app/moduleRegistry";
+import type { MonitoringSessionScope } from "../../shared/api/domainTypes";
 
 export type MonitoringRange = "24h" | "3d" | "7d" | "30d" | "90d" | "custom" | "all";
 export type MonitoringGrain = "auto" | "hour" | "day" | "week" | "month";
@@ -22,6 +23,9 @@ export interface MonitoringFilters {
   search: string;
   investigateKind: string;
   investigateValue: string;
+  investigateLogSessionScope?: MonitoringSessionScope;
+  investigateLogSessionId?: string | null;
+  investigateSourceId?: number;
 }
 
 export interface FilterOption {
@@ -46,10 +50,12 @@ export const DEFAULT_MONITORING_FILTERS: MonitoringFilters = {
   operationType: "all",
   search: "",
   investigateKind: "",
+  investigateLogSessionScope: "all",
+  investigateLogSessionId: "",
   investigateValue: ""
 };
 
-const FILTER_KEYS = Object.keys(DEFAULT_MONITORING_FILTERS) as Array<keyof MonitoringFilters>;
+const FILTER_KEYS = [...Object.keys(DEFAULT_MONITORING_FILTERS), "investigateSourceId"] as Array<keyof MonitoringFilters>;
 
 export function filtersFromSearch(search: string): MonitoringFilters {
   const params = new URLSearchParams(search);
@@ -61,6 +67,11 @@ export function filtersFromSearch(search: string): MonitoringFilters {
         filters.range = isMonitoringRange(value) ? value : DEFAULT_MONITORING_FILTERS.range;
       } else if (key === "grain") {
         filters.grain = isMonitoringGrain(value) ? value : DEFAULT_MONITORING_FILTERS.grain;
+      } else if (key === "investigateLogSessionScope") {
+        filters.investigateLogSessionScope = isMonitoringSessionScope(value) ? value : DEFAULT_MONITORING_FILTERS.investigateLogSessionScope;
+      } else if (key === "investigateSourceId") {
+        const sourceId = Number(value);
+        if (Number.isInteger(sourceId) && sourceId > 0) filters.investigateSourceId = sourceId;
       } else {
         filters[key] = value as never;
       }
@@ -69,19 +80,23 @@ export function filtersFromSearch(search: string): MonitoringFilters {
   return filters;
 }
 
-export function writeFiltersToSearch(filters: MonitoringFilters) {
-  const url = new URL(window.location.href);
+export function filtersToSearch(filters: MonitoringFilters, search = "") {
+  const params = new URLSearchParams(search);
   for (const key of FILTER_KEYS) {
     const value = filters[key];
     if ((key === "startTime" || key === "endTime") && filters.range !== "custom") {
-      url.searchParams.delete(key);
+      params.delete(key);
+    } else if (key === "investigateLogSessionId" && filters.investigateLogSessionScope === "exact" && value !== undefined && value !== null) {
+      // An exact empty session ID is meaningful and must survive URL round trips.
+      params.set(key, String(value));
     } else if (value && value !== DEFAULT_MONITORING_FILTERS[key]) {
-      url.searchParams.set(key, value);
+      params.set(key, String(value));
     } else {
-      url.searchParams.delete(key);
+      params.delete(key);
     }
   }
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  const value = params.toString();
+  return value ? `?${value}` : "";
 }
 
 export function hasActiveFilters(filters: MonitoringFilters) {
@@ -97,4 +112,8 @@ function isMonitoringRange(value: string): value is MonitoringRange {
 
 function isMonitoringGrain(value: string): value is MonitoringGrain {
   return value === "auto" || value === "hour" || value === "day" || value === "week" || value === "month";
+}
+
+function isMonitoringSessionScope(value: string): value is MonitoringSessionScope {
+  return value === "all" || value === "null" || value === "exact";
 }

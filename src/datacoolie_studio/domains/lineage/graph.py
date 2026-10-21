@@ -130,7 +130,6 @@ def _build_typed_graph_components(
                 _add_unresolved_diagnostic_reference(
                     diagnostic,
                     target_asset_id,
-                    dataflow,
                     references,
                     reference_occurrences,
                     dependencies,
@@ -301,7 +300,6 @@ def _add_resolution(
 def _add_unresolved_diagnostic_reference(
     diagnostic: dict[str, Any],
     target_asset_id: str,
-    dataflow: LineageDataflow,
     references: dict[str, LineageReference],
     reference_occurrences: dict[str, LineageReferenceOccurrence],
     dependencies: dict[str, LineageDependency],

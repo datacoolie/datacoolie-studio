@@ -19,10 +19,8 @@ from datacoolie_studio.domains.code_artifacts.service import (
     code_artifact_materialization,
     ensure_code_artifact_materialization_result,
 )
-from datacoolie_studio.domains.logs.ingestion import (
-    log_source_has_pending_changes,
-    refresh_log_source_cache,
-)
+from datacoolie_studio.domains.logs.ingestion import refresh_log_source_cache
+from datacoolie_studio.domains.logs.pending import log_source_has_pending_changes
 from datacoolie_studio.domains.metadata.service import (
     ensure_metadata_materialization_result,
     metadata_materialization,

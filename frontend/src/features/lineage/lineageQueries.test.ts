@@ -53,14 +53,15 @@ describe("Lineage query ownership", () => {
     await client.invalidateQueries({ queryKey: environmentQueryKeys.monitoring(7) });
     await client.fetchInfiniteQuery(options);
     expect(request).toHaveBeenCalledWith(7, {
-      investigateKind: "dataflow",
+      investigateKind: "dataflow_id",
       investigateValue: "orders",
       range: "all",
+      log_session_scope: "all",
       limit: LINEAGE_RUN_HISTORY_PAGE_SIZE,
       offset: 0,
       sortBy: "start_time",
       sortDir: "desc",
-    });
+    }, expect.any(AbortSignal));
     expect(request).toHaveBeenCalledTimes(2);
   });
 });

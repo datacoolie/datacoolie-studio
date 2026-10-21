@@ -8,12 +8,13 @@ import { useStudioRouter } from "./app/useStudioRouter";
 import { useStudioWorkspace } from "./app/useStudioWorkspace";
 import { useStudioDiagnostics } from "./features/settings/hooks/useStudioDiagnostics";
 import { useStudioSettings } from "./features/settings/hooks/useStudioSettings";
-import { environmentQueryKeys, useEnvironmentContextQuery } from "./features/environments/environmentQueries";
+import { environmentQueryKeys, installEnvironmentVersionReconciliation, useEnvironmentContextQuery } from "./features/environments/environmentQueries";
 import { sourceCheckIntervalMs } from "./app/environmentHeaderResource";
 
 export function App() {
   const router = useStudioRouter();
   const queryClient = useQueryClient();
+  useEffect(() => installEnvironmentVersionReconciliation(queryClient), [queryClient]);
   const modules = useStudioModules();
   const diagnostics = useStudioDiagnostics(router.route.module === "settings");
   const settings = useStudioSettings({
@@ -34,7 +35,7 @@ export function App() {
   );
   const workspace = useStudioWorkspace(router, {
     onEnvironmentChanged: async (environmentId) => {
-      await queryClient.invalidateQueries({ queryKey: environmentQueryKeys.context(environmentId) });
+      await queryClient.invalidateQueries({ queryKey: environmentQueryKeys.context(environmentId) }, { throwOnError: true });
     },
   });
 
@@ -58,14 +59,13 @@ export function App() {
     <AppShell
       activeModule={router.route.module}
       activeScope={router.activeScope}
-      project={environmentContext.data?.project ?? workspace.selectedProject ?? workspace.selectedProjectSummary}
-      environment={environmentContext.data?.environment
-        ?? workspace.environments.find((item) => item.id === router.route.environmentId)
-        ?? null}
+      project={environmentContext.data?.project ?? workspace.selectedProjectSummary}
+      environment={environmentContext.data?.environment ?? null}
+      environmentId={router.route.environmentId}
       sidebarCollapsed={router.sidebarCollapsed}
       enabledCapabilities={modules.enabledCapabilities}
       metadataSourceCount={environmentContext.data?.source_counts.metadata ?? 0}
-      logPathCount={environmentContext.data?.source_counts.logs ?? 0}
+      logSourceCount={environmentContext.data?.source_counts.logs ?? 0}
       freshness={environmentContext.data?.freshness ?? null}
       timezoneName={settings.settings?.timezone ?? null}
       error={error}

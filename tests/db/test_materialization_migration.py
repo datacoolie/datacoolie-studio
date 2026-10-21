@@ -74,6 +74,8 @@ def test_legacy_snapshots_migrate_latest_payload_only(tmp_path: Path, monkeypatc
             """
         )
 
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP TABLE alembic_version")
     init_db()
     init_db()
 

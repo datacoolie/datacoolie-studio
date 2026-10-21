@@ -216,6 +216,7 @@ class OneLakeStorageAdapter:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
         digest = hashlib.sha256()
+        bytes_written = 0
         try:
             handle, downloaded = self.open_read_with_revision(uri)
             if not before.same_object_state_as(downloaded):
@@ -226,11 +227,22 @@ class OneLakeStorageAdapter:
                 while chunk := handle.read(1024 * 1024):
                     digest.update(chunk)
                     output.write(chunk)
-            after = self.stat(uri)
-            if not downloaded.same_object_state_as(after):
+                    bytes_written += len(chunk)
+            if downloaded.size > 0 and downloaded.size != bytes_written:
                 raise StorageConflictError(
-                    uri, "Source revision changed during materialization"
+                    uri,
+                    "Downloaded content length does not match the source revision",
                 )
+            # A versioned download is an immutable provider snapshot.  Avoid a
+            # second metadata request when the response carries an ETag; only
+            # fall back to a post-read stat for providers that omit it.
+            after = downloaded
+            if downloaded.provider_revision is None:
+                after = self.stat(uri)
+                if not downloaded.same_object_state_as(after):
+                    raise StorageConflictError(
+                        uri, "Source revision changed during materialization"
+                    )
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

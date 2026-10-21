@@ -4,33 +4,40 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from datacoolie_studio.domains.monitoring.metrics.health import environment_health
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _avg,
-    _counter_rows,
-    _dataflow_id,
-    _dataflow_operation_type,
-    _date_bucket,
-    _destination_operation_type,
-    _dominant_dataflow_operation_type,
-    _dominant_value,
-    _duration_stats,
-    _enrich_job_run_for_investigation,
-    _error_preview,
-    _job_key,
-    _job_runs_by_dataflow_operation_type,
-    _job_shape_label,
-    _listish_values,
-    _num,
-    _percentile,
-    _percentile_clean,
-    _phase_duration_summary,
-    _rate,
-    _row_timestamp,
-    _status,
-    _sum,
-    _time_value,
-    _trend_context,
-    _watermark_classification,
+from datacoolie_studio.domains.monitoring.metrics.row_normalization import (
+    counter_rows as _counter_rows,
+    dataflow_id as _dataflow_id,
+    dataflow_operation_type as _dataflow_operation_type,
+    destination_operation_type as _destination_operation_type,
+    dominant_dataflow_operation_type as _dominant_dataflow_operation_type,
+    dominant_value as _dominant_value,
+    job_key as _job_key,
+    job_runs_by_dataflow_operation_type as _job_runs_by_dataflow_operation_type,
+    job_shape_label as _job_shape_label,
+    listish_values as _listish_values,
+)
+from datacoolie_studio.domains.monitoring.metrics.investigation import (
+    enrich_job_run_for_investigation as _enrich_job_run_for_investigation,
+    error_preview as _error_preview,
+    phase_duration_summary as _phase_duration_summary,
+    watermark_classification as _watermark_classification,
+)
+from datacoolie_studio.domains.monitoring.metrics.aggregates import (
+    average as _avg,
+    duration_stats as _duration_stats,
+    numeric_value as _num,
+    percentile as _percentile,
+    percentile_clean as _percentile_clean,
+    rate as _rate,
+    status as _status,
+    sum_observed as _sum_metric,
+    sum_values as _sum,
+)
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import (
+    date_bucket as _date_bucket,
+    row_timestamp,
+    time_value as _time_value,
+    trend_context as _trend_context,
 )
 
 _STATUS_KEYS = ("succeeded", "failed", "skipped", "running", "pending", "unknown")
@@ -41,6 +48,8 @@ def _operations_page(
     jobs: list[dict[str, Any]],
     timezone_info: tzinfo = timezone.utc,
     trend_context: dict[str, Any] | None = None,
+    *,
+    version_mode: str = "v6",
 ) -> dict[str, Any]:
     trend_context = trend_context or _trend_context({}, [*rows, *jobs], timezone_info)
     job_status = Counter(_status(row) for row in jobs)
@@ -62,16 +71,26 @@ def _operations_page(
         "failed", 0
     )
     failed_jobs = [
-        _enrich_job_run_for_investigation(job)
+        _enrich_job_run_for_investigation(job, version_mode=version_mode)
         for job in jobs
         if _status(job) == "failed"
     ][:50]
     job_runs_by_dataflow_operation_type = _job_runs_by_dataflow_operation_type(
         rows, jobs
     )
+    # These are status counters, so an empty/missing value remains the
+    # historical zero.  Version-aware observed semantics apply to measured
+    # workload metrics below, not to status/count fields.
     job_total_running = _sum(jobs, "total_running")
     job_total_pending = _sum(jobs, "total_pending")
     job_total_skipped = _sum(jobs, "total_skipped")
+    rows_read = _sum_metric(jobs, "total_rows_read", mode=version_mode)
+    rows_written = _sum_metric(jobs, "total_rows_written", mode=version_mode)
+    total_rows_processed = (
+        None
+        if rows_read is None and rows_written is None
+        else (rows_read or 0) + (rows_written or 0)
+    )
     return {
         "kpis": {
             "total_jobs": total_jobs,
@@ -81,8 +100,7 @@ def _operations_page(
             "job_skip_rate": _rate(job_status.get("skipped", 0), total_jobs),
             "job_pending_rate": _rate(job_status.get("pending", 0), total_jobs),
             "job_running_rate": _rate(job_status.get("running", 0), total_jobs),
-            "total_rows_processed": _sum(jobs, "total_rows_read")
-            + _sum(jobs, "total_rows_written"),
+            "total_rows_processed": total_rows_processed,
             "total_failures": job_status.get("failed", 0),
             "total_skipped": job_total_skipped,
             "total_pending": job_total_pending,
@@ -130,7 +148,7 @@ def _operations_page(
             "skip_rate": _rate(dataflow_status.get("skipped", 0), total_dataflows),
             "pending_rate": _rate(dataflow_status.get("pending", 0), total_dataflows),
             "running_rate": _rate(dataflow_status.get("running", 0), total_dataflows),
-            "total_bytes_written": _sum(rows, "destination_bytes_added"),
+            "total_bytes_written": _sum_metric(rows, "destination_bytes_added", mode=version_mode),
             "avg_duration_seconds": _avg(dataflow_durations),
             "p95_duration_seconds": _percentile_clean(dataflow_durations, 0.95),
             "active_engines": len(
@@ -159,11 +177,11 @@ def _latest_failed_run(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     failed = [
         row
         for row in rows
-        if _status(row) == "failed" and _row_timestamp(row) is not None
+        if _status(row) == "failed" and row_timestamp(row) is not None
     ]
     if not failed:
         return None
-    return max(failed, key=lambda row: _row_timestamp(row) or datetime.min)
+    return max(failed, key=lambda row: row_timestamp(row) or datetime.min)
 
 
 def _slowest_jobs(jobs: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
@@ -311,7 +329,7 @@ def _job_workload_efficiency(
                 "job_id": job_id,
                 "job_key": _job_key(job) if job else "unknown",
                 "job_shape_label": _job_shape_label(job) if job else "unknown",
-                "status": _status(job) if job else _dominant_status(statuses),
+                "status": _status(job) if job else "unknown",
                 "operation_type": operation_type,
                 "engine_name": job.get("engine_name") or "unknown",
                 "metadata_provider_name": job.get("metadata_provider_name")
@@ -465,7 +483,7 @@ def _job_attention_items(
         duration = _num(job, "duration_seconds") or 0
         child_failed = _num(job, "child_failed_count") or 0
         mismatches = _num(job, "reconciliation_mismatch_count") or 0
-        timestamp = _row_timestamp(job)
+        timestamp = row_timestamp(job)
         sort_time = timestamp.timestamp() if timestamp else 0
 
         if status == "failed":
@@ -533,7 +551,6 @@ def _health_page(
     rows: list[dict[str, Any]],
     jobs: list[dict[str, Any]],
     operations: dict[str, Any],
-    maintenance: dict[str, Any],
     coverage: dict[str, Any],
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
@@ -565,8 +582,6 @@ def _health_page(
 
 
 def _attention_queue(
-    rows: list[dict[str, Any]],
-    jobs: list[dict[str, Any]],
     failures: dict[str, Any],
     performance: dict[str, Any],
     maintenance: dict[str, Any],
@@ -949,87 +964,6 @@ def _attention(
     }
 
 
-def _metric_definitions() -> dict[str, dict[str, str]]:
-    return {
-        "job_success_rate": {
-            "label": "Job execution success rate",
-            "formula": "succeeded jobs / (succeeded jobs + failed jobs)",
-        },
-        "job_failure_rate": {
-            "label": "Job failure rate",
-            "formula": "failed jobs / (succeeded jobs + failed jobs)",
-        },
-        "job_skip_rate": {
-            "label": "Job skip rate",
-            "formula": "skipped jobs / all job runs",
-        },
-        "job_pending_rate": {
-            "label": "Job pending rate",
-            "formula": "pending jobs / all job runs",
-        },
-        "job_running_rate": {
-            "label": "Job running rate",
-            "formula": "running jobs / all job runs",
-        },
-        "dataflow_success_rate": {
-            "label": "Dataflow execution success rate",
-            "formula": "succeeded dataflow runs / (succeeded dataflow runs + failed dataflow runs)",
-        },
-        "dataflow_failure_rate": {
-            "label": "Dataflow failure rate",
-            "formula": "failed dataflow runs / (succeeded dataflow runs + failed dataflow runs)",
-        },
-        "dataflow_skip_rate": {
-            "label": "Dataflow skip rate",
-            "formula": "skipped dataflow runs / all dataflow runs",
-        },
-        "dataflow_pending_rate": {
-            "label": "Dataflow pending rate",
-            "formula": "pending dataflow runs / all dataflow runs",
-        },
-        "dataflow_running_rate": {
-            "label": "Dataflow running rate",
-            "formula": "running dataflow runs / all dataflow runs",
-        },
-        "health_status": {
-            "label": "Environment health",
-            "formula": "highest severity matching rule: no evidence, stale logs, recent failures, maintenance issues, or reconciliation mismatch",
-        },
-        "today_window": {
-            "label": "Today",
-            "formula": "runs whose end_time/start_time falls on the current date in the configured Studio timezone",
-        },
-        "last_7_days_window": {
-            "label": "Last 7 days",
-            "formula": "runs whose end_time/start_time is within the last 7 * 24 hours",
-        },
-        "avg_duration": {
-            "label": "Average duration",
-            "formula": "average duration_seconds for executable runs (succeeded + failed) with duration present",
-        },
-        "duration_quartiles": {
-            "label": "Duration percentiles",
-            "formula": "P50/P75/P95/P99 duration_seconds for executable runs (succeeded + failed) with duration present",
-        },
-        "net_bytes_change": {
-            "label": "Net bytes change",
-            "formula": "destination bytes added - destination bytes removed",
-        },
-        "maintenance_efficiency": {
-            "label": "Maintenance efficiency",
-            "formula": "bytes removed / duration seconds",
-        },
-        "p95_duration": {
-            "label": "P95 duration",
-            "formula": "95th percentile of duration_seconds for executable runs (succeeded + failed) with duration present",
-        },
-        "log_coverage": {
-            "label": "Log coverage",
-            "formula": "presence and joinability of job logs and dataflow logs",
-        },
-    }
-
-
 def _status_by_date(
     rows: list[dict[str, Any]], trend_context: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
@@ -1239,9 +1173,9 @@ def _dataflow_name_status_health(
             for item in items
             if _num(item, "duration_seconds") is not None
         ]
-        latest = max(items, key=lambda item: _row_timestamp(item) or datetime.min)
-        rows_read = _sum(items, "source_rows_read")
-        rows_written = _sum(items, "destination_rows_written")
+        latest = max(items, key=lambda item: row_timestamp(item) or datetime.min)
+        rows_read = _sum_metric(items, "source_rows_read")
+        rows_written = _sum_metric(items, "destination_rows_written")
         result.append(
             {
                 "dataflow_name": latest.get("dataflow_name") or dataflow_id,
@@ -1328,10 +1262,10 @@ def _dataflow_endpoint_health(
                 "success_rate": _rate(statuses.get("succeeded", 0), executable),
                 "avg_duration_seconds": _avg(durations),
                 "p95_duration_seconds": _percentile_clean(durations, 0.95),
-                "rows_read": _sum(items, "source_rows_read"),
-                "rows_written": _sum(items, "destination_rows_written"),
-                "bytes_added": _sum(items, "destination_bytes_added"),
-                "bytes_removed": _sum(items, "destination_bytes_removed"),
+                "rows_read": _sum_metric(items, "source_rows_read"),
+                "rows_written": _sum_metric(items, "destination_rows_written"),
+                "bytes_added": _sum_metric(items, "destination_bytes_added"),
+                "bytes_removed": _sum_metric(items, "destination_bytes_removed"),
             }
         )
     return sorted(
@@ -1376,6 +1310,8 @@ def _dataflow_watermark_summary(
                 "advanced": statuses.get("advanced", 0),
                 "initialized": statuses.get("initialized", 0),
                 "unchanged": statuses.get("unchanged", 0),
+                "changed": statuses.get("changed", 0),
+                "empty": statuses.get("empty", 0),
                 "incomplete": statuses.get("incomplete", 0),
                 "adjusted": adjustments.get("adjusted", 0),
                 "missing": not_configured,
@@ -1401,16 +1337,9 @@ def _dataflow_watermark_summary(
 
 def _latest_log_at(rows: list[dict[str, Any]]) -> str | None:
     timestamps = [
-        timestamp for row in rows if (timestamp := _row_timestamp(row)) is not None
+        timestamp for row in rows if (timestamp := row_timestamp(row)) is not None
     ]
     return max(timestamps).isoformat() if timestamps else None
-
-
-def _dominant_status(statuses: Counter) -> str:
-    for status in ("failed", "running", "pending", "succeeded", "skipped"):
-        if statuses.get(status, 0):
-            return status
-    return "unknown"
 
 
 def _operation_windows(
@@ -1477,7 +1406,7 @@ def _operation_window_summary(
 
 
 def _is_same_local_date(row: dict[str, Any], date_value, timezone_info: tzinfo) -> bool:
-    timestamp = _row_timestamp(row)
+    timestamp = row_timestamp(row)
     if timestamp is None:
         return False
     if timestamp.tzinfo is None:
@@ -1486,7 +1415,7 @@ def _is_same_local_date(row: dict[str, Any], date_value, timezone_info: tzinfo) 
 
 
 def _is_since(row: dict[str, Any], start: datetime) -> bool:
-    timestamp = _row_timestamp(row)
+    timestamp = row_timestamp(row)
     if timestamp is None:
         return False
     if timestamp.tzinfo is None:
@@ -1500,7 +1429,7 @@ def _failed_count_in_window(rows: list[dict[str, Any]], days: int) -> int:
     for row in rows:
         if _status(row) != "failed":
             continue
-        timestamp = _row_timestamp(row)
+        timestamp = row_timestamp(row)
         if timestamp is None:
             continue
         if timestamp.tzinfo is None:
@@ -1520,7 +1449,7 @@ def _maintenance_count_in_window(
             continue
         if _status(row) not in statuses:
             continue
-        timestamp = _row_timestamp(row)
+        timestamp = row_timestamp(row)
         if timestamp is None:
             continue
         if timestamp.tzinfo is None:

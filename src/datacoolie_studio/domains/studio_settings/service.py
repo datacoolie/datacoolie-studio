@@ -341,6 +341,7 @@ def _studio_storage_context(session: Session) -> dict[str, Any]:
             "active_source_count": len(cached_source_ids & active_etl_source_ids),
             "orphan_source_count": len(orphan_source_ids),
             "orphan_source_ids": orphan_source_ids,
+            "resource_limits": analytics_stats.get("resource_limits", {}),
         },
     }
 

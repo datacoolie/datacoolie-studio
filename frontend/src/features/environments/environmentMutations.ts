@@ -1,26 +1,19 @@
-import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
+import type { Dispatch, SetStateAction } from "react";
 
-import {
-  addEnvironmentToProject,
-  removeEnvironmentFromProject,
-  renameEnvironmentInProject,
-} from "../../app/projectSummaryMutations";
+import { projectQueryKeys } from "../projects/projectQueries";
 import { api } from "../../shared/api/client";
-import type { Environment, ProjectSummary } from "../../shared/api/domainTypes";
 import { toErrorMessage } from "../../shared/lib/errors";
 
 type EnvironmentMutationContext = {
   projectId: number | null;
   queryClient: QueryClient;
-  setEnvironments: Dispatch<SetStateAction<Environment[]>>;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
-  updateProjectSummaries: (updater: (items: ProjectSummary[]) => ProjectSummary[]) => void;
 };
 
 export function createEnvironmentMutations(context: EnvironmentMutationContext) {
-  const { projectId, queryClient, setEnvironments, setBusy, setError, updateProjectSummaries } = context;
+  const { projectId, queryClient, setBusy, setError } = context;
   const route = { projectId };
 
   async function createEnvironment(name: string, projectIdOverride?: number): Promise<number> {
@@ -30,9 +23,7 @@ export function createEnvironmentMutations(context: EnvironmentMutationContext) 
     setError(null);
     try {
       const environment = await api.createEnvironment(pid, { name });
-      updateProjectSummaries((current) => addEnvironmentToProject(current, pid, environment));
-      setEnvironments((current) => [...current.filter((item) => item.id !== environment.id), environment]
-        .sort((left, right) => left.name.localeCompare(right.name)));
+      await queryClient.invalidateQueries({ queryKey: projectQueryKeys.summaries() });
       return environment.id;
     } catch (err) {
       setError(toErrorMessage(err));
@@ -43,14 +34,12 @@ export function createEnvironmentMutations(context: EnvironmentMutationContext) 
   }
 
   async function deleteEnvironment(environmentId: number) {
-    const pid = route.projectId;
     setBusy(true);
     setError(null);
     try {
       await api.deleteEnvironment(environmentId);
       queryClient.removeQueries({ queryKey: ["environments", environmentId] });
-      updateProjectSummaries((current) => removeEnvironmentFromProject(current, pid, environmentId));
-      setEnvironments((current) => current.filter((environment) => environment.id !== environmentId));
+      await queryClient.invalidateQueries({ queryKey: projectQueryKeys.summaries() });
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;
@@ -63,11 +52,8 @@ export function createEnvironmentMutations(context: EnvironmentMutationContext) 
     setBusy(true);
     setError(null);
     try {
-      const environment = await api.renameEnvironment(environmentId, { name });
-      setEnvironments((current) => current
-        .map((item) => item.id === environment.id ? environment : item)
-        .sort((left, right) => left.name.localeCompare(right.name)));
-      updateProjectSummaries((current) => renameEnvironmentInProject(current, environment));
+      await api.renameEnvironment(environmentId, { name });
+      await queryClient.invalidateQueries({ queryKey: projectQueryKeys.summaries() });
     } catch (err) {
       setError(toErrorMessage(err));
       throw err;

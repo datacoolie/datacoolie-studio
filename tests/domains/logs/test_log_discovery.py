@@ -7,13 +7,10 @@ from pathlib import Path
 import pytest
 
 from datacoolie_studio.domains.logs.discovery import (
-    LogStreamCheckpoint,
     LogSyncMode,
     LogSyncSpec,
     LookbackRange,
     PartitionFormatError,
-    discover_incremental_candidates,
-    discover_lookback_candidates,
 )
 from datacoolie_studio.domains.logs.partition import PartitionGranularity, parse_partition_path
 from datacoolie_studio.domains.logs.partition import PartitionLayout
@@ -32,8 +29,6 @@ from datacoolie_studio.domains.storage.inventory import StorageInventory
 
 
 def test_stream_plan_reingests_changed_provider_revision_at_same_timestamp():
-    from datacoolie_studio.domains.logs.ingestion import _plan_stream_sync
-
     uri = "s3://bucket/logs/job_run_log/run.jsonl"
     modified = datetime(2026, 7, 23, tzinfo=timezone.utc)
     current = StorageRevision(
@@ -75,22 +70,27 @@ def test_stream_plan_reingests_changed_provider_revision_at_same_timestamp():
                 duration_ms=1,
             )
 
-    checkpoint = LogStreamCheckpoint(
-        partition_value=modified.date(),
-        boundary_last_modified=modified,
-        partition_format="%Y-%m-%d",
-    )
-    incremental, candidates, _ = _plan_stream_sync(
+    plan = plan_stream_sync(
         FakeAdapter(),
-        "s3://bucket/logs/job_run_log",
-        suffix=".jsonl",
-        checkpoint=checkpoint,
+        StreamDefinition(
+            stream_kind="revision_test",
+            root_uri="s3://bucket/logs/job_run_log",
+            suffix=".jsonl",
+        ),
+        state=PlannerState(
+            stream_kind="revision_test",
+            root_uri="s3://bucket/logs/job_run_log",
+            layout_status="learned",
+            partition_format="%Y-%m-%d",
+            partition_granularity=PartitionGranularity.DAY,
+            last_scanned_partition_value=modified.date(),
+        ),
         spec=LogSyncSpec(),
         manifest={uri: previous},
     )
 
-    assert [item.canonical_uri for item in incremental] == [uri]
-    assert [item.canonical_uri for item in candidates] == [uri]
+    assert [item.canonical_uri for item in plan.files] == [uri]
+    assert [item.canonical_uri for item in plan.candidates] == [uri]
 
 
 @pytest.mark.parametrize(
@@ -226,160 +226,70 @@ def test_partition_layout_rejects_formats_outside_ordered_token_contract(
         PartitionLayout(partition_format, granularity)
 
 
-def test_incremental_discovery_prunes_old_partition_before_file_listing(tmp_path: Path) -> None:
-    adapter = _RecordingLocalStorageAdapter()
-    old = tmp_path / "__run_date=2026-07-20"
-    boundary = tmp_path / "__run_date=2026-07-21"
-    current = tmp_path / "__run_date=2026-07-22"
-    for folder in (old, boundary, current):
-        folder.mkdir()
-    _write_with_mtime(old / "old.jsonl", 100)
-    _write_with_mtime(boundary / "at-boundary.jsonl", 200)
-    _write_with_mtime(boundary / "newer.jsonl", 201)
-    _write_with_mtime(current / "new.jsonl", 202)
-    checkpoint = LogStreamCheckpoint(
-        partition_value=date(2026, 7, 21),
-        boundary_last_modified=datetime.fromtimestamp(200, tz=timezone.utc),
-        partition_format="__run_date=%Y-%m-%d",
-    )
-
-    candidates = discover_incremental_candidates(
-        adapter,
-        str(tmp_path),
-        suffix=".jsonl",
-        checkpoint=checkpoint,
-    )
-
-    assert [Path(item.canonical_uri).name for item in candidates] == ["newer.jsonl", "new.jsonl"]
-    assert old.resolve().as_posix() not in adapter.listed_file_partitions
-    assert boundary.resolve().as_posix() in adapter.listed_file_partitions
-    assert current.resolve().as_posix() in adapter.listed_file_partitions
-
-
-def test_initial_incremental_sync_selects_all_partition_files(tmp_path: Path) -> None:
+def test_initial_plan_uses_one_recursive_file_inventory(tmp_path: Path) -> None:
     for raw_partition in ("20260720", "20260721"):
         folder = tmp_path / raw_partition
         folder.mkdir()
         _write_with_mtime(folder / f"{raw_partition}.parquet", 100)
 
-    candidates = discover_incremental_candidates(LocalStorageAdapter(), str(tmp_path), suffix="parquet")
+    adapter = _RecordingLocalStorageAdapter()
+    plan = plan_stream_sync(
+        adapter,
+        StreamDefinition("job_jsonl", str(tmp_path), "parquet"),
+        state=None,
+        manifest={},
+        spec=LogSyncSpec(),
+        today=date(2026, 7, 22),
+    )
 
-    assert [item.partition.raw_partition_path for item in candidates] == ["20260720", "20260721"]
+    assert [item.partition.raw_partition_path for item in plan.candidates] == [
+        "20260720",
+        "20260721",
+    ]
+    assert len(adapter.inventory_requests) == 1
+    assert adapter.inventory_requests[0].recursive is True
+    assert adapter.inventory_requests[0].object_types == frozenset({"file"})
+    assert plan.inventory_requests == 1
+    assert plan.inventory_pages == 1
+    assert plan.stat_requests == 0
 
 
-def test_nested_partition_discovery_uses_the_deepest_partition(tmp_path: Path) -> None:
+def test_initial_plan_infers_nested_partition_layout_without_tree_walk(tmp_path: Path) -> None:
     folder = tmp_path / "2026" / "07" / "22"
     folder.mkdir(parents=True)
     _write_with_mtime(folder / "run.parquet", 100)
 
-    candidates = discover_incremental_candidates(LocalStorageAdapter(), str(tmp_path), suffix=".parquet")
-
-    assert len(candidates) == 1
-    assert candidates[0].partition.raw_partition_path == "2026/07/22"
-    assert candidates[0].partition.partition_format == "%Y/%m/%d"
-
-
-def test_nested_hour_partition_discovery_prefers_hour_leaves(tmp_path: Path) -> None:
-    for hour in (10, 11):
-        folder = tmp_path / "__run_date=2026-07-22" / f"__run_hour={hour:02d}"
-        folder.mkdir(parents=True)
-        _write_with_mtime(folder / f"run-{hour}.jsonl", 100 + hour)
-
-    candidates = discover_incremental_candidates(
-        LocalStorageAdapter(),
-        str(tmp_path),
-        suffix=".jsonl",
+    adapter = _RecordingLocalStorageAdapter()
+    plan = plan_stream_sync(
+        adapter,
+        StreamDefinition("job_jsonl", str(tmp_path), ".parquet"),
+        state=None,
+        manifest={},
+        spec=LogSyncSpec(),
+        today=date(2026, 7, 22),
     )
 
-    assert [item.partition.partition_value for item in candidates] == [
-        datetime(2026, 7, 22, 10),
-        datetime(2026, 7, 22, 11),
-    ]
-    assert {
-        item.partition.partition_format for item in candidates
-    } == {"__run_date=%Y-%m-%d/__run_hour=%H"}
+    assert len(plan.candidates) == 1
+    assert plan.candidates[0].partition.raw_partition_path == "2026/07/22"
+    assert plan.candidates[0].partition.partition_format == "%Y/%m/%d"
+    assert adapter.listed_partition_children == []
 
 
-def test_nested_discovery_infers_arbitrary_ordered_literals(tmp_path: Path) -> None:
-    folder = tmp_path / "logs_2026" / "m_08" / "d_09" / "h_07"
-    folder.mkdir(parents=True)
-    _write_with_mtime(folder / "run.jsonl", 100)
-
-    candidates = discover_incremental_candidates(
-        LocalStorageAdapter(),
-        str(tmp_path),
-        suffix=".jsonl",
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0].partition.partition_value == datetime(2026, 8, 9, 7)
-    assert candidates[0].partition.partition_format == (
-        "logs_%Y/m_%m/d_%d/h_%H"
-    )
-
-
-def test_hourly_discovery_normalizes_legacy_date_checkpoint(tmp_path: Path) -> None:
-    for hour in (10, 11):
-        folder = tmp_path / "__run_date=2026-07-22" / f"__run_hour={hour:02d}"
-        folder.mkdir(parents=True)
-        _write_with_mtime(folder / f"run-{hour}.jsonl", 100 + hour)
-    checkpoint = LogStreamCheckpoint(
-        partition_value=date(2026, 7, 22),
-        boundary_last_modified=datetime.fromtimestamp(0, tz=timezone.utc),
-        partition_format="__run_date=%Y-%m-%d/__run_hour=%H",
-    )
-
-    candidates = discover_incremental_candidates(
-        LocalStorageAdapter(),
-        str(tmp_path),
-        suffix=".jsonl",
-        checkpoint=checkpoint,
-    )
-
-    assert [item.partition.partition_value for item in candidates] == [
-        datetime(2026, 7, 22, 10),
-        datetime(2026, 7, 22, 11),
-    ]
-
-
-def test_initial_discovery_rejects_mixed_partition_formats(tmp_path: Path) -> None:
-    (tmp_path / "20260721").mkdir()
-    (tmp_path / "2026-07-22").mkdir()
+def test_initial_plan_rejects_mixed_partition_formats(tmp_path: Path) -> None:
+    for raw_partition in ("20260721", "2026-07-22"):
+        folder = tmp_path / raw_partition
+        folder.mkdir()
+        _write_with_mtime(folder / "run.jsonl", 100)
 
     with pytest.raises(PartitionFormatError, match="Mixed partition formats"):
-        discover_incremental_candidates(LocalStorageAdapter(), str(tmp_path), suffix=".jsonl")
-
-
-def test_lookback_selects_new_or_changed_files_without_advancing_policy(tmp_path: Path) -> None:
-    folder = tmp_path / "__run_date=2026-07-20"
-    folder.mkdir()
-    unchanged_path = folder / "unchanged.jsonl"
-    changed_path = folder / "changed.jsonl"
-    new_path = folder / "new.jsonl"
-    for path, modified in ((unchanged_path, 100), (changed_path, 101), (new_path, 102)):
-        _write_with_mtime(path, modified)
-    adapter = LocalStorageAdapter()
-    unchanged_revision = adapter.stat(str(unchanged_path))
-    old_changed_revision = StorageRevision(
-        canonical_uri=adapter.canonical_uri(str(changed_path)),
-        size=0,
-        last_modified=datetime.fromtimestamp(99, tz=timezone.utc),
-        provider_revision="99000000000",
-    )
-
-    candidates = discover_lookback_candidates(
-        adapter,
-        str(tmp_path),
-        suffix="jsonl",
-        lookback=LookbackRange(date(2026, 7, 20), date(2026, 7, 20)),
-        manifest_revisions={
-            unchanged_revision.canonical_uri: unchanged_revision,
-            old_changed_revision.canonical_uri: old_changed_revision,
-        },
-        expected_format="__run_date=%Y-%m-%d",
-    )
-
-    assert [Path(item.canonical_uri).name for item in candidates] == ["changed.jsonl", "new.jsonl"]
+        plan_stream_sync(
+            LocalStorageAdapter(),
+            StreamDefinition("job_jsonl", str(tmp_path), ".jsonl"),
+            state=None,
+            manifest={},
+            spec=LogSyncSpec(),
+            today=date(2026, 7, 22),
+        )
 
 
 def test_sync_spec_requires_mode_appropriate_lookback() -> None:
@@ -413,8 +323,6 @@ def test_learned_layout_renders_only_incremental_and_lookback_partitions(
         layout_status="learned",
         partition_format="__run_date=%Y-%m-%d",
         partition_granularity=PartitionGranularity.DAY,
-        checkpoint_partition_value=date(2026, 7, 22),
-        boundary_last_modified=datetime.fromtimestamp(100, tz=timezone.utc),
         last_scanned_partition_value=date(2026, 7, 22),
     )
 
@@ -449,11 +357,12 @@ def test_learned_layout_renders_only_incremental_and_lookback_partitions(
         date(2026, 7, 24),
     )
     assert plan.lookback_partition_values == (date(2026, 7, 20),)
+    assert plan.inventory_requests == 4
+    assert plan.inventory_pages == 4
     assert plan.state.last_scanned_partition_value == date(2026, 7, 24)
-    assert plan.state.checkpoint_partition_value == date(2026, 7, 24)
 
 
-def test_hourly_planner_revisits_checkpoint_and_advances_by_hour(tmp_path: Path) -> None:
+def test_hourly_planner_scans_forward_and_one_day_overwrite_window(tmp_path: Path) -> None:
     old = tmp_path / "__run_date=2026-07-22" / "__run_hour=09"
     checkpoint = tmp_path / "__run_date=2026-07-22" / "__run_hour=10"
     current = tmp_path / "__run_date=2026-07-22" / "__run_hour=11"
@@ -471,8 +380,6 @@ def test_hourly_planner_revisits_checkpoint_and_advances_by_hour(tmp_path: Path)
         layout_status="learned",
         partition_format="__run_date=%Y-%m-%d/__run_hour=%H",
         partition_granularity=PartitionGranularity.HOUR,
-        checkpoint_partition_value=datetime(2026, 7, 22, 10),
-        boundary_last_modified=datetime.fromtimestamp(100, tz=timezone.utc),
         last_scanned_partition_value=datetime(2026, 7, 22, 10),
     )
 
@@ -485,19 +392,18 @@ def test_hourly_planner_revisits_checkpoint_and_advances_by_hour(tmp_path: Path)
         today=datetime(2026, 7, 22, 11, 30),
     )
 
-    assert plan.incremental_partition_values == (
-        datetime(2026, 7, 22, 10),
-        datetime(2026, 7, 22, 11),
-    )
+    assert len(plan.incremental_partition_values) == 25
+    assert plan.incremental_partition_values[0] == datetime(2026, 7, 21, 11)
+    assert plan.incremental_partition_values[-1] == datetime(2026, 7, 22, 11)
     assert [Path(item.canonical_uri).name for item in plan.candidates] == [
+        "old.jsonl",
         "late.jsonl",
         "new.jsonl",
     ]
-    assert plan.state.checkpoint_partition_value == datetime(2026, 7, 22, 11)
-    assert old.resolve().as_posix() not in adapter.listed_file_partitions
+    assert old.resolve().as_posix() in adapter.listed_file_partitions
 
 
-def test_hourly_incremental_revisits_previous_hour_for_late_files(
+def test_hourly_incremental_revisits_the_rolling_overwrite_window(
     tmp_path: Path,
 ) -> None:
     previous = tmp_path / "__run_date=2026-07-22" / "__run_hour=10"
@@ -514,8 +420,6 @@ def test_hourly_incremental_revisits_previous_hour_for_late_files(
         layout_status="learned",
         partition_format="__run_date=%Y-%m-%d/__run_hour=%H",
         partition_granularity=PartitionGranularity.HOUR,
-        checkpoint_partition_value=datetime(2026, 7, 22, 11),
-        boundary_last_modified=datetime.fromtimestamp(100, tz=timezone.utc),
         last_scanned_partition_value=datetime(2026, 7, 22, 11),
     )
 
@@ -528,10 +432,9 @@ def test_hourly_incremental_revisits_previous_hour_for_late_files(
         today=datetime(2026, 7, 22, 11, 30),
     )
 
-    assert plan.incremental_partition_values == (
-        datetime(2026, 7, 22, 10),
-        datetime(2026, 7, 22, 11),
-    )
+    assert len(plan.incremental_partition_values) == 25
+    assert plan.incremental_partition_values[0] == datetime(2026, 7, 21, 11)
+    assert plan.incremental_partition_values[-1] == datetime(2026, 7, 22, 11)
     assert [Path(item.canonical_uri).name for item in plan.candidates] == [
         "late.jsonl"
     ]
@@ -551,7 +454,6 @@ def test_initial_hourly_plan_marks_current_hour_as_scanned(tmp_path: Path) -> No
         today=datetime(2026, 7, 22, 10, 30),
     )
 
-    assert plan.state.checkpoint_partition_value == datetime(2026, 7, 20, 8)
     assert plan.state.last_scanned_partition_value == datetime(2026, 7, 22, 10)
 
     follow_up = plan_stream_sync(
@@ -562,11 +464,9 @@ def test_initial_hourly_plan_marks_current_hour_as_scanned(tmp_path: Path) -> No
         spec=LogSyncSpec(),
         today=datetime(2026, 7, 22, 11, 30),
     )
-    assert follow_up.incremental_partition_values == (
-        datetime(2026, 7, 20, 8),
-        datetime(2026, 7, 22, 10),
-        datetime(2026, 7, 22, 11),
-    )
+    assert len(follow_up.incremental_partition_values) == 25
+    assert follow_up.incremental_partition_values[0] == datetime(2026, 7, 21, 11)
+    assert follow_up.incremental_partition_values[-1] == datetime(2026, 7, 22, 11)
 
 
 def test_initial_unpartitioned_plan_normalizes_current_partition_to_date(
@@ -594,7 +494,6 @@ def test_hourly_lookback_expands_inclusive_dates_to_all_hours(tmp_path: Path) ->
         layout_status="learned",
         partition_format="__run_date=%Y-%m-%d/__run_hour=%H",
         partition_granularity=PartitionGranularity.HOUR,
-        checkpoint_partition_value=datetime(2026, 7, 22, 10),
         last_scanned_partition_value=datetime(2026, 7, 22, 10),
     )
 
@@ -677,8 +576,10 @@ class _RecordingLocalStorageAdapter(LocalStorageAdapter):
     def __init__(self) -> None:
         self.listed_file_partitions: list[str] = []
         self.listed_partition_children: list[str] = []
+        self.inventory_requests = []
 
     def inventory(self, request):
+        self.inventory_requests.append(request)
         if request.object_types == frozenset({"directory"}):
             self.listed_partition_children.append(self.canonical_uri(request.uri))
         if request.object_types == frozenset({"file"}):

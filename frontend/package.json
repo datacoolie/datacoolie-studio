@@ -1,15 +1,16 @@
 {
   "name": "datacoolie-studio-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
     "test": "vitest run",
+    "test:lifecycle": "node scripts/check-frontend-lifecycle.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "api:generate": "openapi-typescript ../openapi/openapi.json -o src/shared/api/generated/schema.ts",
-    "api:check": "npm run api:generate --silent && git diff --exit-code -- src/shared/api/generated/schema.ts"
+    "api:check": "node scripts/check-generated-api.mjs"
   },
   "dependencies": {
     "@iconify-icons/carbon": "^1.2.20",
@@ -17,16 +18,16 @@
     "@iconify-icons/vscode-icons": "^1.2.29",
     "@iconify/react": "^6.0.2",
     "@tanstack/react-query": "^5.101.2",
-    "@tanstack/react-table": "^8.21.3",
+    "@tanstack/react-virtual": "3.14.20",
     "@xyflow/react": "^12.8.2",
     "echarts": "^6.1.0",
     "elkjs": "^0.11.1",
     "highlight.js": "^11.11.1",
+    "lossless-json": "4.3.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-datasheet-grid": "^4.11.6",
-    "react-dom": "^18.3.1",
-    "tslib": "^2.8.1"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -36,11 +37,11 @@
     "openapi-typescript": "^7.13.0",
     "playwright": "^1.56.1",
     "typescript": "^5.6.3",
-    "vite": "^8.0.16",
+    "vite": "^8.1.6",
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "js-yaml": "4.3.1",
+    "js-yaml": "4.3.2",
     "undici": "6.27.0"
   }
 }

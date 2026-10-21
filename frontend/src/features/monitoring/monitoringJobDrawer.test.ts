@@ -13,17 +13,18 @@ describe("Job drawer child dataflow table", () => {
       "Dataflow",
       "Stage / operation",
       "Time",
+      "Phase",
       "Status",
       "Duration",
       "Rows",
-      "Issue",
+      "Message",
     ]);
     expect(columns.find((column) => column.label === "Stage / operation")?.sortKey).toBe("stage");
     expect(columns.find((column) => column.label === "Rows")?.sortKey).toBe("source_rows_read");
     expect(columns.find((column) => column.label === "Time")?.key).toBe("start_time");
   });
 
-  it("measures every displayed line for paired child dataflow fields", () => {
+  it("measures paired child values and keeps Time at its explicit width", () => {
     const row = {
       stage: "silver",
       operation_type: "merge",
@@ -36,9 +37,6 @@ describe("Job drawer child dataflow table", () => {
 
     expect(childDataflowStageOperationLines(row)).toEqual(["silver", "merge"]);
     expect(childDataflowRowLines(row)).toEqual(["12,345 read", "12,000 written"]);
-    expect(columns.find((column) => column.label === "Time")?.measureValue?.(row, "UTC")).toEqual([
-      "2026-07-14 07:19:22 UTC",
-      "→ 2026-07-14 07:19:24 UTC",
-    ]);
+    expect(columns.find((column) => column.label === "Time")).toMatchObject({ width: 170 });
   });
 });

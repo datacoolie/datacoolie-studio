@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from datacoolie_studio.api.v1.routes.credentials import (
+from datacoolie_studio.api.v1.dependencies import (
     get_credential_secret_store,
 )
 from datacoolie_studio.main import app
@@ -83,13 +83,11 @@ def test_databricks_log_validation_uses_three_first_match_probes(monkeypatch):
         def inventory(self, request):
             requests.append(request)
             name = (
-                "dataflow.parquet"
-                if request.suffixes == frozenset({".parquet"})
-                else (
-                    "system_log_20260729.jsonl"
-                    if request.name_prefix == "system_log_"
-                    else "job.jsonl"
-                )
+                "dataflow.json"
+                if request.uri.endswith("/dataflow_run_log")
+                else "job.json"
+                if request.uri.endswith("/job_run_log")
+                else "system.json"
             )
             return StorageInventory(
                 objects=(
@@ -129,7 +127,8 @@ def test_databricks_log_validation_uses_three_first_match_probes(monkeypatch):
     assert len(requests) == 3
     assert all(request.object_limit == 1 for request in requests)
     assert all(request.stop_after_match is True for request in requests)
-    assert requests[2].name_prefix == "system_log_"
+    assert requests[2].name_prefix is None
+    assert all(request.suffixes == frozenset({".json"}) for request in requests)
 
 
 def test_remote_metadata_validation_preserves_safe_storage_error(monkeypatch):
@@ -188,6 +187,49 @@ def test_local_source_defaults_to_typed_local_binding(
             "credential_profile_id": None,
             "options": {},
         }
+
+
+def test_local_sql_source_is_registered_as_a_live_read_root(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "DATACOOLIE_STUDIO_DATABASE_URL",
+        f"sqlite:///{(tmp_path / 'studio.db').as_posix()}",
+    )
+    sql_root = tmp_path / "queries"
+    sql_root.mkdir()
+    (sql_root / "orders.sql").write_text("SELECT 1;\n", encoding="utf-8")
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "demo"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        response = client.post(
+            f"/api/v1/environments/{environment['id']}/sql-sources",
+            json={"uri": str(sql_root), "label": "queries"},
+        )
+
+        assert response.status_code == 200, response.text
+        source = response.json()
+        assert source["source_config"]["sql_root_uri"] == str(sql_root)
+        assert source["storage"]["provider"] == "local"
+
+        workspace = client.get(
+            f"/api/v1/environments/{environment['id']}/sources/workspace"
+        )
+        assert workspace.status_code == 200, workspace.text
+        payload = workspace.json()
+        assert [item["id"] for item in payload["sql_sources"]] == [source["id"]]
+        status = next(
+            item for item in payload["statuses"] if item["source_id"] == source["id"]
+        )
+        assert status["source_kind"] == "sql"
+        assert status["validation"]["state"] == "ready"
+        assert status["freshness"]["state"] == "current"
+        assert status["freshness"]["summary"] == "SQL source is readable"
 
 
 def test_cloud_source_binding_validates_profile_and_rejects_secret_config(
@@ -312,12 +354,10 @@ def test_log_credential_change_preserves_learned_state_but_storage_change_resets
                     """
                     INSERT INTO log_stream_states (
                         source_id, stream_kind, root_uri, partition_format,
-                        partition_granularity, checkpoint_partition_value,
-                        boundary_last_modified, last_scanned_partition_value,
+                        partition_granularity, last_scanned_partition_key,
                         layout_status, created_at, updated_at
                     ) VALUES (?, 'job_jsonl', 's3://analytics/logs/job_run_log',
                               '%Y-%m-%d', 'day', '2026-07-22',
-                              '2026-07-22T00:00:00+00:00', '2026-07-22',
                               'learned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """,
                     (source["id"],),
@@ -456,7 +496,7 @@ def test_storage_connection_validation_supports_remote_files(
     assert calls == [("inventory", canonical_uri), ("stat", canonical_uri)]
 
 
-def test_storage_connection_validation_rejects_mismatched_base_log_uri(
+def test_storage_connection_validation_rejects_mismatched_log_base_path(
     tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
@@ -471,7 +511,7 @@ def test_storage_connection_validation_rejects_mismatched_base_log_uri(
                 "uri": str(root),
                 "storage": {"provider": "local", "auth_mode": "none"},
                 "source_config": {
-                    "base_log_uri": "s3://bucket/logs",
+                    "log_base_path": "s3://bucket/logs",
                 },
             },
         )
@@ -488,28 +528,29 @@ def test_storage_connection_validation_rejects_mismatched_base_log_uri(
                 "uri": str(root),
                 "enabled": False,
                 "storage": {"provider": "local", "auth_mode": "none"},
-                "source_config": {"base_log_uri": "s3://bucket/logs"},
+                "source_config": {"log_base_path": "s3://bucket/logs"},
             },
         )
 
     assert response.status_code == 200
     assert response.json()["status"] == "error"
-    assert "base_log_uri" in response.json()["message"]
+    assert "log_base_path" in response.json()["message"]
     assert create.status_code == 422
-    assert "base_log_uri" in create.text
+    assert "log_base_path" in create.text
 
 
 @pytest.mark.parametrize(
-    ("provider", "uri", "expected_limit"),
-    [
-        (
-            "onelake",
-            "https://onelake.dfs.fabric.microsoft.com/Analytics/"
-            "Telemetry.Lakehouse/Files/project",
-            1,
-        ),
-        ("dbfs", "dbfs:/Volumes/catalog/schema/volume/project", 1),
-    ],
+        ("provider", "uri", "expected_limit", "expected_write_back"),
+        [
+            (
+                "onelake",
+                "https://onelake.dfs.fabric.microsoft.com/Analytics/"
+                "Telemetry.Lakehouse/Files/project",
+                1,
+                True,
+            ),
+            ("dbfs", "dbfs:/Volumes/catalog/schema/volume/project", 1, True),
+        ],
 )
 def test_cloud_connection_probe_supports_write_back_and_is_bounded(
     tmp_path: Path,
@@ -517,6 +558,7 @@ def test_cloud_connection_probe_supports_write_back_and_is_bounded(
     provider: str,
     uri: str,
     expected_limit: int,
+    expected_write_back: bool,
 ):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
@@ -571,7 +613,7 @@ def test_cloud_connection_probe_supports_write_back_and_is_bounded(
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "ok"
     assert response.json()["objects_scanned"] == 1
-    assert response.json()["metadata_write_back_supported"] is True
+    assert response.json()["metadata_write_back_supported"] is expected_write_back
     assert observed_requests[0].object_limit == expected_limit
     assert observed_requests[0].stop_after_match is True
     assert observed_requests[0].recursive is False
@@ -726,7 +768,7 @@ def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input
 ) -> None:
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
-    etl_input = "abfss://test@account.dfs.core.windows.net/logs/etl"
+    execution_input = "abfss://test@account.dfs.core.windows.net/logs/execution"
     system_input = "https://account.dfs.core.windows.net/test/logs/system"
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "log-locations"}).json()
@@ -737,12 +779,12 @@ def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input
         response = client.post(
             f"/api/v1/environments/{environment['id']}/log-sources",
             json={
-                "uri": etl_input,
+                "uri": execution_input,
                 "enabled": False,
                 "storage": {"provider": "adls", "auth_mode": "ambient"},
                 "source_config": {
                     "mode": "separate_paths",
-                    "etl_logs_uri": etl_input,
+                    "execution_logs_uri": execution_input,
                     "system_logs_uri": system_input,
                 },
             },
@@ -750,12 +792,12 @@ def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input
         second = client.post(
             f"/api/v1/environments/{environment['id']}/log-sources",
             json={
-                "uri": etl_input,
+                "uri": execution_input,
                 "enabled": False,
                 "storage": {"provider": "adls", "auth_mode": "ambient"},
                 "source_config": {
                     "mode": "separate_paths",
-                    "etl_logs_uri": etl_input,
+                    "execution_logs_uri": execution_input,
                     "system_logs_uri": (
                         "https://account.dfs.core.windows.net/test/logs/system-2"
                     ),
@@ -765,22 +807,24 @@ def test_log_secondary_locations_are_canonical_for_collection_and_keep_raw_input
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["uri"] == "abfs://test@account.dfs.core.windows.net/logs/etl"
-    assert body["source_config"]["etl_logs_uri"] == (
-        "abfs://test@account.dfs.core.windows.net/logs/etl"
-    )
+    assert body["uri"] == "abfs://test@account.dfs.core.windows.net/logs/execution"
+    assert body["source_config"] == {
+        "mode": "separate_paths",
+        "execution_logs_uri": "abfs://test@account.dfs.core.windows.net/logs/execution",
+        "system_logs_uri": "abfs://test@account.dfs.core.windows.net/logs/system",
+    }
     assert body["source_config"]["system_logs_uri"] == (
         "abfs://test@account.dfs.core.windows.net/logs/system"
     )
     assert body["configured_location"]["input_locations"] == {
-        "etl_logs_uri": etl_input,
+        "execution_logs_uri": execution_input,
         "system_logs_uri": system_input,
     }
     assert second.status_code == 200, second.text
     assert second.json()["id"] != body["id"]
 
 
-def test_legacy_log_location_aliases_are_normalized_and_update_registration(
+def test_log_base_path_location_is_normalized_and_update_registration(
     tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
@@ -794,7 +838,7 @@ def test_legacy_log_location_aliases_are_normalized_and_update_registration(
 
     with TestClient(app) as client:
         project = client.post(
-            "/api/v1/projects", json={"name": "legacy-log-keys"}
+            "/api/v1/projects", json={"name": "log-base-path"}
         ).json()
         environment = client.post(
             f"/api/v1/projects/{project['id']}/environments",
@@ -807,8 +851,8 @@ def test_legacy_log_location_aliases_are_normalized_and_update_registration(
                 "enabled": False,
                 "storage": {"provider": "local", "auth_mode": "none"},
                 "source_config": {
-                    "mode": "base_log_path",
-                    "base_log_path": str(old_root),
+                    "mode": "log_base_path",
+                    "log_base_path": str(old_root),
                 },
             },
         )
@@ -816,27 +860,23 @@ def test_legacy_log_location_aliases_are_normalized_and_update_registration(
             f"/api/v1/environments/{environment['id']}/log-sources/{created.json()['id']}",
             json={
                 "source_config": {
-                    "mode": "base_log_path",
-                    "base_log_path": str(new_root),
+                    "mode": "log_base_path",
+                    "log_base_path": str(new_root),
                 }
             },
         )
 
     assert created.status_code == 200, created.text
-    assert created.json()["source_config"] == {
-        "base_log_uri": str(old_root),
-        "mode": "base_log_path",
-    }
+    assert created.json()["source_config"]["mode"] == "log_base_path"
+    assert created.json()["source_config"]["log_base_path"] == str(old_root)
     assert created.json()["configured_location"]["input_locations"] == {
-        "base_log_uri": str(old_root)
+        "log_base_path": str(old_root)
     }
     assert updated.status_code == 200, updated.text
-    assert updated.json()["source_config"] == {
-        "base_log_uri": str(new_root),
-        "mode": "base_log_path",
-    }
+    assert updated.json()["source_config"]["mode"] == "log_base_path"
+    assert updated.json()["source_config"]["log_base_path"] == str(new_root)
     assert updated.json()["configured_location"]["input_locations"] == {
-        "base_log_uri": str(new_root)
+        "log_base_path": str(new_root)
     }
 
 
@@ -895,6 +935,7 @@ def test_dbfs_source_accepts_volume_aliases_and_persists_canonical_uri(
                 "storage": {
                     "provider": "dbfs",
                     "auth_mode": "ambient",
+                    "options": {"host": "https://workspace.example"},
                 },
             },
         )
@@ -930,3 +971,63 @@ def test_remote_client_cannot_attach_stored_profile(tmp_path: Path, monkeypatch)
         )
 
     assert response.status_code == 403
+
+
+def test_source_patch_shallow_merges_config_and_distinguishes_null_label(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "DATACOOLIE_STUDIO_DATABASE_URL",
+        f"sqlite:///{(tmp_path / 'studio.db').as_posix()}",
+    )
+    execution_root = tmp_path / "execution"
+    replacement_root = tmp_path / "replacement"
+    system_root = tmp_path / "system"
+    for root in (execution_root, replacement_root, system_root):
+        root.mkdir()
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "patch-merge"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        source = client.post(
+            f"/api/v1/environments/{environment['id']}/log-sources",
+            json={
+                "uri": str(execution_root),
+                "enabled": False,
+                "label": "keep until cleared",
+                "source_config": {
+                    "mode": "separate_paths",
+                    "execution_logs_uri": str(execution_root),
+                    "system_logs_uri": str(system_root),
+                    "custom_option": "preserve",
+                },
+            },
+        ).json()
+
+        updated = client.patch(
+            f"/api/v1/environments/{environment['id']}/log-sources/{source['id']}",
+            json={
+                "label": None,
+                "source_config": {"execution_logs_uri": str(replacement_root)},
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        body = updated.json()
+        assert body["label"] is None
+        assert body["source_config"] == {
+            "mode": "separate_paths",
+            "execution_logs_uri": str(replacement_root),
+            "system_logs_uri": str(system_root),
+            "custom_option": "preserve",
+        }
+
+        rejected = client.patch(
+            f"/api/v1/environments/{environment['id']}/log-sources/{source['id']}",
+            json={"source_config": None},
+        )
+        assert rejected.status_code == 422

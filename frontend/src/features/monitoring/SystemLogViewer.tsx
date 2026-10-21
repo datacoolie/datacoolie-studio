@@ -1,46 +1,106 @@
-import { Check, Copy, ListTree, Search, WrapText, X } from "lucide-react";
+import { Copy, Download, ListTree, Search, WrapText, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
-import { formatTimestampForDisplay, parseTimestamp } from "../../shared/time";
-import { monitoringSystemLogsOptions, SYSTEM_LOG_PAGE_SIZE } from "./monitoringQueries";
-import { CompactNumberValue } from "./CompactNumberValue";
+import { monitoringSystemLogsOptions, systemLogDownloadParams, SYSTEM_LOG_PAGE_SIZE } from "./monitoringQueries";
+import { api } from "../../shared/api/client";
+import type { MonitoringSessionScope } from "../../shared/api/domainTypes";
+import { CompactNumberValue } from "../../shared/components/CompactNumberValue";
+import { Help } from "../../shared/components/Help";
+import { dismissActiveHelp } from "../../shared/components/helpCoordinator";
+import { resolveIntlTimezone } from "../../shared/time";
+import { highlightJson } from "./details/detailPrimitives";
+import {
+  collectSystemLogReadErrors,
+  displaySystemLogValue,
+  displaySystemLogMessage,
+  formatSystemLogRecord,
+  logLevelTone,
+  logRecordKey,
+  readErrorSummary,
+  sortLogRecords,
+  systemLogParts,
+  uniqueSystemLogFiles,
+  type SystemLogPage,
+} from "./systemLogModel";
 
 export { systemLogScopeParams } from "./monitoringQueries";
+export {
+  collectSystemLogReadErrors,
+  displaySystemLogValue,
+  displaySystemLogMessage,
+  formatFullSystemLogRecord,
+  formatSystemLogRecord,
+  logLevelTone,
+  systemLogParts,
+  systemLogDetailEntries,
+  uniqueSystemLogFiles,
+} from "./systemLogModel";
+export type { SystemLogPage, SystemLogParts } from "./systemLogModel";
 
 const LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
+const EMPTY_LOG_PAGES: SystemLogPage[] = [];
 
 interface SystemLogViewerProps {
   environmentId: number;
   jobId: string;
+  jobLabel?: string | null;
+  sourceId?: number;
+  logSessionScope?: MonitoringSessionScope;
+  logSessionId?: string | null;
   dataflowId?: string;
+  dataflowLabel?: string | null;
+  dataflowRunId?: string;
+  eventName?: string;
   timezoneName?: string | null;
   onClose: () => void;
 }
 
-export interface SystemLogParts {
-  time: string;
-  level: string;
-  logger: string;
-  func: string;
-  line: string;
-  dataflowId: string;
+interface CopyFeedback {
+  tone: "success" | "error";
   message: string;
 }
 
-export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName, onClose }: SystemLogViewerProps) {
+type CopyHandler = (label: string, value: string) => void;
+
+export function SystemLogViewer({
+  environmentId,
+  jobId,
+  jobLabel,
+  sourceId,
+  logSessionScope,
+  logSessionId,
+  dataflowId,
+  dataflowLabel,
+  dataflowRunId,
+  eventName,
+  timezoneName,
+  onClose,
+}: SystemLogViewerProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const feedbackTimerRef = useRef<number | null>(null);
+  const onCloseRef = useRef(onClose);
   const [searchValue, setSearchValue] = useState("");
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState("");
   const [includeDataflowLogs, setIncludeDataflowLogs] = useState(false);
   const [wrapped, setWrapped] = useState(true);
-  const [copied, setCopied] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   const logsQuery = useInfiniteQuery(monitoringSystemLogsOptions(environmentId, {
     jobId,
+    sourceId,
+    logSessionScope,
+    logSessionId,
     dataflowId,
+    dataflowRunId,
+    eventName,
     includeDataflowLogs,
     level,
     query,
@@ -52,23 +112,31 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
   }, [searchValue]);
 
   useEffect(() => {
+    dismissActiveHelp();
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const focusFrame = window.requestAnimationFrame(() => searchRef.current?.focus());
 
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
       if (event.key === "Escape") {
+        if (dismissActiveHelp(event)) return;
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      )].filter((element) => !element.hidden);
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => {
+        if (element.hidden) return false;
+        const closedDetails = element.closest("details:not([open])");
+        if (closedDetails && !closedDetails.querySelector(":scope > summary")?.isSameNode(element)) return false;
+        return element.getClientRects().length > 0;
+      });
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -86,32 +154,84 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
       window.cancelAnimationFrame(focusFrame);
       document.removeEventListener("keydown", handleKeyDown, true);
       document.body.style.overflow = previousOverflow;
-      window.requestAnimationFrame(() => previousFocus?.focus());
+      window.requestAnimationFrame(() => {
+        previousFocus?.setAttribute("data-help-restoring-focus", "true");
+        previousFocus?.focus();
+        queueMicrotask(() => previousFocus?.removeAttribute("data-help-restoring-focus"));
+      });
     };
-  }, [onClose]);
+  }, []);
 
-  const pages = logsQuery.data?.pages ?? [];
+  useEffect(() => () => {
+    if (feedbackTimerRef.current !== null) window.clearTimeout(feedbackTimerRef.current);
+  }, []);
+
+  const pages = logsQuery.data?.pages ?? EMPTY_LOG_PAGES;
   const records = useMemo(() => sortLogRecords(pages.flatMap((page) => page.records)), [pages]);
   const total = pages.at(-1)?.total ?? 0;
-  const files = useMemo(() => Array.from(new Set(pages.flatMap((page) => page.files))), [pages]);
-  const readErrors = useMemo(() => pages.flatMap((page) => page.errors), [pages]);
+  const files = useMemo(() => uniqueSystemLogFiles(pages.flatMap((page) => page.files)), [pages]);
+  const readErrors = useMemo(() => collectSystemLogReadErrors(pages), [pages]);
+  const loaded = records.length;
+  const responseLoaded = Boolean(logsQuery.data);
   const loading = logsQuery.isPending;
   const loadingMore = logsQuery.isFetchingNextPage;
+  const refreshing = logsQuery.isFetching && !loading && !loadingMore;
   const error = logsQuery.error instanceof Error ? logsQuery.error.message : logsQuery.error ? String(logsQuery.error) : null;
-  const canLoadMore = Boolean(logsQuery.hasNextPage && !logsQuery.isFetchingNextPage);
-  const scopeLabel = dataflowId ? `Dataflow ${dataflowId}` : includeDataflowLogs ? "Job + dataflows" : "Job only";
+  const nextPageError = Boolean(logsQuery.isFetchNextPageError);
+  const canLoadMore = Boolean(logsQuery.hasNextPage && !logsQuery.isFetchingNextPage && !error);
+  const resolvedTimezone = resolveIntlTimezone(timezoneName);
+  const viewerTitle = presentLabel(dataflowLabel) && dataflowId
+    ? dataflowLabel as string
+    : presentLabel(jobLabel) ?? jobId;
+  const scopeMode = dataflowRunId
+    ? `Dataflow run ${dataflowRunId}`
+    : dataflowId
+      ? `Dataflow ${displayScopeIdentity(dataflowLabel, dataflowId)}`
+      : includeDataflowLogs
+        ? "Job + dataflows"
+        : "Job only";
+  const compactLoadedText = useMemo(
+    () => records.map((record) => formatSystemLogRecord(record, timezoneName)).join("\n"),
+    [records, timezoneName],
+  );
+  const downloadUrl = api.monitoringSystemLogDownloadUrl(environmentId, systemLogDownloadParams({
+    jobId, sourceId, logSessionScope, logSessionId,
+  }));
+
+  function showCopyFeedback(feedback: CopyFeedback) {
+    setCopyFeedback(feedback);
+    if (feedbackTimerRef.current !== null) window.clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = window.setTimeout(() => setCopyFeedback(null), 2200);
+  }
+
+  async function copyText(label: string, text: string) {
+    if (!text) {
+      showCopyFeedback({ tone: "error", message: `No ${label.toLowerCase()} is available.` });
+      return;
+    }
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      showCopyFeedback({ tone: "success", message: `${label} copied.` });
+    } catch {
+      showCopyFeedback({ tone: "error", message: `Could not copy ${label.toLowerCase()}.` });
+    }
+  }
 
   function loadMore() {
     if (canLoadMore) void logsQuery.fetchNextPage();
   }
 
-  async function copyVisibleLogs() {
-    const text = records.map((record) => formatSystemLogRecord(record, timezoneName)).join("\n");
-    if (!text) return;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
-  }
+  const scopeEntries = [
+    `Job: ${displayScopeIdentity(jobLabel, jobId)}`,
+    `Source: ${sourceId === undefined ? "all" : sourceId}`,
+    `Session: ${logSessionScope === "null" ? "NULL" : logSessionScope === "exact" ? `exact ${JSON.stringify(logSessionId ?? "")}` : "all"}`,
+    `Dataflow: ${dataflowId ? displayScopeIdentity(dataflowLabel, dataflowId) : "all"}`,
+    ...(dataflowRunId ? [`Run: ${dataflowRunId}`] : []),
+    ...(eventName ? [`Event: ${eventName}`] : []),
+    `Scope: ${scopeMode}`,
+    `Timezone: ${resolvedTimezone}`,
+  ];
 
   return createPortal(
     <div
@@ -130,18 +250,19 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="system-log-dialog-header">
-          <div className="system-log-dialog-title">
-            <span>Job system log</span>
-            <h2 id={titleId}>{jobId}</h2>
+          <Help as="div" className="system-log-dialog-title" title={scopeEntries.join("\n")}>
+            <span>System log</span>
+            <div className="system-log-heading">
+              <h2 id={titleId}>{viewerTitle}</h2>
+            </div>
+          </Help>
+          <div className="system-log-dialog-summary" aria-label="System log counts and timezone">
+            <span className="system-log-summary-chip">{loading ? "Loading records" : <><CompactNumberValue compactStyle="infix" value={loaded} /> / <CompactNumberValue compactStyle="infix" value={total} /> loaded</>}</span>
+            <Help className="system-log-summary-chip" title="Display timezone">{resolvedTimezone}</Help>
           </div>
-          <div className="system-log-dialog-summary">
-            <span>{scopeLabel}</span>
-            <span>{loading ? "Loading…" : <><CompactNumberValue value={total} /> records</>}</span>
-            <span><CompactNumberValue value={files.length} /> files</span>
-          </div>
-          <button className="icon-action" type="button" aria-label="Close system logs" title="Close" onClick={onClose}>
+          <Help as="button" className="icon-action" type="button" aria-label="Close system logs" title="Close" onClick={onClose}>
             <X size={17} />
-          </button>
+          </Help>
         </header>
 
         <div className="system-log-toolbar">
@@ -151,7 +272,7 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
               ref={searchRef}
               type="search"
               value={searchValue}
-              placeholder="Search messages, logger, function…"
+              placeholder="Search messages, logger, event…"
               aria-label="Search system logs"
               onChange={(event) => setSearchValue(event.target.value)}
             />
@@ -163,7 +284,7 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
             </select>
           </label>
           {!dataflowId ? (
-            <button
+            <Help as="button"
               className={`system-log-tool${includeDataflowLogs ? " is-active" : ""}`}
               type="button"
               aria-pressed={includeDataflowLogs}
@@ -171,23 +292,42 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
               onClick={() => setIncludeDataflowLogs((value) => !value)}
             >
               <ListTree size={14} /> Include dataflow logs
-            </button>
+            </Help>
           ) : null}
           <button className={`system-log-tool${wrapped ? " is-active" : ""}`} type="button" aria-pressed={wrapped} onClick={() => setWrapped((value) => !value)}>
             <WrapText size={14} /> Wrap
           </button>
-          <button className="system-log-tool" type="button" disabled={!records.length} onClick={() => void copyVisibleLogs()}>
-            {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy loaded"}
+          <button className="system-log-tool" type="button" disabled={!records.length} onClick={() => void copyText("Loaded logs", compactLoadedText)}>
+            <Copy size={14} /> Copy loaded
           </button>
+          <Help as="a" className="system-log-tool" href={downloadUrl} download target="_blank" rel="noopener noreferrer" title="Download original JSONL for this job, including child dataflows. Search and level filters do not affect the download.">
+            <Download size={14} /> Download job log
+          </Help>
+          {dataflowId ? <Help className="system-log-scope-label" title={scopeMode}>{dataflowRunId ? "Dataflow run" : "Dataflow"}</Help> : null}
+          {refreshing ? <span className="system-log-refresh-status">Refreshing…</span> : null}
+          {copyFeedback ? <span className={`system-log-copy-feedback is-${copyFeedback.tone}`} role="status" aria-live="polite">{copyFeedback.message}</span> : null}
         </div>
 
         <div className={`system-log-viewer${wrapped ? " is-wrapped" : ""}`} aria-live="polite" aria-busy={loading}>
-          {loading ? <SystemLogState title="Loading system logs…" detail="Reading the indexed log files for this job." /> : null}
-          {!loading && error && !records.length ? <SystemLogState tone="error" title="Unable to read system logs" detail={error} /> : null}
-          {!loading && !error && logsQuery.data && !files.length ? (
-            <SystemLogState title="No indexed system logs" detail="Sync the configured log source, then open this viewer again." />
+          {loading ? <SystemLogState title="Loading system logs…" detail="Reading the indexed log files for this scope." /> : null}
+          {!loading && error && !nextPageError && !records.length ? (
+            <SystemLogState tone="error" title="Unable to read system logs" detail={error} onRetry={() => void logsQuery.refetch()} />
           ) : null}
-          {!loading && files.length > 0 && !records.length ? (
+          {!loading && error && nextPageError && !records.length ? (
+            <SystemLogState tone="error" title="Unable to load the next log page" detail={error} onRetry={() => void logsQuery.fetchNextPage()} />
+          ) : null}
+          {!loading && responseLoaded && !records.length && !error && !files.length && !readErrors.length ? (
+            <SystemLogState title="No indexed system logs" detail="No indexed files are available for this source and session scope." />
+          ) : null}
+          {!loading && responseLoaded && !records.length && !error && readErrors.length ? (
+            <SystemLogState
+              tone="error"
+              title="Indexed log files could not be read"
+              detail="No records were loaded. Review the file diagnostics below, then retry the read."
+              onRetry={() => void logsQuery.refetch()}
+            />
+          ) : null}
+          {!loading && responseLoaded && !records.length && !error && !readErrors.length && files.length > 0 ? (
             <SystemLogState
               title="No matching log records"
               detail={query || level
@@ -199,16 +339,28 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
           ) : null}
           {records.length ? (
             <div className="system-log-lines" role="log" aria-label="System log records">
-              {records.map((record, index) => <SystemLogLine key={logRecordKey(record, index)} record={record} timezoneName={timezoneName} />)}
-              {readErrors.length ? <div className="system-log-read-warning"><CompactNumberValue value={readErrors.length} /> file read warnings occurred while loading these logs.</div> : null}
-              {error ? <div className="system-log-read-warning is-error">Could not load more records: {error}</div> : null}
+              {records.map((record, index) => (
+                <SystemLogLine
+                  key={logRecordKey(record, index)}
+                  record={record}
+                  timezoneName={timezoneName}
+                  onCopy={copyText}
+                />
+              ))}
+              {error ? (
+                <div className="system-log-read-warning is-error">
+                  {nextPageError ? `Could not load more records: ${error}` : `Could not refresh system logs: ${error}`}
+                  <button type="button" onClick={() => void (nextPageError ? logsQuery.fetchNextPage() : logsQuery.refetch())}>{nextPageError ? "Retry load more" : "Retry read"}</button>
+                </div>
+              ) : null}
               {canLoadMore ? (
-                <button className="system-log-load-more" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
+                <button className="system-log-load-more" type="button" disabled={loadingMore} onClick={loadMore}>
                   {loadingMore ? "Loading…" : `Load ${SYSTEM_LOG_PAGE_SIZE} more`}
                 </button>
               ) : null}
             </div>
           ) : null}
+          {readErrors.length ? <SystemLogReadDiagnostics errors={readErrors} onRetry={() => void logsQuery.refetch()} /> : null}
         </div>
       </section>
     </div>,
@@ -216,81 +368,81 @@ export function SystemLogViewer({ environmentId, jobId, dataflowId, timezoneName
   );
 }
 
-function SystemLogLine({ record, timezoneName }: { record: Record<string, unknown>; timezoneName?: string | null }) {
+function SystemLogLine({
+  record,
+  timezoneName,
+  onCopy,
+}: {
+  record: Record<string, unknown>;
+  timezoneName?: string | null;
+  onCopy: CopyHandler;
+}) {
   const parts = systemLogParts(record, timezoneName);
   return (
-    <div className="system-log-line">
-      <span className="system-log-time">{parts.time}</span>
-      <LogSeparator />
-      <span className={`system-log-level is-${logLevelTone(parts.level)}`}>[{parts.level}]</span>
-      <LogSeparator />
-      <span className="system-log-callsite">
-        <span className="system-log-logger">{parts.logger}</span>
-        <span className="system-log-punctuation">:</span>
-        <span className="system-log-function">{parts.func}</span>
-        <span className="system-log-punctuation">:</span>
-        <span className="system-log-line-number">{parts.line}</span>
-      </span>
-      <LogSeparator />
-      <span className={`system-log-dataflow${parts.dataflowId === "-" ? " is-empty" : ""}`}>[{parts.dataflowId}]</span>
-      <LogSeparator />
-      <span className="system-log-message">{parts.message}</span>
+    <article className="system-log-line">
+      <div className="system-log-primary">
+        <span className="system-log-time">{parts.time}</span>
+        <span className={`system-log-level is-${logLevelTone(parts.level)}`}>[{displaySystemLogValue(parts.level)}]</span>
+        <span className="system-log-logger">{displaySystemLogValue(parts.logger)}</span>
+        {parts.dataflowId ? (
+          <Help as="button" className="system-log-copy-id system-log-dataflow" type="button" title="Copy dataflow ID" aria-label="Copy dataflow ID" onClick={() => onCopy("Dataflow ID", parts.dataflowId as string)}>
+            [{displaySystemLogValue(parts.dataflowId)}] <Copy size={11} aria-hidden="true" />
+          </Help>
+        ) : null}
+        {parts.eventName ? <span className="system-log-event">[{displaySystemLogValue(parts.eventName)}]</span> : null}
+        <span className="system-log-message-separator" aria-hidden="true"> - </span>
+        <span className="system-log-message">{displaySystemLogMessage(parts.message)}</span>
+      </div>
+      {parts.excInfo ? <pre className="system-log-inline-trace">{parts.excInfo}</pre> : null}
+    </article>
+  );
+}
+
+function SystemLogState({
+  title,
+  detail,
+  tone = "neutral",
+  onRetry,
+}: {
+  title: string;
+  detail: string;
+  tone?: "neutral" | "error";
+  onRetry?: () => void;
+}) {
+  return (
+    <div className={`system-log-state is-${tone}`}>
+      <strong>{title}</strong>
+      <span>{detail}</span>
+      {onRetry ? <button className="system-log-load-more" type="button" onClick={onRetry}>Retry</button> : null}
     </div>
   );
 }
 
-function LogSeparator() {
-  return <span className="system-log-separator" aria-hidden="true"> - </span>;
+function SystemLogReadDiagnostics({ errors, onRetry }: { errors: Array<Record<string, unknown>>; onRetry: () => void }) {
+  return (
+    <section className="system-log-diagnostics" aria-label="File read diagnostics">
+      <div className="system-log-diagnostics-header">
+        <strong>File read diagnostics</strong>
+        <span><CompactNumberValue compactStyle="infix" value={errors.length} /> warning{errors.length === 1 ? "" : "s"}</span>
+        <button className="system-log-tool" type="button" onClick={onRetry}>Retry read</button>
+      </div>
+      <div className="system-log-diagnostics-list">
+        {errors.map((error, index) => (
+          <details className="system-log-diagnostic" key={`${readErrorSummary(error)}-${index}`}>
+            <summary>{readErrorSummary(error)}</summary>
+            <pre>{highlightJson(JSON.stringify(error, null, 2) ?? String(error))}</pre>
+          </details>
+        ))}
+      </div>
+    </section>
+  );
 }
 
-function SystemLogState({ title, detail, tone = "neutral" }: { title: string; detail: string; tone?: "neutral" | "error" }) {
-  return <div className={`system-log-state is-${tone}`}><strong>{title}</strong><span>{detail}</span></div>;
+function presentLabel(value?: string | null) {
+  return value && value.trim() ? value : null;
 }
 
-export function systemLogParts(record: Record<string, unknown>, timezoneName?: string | null): SystemLogParts {
-  return {
-    time: formatTimestampForDisplay(record.ts ?? record.timestamp, timezoneName),
-    level: valueOr(record.level, "UNKNOWN").toUpperCase(),
-    logger: valueOr(record.logger, "-"),
-    func: valueOr(record.func ?? record.function, "-"),
-    line: valueOr(record.line, "-"),
-    dataflowId: valueOr(record.dataflow_id, "-"),
-    message: valueOr(record.msg ?? record.message, "-"),
-  };
-}
-
-export function formatSystemLogRecord(record: Record<string, unknown>, timezoneName?: string | null) {
-  const parts = systemLogParts(record, timezoneName);
-  return `${parts.time} - [${parts.level}] - ${parts.logger}:${parts.func}:${parts.line} - [${parts.dataflowId}] - ${parts.message}`;
-}
-
-export function logLevelTone(level: string) {
-  const normalized = level.trim().toLowerCase();
-  if (normalized === "fatal" || normalized === "critical") return "critical";
-  if (normalized === "error" || normalized === "exception") return "error";
-  if (normalized === "warning" || normalized === "warn") return "warning";
-  if (normalized === "info") return "info";
-  if (normalized === "debug" || normalized === "trace") return "debug";
-  return "unknown";
-}
-
-function valueOr(value: unknown, fallback: string) {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text || fallback;
-}
-
-function sortLogRecords(records: Array<Record<string, unknown>>) {
-  return records.map((record, index) => ({ record, index, timestamp: parseTimestamp(valueOr(record.ts ?? record.timestamp, "")) }))
-    .sort((left, right) => {
-      if (left.timestamp === null && right.timestamp === null) return left.index - right.index;
-      if (left.timestamp === null) return 1;
-      if (right.timestamp === null) return -1;
-      return left.timestamp - right.timestamp || left.index - right.index;
-    })
-    .map(({ record }) => record);
-}
-
-function logRecordKey(record: Record<string, unknown>, index: number) {
-  return [record.ts, record.level, record.logger, record.func, record.line, record.dataflow_id, index].map(String).join(":");
+function displayScopeIdentity(label: string | null | undefined, id: string) {
+  const displayLabel = presentLabel(label);
+  return displayLabel && displayLabel !== id ? `${displayLabel} (${id})` : id;
 }

@@ -46,6 +46,25 @@ class FsspecStorageAdapter:
 
         started = perf_counter()
         root = self._path(request.uri)
+        if request.recursive and request.object_types == frozenset({"file"}):
+            try:
+                recursive_result = self._recursive_file_inventory(
+                    request,
+                    root,
+                    started,
+                )
+            except FileNotFoundError as exc:
+                raise StorageNotFoundError(
+                    f"{self.provider.upper()} path was not found",
+                    provider=self.provider,
+                ) from exc
+            except Exception as exc:
+                raise StorageAccessError(
+                    f"{self.provider.upper()} list failed: {redact_storage_error(str(exc))}",
+                    provider=self.provider,
+                ) from exc
+            if recursive_result is not None:
+                return recursive_result
         pending = [root]
         excluded = {name.lower() for name in request.exclude_directories}
         objects: list[StorageObject] = []
@@ -146,6 +165,116 @@ class FsspecStorageAdapter:
             early_stop_reason="object_limit" if partial else None,
         )
 
+    def _recursive_file_inventory(
+        self,
+        request: StorageInventoryRequest,
+        root: str,
+        started: float,
+    ) -> StorageInventory | None:
+        """Use fsspec's detailed recursive primitive when it is available.
+
+        ``find(detail=True)`` lets providers perform the recursive traversal in
+        one optimized operation.  A small compatibility fallback keeps the
+        existing bounded ``ls`` traversal for filesystems that expose an older
+        or non-implemented ``find`` signature.
+        """
+
+        from datacoolie_studio.domains.storage.inventory import StorageInventory
+
+        finder = getattr(self._filesystem, "find", None)
+        if not callable(finder):
+            return None
+        try:
+            try:
+                listing = finder(root, detail=True, withdirs=True)
+            except TypeError:
+                listing = finder(root, detail=True)
+        except (AttributeError, NotImplementedError, TypeError):
+            return None
+
+        if not isinstance(listing, (dict, list, tuple)):
+            return None
+        if isinstance(listing, (list, tuple)) and any(
+            not isinstance(value, dict) for value in listing
+        ):
+            return None
+        entries = (
+            listing.items()
+            if isinstance(listing, dict)
+            else ((None, value) for value in listing)
+        )
+        objects: list[StorageObject] = []
+        objects_inspected = 0
+        matching_objects = 0
+        partial = False
+        excluded = {name.lower() for name in request.exclude_directories}
+        for key, value in entries:
+            if not isinstance(value, dict):
+                continue
+            info = dict(value)
+            raw_path = str(
+                info.get("name")
+                or info.get("Key")
+                or info.get("path")
+                or key
+                or ""
+            )
+            if not raw_path:
+                continue
+            objects_inspected += 1
+            if _object_type(info) != "file":
+                continue
+            name = raw_path.rstrip("/\\").rsplit("/", 1)[-1]
+            relative = raw_path.replace("\\", "/")
+            normalized_root = root.rstrip("/\\").replace("\\", "/")
+            if relative.startswith(f"{normalized_root}/"):
+                relative = relative[len(normalized_root) + 1 :]
+            if any(part.lower() in excluded for part in relative.split("/")[:-1]):
+                continue
+            if request.suffixes and not any(
+                name.lower().endswith(suffix) for suffix in request.suffixes
+            ):
+                continue
+            if request.name_prefix is not None and not name.startswith(request.name_prefix):
+                continue
+            matching_objects += 1
+            if (
+                request.object_limit is not None
+                and matching_objects > request.object_limit
+            ):
+                partial = True
+                break
+            info.setdefault("name", raw_path)
+            objects.append(
+                self._object_from_info(
+                    raw_path,
+                    info,
+                    source_uri=request.uri,
+                )
+            )
+            if (
+                request.stop_after_match
+                and request.object_limit is not None
+                and matching_objects >= request.object_limit
+            ):
+                partial = True
+                break
+        objects.sort(key=lambda item: item.canonical_uri)
+        return StorageInventory(
+            objects=tuple(objects),
+            completeness="partial" if partial else "complete",
+            requests=1,
+            pages=1,
+            directories_visited=1,
+            objects_inspected=objects_inspected,
+            matching_objects=matching_objects,
+            retries=0,
+            throttles=0,
+            bytes_read=0,
+            duration_ms=round((perf_counter() - started) * 1000),
+            early_stop_reason="object_limit" if partial else None,
+        )
+
     def stat(self, uri: str) -> StorageRevision:
         try:
             info = self._filesystem.info(self._path(uri))
@@ -185,20 +314,31 @@ class FsspecStorageAdapter:
         target: Path,
         expected_revision: StorageRevision | None = None,
     ) -> StorageRevision:
-        before = self.stat(uri)
-        if expected_revision and not before.same_object_state_as(expected_revision):
-            raise StorageConflictError(uri, "Source revision changed before materialization")
+        # Discovery already supplied a revision for normal ingestion.  Reusing
+        # it avoids a redundant provider stat before the download; the single
+        # post-read stat still closes the race window before publication.  A
+        # stat before and after the read remains necessary when callers do not
+        # provide discovery metadata.
+        before = expected_revision or self.stat(uri)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
         digest = hashlib.sha256()
+        bytes_written = 0
         try:
             with self.open_read(uri) as source, temporary.open("wb") as output:
                 while chunk := source.read(1024 * 1024):
                     digest.update(chunk)
                     output.write(chunk)
+                    bytes_written += len(chunk)
             after = self.stat(uri)
-            if not before.same_object_state_as(after):
-                raise StorageConflictError(uri, "Source revision changed during materialization")
+            if (
+                (after.size > 0 and after.size != bytes_written)
+                or not before.same_object_state_as(after)
+            ):
+                raise StorageConflictError(
+                    uri,
+                    "Source revision changed during materialization",
+                )
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

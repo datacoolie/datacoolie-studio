@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
 from datacoolie_studio.domains.code_artifacts.indexer import (
     MAX_FILES,
     ArtifactIndexError,
@@ -91,12 +89,30 @@ def _discover_local(
     if code_root.is_file() or (
         not code_root.exists() and code_root.suffix.lower() in CODE_ARTIFACT_TYPES
     ):
+        if code_root.is_symlink():
+            return CodeDiscoveryResult(
+                [],
+                [{
+                    "uri": str(code_root),
+                    "code": "code_symlink",
+                    "message": "Source code discovery does not follow symlinked artifacts",
+                }],
+            )
         candidate = _local_file_candidate(code_root, project_root, errors)
         return CodeDiscoveryResult([candidate] if candidate else [], errors)
     if not code_root.exists() and discovery_mode == "explicit":
         return CodeDiscoveryResult([], [{"uri": code_uri, "message": f"Source code path not found: {code_uri}"}])
     if code_root.exists() and not code_root.is_dir():
         return CodeDiscoveryResult([], [{"uri": code_uri, "message": f"Unsupported source code path type: {code_uri}"}])
+    if code_root.is_symlink():
+        return CodeDiscoveryResult(
+            [],
+            [{
+                "uri": str(code_root),
+                "code": "code_symlink",
+                "message": "Source code discovery does not follow symlinked directories",
+            }],
+        )
 
     layouts = _local_layout_roots(project_root, code_root, errors)
     candidates: list[CodeArtifactCandidate] = []
@@ -228,12 +244,17 @@ def _local_code_entries(root: Path) -> tuple[list[Path], list[Path]]:
     if not root.is_dir():
         return python_files, archives
     for current, directories, files in os.walk(root, topdown=True, followlinks=False):
-        directories[:] = sorted(
-            name for name in directories if not is_excluded_code_directory(name)
-        )
         base = Path(current)
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not is_excluded_code_directory(name)
+            and not (base / name).is_symlink()
+        )
         for name in sorted(files):
             path = base / name
+            if path.is_symlink():
+                continue
             suffix = path.suffix.lower()
             if suffix == ".py":
                 python_files.append(path)
@@ -249,6 +270,13 @@ def _local_file_candidate(
     *,
     origin: str = "direct",
 ) -> CodeArtifactCandidate | None:
+    if path.is_symlink():
+        errors.append({
+            "uri": str(path),
+            "code": "code_symlink",
+            "message": "Source code discovery does not follow symlinked artifacts",
+        })
+        return None
     if not path.exists():
         errors.append({"uri": str(path), "message": f"Source code artifact not found: {path}"})
         return None

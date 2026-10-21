@@ -11,6 +11,7 @@ class AnalyticsMigration:
     to_version: int
     legacy_queryable: bool
     requires_source_replay: bool
+    operation_kind: str = "source_replay"
 
 
 # DuckDB is a disposable projection. Version steps describe how Studio may serve
@@ -19,6 +20,22 @@ MIGRATIONS: tuple[AnalyticsMigration, ...] = (
     AnalyticsMigration(7, 8, legacy_queryable=False, requires_source_replay=True),
     AnalyticsMigration(8, 9, legacy_queryable=False, requires_source_replay=True),
     AnalyticsMigration(9, 10, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(10, 11, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(11, 12, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(12, 13, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(13, 14, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(14, 15, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(15, 16, legacy_queryable=False, requires_source_replay=True),
+    AnalyticsMigration(16, 17, legacy_queryable=False, requires_source_replay=True),
+    # Schema17 is a complete typed cache. Its native representation can be
+    # rewritten from a writer-fenced DuckDB snapshot without source replay.
+    AnalyticsMigration(
+        17,
+        18,
+        legacy_queryable=False,
+        requires_source_replay=False,
+        operation_kind="schema_migration",
+    ),
 )
 
 
@@ -43,6 +60,29 @@ def migration_path(
 def legacy_cache_is_queryable(from_version: int | None) -> bool:
     path = migration_path(from_version)
     return bool(path) and all(step.legacy_queryable for step in path)
+
+
+def migration_for(
+    from_version: int | None,
+    to_version: int = ANALYTICS_SCHEMA_VERSION,
+) -> AnalyticsMigration | None:
+    """Return the first registered step for a version transition."""
+
+    path = migration_path(from_version, to_version)
+    return path[0] if path else None
+
+
+def is_sql_only_migration(
+    from_version: int | None,
+    to_version: int = ANALYTICS_SCHEMA_VERSION,
+) -> bool:
+    """Return whether a transition must avoid source replay/control writes."""
+
+    path = migration_path(from_version, to_version)
+    return bool(path) and all(
+        not step.requires_source_replay and step.operation_kind == "schema_migration"
+        for step in path
+    )
 
 
 def validate_registry() -> None:

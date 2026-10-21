@@ -4,15 +4,17 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from datacoolie_studio.core.time import parse_utc_datetime
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _date_bucket,
-    _ensure_aware,
-    _has_value,
-    _num,
-    _rate,
-    _run_date,
-    _status,
-    _time_value,
+from datacoolie_studio.domains.monitoring.metrics.row_normalization import has_value as _has_value
+from datacoolie_studio.domains.monitoring.metrics.aggregates import (
+    numeric_value as _num,
+    rate as _rate,
+    status as _status,
+)
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import (
+    date_bucket as _date_bucket,
+    ensure_aware,
+    run_date as _run_date,
+    time_value as _time_value,
 )
 
 
@@ -109,11 +111,11 @@ def _diagnostics_context(
 ) -> dict[str, Any]:
     rows_by_job: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        job_id = _diagnostics_job_id(row)
-        if job_id:
-            rows_by_job[job_id].append(row)
+        job_key = _diagnostics_job_key(row)
+        if job_key:
+            rows_by_job[job_key].append(row)
     jobs_by_id = {
-        _diagnostics_job_id(job): job for job in jobs if _diagnostics_job_id(job)
+        _diagnostics_job_key(job): job for job in jobs if _diagnostics_job_key(job)
     }
     dataflow_job_ids = set(rows_by_job)
     job_ids = set(jobs_by_id)
@@ -130,12 +132,37 @@ def _diagnostics_context(
 
 
 def _diagnostics_job_id(row: dict[str, Any]) -> str:
-    value = str(row.get("job_id") or "").strip()
-    return (
-        ""
-        if not value or value.lower() in {"none", "null", "nan", "unknown"}
-        else value
-    )
+    value = row.get("job_id")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _diagnostics_job_key(row: dict[str, Any]) -> str:
+    """Return the exact source/session/job identity used for linkage.
+
+    The compact job ID is retained when no discriminator is present so legacy
+    in-memory callers remain readable.  Once either discriminator is supplied,
+    it participates in the key and nullable sessions stay distinct from an
+    empty or named session.
+    """
+    job_id = _diagnostics_job_id(row)
+    if not job_id:
+        return ""
+    source_id = row.get("_source_id")
+    session = row.get("log_session_id")
+    if source_id in (None, "") and session in (None, ""):
+        return job_id
+    session_key = "<null>" if session is None else str(session)
+    return f"{source_id!s}\x1f{session_key}\x1f{job_id}"
+
+
+def _diagnostics_display_job_id(identity: str, record: dict[str, Any] | None) -> str:
+    if record is not None:
+        job_id = _diagnostics_job_id(record)
+        if job_id:
+            return job_id
+    return identity.rsplit("\x1f", 1)[-1]
 
 
 def _diagnostics_job_id_evidence(
@@ -147,7 +174,9 @@ def _diagnostics_job_id_evidence(
     for job_id in sorted(context["matched_ids"])[:limit_per_category]:
         job = jobs_by_id[job_id]
         items = rows_by_job[job_id]
-        evidence.append(_diagnostics_job_linkage_row("matched", job_id, job, items))
+        evidence.append(_diagnostics_job_linkage_row(
+            "matched", _diagnostics_display_job_id(job_id, job), job, items,
+        ))
     for job_id in sorted(context["orphan_job_ids"])[:limit_per_category]:
         items = rows_by_job[job_id]
         latest = max(
@@ -158,14 +187,16 @@ def _diagnostics_job_id_evidence(
         )
         evidence.append(
             _diagnostics_job_linkage_row(
-                "orphan_dataflow_job_id", job_id, None, items, latest=latest
+                "orphan_dataflow_job_id", _diagnostics_display_job_id(job_id, latest),
+                None, items, latest=latest,
             )
         )
     for job_id in sorted(context["job_only_ids"])[:limit_per_category]:
         job = jobs_by_id[job_id]
         evidence.append(
             _diagnostics_job_linkage_row(
-                "job_without_dataflow_records", job_id, job, []
+                "job_without_dataflow_records", _diagnostics_display_job_id(job_id, job),
+                job, [],
             )
         )
     return evidence
@@ -227,18 +258,18 @@ def _diagnostics_record_evidence_by_date(
         item["bucket"] = bucket
         item["date"] = bucket
         item["dataflow_records"] += 1
-        job_id = _diagnostics_job_id(row)
-        if job_id:
-            rows_by_bucket_job[bucket].add(job_id)
+        job_key = _diagnostics_job_key(row)
+        if job_key:
+            rows_by_bucket_job[bucket].add(job_key)
     for job in jobs:
         bucket = _diagnostics_time_bucket(job, trend_context)
         item = buckets[bucket]
         item["bucket"] = bucket
         item["date"] = bucket
         item["job_records"] += 1
-        job_id = _diagnostics_job_id(job)
-        if job_id:
-            jobs_by_bucket_id[bucket].add(job_id)
+        job_key = _diagnostics_job_key(job)
+        if job_key:
+            jobs_by_bucket_id[bucket].add(job_key)
     for bucket, item in buckets.items():
         dataflow_ids = rows_by_bucket_job[bucket]
         job_ids = jobs_by_bucket_id[bucket]
@@ -276,8 +307,8 @@ def _diagnostics_expected_trend_buckets(
     if start is None or end is None:
         return []
     timezone_info = trend_context.get("timezone_info") or timezone.utc
-    start = _ensure_aware(start).astimezone(timezone_info)
-    end = _ensure_aware(end).astimezone(timezone_info)
+    start = ensure_aware(start).astimezone(timezone_info)
+    end = ensure_aware(end).astimezone(timezone_info)
     if end < start:
         start, end = end, start
     grain = str(trend_context.get("effective_grain") or "day")
@@ -432,8 +463,8 @@ def _diagnostics_field_completeness(
             rows,
             (
                 "source_watermark_columns",
-                "source_watermark_before",
-                "source_watermark_after",
+                "read_request",
+                "watermark_evidence",
             ),
             "conditional",
         ),
@@ -631,7 +662,7 @@ def _diagnostics_investigation_queue(
                 severity="bad",
                 category="orphan dataflow job id",
                 issue="Dataflow records reference a job_id with no matching job log.",
-                target=job_id,
+                target=_diagnostics_display_job_id(job_id, latest),
                 latest_time=latest.get("end_time") or latest.get("start_time"),
                 evidence={"job_id": job_id, "dataflow_records": len(items)},
                 action_hint="Check job_run_log coverage for the same run window.",
@@ -644,7 +675,7 @@ def _diagnostics_investigation_queue(
                 severity="warning",
                 category="job without dataflows",
                 issue="Job log exists but no child dataflow records were found.",
-                target=job_id,
+                target=_diagnostics_display_job_id(job_id, job),
                 latest_time=job.get("end_time") or job.get("start_time"),
                 evidence={
                     "job_id": job_id,
@@ -691,7 +722,7 @@ def _diagnostics_investigation_queue(
                 target=str(row.get("source") or "source"),
                 latest_time=row.get("latest_log_at"),
                 evidence=row,
-                action_hint="Open Sources and sync or validate this ETL log path.",
+                action_hint="Open Sources and sync or validate this execution/system log base path.",
             )
         )
     queue.sort(

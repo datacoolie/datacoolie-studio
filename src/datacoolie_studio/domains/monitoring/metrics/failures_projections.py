@@ -6,19 +6,25 @@ from datacoolie_studio.domains.monitoring.metrics.failure import (
     categorize_failure,
     classify_failure,
 )
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _counter_rows,
-    _dataflow_id,
-    _dimension_value,
-    _dominant_value,
-    _failure_enriched_dataflow,
-    _failure_signature,
-    _job_key,
-    _job_shape_label,
-    _rate,
-    _run_date,
-    _status,
-    _time_value,
+from datacoolie_studio.domains.monitoring.metrics.row_normalization import (
+    counter_rows as _counter_rows,
+    dataflow_id as _dataflow_id,
+    dimension_value as _dimension_value,
+    dominant_value as _dominant_value,
+    job_key as _job_key,
+    job_shape_label as _job_shape_label,
+)
+from datacoolie_studio.domains.monitoring.metrics.investigation import (
+    failure_enriched_dataflow as _failure_enriched_dataflow,
+    failure_signature as _failure_signature,
+)
+from datacoolie_studio.domains.monitoring.metrics.aggregates import (
+    rate as _rate,
+    status as _status,
+)
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import (
+    run_date as _run_date,
+    time_value as _time_value,
 )
 
 

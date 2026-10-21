@@ -1,51 +1,83 @@
 import type { components } from "./generated/schema";
-import type * as Ui from "./domainTypes";
 
 type Schemas = components["schemas"];
 
-type TransportView<Generated, View> = View & Omit<Partial<Generated>, keyof View>;
+export type DatacoolieProjectSourceImportRequest =
+  Schemas["DatacoolieProjectSourceImportRequest"];
+export type DatacoolieProjectSourceImportInput = Omit<
+  DatacoolieProjectSourceImportRequest,
+  "enabled" | "code_discovery_mode"
+> &
+  Partial<Pick<DatacoolieProjectSourceImportRequest, "enabled" | "code_discovery_mode">>;
+export type MetadataSourceImportRequest = Schemas["MetadataSourceImportRequest"];
+export type MetadataSourceImportInput = Omit<MetadataSourceImportRequest, "enabled"> &
+  Partial<Pick<MetadataSourceImportRequest, "enabled">>;
+export type SourceCreate = Schemas["SourceCreate"];
+export type SourceCreateInput = Omit<SourceCreate, "enabled"> &
+  Partial<Pick<SourceCreate, "enabled">>;
+export type SourceUpdate = Schemas["SourceUpdate"];
 
-export type Environment = TransportView<Schemas["EnvironmentRead"], Ui.Environment>;
-export type EnvironmentContext = TransportView<Schemas["EnvironmentContextResponse"], Ui.EnvironmentContext>;
-export type EnvironmentOverview = TransportView<Schemas["EnvironmentOverviewResponse"], Ui.EnvironmentOverview>;
-export type AssetDetailResponse = TransportView<Schemas["AssetDetailResponse"], Ui.AssetDetailResponse>;
-export type AssetInventoryResponse = TransportView<Schemas["AssetInventoryResponse"], Ui.AssetInventoryResponse>;
-export type AssetReferenceDetailResponse =
-  TransportView<Schemas["AssetReferenceDetailResponse"], Ui.AssetReferenceDetailResponse>;
-export type AssetReferenceListResponse =
-  TransportView<Schemas["AssetReferenceListResponse"], Ui.AssetReferenceListResponse>;
-export type AssetSourceResponse = TransportView<Schemas["AssetSourceResponse"], Ui.AssetSourceResponse>;
-export type ReferenceOccurrenceSourceResponse =
-  TransportView<Schemas["ReferenceOccurrenceSourceResponse"], Ui.ReferenceOccurrenceSourceResponse>;
-export type LineageResponse = TransportView<Schemas["LineageResponse"], Ui.LineageResponse>;
-export type MetadataBackup = TransportView<Schemas["MetadataBackupResponse"], Ui.MetadataBackup>;
-export type MetadataEditorDocument =
-  TransportView<Schemas["MetadataEditorDocumentResponse"], Ui.MetadataEditorDocument>;
-export type MetadataEditorWorkspace =
-  TransportView<Schemas["MetadataEditorWorkspaceResponse"], Ui.MetadataEditorWorkspace>;
-export type MetadataResponse = TransportView<Schemas["MetadataResponse"], Ui.MetadataResponse>;
-export type ProjectReferenceMapping =
-  TransportView<Schemas["ProjectReferenceMappingRead"], Ui.ProjectReferenceMapping>;
-export type ProjectReferenceRegistryResponse =
-  TransportView<Schemas["ProjectReferenceRegistryResponse"], Ui.ProjectReferenceRegistryResponse>;
-export type Project = TransportView<Schemas["ProjectRead"], Ui.Project>;
-export type ProjectSummary = TransportView<Schemas["ProjectSummaryResponse"], Ui.ProjectSummary>;
-export type SourceReadCheckResult =
-  TransportView<Schemas["SourceValidationResponse"], Ui.SourceReadCheckResult>;
-export type SourceDeleteImpact =
-  TransportView<Schemas["SourceDeleteImpactResponse"], Ui.SourceDeleteImpact>;
-export type SourceImportResponse = TransportView<Schemas["SourceImportResponse"], Ui.SourceImportResponse>;
+export type SourceRead =
+  | Schemas["MetadataSourceRead"]
+  | Schemas["SqlSourceRead"]
+  | Schemas["LogSourceRead"]
+  | Schemas["CodeArtifactRead"];
+export type MetadataSourceReadTransport = Schemas["MetadataSourceRead"];
+export type SourcesWorkspaceResponse = Schemas["SourcesWorkspaceResponse"];
+
+export type Environment = Schemas["EnvironmentRead"];
+export type EnvironmentContext = Schemas["EnvironmentContextResponse"];
+export type EnvironmentOverviewResponseTransport = Schemas["EnvironmentOverviewResponse"];
+export type AssetDetailResponseTransport = Schemas["AssetDetailResponse"];
+export type AssetInventoryResponseTransport = Schemas["AssetInventoryResponse"];
+export type AssetReferenceDetailResponseTransport = Schemas["AssetReferenceDetailResponse"];
+export type AssetReferenceListResponseTransport = Schemas["AssetReferenceListResponse"];
+export type AssetSourceResponseTransport = Schemas["AssetSourceResponse"];
+export type ReferenceOccurrenceSourceResponseTransport = Schemas["ReferenceOccurrenceSourceResponse"];
+export type LineageResponseTransport = Schemas["LineageResponse"];
+export type MetadataBackupResponseTransport = Schemas["MetadataBackupResponse"];
+export type MetadataEditorDocumentResponseTransport = Schemas["MetadataEditorDocumentResponse"];
+export type MetadataEditorWorkspaceResponseTransport = Schemas["MetadataEditorWorkspaceResponse"];
+export type MetadataWriteOperationResponseTransport = Schemas["MetadataWriteOperationResponse"];
+export type MetadataResponseTransport = Schemas["MetadataResponse"];
+export type MetadataWriteItemResponseTransport = Schemas["MetadataWriteItemResponse"];
+export type WriteSafety = NonNullable<MetadataWriteItemResponseTransport["write_safety"]>;
+export type SqlReferenceResponse = Schemas["SqlReferenceResponse"];
+export type ProjectReferenceMapping = Schemas["ProjectReferenceMappingRead"];
+export type ProjectReferenceRegistryResponseTransport = Schemas["ProjectReferenceRegistryResponse"];
+export type Project = Schemas["ProjectRead"];
+export type ProjectEnvironmentSummary = Schemas["ProjectEnvironmentSummaryResponse"];
+export type ProjectSummary = Schemas["ProjectSummaryResponse"];
+export type SourceValidationResult = Schemas["SourceValidationResponse"];
+export type SourceReadCheckResult = Schemas["SourceValidationResponse"];
+export type SourceDeleteImpactItem = Schemas["SourceDeleteImpactItem"];
+export type SourceDeleteImpact = Schemas["SourceDeleteImpactResponse"];
+export type SourceImportResponse = Schemas["SourceImportResponse"];
 export type LogSyncRequest = Schemas["LogSyncRequest"];
-export type SourceSyncStatus = TransportView<Schemas["SourceSyncStatusResponse"], Ui.SourceSyncStatus>;
-export type StudioDiagnostics = TransportView<Schemas["StudioDiagnosticsResponse"], Ui.StudioDiagnostics>;
-export type StudioPathInfo = TransportView<Schemas["StudioPathInfo"], Ui.StudioPathInfo>;
-export type StudioCacheMutation =
-  TransportView<Schemas["StudioCacheMutationResponse"], Ui.StudioCacheMutation>;
-export type StudioCacheStatus = TransportView<Schemas["StudioCacheStatusResponse"], Ui.StudioCacheStatus>;
-export type AnalyticsUpgradeStatus =
-  TransportView<Schemas["AnalyticsUpgradeStatusResponse"], Ui.AnalyticsUpgradeStatus>;
-export type StudioSettings = TransportView<Schemas["StudioSettingsResponse"], Ui.StudioSettings>;
-export type ModuleInfo = TransportView<Schemas["ModuleInfo"], Ui.ModuleInfo>;
+export type LocalSourceObservation = Schemas["LocalSourceObservationResponse"];
+export type SourceSyncStatus = Schemas["SourceSyncStatusResponse"];
+export type StudioDiagnosticsResponse = Schemas["StudioDiagnosticsResponse"];
+export type StudioPathInfo = Schemas["StudioPathInfo"];
+export type StudioCacheMutationResponse = Schemas["StudioCacheMutationResponse"];
+export type StudioCacheStatusResponse = Schemas["StudioCacheStatusResponse"];
+export type AnalyticsUpgradeStatusResponse = Schemas["AnalyticsUpgradeStatusResponse"];
+export type StudioSettings = Schemas["StudioSettingsResponse"];
+export type ModuleInfo = Schemas["ModuleInfo"];
+export type MonitoringPageResponseTransport = Schemas["MonitoringPageResponse"];
+export type MonitoringJobRecordTransport = Schemas["MonitoringJobRecordResponse"];
+export type MonitoringDataflowRecordTransport = Schemas["MonitoringDataflowRecordResponse"];
+export type MonitoringNamedCountTransport = Schemas["MonitoringNamedCountResponse"];
+export type MonitoringDataflowRecordsResponseTransport = Schemas["MonitoringDataflowRecordsResponse"];
+export type MonitoringEvidenceResponseTransport = Schemas["MonitoringEvidenceResponse"];
+export type MonitoringDiagnosticsEvidenceResponseTransport = Schemas["MonitoringDiagnosticsEvidenceResponse"];
+export type MonitoringDataflowRegistryResponseTransport = Schemas["MonitoringDataflowRegistryResponse"];
+export type MonitoringRegistryRowTransport = Schemas["MonitoringRegistryRowResponse"];
+export type MonitoringRegistryRunReferenceTransport = Schemas["MonitoringRegistryRunReferenceResponse"];
+export type MonitoringRegistryProfileSnapshotTransport = Schemas["MonitoringRegistryProfileSnapshotResponse"];
+export type MonitoringFilterOptionsResponseTransport = Schemas["MonitoringFilterOptionsResponse"];
+export type MonitoringJobRecordsResponseTransport = Schemas["MonitoringJobRecordsResponse"];
+export type MonitoringLatestStatusResponseTransport = Schemas["MonitoringLatestStatusResponse"];
+export type MonitoringSystemLogsResponseTransport = Schemas["MonitoringSystemLogsResponse"];
 
 export type ReferenceType = Schemas["ProjectReferenceMappingCreate"]["reference_type"];
 export type TargetIdentifierKind =

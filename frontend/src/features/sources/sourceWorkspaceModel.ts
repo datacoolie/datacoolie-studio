@@ -1,4 +1,9 @@
-import type { SourceDeleteImpact, SourceDeleteImpactItem, SourcePath, SourceSyncStatus } from "../../shared/api/domainTypes";
+import type { SourcePath } from "../../shared/api/domainTypes";
+import type {
+  SourceDeleteImpact,
+  SourceDeleteImpactItem,
+  SourceSyncStatus,
+} from "../../shared/api/contractTypes";
 import { displayStorageUri } from "../../shared/lib/storage";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
 
@@ -50,9 +55,14 @@ export function shouldStartLocalObservation(
 }
 
 export function isSourceSyncRunning(status: SourceSyncStatus | null | undefined) {
-  return Boolean(status?.active_operation)
-    || status?.status === "running"
-    || status?.latest_job?.status === "running";
+  return status?.validation?.state === "validating"
+    || status?.sync_execution?.state === "running";
+}
+
+export function sourceBackendOperation(status: SourceSyncStatus | null | undefined): "validate" | "sync" | null {
+  if (status?.validation?.state === "validating") return "validate";
+  if (status?.sync_execution?.state === "running") return "sync";
+  return null;
 }
 
 export function hasRunningSourceSync(syncStatuses: Record<string, SourceSyncStatus>) {
@@ -65,7 +75,7 @@ export function sourceSyncStatusPollInterval(
 ) {
   if (hasRunningSourceSync(syncStatuses)) return SOURCE_SYNC_STATUS_POLL_INTERVAL_MS;
   const dueTimes = Object.values(syncStatuses)
-    .map((status) => status.next_check_at ? Date.parse(status.next_check_at) : Number.NaN)
+    .map((status) => status.observation?.next_check_at ? Date.parse(status.observation.next_check_at) : Number.NaN)
     .filter(Number.isFinite);
   if (!dueTimes.length) return false;
   return Math.min(
@@ -172,7 +182,7 @@ export function summarizeSourceHealth(
     if (!source.enabled) continue;
     enabled += 1;
     const status = syncStatuses[sourceKey(kind, source.id)];
-    if (status?.freshness?.state === "not_synced" || status?.pending_changes === true) {
+    if (status?.freshness?.state === "not_synced" || status?.observation?.pending_changes === true) {
       pendingSync += 1;
     }
     const hasIssue = status?.freshness?.state === "missing"
@@ -181,7 +191,7 @@ export function summarizeSourceHealth(
       || status?.observation?.state === "error"
       || status?.observation?.state === "paused"
       || status?.sync_execution?.state === "failed"
-      || (!status?.freshness && status?.status === "error");
+      || status?.status === "error";
     if (hasIssue) issues += 1;
   }
 
@@ -201,12 +211,17 @@ export function sourceDisplayPath(source: SourcePath, kind: SourceKind) {
 
   const locationKey = kind === "metadata" ? "metadata_uri" : kind === "code" ? "code_uri" : null;
   const canonicalBase = locationKey
-    ? location.canonical_locations[locationKey] || location.canonical_uri
+    ? locationValue(location.canonical_locations[locationKey], location.canonical_uri)
     : location.canonical_uri;
   const suffix = sourceLocationSuffix(source.uri, canonicalBase);
   return suffix === null
     ? displayStorageUri(source.uri)
     : displayStorageUri(joinDisplayLocation(canonicalBase, suffix));
+}
+
+function locationValue(value: string | string[] | undefined, fallback: string) {
+  if (Array.isArray(value)) return value[0] || fallback;
+  return value || fallback;
 }
 
 function sourceLocationSuffix(uri: string, base: string) {

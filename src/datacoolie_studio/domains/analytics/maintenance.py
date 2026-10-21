@@ -3,9 +3,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from datacoolie_studio.core.config import analytics_database_path
-from datacoolie_studio.domains.analytics import access, schema, store
+from datacoolie_studio.core.config import (
+    analytics_database_path,
+    analytics_duckdb_memory_limit,
+    analytics_duckdb_temp_directory,
+    analytics_duckdb_threads,
+    analytics_upgrade_batch_max_bytes,
+    analytics_upgrade_batch_max_files,
+    analytics_upgrade_build_concurrency,
+    analytics_upgrade_max_inflight_bytes,
+)
+from datacoolie_studio.domains.analytics import (
+    access,
+    cache_state,
+    row_maintenance,
+    schema,
+)
 from datacoolie_studio.domains.analytics.connections import analytics_connections
+from datacoolie_studio.db.models import utc_now
 
 
 def cache_stats() -> dict[str, Any]:
@@ -24,12 +39,13 @@ def cache_stats() -> dict[str, Any]:
         "job_row_count": 0,
         "filter_value_count": 0,
         "cached_source_ids": [],
+        "resource_limits": analytics_resource_limits(),
     }
     if not exists:
         return stats
     conn = access.connect(path, read_only=True)
     try:
-        meta = store.analytics_meta(conn)
+        meta = cache_state.analytics_meta(conn)
         if meta is not None:
             stats.update(meta)
         stats["dataflow_row_count"] = table_row_count(conn, schema.DATAFLOW_TABLE)
@@ -38,10 +54,24 @@ def cache_stats() -> dict[str, Any]:
             conn,
             schema.FILTER_VALUES_TABLE,
         )
-        stats["cached_source_ids"] = sorted(store.cache_source_ids(conn))
+        stats["cached_source_ids"] = sorted(cache_state.cache_source_ids(conn))
     finally:
         conn.close()
     return stats
+
+
+def analytics_resource_limits() -> dict[str, Any]:
+    """Return the effective analytics resource budget without secrets."""
+
+    return {
+        "duckdb_threads": analytics_duckdb_threads(),
+        "duckdb_memory_limit": analytics_duckdb_memory_limit(),
+        "duckdb_temp_directory": str(analytics_duckdb_temp_directory()),
+        "upgrade_build_concurrency": analytics_upgrade_build_concurrency(),
+        "upgrade_batch_max_files": analytics_upgrade_batch_max_files(),
+        "upgrade_batch_max_bytes": analytics_upgrade_batch_max_bytes(),
+        "upgrade_max_inflight_bytes": analytics_upgrade_max_inflight_bytes(),
+    }
 
 
 def clear_cache() -> dict[str, int]:
@@ -99,17 +129,17 @@ def source_stats(source_id: int) -> dict[str, int]:
         return stats
     conn = access.connect(path, read_only=True)
     try:
-        stats["dataflow_row_count"] = store.table_source_row_count(
+        stats["dataflow_row_count"] = row_maintenance.table_source_row_count(
             conn,
             schema.DATAFLOW_TABLE,
             source_id,
         )
-        stats["job_row_count"] = store.table_source_row_count(
+        stats["job_row_count"] = row_maintenance.table_source_row_count(
             conn,
             schema.JOB_TABLE,
             source_id,
         )
-        stats["filter_value_count"] = store.table_source_row_count(
+        stats["filter_value_count"] = row_maintenance.table_source_row_count(
             conn,
             schema.FILTER_VALUES_TABLE,
             source_id,
@@ -137,28 +167,62 @@ def purge_source_ids(source_ids: list[int]) -> dict[str, int]:
     with access.analytics_maintenance_lock:
         conn = access.connect(path)
         try:
-            dataflow_rows = store.delete_rows_by_source_ids(
+            conn.execute("BEGIN TRANSACTION")
+            meta = cache_state.analytics_meta(conn)
+            compatible = (
+                meta is not None
+                and meta["schema_version"] == schema.ANALYTICS_SCHEMA_VERSION
+                and meta["build_state"] == "ready"
+                and schema.typed_cache_schema_is_ready(conn)
+            )
+            dataflow_rows = row_maintenance.delete_rows_by_source_ids(
                 conn,
                 schema.DATAFLOW_TABLE,
                 unique_ids,
             )
-            job_rows = store.delete_rows_by_source_ids(
+            job_rows = row_maintenance.delete_rows_by_source_ids(
                 conn,
                 schema.JOB_TABLE,
                 unique_ids,
             )
-            filter_rows = store.delete_rows_by_source_ids(
+            filter_rows = row_maintenance.delete_rows_by_source_ids(
                 conn,
                 schema.FILTER_VALUES_TABLE,
                 unique_ids,
             )
             for table_name in (schema.CACHE_SOURCES_TABLE,):
-                store.delete_rows_by_source_ids(
+                row_maintenance.delete_rows_by_source_ids(
                     conn,
                     table_name,
                     unique_ids,
                     source_column="source_id",
                 )
+            from datacoolie_studio.domains.analytics import publication
+            from datacoolie_studio.domains.analytics.serving_facts import (
+                MONITORING_DATAFLOW_FACTS_TABLE, MONITORING_JOB_FACTS_TABLE,
+            )
+            if compatible:
+                publication.publish_generation(
+                    conn,
+                    dataflow_column_types=schema.DATAFLOW_COLUMN_TYPES,
+                    job_column_types=schema.JOB_COLUMN_TYPES,
+                    published_at=utc_now(),
+                    source_ids=unique_ids,
+                )
+            else:
+                # Legacy caches remain rebuild-required; purge physical derived
+                # rows without claiming that the old schema is current.
+                for table_name in (MONITORING_DATAFLOW_FACTS_TABLE, MONITORING_JOB_FACTS_TABLE):
+                    if conn.execute(
+                        "SELECT count(*) FROM duckdb_tables() WHERE table_name = ? "
+                        "AND NOT temporary AND schema_name = 'main'",
+                        [table_name],
+                    ).fetchone()[0]:
+                        row_maintenance.delete_rows_by_source_ids(conn, table_name, unique_ids)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
     return {

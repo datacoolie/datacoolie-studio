@@ -1,0 +1,2 @@
+{"log_schema_version":4,"_type":"system_log","datacoolie_version":"0.2.0","log_session_id":"fixture-session-replay","job_id":"replay/job#A","job_num":8,"job_index":1,"ts":"2026-09-11T00:01:05+00:00","level":"INFO","logger":"datacoolie.fixture","msg":"replay resumed","dataflow_id":"ABCDEFAB-CDEF-ABCD-EFAB-CDEF01234567","dataflow_run_id":"replay/run#1","event_name":"dataflow.replay"}
+

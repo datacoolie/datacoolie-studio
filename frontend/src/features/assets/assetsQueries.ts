@@ -29,7 +29,7 @@ export function assetInventoryOptions(environmentId: number, parameters: AssetQu
   const normalized = normalizedParameters(parameters);
   return queryOptions({
     queryKey: assetQueryKeys.inventory(environmentId, normalized),
-    queryFn: () => api.getAssets(environmentId, normalized),
+    queryFn: ({ signal }) => api.getAssets(environmentId, normalized, signal),
     staleTime: assetsQueryStaleTime,
   });
 }
@@ -38,7 +38,7 @@ export function assetReferencesOptions(environmentId: number, parameters: AssetQ
   const normalized = normalizedParameters(parameters);
   return queryOptions({
     queryKey: assetQueryKeys.references(environmentId, normalized),
-    queryFn: () => api.getAssetReferences(environmentId, normalized),
+    queryFn: ({ signal }) => api.getAssetReferences(environmentId, normalized, signal),
     staleTime: assetsQueryStaleTime,
   });
 }
@@ -46,7 +46,7 @@ export function assetReferencesOptions(environmentId: number, parameters: AssetQ
 export function assetDetailOptions(environmentId: number, assetId: string) {
   return queryOptions({
     queryKey: assetQueryKeys.assetDetail(environmentId, assetId),
-    queryFn: () => api.getAsset(environmentId, assetId),
+    queryFn: ({ signal }) => api.getAsset(environmentId, assetId, signal),
     staleTime: assetsQueryStaleTime,
   });
 }
@@ -54,7 +54,7 @@ export function assetDetailOptions(environmentId: number, assetId: string) {
 export function assetSourceOptions(environmentId: number, assetId: string) {
   return queryOptions({
     queryKey: assetQueryKeys.assetSource(environmentId, assetId),
-    queryFn: async () => (await api.getAssetSource(environmentId, assetId)).definition,
+    queryFn: async ({ signal }) => (await api.getAssetSource(environmentId, assetId, signal)).definition,
     staleTime: assetsQueryStaleTime,
   });
 }
@@ -62,7 +62,7 @@ export function assetSourceOptions(environmentId: number, assetId: string) {
 export function referenceDetailOptions(environmentId: number, referenceId: string) {
   return queryOptions({
     queryKey: assetQueryKeys.referenceDetail(environmentId, referenceId),
-    queryFn: () => api.getAssetReference(environmentId, referenceId),
+    queryFn: ({ signal }) => api.getAssetReference(environmentId, referenceId, signal),
     staleTime: assetsQueryStaleTime,
   });
 }

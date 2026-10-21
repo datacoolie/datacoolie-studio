@@ -64,7 +64,13 @@ def test_log_partition_key_columns_are_added_idempotently(
             row[1] for row in connection.execute("PRAGMA table_info(log_stream_states)")
         }
     assert "partition_key" in manifest_columns
-    assert {"checkpoint_partition_key", "last_scanned_partition_key"} <= state_columns
+    assert "last_scanned_partition_key" in state_columns
+    assert not {
+        "checkpoint_partition_value",
+        "checkpoint_partition_key",
+        "boundary_last_modified",
+        "last_scanned_partition_value",
+    } & state_columns
 
 
 def test_source_observation_hard_cutover_drops_only_superseded_state(
@@ -111,6 +117,8 @@ def test_source_observation_hard_cutover_drops_only_superseded_state(
         connection.execute(text("INSERT INTO source_revisions VALUES (1)"))
         connection.execute(text("INSERT INTO source_check_states VALUES (1)"))
 
+    with get_engine().begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
     init_db()
 
     with get_engine().connect() as connection:
@@ -361,6 +369,8 @@ def test_adls_metadata_uri_is_repaired_from_its_discovery_root(
             },
         )
 
+    with get_engine().begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
     init_db()
 
     with get_engine().connect() as connection:

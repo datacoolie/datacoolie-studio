@@ -2,135 +2,56 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+import time
+from collections.abc import Callable, Iterable
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-import duckdb
-
 from datacoolie_studio.core.time import parse_utc_datetime
 from datacoolie_studio.db.models import utc_now
-from datacoolie_studio.domains.analytics import schema
-from datacoolie_studio.domains.analytics import schema_compatibility
+from datacoolie_studio.domains.analytics import (
+    cache_state,
+    contracts as analytics_contracts,
+    dataflow_projection,
+    job_projection,
+    publication,
+    schema,
+    schema_tables,
+    staging,
+    ownership,
+)
 from datacoolie_studio.domains.analytics.errors import (
     AnalyticsFileChangedDuringPublishError,
     AnalyticsSchemaIncompatibleError,
 )
-from datacoolie_studio.domains.analytics.serving_facts import (
-    rebuild_monitoring_serving_facts,
-    validate_monitoring_serving_facts,
+from datacoolie_studio.domains.analytics.sql import (
+    quote_identifier,
 )
-
-DataflowFile = (
-    tuple[str, str, str]
-    | tuple[str, str, str, str]
-    | tuple[str, str, str, str, str | None]
-)
-
-
-def publish_generation(
-    conn,
-    *,
-    dataflow_column_types: dict[str, str],
-    job_column_types: dict[str, str],
-    published_at: datetime,
-) -> None:
-    rebuild_monitoring_serving_facts(
-        conn,
-        dataflow_table=schema.DATAFLOW_TABLE,
-        job_table=schema.JOB_TABLE,
-        dataflow_column_types=schema.cache_table_column_types(dataflow_column_types),
-        job_column_types=schema.cache_table_column_types(job_column_types),
-    )
-    validate_monitoring_serving_facts(
-        conn,
-        dataflow_table=schema.DATAFLOW_TABLE,
-        job_table=schema.JOB_TABLE,
-    )
-    schema.ensure_analytics_meta_table(conn)
-    conn.execute(
-        f"""
-        UPDATE {schema.ANALYTICS_META_TABLE}
-        SET schema_version = ?,
-            generation = generation + 1,
-            build_state = 'ready',
-            published_at = ?::TIMESTAMPTZ
-        WHERE singleton_id = 1
-        """,
-        [schema.ANALYTICS_SCHEMA_VERSION, published_at.isoformat()],
-    )
-
-
-def analytics_meta(conn) -> dict[str, Any] | None:
-    if not schema.table_exists(conn, schema.ANALYTICS_META_TABLE):
-        return None
-    row = conn.execute(
-        f"""
-        SELECT schema_version, generation, build_state, published_at
-        FROM {schema.ANALYTICS_META_TABLE}
-        WHERE singleton_id = 1
-        """
-    ).fetchone()
-    if row is None:
-        return None
-    return {
-        "schema_version": int(row[0]),
-        "generation": int(row[1]),
-        "build_state": str(row[2]),
-        "published_at": row[3].isoformat() if row[3] is not None else None,
-    }
-
-
-def mark_cache_source(conn, source_id: int, *, refreshed_at: datetime) -> None:
-    schema.ensure_cache_sources_table(conn)
-    current = conn.execute(
-        f"SELECT generation FROM {schema.CACHE_SOURCES_TABLE} WHERE source_id = ?",
-        [source_id],
-    ).fetchone()
-    generation = int(current[0] or 0) + 1 if current is not None else 1
-    conn.execute(
-        f"DELETE FROM {schema.CACHE_SOURCES_TABLE} WHERE source_id = ?",
-        [source_id],
-    )
-    conn.execute(
-        f"INSERT INTO {schema.CACHE_SOURCES_TABLE} "
-        "(source_id, refreshed_at, generation) VALUES (?, ?::TIMESTAMPTZ, ?)",
-        [source_id, refreshed_at.isoformat(), generation],
-    )
-
-
-def cache_source_ids(conn) -> set[int]:
-    if not schema.table_exists(conn, schema.CACHE_SOURCES_TABLE):
-        return set()
-    return {
-        int(row[0])
-        for row in conn.execute(
-            f"SELECT source_id FROM {schema.CACHE_SOURCES_TABLE}"
-        ).fetchall()
-    }
-
-
-def cache_source_generations(conn) -> dict[int, int]:
-    if not schema.table_exists(conn, schema.CACHE_SOURCES_TABLE):
-        return {}
-    return {
-        int(source_id): int(generation or 0)
-        for source_id, generation in conn.execute(
-            f"SELECT source_id, generation FROM {schema.CACHE_SOURCES_TABLE}"
-        ).fetchall()
-    }
-
 
 def publish_rows(
     source_id: int,
-    dataflow_files: list[DataflowFile],
+    dataflow_files: list[analytics_contracts.DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
     *,
     database_path: Path,
     source_files: list[dict[str, Any]] | None = None,
+    job_files: list[analytics_contracts.JobFile] | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
 ) -> dict[str, Any]:
+    if not job_rows:
+        return publish_rows_batched(
+            source_id,
+            [analytics_contracts.LogPublishBatch(
+                dataflow_files=tuple(dataflow_files), job_files=tuple(job_files or ()),
+                source_files=tuple(source_files or ()),
+            )],
+            removed_files, changed_files, database_path=database_path,
+            finalize_generation=finalize_generation, mark_source=mark_source,
+        )
     from datacoolie_studio.domains.analytics import access as analytics_access
 
     with analytics_access.analytics_maintenance_lock:
@@ -142,18 +63,292 @@ def publish_rows(
             changed_files,
             database_path=database_path,
             source_files=source_files,
+            job_files=job_files,
+            finalize_generation=finalize_generation,
+            mark_source=mark_source,
         )
+
+
+def publish_rows_batched(
+    source_id: int,
+    batches: Iterable[analytics_contracts.LogPublishBatch],
+    removed_files: list[str],
+    changed_files: list[str],
+    *,
+    database_path: Path,
+    on_batch_detached: Callable[[analytics_contracts.LogPublishBatch], None]
+    | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
+) -> dict[str, Any]:
+    """Publish bounded log batches in one atomic DuckDB generation.
+
+    The iterator may materialize one batch immediately before yielding it. DuckDB
+    copies that batch into temporary relations before the iterator is resumed, so
+    the caller can delete its owned raw files without retaining the complete input
+    in the local staging directory or in Python row buffers.
+    """
+
+    from datacoolie_studio.domains.analytics import access as analytics_access
+
+    with analytics_access.analytics_maintenance_lock:
+        return _publish_rows_batched_locked(
+            source_id,
+            batches,
+            removed_files,
+            changed_files,
+            database_path=database_path,
+            on_batch_detached=on_batch_detached,
+            finalize_generation=finalize_generation,
+            mark_source=mark_source,
+        )
+
+
+def _publish_rows_batched_locked(
+    source_id: int,
+    batches: Iterable[analytics_contracts.LogPublishBatch],
+    removed_files: list[str],
+    changed_files: list[str],
+    *,
+    database_path: Path,
+    on_batch_detached: Callable[[analytics_contracts.LogPublishBatch], None]
+    | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
+) -> dict[str, Any]:
+    from datacoolie_studio.domains.analytics import access as analytics_access
+
+    path = database_path
+    blocked_status = _blocking_upgrade_status(path)
+    if blocked_status is not None:
+        _close_batch_iterator(batches)
+        return {
+            "parsed_dataflow_records": 0,
+            "parsed_job_records": 0,
+            "file_row_counts": {},
+            "errors": [
+                {
+                    "uri": str(path),
+                    "message": "A complete analytics cache upgrade is in progress",
+                    "code": "analytics_upgrade_in_progress",
+                }
+            ],
+            "published": False,
+        }
+
+    if not finalize_generation:
+        return _write_batched_duckdb_rows(
+            path,
+            source_id,
+            batches,
+            removed_files,
+            changed_files,
+            on_batch_detached=on_batch_detached,
+            finalize_generation=False,
+            mark_source=mark_source,
+        )
+    if analytics_access.schema_rebuild_required(path):
+        _close_batch_iterator(batches)
+        return _analytics_upgrade_required_result(path)
+    return _write_batched_duckdb_rows(
+        path,
+        source_id,
+        batches,
+        removed_files,
+        changed_files,
+        on_batch_detached=on_batch_detached,
+        finalize_generation=True,
+        mark_source=mark_source,
+    )
+
+
+def _write_batched_duckdb_rows(
+    path: Path,
+    source_id: int,
+    batches: Iterable[analytics_contracts.LogPublishBatch],
+    removed_files: list[str],
+    changed_files: list[str],
+    *,
+    on_batch_detached: Callable[[analytics_contracts.LogPublishBatch], None]
+    | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
+) -> dict[str, Any]:
+    """Stage all bounded batches, then mutate the target in one transaction."""
+
+    from datacoolie_studio.domains.analytics import access as analytics_access
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parsed_dataflow_records = 0
+    parsed_job_records = 0
+    file_row_counts: dict[str, int] = {}
+    errors: list[dict[str, str]] = []
+    conn = analytics_access.connect(path)
+    staged_batches: list[dict[str, Any]] = []
+    source_fence_files: list[dict[str, Any]] = []
+    source_fence_read_uris: dict[str, str] = {}
+    file_admission_summaries: dict[str, dict[str, Any]] = {}
+    dataflow_stage_tables: list[str] = []
+    dataflow_stage_views: list[str] = []
+    job_stage_tables: list[str] = []
+    job_stage_views: list[str] = []
+    transaction_started = False
+    staging_duration_ms = 0.0
+    publication_duration_ms = 0.0
+    batch_iterator = iter(batches)
+    try:
+        schema_tables.ensure_tables(conn)
+        try:
+            staging_started = time.perf_counter()
+            for batch_index, batch in enumerate(batch_iterator):
+                dataflow_files = tuple(batch.dataflow_files)
+                job_files = tuple(batch.job_files)
+                # Capture a local descriptor's revision before DuckDB reads it.
+                # The post-stage and pre-commit checks below then fence the
+                # bytes that were actually admitted into this generation.
+                batch_fence_files, batch_fence_read_uris = _source_revision_fence(
+                    batch.source_files,
+                    [*dataflow_files, *job_files],
+                )
+                dataflow_stage = staging.stage_native_batch(conn, dataflow_files, kind="dataflow", stage_index=batch_index)
+                if dataflow_stage:
+                    dataflow_stage_tables.extend(dataflow_stage.tables)
+                job_stage = staging.stage_native_batch(conn, job_files, kind="job", stage_index=batch_index)
+                if job_stage:
+                    job_stage_tables.extend(job_stage.tables)
+                for stage in (dataflow_stage, job_stage):
+                    if stage:
+                        for item, summary in zip(stage.items, stage.summaries):
+                            file_admission_summaries[item.canonical_uri] = summary
+                _assert_ingest_files_stable(batch_fence_files, batch_fence_read_uris)
+                source_fence_files.extend(batch_fence_files)
+                source_fence_read_uris.update(batch_fence_read_uris)
+                staged_batches.append(
+                    {
+                        "batch": batch,
+                        "dataflow_stage": dataflow_stage,
+                        "job_stage": job_stage,
+                    }
+                )
+                if on_batch_detached is not None:
+                    on_batch_detached(batch)
+
+            # All stages use one generated schema; inspect each typed relation
+            # once. ensure_tables already validated the target before staging.
+            for staged in staged_batches:
+                for kind in ("dataflow", "job"):
+                    stage = staged[f"{kind}_stage"]
+                    if stage:
+                        _preflight_native_batch(conn, stage, kind=kind)
+            staging_duration_ms = round(
+                (time.perf_counter() - staging_started) * 1000,
+                3,
+            )
+
+            # Every local input is checked once more after all source bytes
+            # have been staged and before the publication transaction starts.
+            _assert_ingest_files_stable(
+                source_fence_files,
+                source_fence_read_uris,
+            )
+
+            publication_started = time.perf_counter()
+            conn.execute("BEGIN TRANSACTION")
+            transaction_started = True
+            replaced = sorted(set([*removed_files, *changed_files]))
+            if replaced:
+                for table in (schema.DATAFLOW_TABLE, schema.JOB_TABLE):
+                    conn.execute(f"DELETE FROM {table} WHERE _source_id = ? AND _file_uri IN (SELECT unnest(?::VARCHAR[]))",
+                                 [source_id, replaced])
+            for staged in staged_batches:
+                for kind in ("dataflow", "job"):
+                    stage = staged[f"{kind}_stage"]
+                    if stage:
+                        insert_native_batch(conn, source_id, stage, kind=kind)
+                        for item, row_count in zip(stage.items, stage.counts):
+                            file_row_counts[item.canonical_uri] = row_count
+                            if kind == "dataflow":
+                                parsed_dataflow_records += row_count
+                            else:
+                                parsed_job_records += row_count
+            if mark_source:
+                cache_state.mark_cache_source(conn, source_id, refreshed_at=utc_now())
+            if finalize_generation:
+                publication.refresh_filter_values(conn, source_id)
+                publication.publish_generation(
+                    conn,
+                    dataflow_column_types=schema.DATAFLOW_COLUMN_TYPES,
+                    job_column_types=schema.JOB_COLUMN_TYPES,
+                    published_at=utc_now(),
+                    source_ids=[source_id],
+                )
+            else:
+                cache_state.mark_candidate_building(conn)
+            # The source fence must also cover derived writes and generation
+            # publication. A local source changing at this point rolls back
+            # the transaction rather than exposing a mixed generation.
+            _assert_ingest_files_stable(
+                source_fence_files,
+                source_fence_read_uris,
+            )
+            conn.execute("COMMIT")
+            publication_duration_ms = round(
+                (time.perf_counter() - publication_started) * 1000,
+                3,
+            )
+        except Exception as exc:
+            if transaction_started:
+                conn.execute("ROLLBACK")
+            errors.append(
+                {
+                    "uri": str(path),
+                    "message": str(exc),
+                    "code": getattr(exc, "code", "publish_failed"),
+                }
+            )
+            parsed_dataflow_records = 0
+            parsed_job_records = 0
+            file_row_counts.clear()
+            file_admission_summaries.clear()
+    finally:
+        _close_batch_iterator(batch_iterator)
+        staging.drop_staged_relations(
+            conn,
+            tables=[*dataflow_stage_tables, *job_stage_tables],
+            views=[*dataflow_stage_views, *job_stage_views],
+        )
+        conn.close()
+    return {
+        "parsed_dataflow_records": parsed_dataflow_records,
+        "parsed_job_records": parsed_job_records,
+        "file_row_counts": file_row_counts,
+        "errors": errors,
+        "published": not errors,
+        "batch_count": len(staged_batches),
+        "file_admission_summaries": file_admission_summaries,
+        "staging_duration_ms": staging_duration_ms,
+        "publication_duration_ms": publication_duration_ms,
+    }
+
+
+def _close_batch_iterator(iterator: Iterable[Any]) -> None:
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        close()
 
 
 def _publish_rows_locked(
     source_id: int,
-    dataflow_files: list[DataflowFile],
+    dataflow_files: list[analytics_contracts.DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
     *,
     database_path: Path,
     source_files: list[dict[str, Any]] | None = None,
+    job_files: list[analytics_contracts.JobFile] | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
 ) -> dict[str, Any]:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
@@ -172,32 +367,24 @@ def _publish_rows_locked(
             ],
             "published": False,
         }
-    if analytics_access.schema_rebuild_required(path):
-        candidate_path = analytics_access.candidate_path(path)
-        analytics_access.discard_candidate(candidate_path)
-        result = _write_duckdb_rows(
-            candidate_path,
+    # A complete upgrade deliberately keeps its candidate in ``building`` state
+    # between source/batch commits.  It must not be routed through the normal
+    # "schema is not ready, discard and rebuild" path on the next batch.
+    if not finalize_generation:
+        return _write_duckdb_rows(
+            path,
             source_id,
             dataflow_files,
             job_rows,
             removed_files,
             changed_files,
             source_files=source_files,
+            job_files=job_files,
+            finalize_generation=False,
+            mark_source=mark_source,
         )
-        if result["published"]:
-            try:
-                _validate_analytics_candidate(candidate_path, [source_id])
-                analytics_access.swap_candidate(candidate_path, path)
-            except Exception as exc:
-                result["errors"].append(
-                    {
-                        "uri": str(candidate_path),
-                        "message": str(exc),
-                        "code": getattr(exc, "code", "publish_failed"),
-                    }
-                )
-                result["published"] = False
-        return result
+    if analytics_access.schema_rebuild_required(path):
+        return _analytics_upgrade_required_result(path)
     return _write_duckdb_rows(
         path,
         source_id,
@@ -206,37 +393,49 @@ def _publish_rows_locked(
         removed_files,
         changed_files,
         source_files=source_files,
+        job_files=job_files,
+        finalize_generation=True,
+        mark_source=mark_source,
     )
 
 
 def _blocking_upgrade_status(path: Path) -> dict[str, Any] | None:
-    from datacoolie_studio.domains.analytics_upgrade.service import (
-        current_upgrade_status,
-    )
+    return ownership.blocking_upgrade_status(path)
 
-    status = current_upgrade_status()
-    # Only an actively building/validating/publishing upgrade owns the live cache.
-    # A "pending" (queued) or "failed" (awaiting retry) upgrade has no live claim, so
-    # it must never block a manual or scheduled per-source sync.
-    if status is None or status.get("state") not in {
-        "building",
-        "validating",
-        "publishing",
-    }:
-        return None
-    candidate = status.get("candidate_path")
-    return None if candidate and Path(str(candidate)) == path else status
+
+def _analytics_upgrade_required_result(path: Path) -> dict[str, Any]:
+    """Route every existing incompatible cache to the complete-cache owner."""
+
+    return {
+        "parsed_dataflow_records": 0,
+        "parsed_job_records": 0,
+        "file_row_counts": {},
+        "errors": [
+            {
+                "uri": str(path),
+                "code": "analytics_upgrade_required",
+                "message": (
+                    "The existing analytics cache requires its complete "
+                    "upgrade or rebuild owner before source refresh"
+                ),
+            }
+        ],
+        "published": False,
+    }
 
 
 def _write_duckdb_rows(
     path: Path,
     source_id: int,
-    dataflow_files: list[DataflowFile],
+    dataflow_files: list[analytics_contracts.DataflowFile],
     job_rows: list[tuple[str, str, str, dict[str, Any]]],
     removed_files: list[str],
     changed_files: list[str],
     *,
     source_files: list[dict[str, Any]] | None = None,
+    job_files: list[analytics_contracts.JobFile] | None = None,
+    finalize_generation: bool = True,
+    mark_source: bool = True,
 ) -> dict[str, Any]:
     from datacoolie_studio.domains.analytics import access as analytics_access
 
@@ -245,47 +444,95 @@ def _write_duckdb_rows(
     file_row_counts: dict[str, int] = {}
     errors: list[dict[str, str]] = []
     conn = analytics_access.connect(path)
+    dataflow_stage_tables: tuple[str, ...] = ()
+    dataflow_stage_views: tuple[str, ...] = ()
+    job_stage_tables: tuple[str, ...] = ()
+    job_stage_views: tuple[str, ...] = ()
+    parsed_job_records = 0
+    transaction_started = False
     try:
-        ensure_tables(conn)
-        conn.execute("BEGIN TRANSACTION")
+        schema_tables.ensure_tables(conn)
         try:
-            _preflight_dataflow_schemas(
-                conn, [_dataflow_read_uri(item) for item in dataflow_files]
+            if job_rows:
+                from datacoolie_studio.domains.analytics.log_contract import admit_log_record
+
+                projected_rows = []
+                line_counts: dict[str, int] = {}
+                for uri, kind, revision, record in job_rows:
+                    line_counts[uri] = line_counts.get(uri, 0) + 1
+                    line = line_counts[uri]
+                    if not admit_log_record(record, expected_type="job_run_log", uri=uri, line=line):
+                        continue
+                    projected_rows.append((uri, kind, revision, {**record, "_record_line": line}))
+                    file_row_counts[uri] = file_row_counts.get(uri, 0) + 1
+                job_rows = projected_rows
+                parsed_job_records = len(job_rows)
+            # Read each kind as one explicit file list before opening the live
+            # publication transaction. The temporary tables retain exact
+            # filename provenance while avoiding a second scan of source bytes.
+            # Capture local descriptor revisions before the native readers open
+            # their relations; later checks fence the admitted bytes.
+            source_fence_files, source_fence_read_uris = _source_revision_fence(
+                source_files or [],
+                [*dataflow_files, *(job_files or [])],
             )
+            dataflow_stage = staging.stage_native_batch(conn, dataflow_files, kind="dataflow", stage_index=0)
+            job_stage = None
+            if dataflow_stage:
+                dataflow_stage_tables = dataflow_stage.tables
+                _preflight_native_batch(conn, dataflow_stage, kind="dataflow")
+            job_stage = staging.stage_native_batch(conn, job_files or [], kind="job", stage_index=0)
+            if job_stage:
+                job_stage_tables = job_stage.tables
+                _preflight_native_batch(conn, job_stage, kind="job")
+            _assert_ingest_files_stable(
+                source_fence_files,
+                source_fence_read_uris,
+            )
+            conn.execute("BEGIN TRANSACTION")
+            transaction_started = True
             stale_files = [*removed_files, *changed_files]
             for file_uri in stale_files:
                 if schema.table_exists(conn, schema.DATAFLOW_TABLE):
                     conn.execute(f"DELETE FROM {schema.DATAFLOW_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
                 if schema.table_exists(conn, schema.JOB_TABLE):
                     conn.execute(f"DELETE FROM {schema.JOB_TABLE} WHERE _source_id = ? AND _file_uri = ?", [source_id, file_uri])
-            for item in dataflow_files:
-                file_uri, file_kind, revision_json = item[:3]
-                read_uri = _dataflow_read_uri(item)
-                row_count = insert_dataflow_file(
-                    conn,
-                    source_id,
-                    file_uri,
-                    file_kind,
-                    revision_json,
-                    read_uri=read_uri,
-                    partition_date=_dataflow_partition_date(item),
-                )
-                parsed_dataflow_records += row_count
-                file_row_counts[file_uri] = row_count
+            for kind, stage in (("dataflow", dataflow_stage), ("job", job_stage)):
+                if stage:
+                    insert_native_batch(conn, source_id, stage, kind=kind)
+                    for item, row_count in zip(stage.items, stage.counts):
+                        file_row_counts[item.canonical_uri] = row_count
+                        if kind == "dataflow":
+                            parsed_dataflow_records += row_count
+                        else:
+                            parsed_job_records += row_count
             if job_rows:
                 insert_typed_rows(conn, schema.JOB_TABLE, source_id, job_rows, schema.JOB_COLUMN_TYPES)
-            _assert_ingest_files_stable(source_files or [])
-            refresh_filter_values(conn, source_id)
-            mark_cache_source(conn, source_id, refreshed_at=utc_now())
-            publish_generation(
-                conn,
-                dataflow_column_types=schema.DATAFLOW_COLUMN_TYPES,
-                job_column_types=schema.JOB_COLUMN_TYPES,
-                published_at=utc_now(),
+            _assert_ingest_files_stable(
+                source_fence_files,
+                source_fence_read_uris,
+            )
+            if mark_source:
+                cache_state.mark_cache_source(conn, source_id, refreshed_at=utc_now())
+            if finalize_generation:
+                publication.refresh_filter_values(conn, source_id)
+                publication.publish_generation(
+                    conn,
+                    dataflow_column_types=schema.DATAFLOW_COLUMN_TYPES,
+                    job_column_types=schema.JOB_COLUMN_TYPES,
+                    published_at=utc_now(),
+                    source_ids=[source_id],
+                )
+            else:
+                cache_state.mark_candidate_building(conn)
+            _assert_ingest_files_stable(
+                source_fence_files,
+                source_fence_read_uris,
             )
             conn.execute("COMMIT")
         except Exception as exc:
-            conn.execute("ROLLBACK")
+            if transaction_started:
+                conn.execute("ROLLBACK")
             errors.append(
                 {
                     "uri": str(path),
@@ -294,11 +541,19 @@ def _write_duckdb_rows(
                 }
             )
             parsed_dataflow_records = 0
+            parsed_job_records = 0
             file_row_counts.clear()
+        finally:
+            staging.drop_staged_relations(
+                conn,
+                tables=[*dataflow_stage_tables, *job_stage_tables],
+                views=[*dataflow_stage_views, *job_stage_views],
+            )
     finally:
         conn.close()
     return {
         "parsed_dataflow_records": parsed_dataflow_records,
+        "parsed_job_records": parsed_job_records,
         "file_row_counts": file_row_counts,
         "errors": errors,
         "published": not errors,
@@ -310,12 +565,58 @@ def _file_revision_json(file_uri: str) -> str:
     return json.dumps({"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, sort_keys=True)
 
 
-def _assert_ingest_files_stable(files: list[dict[str, Any]]) -> None:
+def _source_revision_fence(
+    source_files: Iterable[dict[str, Any]],
+    descriptors: Iterable[analytics_contracts.LogFileDescriptor],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Capture the local source revisions that must survive publication.
+
+    Remote descriptors can point at a short-lived materialized ``read_uri``;
+    those bytes are already revision-checked by the storage adapter and may be
+    removed by ``on_batch_detached``. Only descriptors read from their
+    canonical local URI participate in the final DuckDB fence. When callers do
+    not provide source inventory entries, capture the local descriptor stat at
+    the end of staging so the transaction still has an expected revision.
+    """
+
+    fenced_files = [dict(file_state) for file_state in source_files]
+    by_canonical = {
+        str(file_state["file_uri"]): file_state
+        for file_state in fenced_files
+        if file_state.get("file_uri") is not None
+    }
+    read_uris: dict[str, str] = {}
+    for descriptor in descriptors:
+        canonical_uri = str(descriptor.canonical_uri)
+        read_uri = str(descriptor.read_uri)
+        read_uris[canonical_uri] = read_uri
+        if read_uri != canonical_uri:
+            continue
+        state = by_canonical.get(canonical_uri)
+        if state is None:
+            state = {
+                "file_uri": canonical_uri,
+                "revision_json": _file_revision_json(canonical_uri),
+            }
+            fenced_files.append(state)
+            by_canonical[canonical_uri] = state
+        elif not state.get("revision_json"):
+            state["revision_json"] = _file_revision_json(canonical_uri)
+    return fenced_files, read_uris
+
+
+def _assert_ingest_files_stable(
+    files: list[dict[str, Any]],
+    read_uris: dict[str, str],
+) -> None:
     """Abort the transaction when bytes changed after candidate discovery."""
     for file_state in files:
-        if file_state.get("staged_path"):
-            continue
         file_uri = str(file_state["file_uri"])
+        # The canonical file is the only byte stream this process can fence.
+        # A remote descriptor's materialized read URI may have been detached
+        # before this final check and is intentionally not re-opened here.
+        if read_uris.get(file_uri) != file_uri:
+            continue
         expected = str(file_state["revision_json"])
         try:
             actual = _file_revision_json(file_uri)
@@ -340,195 +641,6 @@ def _revision_equivalent(left_json: str | None, right_json: str | None) -> bool:
     return left.get("size") == right.get("size") and left.get("mtime_ns") == right.get("mtime_ns")
 
 
-def ensure_tables(conn) -> None:
-    recreated = [
-        _ensure_dataflow_cache_table(conn),
-        ensure_typed_table(conn, schema.JOB_TABLE, schema.JOB_COLUMN_TYPES),
-    ]
-    _drop_empty_generated_job_columns(conn)
-    if any(recreated) and schema.table_exists(conn, schema.FILTER_VALUES_TABLE):
-        conn.execute(f"DROP TABLE {schema.FILTER_VALUES_TABLE}")
-    schema.ensure_filter_values_table(conn)
-    schema.ensure_cache_sources_table(conn)
-    schema.ensure_analytics_meta_table(conn)
-    _migrate_legacy_cache(conn)
-
-
-def _validate_analytics_candidate(
-    candidate_path: Path,
-    source_ids: list[int],
-) -> None:
-    from datacoolie_studio.domains.analytics import access as analytics_access
-
-    if not analytics_access.cache_is_ready(candidate_path):
-        raise RuntimeError("Analytics rebuild candidate did not create the current typed schema")
-    conn = analytics_access.connect(candidate_path, read_only=True)
-    try:
-        analytics_access.validate_source_complete_candidate(conn, source_ids)
-    finally:
-        conn.close()
-
-
-def validate_analytics_candidate(
-    candidate_path: Path,
-    source_ids: list[int],
-) -> None:
-    _validate_analytics_candidate(candidate_path, source_ids)
-
-
-def refresh_filter_values(conn, source_id: int) -> None:
-    schema.ensure_filter_values_table(conn)
-    conn.execute(f"DELETE FROM {schema.FILTER_VALUES_TABLE} WHERE _source_id = ?", [source_id])
-    updated_at = utc_now().isoformat()
-    for field, (table_name, column_name) in schema.FILTER_VALUE_SOURCES.items():
-        if not schema.table_exists(conn, table_name):
-            continue
-        if column_name not in schema.table_columns(conn, table_name):
-            continue
-        conn.execute(
-            f"""
-            INSERT INTO {schema.FILTER_VALUES_TABLE}
-            SELECT
-              ?::BIGINT AS _source_id,
-              ?::VARCHAR AS field,
-              TRIM(CAST({_quote_identifier(column_name)} AS VARCHAR)) AS value,
-              COUNT(*)::BIGINT AS record_count,
-              ?::TIMESTAMPTZ AS _updated_at
-            FROM {table_name}
-            WHERE _source_id = ?
-              AND {_quote_identifier(column_name)} IS NOT NULL
-              AND TRIM(CAST({_quote_identifier(column_name)} AS VARCHAR)) <> ''
-            GROUP BY TRIM(CAST({_quote_identifier(column_name)} AS VARCHAR))
-            """,
-            [source_id, field, updated_at, source_id],
-        )
-    if schema.table_exists(conn, schema.DATAFLOW_TABLE):
-        dataflow_columns = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
-        connection_selects = []
-        identity_sql = ", ".join(
-            [
-                "_source_id",
-                "_file_uri",
-                "dataflow_run_id" if "dataflow_run_id" in dataflow_columns else "NULL::VARCHAR AS dataflow_run_id",
-                "job_id" if "job_id" in dataflow_columns else "NULL::VARCHAR AS job_id",
-            ]
-        )
-        for column_name in ("source_name", "destination_name"):
-            if column_name not in dataflow_columns:
-                continue
-            quoted_column = _quote_identifier(column_name)
-            connection_selects.append(
-                f"""
-                SELECT {identity_sql}, TRIM(CAST({quoted_column} AS VARCHAR)) AS connection_name
-                FROM {schema.DATAFLOW_TABLE}
-                WHERE _source_id = ?
-                  AND {quoted_column} IS NOT NULL
-                  AND TRIM(CAST({quoted_column} AS VARCHAR)) <> ''
-                """
-            )
-        if not connection_selects:
-            return
-        union_sql = "\nUNION ALL\n".join(connection_selects)
-        conn.execute(
-            f"""
-            INSERT INTO {schema.FILTER_VALUES_TABLE}
-            SELECT
-              ?::BIGINT AS _source_id,
-              'connection'::VARCHAR AS field,
-              connection_name AS value,
-              COUNT(*)::BIGINT AS record_count,
-              ?::TIMESTAMPTZ AS _updated_at
-            FROM (
-              SELECT DISTINCT _source_id, _file_uri, dataflow_run_id, job_id, connection_name
-              FROM (
-                {union_sql}
-              ) raw_connection_names
-            ) connection_names
-            GROUP BY connection_name
-            """,
-            [source_id, updated_at, *([source_id] * len(connection_selects))],
-        )
-
-
-def _migrate_legacy_cache(conn) -> None:
-    migrated_source_ids = set()
-    migrated_source_ids.update(
-        _migrate_legacy_table(
-            conn,
-            legacy_table=schema.LEGACY_DATAFLOW_TABLE,
-            target_table=schema.DATAFLOW_TABLE,
-            column_types=schema.DATAFLOW_COLUMN_TYPES,
-            file_kind="legacy_dataflow_json",
-        )
-    )
-    migrated_source_ids.update(
-        _migrate_legacy_table(
-            conn,
-            legacy_table=schema.LEGACY_JOB_TABLE,
-            target_table=schema.JOB_TABLE,
-            column_types=schema.JOB_COLUMN_TYPES,
-            file_kind="legacy_job_json",
-        )
-    )
-    for source_id in sorted(migrated_source_ids):
-        refresh_filter_values(conn, source_id)
-
-
-def _migrate_legacy_table(
-    conn,
-    legacy_table: str,
-    target_table: str,
-    column_types: dict[str, str],
-    file_kind: str,
-) -> set[int]:
-    if not schema.table_exists(conn, legacy_table):
-        return set()
-    legacy_columns = set(schema.table_columns(conn, legacy_table))
-    if not {"source_id", "file_uri", "row_json"} <= legacy_columns:
-        return set()
-
-    if not schema.table_exists(conn, target_table):
-        ensure_typed_table(conn, target_table, column_types)
-
-    migrated_source_ids = set()
-    source_ids = [
-        int(row[0])
-        for row in conn.execute(
-            f"SELECT DISTINCT source_id FROM {legacy_table} WHERE source_id IS NOT NULL ORDER BY source_id"
-        ).fetchall()
-    ]
-    for source_id in source_ids:
-        legacy_count = conn.execute(
-            f"SELECT count(*) FROM {legacy_table} WHERE source_id = ?",
-            [source_id],
-        ).fetchone()[0]
-        target_count = conn.execute(f"SELECT count(*) FROM {target_table} WHERE _source_id = ?", [source_id]).fetchone()[0]
-        if target_count == legacy_count:
-            migrated_source_ids.add(source_id)
-            continue
-        conn.execute(f"DELETE FROM {target_table} WHERE _source_id = ?", [source_id])
-        legacy_rows = conn.execute(
-            f"SELECT file_uri, row_json FROM {legacy_table} WHERE source_id = ?",
-            [source_id],
-        ).fetchall()
-        typed_rows = []
-        for file_uri, row_json in legacy_rows:
-            try:
-                row = json.loads(row_json) if row_json else {}
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(row, dict):
-                continue
-            typed_rows.append((str(file_uri or ""), file_kind, "{}", row))
-        if typed_rows:
-            if not schema.table_exists(conn, target_table):
-                ensure_typed_table(conn, target_table, column_types)
-            insert_typed_rows(conn, target_table, source_id, typed_rows, column_types)
-            migrated_source_ids.add(source_id)
-    conn.execute(f"DROP TABLE {legacy_table}")
-    return migrated_source_ids
-
-
 def insert_typed_rows(
     conn,
     table_name: str,
@@ -536,30 +648,88 @@ def insert_typed_rows(
     rows: list[tuple[str, str, str, dict[str, Any]]],
     column_types: dict[str, str],
 ) -> None:
-    _ensure_source_columns(conn, table_name, rows, column_types)
-    columns = schema.table_columns(conn, table_name)
-    insert_columns = [
-        column
-        for column in columns
-        if (
-            column not in _ignored_source_columns(table_name)
-            and (
-                column in schema.STUDIO_CACHE_COLUMNS
-                or column in schema.GENERATED_CACHE_COLUMNS
-                or any(column in row for _, _, _, row in rows)
+    """Insert native records through the same lossless codec as file ingestion."""
+    from datacoolie_studio.domains.analytics.record_codec import insert_records
+
+    kind = "dataflow_run_log" if table_name == schema.DATAFLOW_TABLE else "job_run_log"
+    line_counts: dict[str, int] = {}
+    metadata = []
+    for file_uri, file_kind, revision_json, row in rows:
+        line_counts[file_uri] = line_counts.get(file_uri, 0) + 1
+        event_time = parse_utc_datetime(row.get("__event_time")) or parse_utc_datetime(row.get("end_time")) or parse_utc_datetime(row.get("start_time"))
+        file_date = event_time.date() if event_time else None
+        if file_date is None:
+            match = re.search(r"(20\d{2}[-_/]\d{2}[-_/]\d{2})", file_uri)
+            if match:
+                file_date = date.fromisoformat(match.group(1).replace("_", "-").replace("/", "-"))
+        metadata.append({
+            "_source_id": source_id, "_file_uri": file_uri, "_file_kind": file_kind,
+            "_file_date": file_date, "_source_size": _revision_value(revision_json, "size"),
+            "_source_mtime_ns": _revision_value(revision_json, "mtime_ns"),
+            "_ingested_at": utc_now(), "__event_time": event_time, "__run_date": file_date,
+            "_record_line": row.get("_record_line", line_counts[file_uri]),
+        })
+    insert_records(conn, table_name, [row for _, _, _, row in rows], kind=kind, metadata=metadata)
+
+
+
+def _preflight_native_batch(conn, stage, *, kind: str) -> None:
+    expected = schema.DATAFLOW_COLUMN_TYPES if kind == "dataflow" else schema.JOB_COLUMN_TYPES
+    actual = {
+        row[0]: row[1] for row in conn.execute(f"DESCRIBE {stage.relation}").fetchall()
+    }
+    for column, dtype in expected.items():
+        if column in schema.GENERATED_CACHE_COLUMNS:
+            continue
+        if column not in actual or not schema.duckdb_type_matches(actual[column], dtype):
+            raise AnalyticsSchemaIncompatibleError(
+                f"Invalid staged datatype for {column!r} in {stage.items[0].canonical_uri}"
             )
-        )
-    ]
-    placeholders = ", ".join("?" for _ in insert_columns)
-    column_sql = ", ".join(_quote_identifier(column) for column in insert_columns)
+
+
+def insert_native_batch(conn, source_id: int, stage, *, kind: str) -> None:
+    """One set-based base write, preserving the existing projection owners."""
+    metadata = stage.metadata
+    ingested_times = []
+    for item in stage.items:
+        observed = utc_now()
+        if ingested_times and observed <= ingested_times[-1]:
+            observed = ingested_times[-1] + timedelta(microseconds=1)
+        ingested_times.append(observed)
     values = [
-        [
-            _cache_value(column, source_id, file_uri, file_kind, revision_json, row, column_types.get(column))
-            for column in insert_columns
-        ]
-        for file_uri, file_kind, revision_json, row in rows
+        [item.partition_date or _file_date(item.canonical_uri, {}) if kind == "dataflow" else None for item in stage.items],
+        [_revision_value(item.revision_json, "size") for item in stage.items],
+        [_revision_value(item.revision_json, "mtime_ns") for item in stage.items],
+        ingested_times,
     ]
-    conn.executemany(f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders})", values)
+    # Metadata has one row per descriptor, including empty/excluded files.
+    metadata_values = "SELECT unnest(?::DATE[]) AS dataflow_file_date, unnest(?::BIGINT[]) AS source_size, unnest(?::BIGINT[]) AS source_mtime_ns, unnest(?::TIMESTAMPTZ[]) AS ingested_at, unnest(?::BIGINT[]) AS file_key"
+    metadata_join = f"{metadata} m JOIN ({metadata_values}) v USING (file_key)"
+    source_join = f"{stage.relation} s JOIN ({metadata_join}) ON s.{quote_identifier(stage.file_key_column)} = m.file_key"
+    common = [
+        "?::BIGINT AS _source_id", "m.canonical_uri AS _file_uri", "m.file_kind AS _file_kind",
+        "v.source_size AS _source_size", "v.source_mtime_ns AS _source_mtime_ns",
+        "v.ingested_at AS _ingested_at",
+    ]
+    if kind == "dataflow":
+        projection = dataflow_projection.dataflow_source_projection(
+            conn, "", file_kind="dataflow_json", source_relation=stage.relation,
+            partition_expression="CAST(m.partition_date AS DATE)", column_prefix="s.",
+        )
+        projection = ", ".join([*common, "v.dataflow_file_date AS _file_date", projection])
+        table = schema.DATAFLOW_TABLE
+    else:
+        source_columns = set(schema.JOB_COLUMN_TYPES) - schema.GENERATED_CACHE_COLUMNS
+        payload = [f"s.{quote_identifier(column)} AS {quote_identifier(column)}" for column in source_columns]
+        event_columns = source_columns | set(stage.source_types or {})
+        event_time = job_projection.job_event_time_expression(event_columns, column_prefix="s.")
+        source_run_date = 'TRY_CAST(s."__run_date" AS DATE)' if "__run_date" in event_columns else "NULL::DATE"
+        uri_date = job_projection.uri_date_expression("", sql_expression="m.canonical_uri")
+        run_date = f"COALESCE(CAST(m.partition_date AS DATE), {source_run_date}, CAST(timezone('UTC', {event_time}) AS DATE), {uri_date})"
+        projection = ", ".join([*payload, *common, f"{event_time} AS __event_time", f"{run_date} AS __run_date", f"{run_date} AS _file_date"])
+        table = schema.JOB_TABLE
+    conn.execute(f"INSERT INTO {table} BY NAME SELECT {projection} FROM {source_join} ORDER BY m.file_key, s._record_line",
+                 [source_id, *values, list(range(len(stage.items)))])
 
 
 def insert_dataflow_file(
@@ -571,524 +741,74 @@ def insert_dataflow_file(
     *,
     read_uri: str | None = None,
     partition_date: str | None = None,
+    source_relation: str | None = None,
 ) -> int:
-    source_read_uri = read_uri or file_uri
-    _ensure_dataflow_table_for_parquet(conn, source_read_uri)
-    escaped = source_read_uri.replace("'", "''")
-    source_projection = _dataflow_parquet_source_projection(
-        conn,
-        source_read_uri,
-        partition_date=partition_date,
-    )
-    row_count = conn.execute(
-        f"SELECT count(*) FROM read_parquet('{escaped}', "
-        "union_by_name=true, hive_partitioning=false)"
-    ).fetchone()[0]
-    conn.execute(
-        f"""
-        INSERT INTO {schema.DATAFLOW_TABLE} BY NAME
-        SELECT
-          {int(source_id)}::BIGINT AS _source_id,
-          {_sql_string(file_uri)} AS _file_uri,
-          {_sql_string(file_kind)} AS _file_kind,
-          {_sql_date(partition_date or _file_date(file_uri, {}))} AS _file_date,
-          {_sql_number(_revision_value(revision_json, "size"))}::BIGINT AS _source_size,
-          {_sql_number(_revision_value(revision_json, "mtime_ns"))}::BIGINT AS _source_mtime_ns,
-          {_sql_string(utc_now().isoformat())}::TIMESTAMPTZ AS _ingested_at,
-          {source_projection}
-        FROM read_parquet(
-          '{escaped}',
-          union_by_name=true,
-          hive_partitioning=false
-        )
-        """
-    )
-    return int(row_count)
-
-
-def _dataflow_read_uri(
-    item: DataflowFile,
-) -> str:
-    return item[3] if len(item) >= 4 else item[0]
-
-
-def _dataflow_partition_date(item: DataflowFile) -> str | None:
-    return item[4] if len(item) >= 5 else None
-
-
-def ensure_typed_table(conn, table_name: str, column_types: dict[str, str]) -> bool:
-    columns = schema.table_columns(conn, table_name)
-    if columns and ("_source_id" not in columns or schema.has_legacy_raw_json_column(columns) or schema.has_incompatible_column_types(conn, table_name, column_types)):
-        conn.execute(f"DROP TABLE {table_name}")
-        columns = []
-    if not columns:
-        definitions = [
-            f"{_quote_identifier(column)} {data_type}"
-            for column, data_type in schema.cache_table_column_types(column_types).items()
-        ]
-        conn.execute(f"CREATE TABLE {table_name} ({', '.join(definitions)})")
-        return True
-    _ensure_columns(conn, table_name, schema.cache_table_column_types(column_types), set(columns))
-    _ensure_column_order(conn, table_name, column_types)
-    return False
-
-
-def _ensure_dataflow_cache_table(conn) -> bool:
-    columns = schema.table_columns(conn, schema.DATAFLOW_TABLE)
-    if columns and ("_source_id" not in columns or schema.has_legacy_raw_json_column(columns)):
-        conn.execute(f"DROP TABLE {schema.DATAFLOW_TABLE}")
-        columns = []
-    if not columns:
-        return ensure_typed_table(conn, schema.DATAFLOW_TABLE, {})
-    existing = set(columns)
-    _ensure_columns(conn, schema.DATAFLOW_TABLE, schema.STUDIO_CACHE_COLUMNS, existing)
-    _ensure_column_order(conn, schema.DATAFLOW_TABLE, schema.actual_source_column_types(conn, schema.DATAFLOW_TABLE))
-    return False
-
-
-def _ensure_source_columns(
-    conn,
-    table_name: str,
-    rows: list[tuple[str, str, str, dict[str, Any]]],
-    column_types: dict[str, str],
-) -> None:
-    existing = set(schema.table_columns(conn, table_name))
-    actual_types = schema.table_column_types(conn, table_name)
-    inferred: dict[str, set[str]] = {}
-    ignored_columns = _ignored_source_columns(table_name)
-    for _, _, _, row in rows:
-        for column, value in row.items():
-            if (
-                value is None
-                or column in schema.STUDIO_CACHE_COLUMNS
-                or column in ignored_columns
-            ):
-                continue
-            expected = column_types.get(column) or _infer_duckdb_type(value)
-            if column in existing:
-                actual = actual_types.get(column)
-                if actual and not schema.duckdb_type_matches(actual, expected):
-                    raise AnalyticsSchemaIncompatibleError(
-                        f"Column {column!r} changed datatype from {actual} to {expected}"
-                    )
-                continue
-            inferred.setdefault(column, set()).add(expected)
-    conflicts = {column: types for column, types in inferred.items() if len(types) > 1}
-    if conflicts:
-        column, types = sorted(conflicts.items())[0]
-        raise AnalyticsSchemaIncompatibleError(
-            f"New column {column!r} has conflicting datatypes: {', '.join(sorted(types))}"
-        )
-    discovered = {column: next(iter(types)) for column, types in inferred.items()}
-    if discovered:
-        _ensure_columns(conn, table_name, discovered, existing)
-        _ensure_column_order(conn, table_name, {**column_types, **discovered})
-
-
-def _ensure_dataflow_table_for_parquet(conn, file_uri: str) -> None:
-    parquet_column_types = _dataflow_parquet_target_types(conn, file_uri)
-    if not schema.table_exists(conn, schema.DATAFLOW_TABLE):
-        definitions = [
-            f"{_quote_identifier(column)} {data_type}"
-            for column, data_type in schema.cache_table_column_types(parquet_column_types).items()
-        ]
-        conn.execute(f"CREATE TABLE {schema.DATAFLOW_TABLE} ({', '.join(definitions)})")
-        return
-    existing = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
-    actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
-    for column, source_type in parquet_column_types.items():
-        actual_type = actual_types.get(column)
-        if actual_type and not _source_type_fits_target(actual_type, source_type):
-            raise AnalyticsSchemaIncompatibleError(
-                f"Column {column!r} changed datatype from {actual_type} to {source_type} in {file_uri}"
-            )
-    discovered = {
-        column: data_type
-        for column, data_type in parquet_column_types.items()
-        if column not in existing
-    }
-    if discovered:
-        _ensure_columns(conn, schema.DATAFLOW_TABLE, discovered, existing)
-        _ensure_column_order(conn, schema.DATAFLOW_TABLE, parquet_column_types)
-
-
-def _preflight_dataflow_schemas(conn, file_uris: list[str]) -> None:
-    if not file_uris:
-        return
-    candidate_types: dict[str, str] = {}
-    for file_uri in file_uris:
-        for column, source_type in _dataflow_parquet_target_types(conn, file_uri).items():
-            previous = candidate_types.get(column)
-            candidate_types[column] = (
-                source_type
-                if previous is None
-                else _common_source_type(column, previous, source_type)
-            )
-    candidate_types["__event_time"] = "TIMESTAMPTZ"
-    candidate_types["__run_date"] = "DATE"
-    existing = set(schema.table_columns(conn, schema.DATAFLOW_TABLE))
-    actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
-    for column, source_type in candidate_types.items():
-        actual_type = actual_types.get(column)
-        if actual_type and not _source_type_fits_target(actual_type, source_type):
-            raise AnalyticsSchemaIncompatibleError(
-                f"Column {column!r} changed datatype from {actual_type} to {source_type}"
-            )
-    discovered = {column: data_type for column, data_type in candidate_types.items() if column not in existing}
-    if discovered:
-        _ensure_columns(conn, schema.DATAFLOW_TABLE, discovered, existing)
-    _ensure_column_order(conn, schema.DATAFLOW_TABLE, candidate_types)
-
-
-def _common_source_type(column: str, left: str, right: str) -> str:
-    left_type = left.upper()
-    right_type = right.upper()
-    if left_type == right_type:
-        return left
-    if {left_type, right_type} <= {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"}:
-        return "DOUBLE" if "DOUBLE" in {left_type, right_type} or "FLOAT" in {left_type, right_type} else "BIGINT"
-    if left_type.startswith("TIMESTAMP") and right_type.startswith("TIMESTAMP"):
-        return "TIMESTAMPTZ"
-    raise AnalyticsSchemaIncompatibleError(
-        f"Column {column!r} has incompatible source datatypes {left} and {right}"
-    )
-
-
-def _source_type_fits_target(target_type: str, source_type: str) -> bool:
+    _assert_direct_target_schema(conn, kind="dataflow")
+    descriptor = analytics_contracts.DataflowFile(file_uri, file_kind, revision_json, read_uri or file_uri, partition_date)
+    if source_relation is None:
+        stage = staging.stage_native_batch(conn, [descriptor], kind="dataflow", stage_index=0)
+        try:
+            _preflight_native_batch(conn, stage, kind="dataflow")
+            insert_native_batch(conn, source_id, stage, kind="dataflow")
+            return stage.counts[0]
+        finally:
+            staging.drop_staged_relations(conn, tables=stage.tables)
+    stage = _single_relation_batch(conn, descriptor, source_relation, kind="dataflow")
     try:
-        schema_compatibility.classify_type(target_type, source_type)
-    except ValueError:
-        return False
-    return True
+        _preflight_native_batch(conn, stage, kind="dataflow")
+        insert_native_batch(conn, source_id, stage, kind="dataflow")
+        return stage.counts[0]
+    finally:
+        staging.drop_staged_relations(conn, tables=stage.tables, views=("__dc_single_dataflow",))
 
 
-def _describe_parquet_columns(conn, file_uri: str) -> list[tuple[str, str]]:
-    escaped = file_uri.replace("'", "''")
-    described = conn.execute(
-        f"DESCRIBE SELECT * FROM read_parquet('{escaped}', "
-        "union_by_name=true, hive_partitioning=false)"
-    ).fetchall()
-    return [(str(row[0]), str(row[1])) for row in described]
-
-
-def _dataflow_parquet_target_types(conn, file_uri: str) -> dict[str, str]:
-    source_types = dict(_describe_parquet_columns(conn, file_uri))
-    actual_types = schema.table_column_types(conn, schema.DATAFLOW_TABLE)
-    target_types: dict[str, str] = {}
-    for name, source_type in source_types.items():
-        if (
-            name in schema.STUDIO_CACHE_COLUMNS
-            or name in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
-            or name in schema.GENERATED_CACHE_COLUMNS
-        ):
-            continue
-        target_type = (
-            schema.DATAFLOW_COLUMN_TYPES.get(name)
-            or actual_types.get(name)
-            or source_type
-        )
-        try:
-            compatibility = schema_compatibility.classify_type(
-                target_type,
-                source_type,
-            )
-        except ValueError as exc:
-            raise AnalyticsSchemaIncompatibleError(
-                f"Column {name!r} changed datatype from {target_type} to "
-                f"{source_type} in {file_uri}: {exc}"
-            ) from exc
-        if compatibility.requires_value_validation:
-            _validate_lossless_integer_column(
-                conn,
-                file_uri,
-                name,
-                source_type,
-                target_type,
-            )
-        target_types[name] = compatibility.normalized_type
-    target_types["__event_time"] = "TIMESTAMPTZ"
-    target_types["__run_date"] = "DATE"
-    return target_types
-
-
-def _validate_lossless_integer_column(
+def insert_job_file(
     conn,
-    file_uri: str,
-    column: str,
-    source_type: str,
-    target_type: str,
-) -> None:
-    escaped = file_uri.replace("'", "''")
-    quoted = _quote_identifier(column)
-    invalid_predicate = schema_compatibility.lossless_integer_predicate(
-        quoted,
-        source_type,
-    )
-    row = conn.execute(
-        f"""
-        SELECT
-          COUNT(*)::BIGINT AS row_count,
-          COUNT(*) FILTER (WHERE {quoted} IS NOT NULL AND ({invalid_predicate}))::BIGINT AS invalid_count,
-          MIN({quoted}) AS min_value,
-          MAX({quoted}) AS max_value
-        FROM read_parquet(
-          '{escaped}',
-          union_by_name=true,
-          hive_partitioning=false
-        )
-        """
-    ).fetchone()
-    invalid_count = int(row[1] or 0)
-    if invalid_count:
-        raise AnalyticsSchemaIncompatibleError(
-            f"Column {column!r} cannot be safely cast from {source_type} to "
-            f"{target_type} in {file_uri}: {invalid_count} invalid value(s); "
-            f"range={row[2]!r}..{row[3]!r}"
-        )
-
-
-def _dataflow_parquet_source_projection(
-    conn,
-    file_uri: str,
-    *,
-    partition_date: str | None = None,
-) -> str:
-    source_types = dict(_describe_parquet_columns(conn, file_uri))
-    source_columns = set(source_types)
-    cast_columns: list[tuple[str, str]] = []
-    for column, source_type in source_types.items():
-        if column in schema.GENERATED_CACHE_COLUMNS or column in schema.IGNORED_DATAFLOW_SOURCE_COLUMNS:
-            continue
-        target_type = schema.DATAFLOW_COLUMN_TYPES.get(column)
-        if not target_type:
-            continue
-        compatibility = schema_compatibility.classify_type(
-            target_type,
-            source_type,
-        )
-        if compatibility.requires_projection_cast:
-            cast_columns.append((column, compatibility.normalized_type))
-    excluded_columns = [
-        column
-        for column in (
-            "__event_time",
-            "__run_date",
-            *schema.IGNORED_DATAFLOW_SOURCE_COLUMNS,
-            *(column for column, _target_type in cast_columns),
-        )
-        if column in source_columns
-    ]
-    passthrough = (
-        "* EXCLUDE ("
-        + ", ".join(_quote_identifier(column) for column in excluded_columns)
-        + ")"
-        if excluded_columns
-        else "*"
-    )
-
-    def timestamp_value(column: str) -> str:
-        return (
-            f"TRY_CAST({_quote_identifier(column)} AS TIMESTAMPTZ)"
-            if column in source_columns
-            else "NULL::TIMESTAMPTZ"
-        )
-
-    event_time_values = ", ".join(
-        timestamp_value(column)
-        for column in ("__event_time", "end_time", "start_time")
-    )
-    event_time = f"COALESCE({event_time_values})"
-    source_run_date = (
-        'TRY_CAST("__run_date" AS DATE)'
-        if "__run_date" in source_columns
-        else "NULL::DATE"
-    )
-    run_date = (
-        f"COALESCE({_sql_date(partition_date)}, {source_run_date}, "
-        f"CAST(timezone('UTC', {event_time}) AS DATE))"
-    )
-    normalized_columns = ", ".join(
-        schema_compatibility.normalized_cast_expression(
-            _quote_identifier(column),
-            target_type,
-            alias=_quote_identifier(column),
-        )
-        for column, target_type in cast_columns
-    )
-    projection_parts = [passthrough]
-    if normalized_columns:
-        projection_parts.append(normalized_columns)
-    projection_parts.extend(
-        (f"{event_time} AS __event_time", f"{run_date} AS __run_date")
-    )
-    return ", ".join(projection_parts)
-
-
-def _ignored_source_columns(table_name: str) -> set[str]:
-    return (
-        schema.IGNORED_DATAFLOW_SOURCE_COLUMNS
-        if table_name == schema.DATAFLOW_TABLE
-        else set()
-    )
-
-
-def _ensure_columns(conn, table_name: str, column_types: dict[str, str], existing: set[str]) -> None:
-    for column, data_type in column_types.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {_quote_identifier(column)} {data_type}")
-            existing.add(column)
-
-
-def _ensure_column_order(conn, table_name: str, source_column_types: dict[str, str]) -> None:
-    actual_columns = schema.table_columns(conn, table_name)
-    if not actual_columns:
-        return
-    expected_columns = schema.expected_column_order(actual_columns, source_column_types)
-    if actual_columns == expected_columns:
-        return
-    actual_types = schema.table_column_types(conn, table_name)
-    expected_types = schema.cache_table_column_types(source_column_types)
-    temp_table = f"{table_name}__column_order"
-    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
-    definitions = [
-        f"{_quote_identifier(column)} {actual_types.get(column) or expected_types.get(column) or 'VARCHAR'}"
-        for column in expected_columns
-    ]
-    conn.execute(f"CREATE TABLE {temp_table} ({', '.join(definitions)})")
-    common_columns = [column for column in expected_columns if column in actual_columns]
-    if common_columns:
-        column_sql = ", ".join(_quote_identifier(column) for column in common_columns)
-        conn.execute(f"INSERT INTO {temp_table} ({column_sql}) SELECT {column_sql} FROM {table_name}")
-    conn.execute(f"DROP TABLE {table_name}")
-    conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table_name}")
-
-
-def _drop_empty_generated_job_columns(conn) -> None:
-    """Remove columns that older studio cache versions generated for jobs."""
-    if not schema.table_exists(conn, schema.JOB_TABLE):
-        return
-    columns = set(schema.table_columns(conn, schema.JOB_TABLE))
-    for column in ("operation_type",):
-        if column not in columns:
-            continue
-        quoted_column = _quote_identifier(column)
-        try:
-            non_null_count = conn.execute(
-                f"SELECT count(*) FROM {schema.JOB_TABLE} WHERE {quoted_column} IS NOT NULL"
-            ).fetchone()[0]
-            if int(non_null_count or 0) == 0:
-                conn.execute(f"ALTER TABLE {schema.JOB_TABLE} DROP COLUMN {quoted_column}")
-        except duckdb.Error:
-            continue
-
-
-def table_source_row_count(conn, table_name: str, source_id: int) -> int:
-    if not schema.table_exists(conn, table_name) or "_source_id" not in schema.table_columns(conn, table_name):
-        return 0
-    return int(
-        conn.execute(
-            f"SELECT count(*) FROM {table_name} WHERE _source_id = ?",
-            [source_id],
-        ).fetchone()[0]
-        or 0
-    )
-
-
-def _table_source_ids(conn, table_name: str) -> list[int]:
-    if not schema.table_exists(conn, table_name):
-        return []
-    if "_source_id" not in schema.table_columns(conn, table_name):
-        return []
-    rows = conn.execute(
-        f"SELECT DISTINCT _source_id FROM {table_name} WHERE _source_id IS NOT NULL ORDER BY _source_id"
-    ).fetchall()
-    return [int(row[0]) for row in rows]
-
-
-def _table_has_source_rows(conn, table_name: str, source_ids: list[int]) -> bool:
-    if not source_ids or not schema.table_exists(conn, table_name):
-        return False
-    if "_source_id" not in schema.table_columns(conn, table_name):
-        return False
-    placeholders = ", ".join("?" for _ in source_ids)
-    count = conn.execute(
-        f"SELECT count(*) FROM {table_name} WHERE _source_id IN ({placeholders})",
-        source_ids,
-    ).fetchone()[0]
-    return int(count or 0) > 0
-
-
-def delete_rows_by_source_ids(
-    conn,
-    table_name: str,
-    source_ids: list[int],
-    *,
-    source_column: str = "_source_id",
-) -> int:
-    if not source_ids or not schema.table_exists(conn, table_name):
-        return 0
-    if source_column not in schema.table_columns(conn, table_name):
-        return 0
-    quoted_source_column = _quote_identifier(source_column)
-    placeholders = ", ".join("?" for _ in source_ids)
-    row_count = int(
-        conn.execute(
-            f"SELECT count(*) FROM {table_name} WHERE {quoted_source_column} IN ({placeholders})",
-            source_ids,
-        ).fetchone()[0]
-    )
-    if row_count:
-        conn.execute(
-            f"DELETE FROM {table_name} WHERE {quoted_source_column} IN ({placeholders})",
-            source_ids,
-        )
-    return row_count
-
-
-def _cache_value(
-    column: str,
     source_id: int,
     file_uri: str,
     file_kind: str,
     revision_json: str,
-    row: dict[str, Any],
-    data_type: str | None,
-) -> Any:
-    if column == "_source_id":
-        return source_id
-    if column == "_file_uri":
-        return file_uri
-    if column == "_file_kind":
-        return file_kind
-    if column == "_file_date":
-        return _file_date(file_uri, row)
-    if column == "_source_size":
-        return _revision_value(revision_json, "size")
-    if column == "_source_mtime_ns":
-        return _revision_value(revision_json, "mtime_ns")
-    if column == "_ingested_at":
-        return utc_now().isoformat()
-    if column == "__event_time":
-        return (
-            parse_utc_datetime(row.get(column))
-            or parse_utc_datetime(row.get("end_time"))
-            or parse_utc_datetime(row.get("start_time"))
-        )
-    if column == "__run_date":
-        return row.get(column) or _file_date(file_uri, row)
-    return _typed_value(row.get(column), data_type)
+    *,
+    partition_date: str | None = None,
+    source_relation: str | None = None,
+    source_types: dict[str, str] | None = None,
+) -> int:
+    if source_relation is None:
+        raise AnalyticsSchemaIncompatibleError("Job batch insertion requires a staged JSON relation")
+    _assert_direct_target_schema(conn, kind="job")
+    descriptor = analytics_contracts.JobFile(file_uri, file_kind, revision_json, file_uri, partition_date)
+    stage = _single_relation_batch(conn, descriptor, source_relation, kind="job", source_types=source_types)
+    try:
+        _preflight_native_batch(conn, stage, kind="job")
+        insert_native_batch(conn, source_id, stage, kind="job")
+        return stage.counts[0]
+    finally:
+        staging.drop_staged_relations(conn, tables=stage.tables, views=("__dc_single_job",))
 
 
-def _typed_value(value: Any, data_type: str | None) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, default=str)
-    if data_type == "VARCHAR":
-        return str(value)
-    if data_type == "DATE" and isinstance(value, str):
-        return value[:10]
-    return value
+
+def _assert_direct_target_schema(conn, *, kind):
+    table = schema.DATAFLOW_TABLE if kind == "dataflow" else schema.JOB_TABLE
+    columns = schema.DATAFLOW_COLUMN_TYPES if kind == "dataflow" else schema.JOB_COLUMN_TYPES
+    if not schema.typed_table_schema_is_current(conn, table, columns):
+        raise AnalyticsSchemaIncompatibleError(f"{kind.title()} storage requires a complete candidate rebuild")
+
+
+def _single_relation_batch(conn, item, source_relation, *, kind, source_types=None):
+    """Adapt an existing typed relation to the same batch insertion owner."""
+    metadata_name = f"__dc_single_{kind}_metadata"
+    view_name = f"__dc_single_{kind}"
+    expected = schema.DATAFLOW_COLUMN_TYPES if kind == "dataflow" else schema.JOB_COLUMN_TYPES
+    key_column = staging.internal_column_name("__dc_file_key", expected)
+    count = int(conn.execute(f"SELECT count(*) FROM {source_relation}").fetchone()[0])
+    metadata = quote_identifier(metadata_name)
+    conn.execute(f"CREATE TEMP TABLE {metadata} AS SELECT 0::BIGINT AS file_key, ?::VARCHAR AS canonical_uri, ?::VARCHAR AS file_kind, ?::VARCHAR AS partition_date", [item.canonical_uri, item.file_kind, item.partition_date])
+    try:
+        conn.execute(f"CREATE TEMP VIEW {quote_identifier(view_name)} AS SELECT *, 0::BIGINT AS {quote_identifier(key_column)} FROM {source_relation}")
+    except Exception:
+        conn.execute(f"DROP TABLE {metadata}")
+        raise
+    return staging.NativeBatchStage(quote_identifier(view_name), metadata, key_column, (item,), (), (count,), (metadata_name,), source_types)
 
 
 def _revision_value(revision_json: str, key: str) -> Any:
@@ -1107,35 +827,3 @@ def _file_date(file_uri: str, row: dict[str, Any]) -> str | None:
             return str(row[key])[:10]
     match = re.search(r"(20\d{2}[-_/]\d{2}[-_/]\d{2})", file_uri)
     return match.group(1).replace("_", "-").replace("/", "-") if match else None
-
-
-def _infer_duckdb_type(value: Any) -> str:
-    if isinstance(value, bool):
-        return "BOOLEAN"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return "BIGINT"
-    if isinstance(value, float):
-        return "DOUBLE"
-    if isinstance(value, (datetime, date)):
-        return "TIMESTAMPTZ" if isinstance(value, datetime) else "DATE"
-    return "VARCHAR"
-
-
-def _quote_identifier(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
-def _sql_string(value: Any) -> str:
-    if value is None:
-        return "NULL::VARCHAR"
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _sql_date(value: str | None) -> str:
-    if not value:
-        return "NULL::DATE"
-    return f"DATE {_sql_string(value[:10])}"
-
-
-def _sql_number(value: Any) -> str:
-    return "NULL" if value is None else str(int(value))

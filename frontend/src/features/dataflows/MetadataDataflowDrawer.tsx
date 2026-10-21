@@ -5,9 +5,11 @@ import { createPortal } from "react-dom";
 import { formatPrettySql } from "../../shared/components/SqlSyntax";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { displayStorageUri } from "../../shared/lib/storage";
-import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
-import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
-import type { MetadataDataflowField, MetadataDataflowRecord } from "./metadataDataflowModel";
+import { api } from "../../shared/api/client";
+import type { PendingSqlFileOperation } from "../../shared/api/domainTypes";
+import { formatCellValue, formatPrettyStructuredValue, parseCellText, structuredCellKind } from "../../shared/metadata/metadataCellValues";
+import type { MetadataDataflowField, MetadataDataflowRecord } from "../../shared/metadata/metadataDataflowModel";
+import { highlightStructuredValue } from "../../shared/metadata/metadataStructuredValue";
 import {
   dataflowFields,
   dataflowRouteLoadType,
@@ -18,13 +20,27 @@ import {
   isStructuredDataflowField,
   labelFromKey,
   routeEndpointParts,
+  sameSqlFileReference,
   sourceFields,
-} from "./metadataDataflowModel";
-import { formatCellValue, formatPrettyStructuredValue, parseCellText, structuredCellKind } from "../metadata-explorer/metadataSheetOperations";
-import { highlightStructuredValue } from "../metadata-explorer/MetadataStructuredCell";
+} from "../../shared/metadata/metadataDataflowModel";
+import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
+import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
+
+type SqlDraftSnapshot = {
+  mode: "inline" | "file";
+  path: string;
+  content: string;
+  revision: Record<string, unknown> | null;
+  fileUri: string | null;
+  baseUri: string | null;
+  baseKind: string | null;
+  configRevision: Record<string, unknown> | null;
+};
 
 interface MetadataDataflowDrawerProps {
   record: MetadataDataflowRecord;
+  environmentId?: number;
+  pendingSqlFiles?: PendingSqlFileOperation[];
   sectionOrder?: "source-transform-destination" | "source-destination-transform";
   editable?: boolean;
   readOnly?: boolean;
@@ -32,9 +48,8 @@ interface MetadataDataflowDrawerProps {
   connectionRows?: Array<Record<string, unknown>>;
   connectionColumns?: Array<{ key: string }>;
   relatedDataflows?: MetadataDataflowRecord[];
-  onSave?: (nextRow: Record<string, unknown>) => unknown | Promise<unknown>;
-  onSaveDraft?: (nextRow: Record<string, unknown>) => unknown | Promise<unknown>;
-  onValidate?: (nextRow: Record<string, unknown>) => unknown | Promise<unknown>;
+  onSave?: (nextRow: Record<string, unknown>, sqlOperation?: PendingSqlFileOperation | null) => unknown | Promise<unknown>;
+  onSaveDraft?: (nextRow: Record<string, unknown>, sqlOperation?: PendingSqlFileOperation | null) => unknown | Promise<unknown>;
   onBack?: () => void;
   onClose: () => void;
   onFocusInLineage?: (target: LineageDataflowFocusTarget) => void;
@@ -44,6 +59,8 @@ interface MetadataDataflowDrawerProps {
 
 export function MetadataDataflowDrawer({
   record,
+  environmentId,
+  pendingSqlFiles = [],
   sectionOrder = "source-transform-destination",
   editable = false,
   readOnly = false,
@@ -53,7 +70,6 @@ export function MetadataDataflowDrawer({
   relatedDataflows = [],
   onSave,
   onSaveDraft,
-  onValidate,
   onBack,
   onClose,
   onFocusInLineage,
@@ -62,53 +78,134 @@ export function MetadataDataflowDrawer({
 }: MetadataDataflowDrawerProps) {
   const [copied, setCopied] = useState(false);
   const [drawerMode, setDrawerMode] = useState<"view" | "edit">("view");
-  const [drawerDraftRow, setDrawerDraftRow] = useState(record.row);
+  const [drawerDraftRow, setDrawerDraftRow] = useState<Record<string, unknown>>(record.row);
+  const [sqlMode, setSqlMode] = useState<"inline" | "file">("inline");
+  const [sqlFilePath, setSqlFilePath] = useState("");
+  const [sqlContent, setSqlContent] = useState("");
+  const [sqlFileUri, setSqlFileUri] = useState<string | null>(null);
+  const [sqlBaseUri, setSqlBaseUri] = useState<string | null>(null);
+  const [sqlBaseKind, setSqlBaseKind] = useState<string | null>(null);
+  const [sqlFileRevision, setSqlFileRevision] = useState<Record<string, unknown> | null>(null);
+  const [sqlConfigRevision, setSqlConfigRevision] = useState<Record<string, unknown> | null>(null);
+  const [sqlLoading, setSqlLoading] = useState(false);
+  const [sqlError, setSqlError] = useState<string | null>(null);
+  const [sqlBaseline, setSqlBaseline] = useState<SqlDraftSnapshot>({
+    mode: "inline",
+    path: "",
+    content: "",
+    revision: null,
+    fileUri: null,
+    baseUri: null,
+    baseKind: null,
+    configRevision: null,
+  });
   const drawerTitleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const canEdit = drawerMode === "edit" && editable;
-  const canToggleMode = editable && !readOnly;
+  const canToggleMode = editable;
+  const declaredSourceQuery = typeof(record.row.source_query) === "string"
+    ? record.row.source_query.trim()
+    : "";
+  const effectiveSourceQuery = sqlMode === "file" ? sqlFilePath.trim() : sqlContent;
+  const effectiveDrawerRow: Record<string, unknown> = { ...drawerDraftRow, source_query: effectiveSourceQuery };
   const drawerRecord: MetadataDataflowRecord = {
     ...record,
-    row: drawerDraftRow,
+    row: effectiveDrawerRow,
     transformRows: record.transformRows.map((field) => ({
       ...field,
-      value: drawerDraftRow[field.key],
-      structured: isStructuredDataflowField(field.key, drawerDraftRow[field.key]),
+      value: effectiveDrawerRow[field.key],
+      structured: isStructuredDataflowField(field.key, effectiveDrawerRow[field.key]),
     })),
   };
   const sourceFieldsForDisplay = sourceFields(drawerRecord);
   const destinationFieldsForDisplay = destinationFields(drawerRecord);
-  const sourceConnection = connectionRow(connectionRows, formatCellValue(drawerDraftRow.source_connection_name) || record.source.connectionName);
-  const destinationConnection = connectionRow(connectionRows, formatCellValue(drawerDraftRow.destination_connection_name) || record.destination.connectionName);
+  const sourceConnection = connectionRow(connectionRows, formatCellValue(effectiveDrawerRow["source_connection_name"]) || record.source.connectionName);
+  const destinationConnection = connectionRow(connectionRows, formatCellValue(effectiveDrawerRow["destination_connection_name"]) || record.destination.connectionName);
   const connectionOptions = connectionRows
     .map((row) => formatCellValue(row.name).trim())
     .filter(Boolean);
   const route = dataflowRouteText(drawerRecord);
   const related = relatedDataflowRecords(record, relatedDataflows);
-  const drawerDirty = JSON.stringify(drawerDraftRow) !== JSON.stringify(record.row);
+  const sqlSnapshot = {
+    mode: sqlMode,
+    path: sqlFilePath,
+    content: sqlContent,
+    revision: sqlFileRevision,
+  };
+  const sqlDirty = JSON.stringify(sqlSnapshot) !== JSON.stringify({
+    mode: sqlBaseline.mode,
+    path: sqlBaseline.path,
+    content: sqlBaseline.content,
+    revision: sqlBaseline.revision,
+  });
+  const sqlPathNeedsLoad = sqlMode === "file"
+    && Boolean(sqlFilePath.trim())
+    && !sameSqlFileReference(sqlFilePath, sqlBaseline.path);
+  const drawerDirty = JSON.stringify(effectiveDrawerRow) !== JSON.stringify(record.row) || sqlDirty;
+  const pendingSqlFingerprint = JSON.stringify(pendingSqlFiles);
+  const pendingSqlOperation = sqlMode === "file"
+    ? pendingSqlFiles.find((operation) =>
+      operation.source_id === record.metadataSourceId
+      && sameSqlFileReference(operation.query, sqlFilePath)
+    ) ?? null
+    : null;
+  const sqlDraftStatus = pendingSqlOperation?.publish_status === "applied"
+    ? "partial"
+    : pendingSqlOperation
+      ? pendingSqlOperation.base_revision ? "modified" : "new"
+      : null;
+
+  function handleSqlPathChange(path: string) {
+    const changed = path.trim() !== sqlFilePath.trim();
+    setSqlFilePath(path);
+    setSqlBaseKind(path.trim().startsWith("artifact:/") ? "project_root" : path.trim() ? "sql_root" : null);
+    setSqlError(null);
+    if (changed) {
+      setSqlFileUri(null);
+      setSqlBaseUri(null);
+      setSqlFileRevision(null);
+      setSqlConfigRevision(null);
+    }
+  }
+
   const sourceSection = (
     <section key="source" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-source">
       <DataflowFields
         fields={sourceFieldsForDisplay}
-        record={drawerRecord}
         editable={canEdit}
         onFieldChange={setField}
         connectionOptions={connectionOptions}
+        sqlEditor={{
+          mode: sqlMode,
+          path: sqlFilePath,
+          content: sqlContent,
+          fileUri: sqlFileUri,
+          baseUri: sqlBaseUri,
+          baseKind: sqlBaseKind,
+          draftStatus: sqlDraftStatus,
+          loading: sqlLoading,
+          error: sqlError,
+          needsLoad: sqlPathNeedsLoad,
+          editable: canEdit,
+          onModeChange: setSqlMode,
+          onPathChange: handleSqlPathChange,
+          onContentChange: setSqlContent,
+          onLoadExisting: () => void loadExistingSqlFile(),
+        }}
         connectionDetails={connectionDetailFields(sourceFieldsForDisplay, "source", sourceConnection, connectionColumns)}
       />
     </section>
   );
   const transformSection = (
     <section key="transform" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-transform">
-      <DataflowFields fields={drawerRecord.transformRows} record={drawerRecord} editable={canEdit} onFieldChange={setField} />
+      <DataflowFields fields={drawerRecord.transformRows} editable={canEdit} onFieldChange={setField} />
     </section>
   );
   const destinationSection = (
     <section key="destination" className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-destination">
       <DataflowFields
         fields={destinationFieldsForDisplay}
-        record={drawerRecord}
         editable={canEdit}
         onFieldChange={setField}
         connectionOptions={connectionOptions}
@@ -143,6 +240,110 @@ export function MetadataDataflowDrawer({
   }, [record.key, record.row]);
 
   useEffect(() => {
+    let cancelled = false;
+    const pending = pendingSqlFiles.find((operation) =>
+      operation.source_id === record.metadataSourceId
+      && sameSqlFileReference(operation.query, declaredSourceQuery)
+    );
+    const fileReference = isSqlFileReference(declaredSourceQuery) || Boolean(pending);
+    const path = pending?.query ?? (fileReference ? declaredSourceQuery : "");
+    const baseKind = pending?.base_kind ?? (path.startsWith("artifact:/") ? "project_root" : fileReference ? "sql_root" : null);
+    setSqlMode(fileReference ? "file" : "inline");
+    setSqlFilePath(path);
+    setSqlFileUri(null);
+    setSqlBaseUri(pending?.base_uri ?? null);
+    setSqlBaseKind(baseKind);
+    setSqlError(null);
+    setSqlFileRevision(pending?.base_revision ?? null);
+    setSqlConfigRevision(pending?.config_revision ?? null);
+    if (!fileReference) {
+      setSqlLoading(false);
+      setSqlContent(declaredSourceQuery);
+      setSqlBaseline({
+        mode: "inline",
+        path: "",
+        content: declaredSourceQuery,
+        revision: null,
+        fileUri: null,
+        baseUri: null,
+        baseKind: null,
+        configRevision: null,
+      });
+      return () => { cancelled = true; };
+    }
+    if (pending) {
+      setSqlLoading(false);
+      setSqlContent(pending.content);
+      setSqlBaseline({
+        mode: "file",
+        path,
+        content: pending.content,
+        revision: pending.base_revision ?? null,
+        fileUri: null,
+        baseUri: pending.base_uri ?? null,
+        baseKind: pending.base_kind ?? baseKind,
+        configRevision: pending.config_revision ?? null,
+      });
+      return () => { cancelled = true; };
+    }
+    if (!environmentId || !record.metadataSourceId) {
+      setSqlLoading(false);
+      setSqlContent("");
+      setSqlBaseline({
+        mode: "file",
+        path,
+        content: "",
+        revision: null,
+        fileUri: null,
+        baseUri: null,
+        baseKind,
+        configRevision: null,
+      });
+      return () => { cancelled = true; };
+    }
+    setSqlLoading(true);
+    setSqlContent("");
+    void api.readSqlReference(environmentId, record.metadataSourceId, path)
+      .then((resolved) => {
+        if (cancelled) return;
+        setSqlContent(resolved.content);
+        setSqlFileUri(resolved.file_uri ?? null);
+        setSqlBaseUri(resolved.base_uri ?? null);
+        setSqlBaseKind(resolved.base_kind ?? baseKind);
+        setSqlFileRevision(resolved.revision ?? null);
+        setSqlConfigRevision(resolved.config_revision ?? null);
+        setSqlBaseline({
+          mode: "file",
+          path,
+          content: resolved.content,
+          revision: resolved.revision ?? null,
+          fileUri: resolved.file_uri ?? null,
+          baseUri: resolved.base_uri ?? null,
+          baseKind: resolved.base_kind ?? baseKind,
+          configRevision: resolved.config_revision ?? null,
+        });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setSqlError(error instanceof Error ? error.message : "SQL file could not be read");
+        setSqlBaseline({
+          mode: "file",
+          path,
+          content: "",
+          revision: null,
+          fileUri: null,
+          baseUri: null,
+          baseKind,
+          configRevision: null,
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setSqlLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [declaredSourceQuery, environmentId, pendingSqlFingerprint, record.key, record.metadataSourceId]);
+
+  useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1200);
     return () => window.clearTimeout(timer);
@@ -156,6 +357,90 @@ export function MetadataDataflowDrawer({
 
   function setField(key: string, value: unknown) {
     setDrawerDraftRow((current) => ({ ...current, [key]: value }));
+  }
+
+  async function loadExistingSqlFile() {
+    const path = sqlFilePath.trim();
+    if (!path) {
+      setSqlError("Enter a relative .sql file path first.");
+      return;
+    }
+    if (!environmentId || !record.metadataSourceId) {
+      setSqlError("This SQL file cannot be loaded without a metadata source.");
+      return;
+    }
+    const pending = pendingSqlFiles.find((operation) =>
+      operation.source_id === record.metadataSourceId
+      && sameSqlFileReference(operation.query, path)
+    );
+    if (pending) {
+      setSqlContent(pending.content);
+      setSqlFileUri(null);
+      setSqlBaseUri(pending.base_uri ?? null);
+      setSqlBaseKind(pending.base_kind ?? sqlBaseKind);
+      setSqlFileRevision(pending.base_revision ?? null);
+      setSqlConfigRevision(pending.config_revision ?? null);
+      setSqlError(null);
+      setSqlBaseline({
+        mode: "file",
+        path,
+        content: pending.content,
+        revision: pending.base_revision ?? null,
+        fileUri: null,
+        baseUri: pending.base_uri ?? null,
+        baseKind: pending.base_kind ?? sqlBaseKind,
+        configRevision: pending.config_revision ?? null,
+      });
+      return;
+    }
+    setSqlLoading(true);
+    setSqlError(null);
+    try {
+      const resolved = await api.readSqlReference(environmentId, record.metadataSourceId, path);
+      setSqlContent(resolved.content);
+      setSqlFileUri(resolved.file_uri ?? null);
+      setSqlBaseUri(resolved.base_uri ?? null);
+      setSqlBaseKind(resolved.base_kind ?? sqlBaseKind);
+      setSqlFileRevision(resolved.revision ?? null);
+      setSqlConfigRevision(resolved.config_revision ?? null);
+      setSqlBaseline({
+        mode: "file",
+        path,
+        content: resolved.content,
+        revision: resolved.revision ?? null,
+        fileUri: resolved.file_uri ?? null,
+        baseUri: resolved.base_uri ?? null,
+        baseKind: resolved.base_kind ?? sqlBaseKind,
+        configRevision: resolved.config_revision ?? null,
+      });
+    } catch (error: unknown) {
+      setSqlError(error instanceof Error ? error.message : "SQL file could not be read");
+    } finally {
+      setSqlLoading(false);
+    }
+  }
+
+  function currentSqlOperation(): PendingSqlFileOperation | null {
+    if (sqlMode !== "file" || !sqlFilePath.trim() || !record.metadataSourceId) return null;
+    const existing = pendingSqlFiles.find((operation) =>
+      operation.source_id === record.metadataSourceId
+      && sameSqlFileReference(operation.query, sqlFilePath.trim())
+    );
+    if (!sqlDirty && !existing) return null;
+    const retainsPublishedState = Boolean(existing && existing.content === sqlContent);
+    return {
+      ...(retainsPublishedState ? existing : {}),
+      source_id: record.metadataSourceId,
+      query: sqlFilePath.trim(),
+      content: sqlContent,
+      base_revision: sqlFileRevision ?? existing?.base_revision ?? null,
+      base_kind: sqlBaseKind ?? undefined,
+      base_uri: sqlBaseUri ?? existing?.base_uri ?? null,
+      config_revision: sqlConfigRevision ?? existing?.config_revision ?? null,
+      publish_status: retainsPublishedState ? existing?.publish_status : "pending",
+      published_revision: retainsPublishedState ? existing?.published_revision ?? null : null,
+      published_content_hash: retainsPublishedState ? existing?.published_content_hash ?? null : null,
+    };
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
@@ -182,17 +467,26 @@ export function MetadataDataflowDrawer({
   async function saveDrawerChanges(action: "save" | "draft") {
     const handler = action === "save" ? onSave : onSaveDraft;
     if (!handler || !drawerDirty) return;
-    const result = await handler(drawerDraftRow);
+    if (sqlMode === "file" && !sqlFilePath.trim()) {
+      setSqlError("Enter a relative .sql file path, or switch to Inline SQL.");
+      return;
+    }
+    const result = await handler(effectiveDrawerRow, currentSqlOperation());
     if (result) setDrawerMode("view");
-  }
-
-  async function validateDrawerChanges() {
-    if (!onValidate) return;
-    await onValidate(drawerDraftRow);
   }
 
   function discardDrawerChanges() {
     setDrawerDraftRow(record.row);
+    setSqlMode(sqlBaseline.mode);
+    setSqlFilePath(sqlBaseline.path);
+    setSqlContent(sqlBaseline.content);
+    setSqlFileUri(sqlBaseline.fileUri);
+    setSqlBaseUri(sqlBaseline.baseUri);
+    setSqlBaseKind(sqlBaseline.baseKind);
+    setSqlFileRevision(sqlBaseline.revision);
+    setSqlConfigRevision(sqlBaseline.configRevision);
+    setSqlError(null);
+    setSqlLoading(false);
     setDrawerMode("view");
   }
 
@@ -230,6 +524,8 @@ export function MetadataDataflowDrawer({
               </span>
               {!canToggleMode ? (
                 <span className="assets-header-chip">view only</span>
+              ) : readOnly ? (
+                <span className="assets-header-chip">draft only · source read-only</span>
               ) : null}
             </div>
           </div>
@@ -257,9 +553,8 @@ export function MetadataDataflowDrawer({
               ) : null}
               {canEdit ? (
                 <div className="dataflow-edit-actions dataflow-edit-header-actions">
-                  {onSave ? <button className="text-action primary" type="button" onClick={() => void saveDrawerChanges("save")} disabled={!drawerDirty || busy}>Save</button> : null}
-                  {onSaveDraft ? <button className="text-action" type="button" onClick={() => void saveDrawerChanges("draft")} disabled={!drawerDirty || busy}>Draft</button> : null}
-                  {onValidate ? <button className="text-action" type="button" onClick={() => void validateDrawerChanges()} disabled={busy}>Validate</button> : null}
+                  {onSave && !readOnly ? <button className="text-action primary" type="button" onClick={() => void saveDrawerChanges("save")} disabled={!drawerDirty || busy}>Save to source</button> : null}
+                  {onSaveDraft ? <button className="text-action" type="button" onClick={() => void saveDrawerChanges("draft")} disabled={!drawerDirty || busy}>Save draft</button> : null}
                   <button className="text-action" type="button" onClick={discardDrawerChanges} disabled={!drawerDirty || busy}>Discard</button>
                 </div>
               ) : null}
@@ -291,7 +586,7 @@ export function MetadataDataflowDrawer({
           ) : null}
 
           <section className="assets-drawer-section dataflow-drawer-section dataflow-drawer-section-dataflow">
-            <DataflowFields fields={dataflowFields(drawerRecord)} record={drawerRecord} editable={canEdit} onFieldChange={setField} />
+            <DataflowFields fields={dataflowFields(drawerRecord)} editable={canEdit} onFieldChange={setField} />
             <RelatedDataflows records={related} onSelect={onSelectRelatedDataflow} />
           </section>
 
@@ -336,6 +631,10 @@ function connectionRow(rows: Array<Record<string, unknown>>, connectionName: str
   const normalizedName = connectionName.trim().toLocaleLowerCase();
   if (!normalizedName) return undefined;
   return rows.find((row) => formatCellValue(row.name).trim().toLocaleLowerCase() === normalizedName);
+}
+
+function isSqlFileReference(value: string) {
+  return value.startsWith("artifact:/") || value.toLocaleLowerCase().endsWith(".sql");
 }
 
 function RouteText({ record }: { record: MetadataDataflowRecord }) {
@@ -420,18 +719,18 @@ function connectionDetailFields(
 
 function DataflowFields({
   fields,
-  record,
   editable,
   onFieldChange,
   connectionOptions = [],
+  sqlEditor,
   connectionDetails,
   emptyText = "No fields.",
 }: {
   fields: Array<{ key: string; label: string; value: unknown; structured: boolean }>;
-  record: MetadataDataflowRecord;
   editable: boolean;
   onFieldChange: (key: string, value: unknown) => void;
   connectionOptions?: string[];
+  sqlEditor?: SqlEditorProps;
   connectionDetails?: MetadataDataflowField[];
   emptyText?: string;
 }) {
@@ -440,15 +739,19 @@ function DataflowFields({
     <dl className="assets-detail-list dataflow-field-list">
       {fields.map((field) => (
         <Fragment key={field.key}>
-          <EditableDetailRow
-            fieldKey={field.key}
-            label={field.key}
-            value={field.value}
-            editable={editable}
-            structured={field.structured}
-            connectionOptions={connectionOptions}
-            onChange={onFieldChange}
-          />
+          {field.key === "source_query" && sqlEditor ? (
+            <SqlQueryField state={sqlEditor} />
+          ) : (
+            <EditableDetailRow
+              fieldKey={field.key}
+              label={field.key}
+              value={field.value}
+              editable={editable}
+              structured={field.structured}
+              connectionOptions={connectionOptions}
+              onChange={onFieldChange}
+            />
+          )}
           {isConnectionNameField(field.key) && formatCellValue(field.value) && connectionDetails?.length ? (
             <ConnectionDetailRows fields={connectionDetails} />
           ) : null}
@@ -456,6 +759,132 @@ function DataflowFields({
       ))}
     </dl>
   );
+}
+
+type SqlEditorProps = {
+  mode: "inline" | "file";
+  path: string;
+  content: string;
+  fileUri: string | null;
+  baseUri: string | null;
+  baseKind: string | null;
+  draftStatus: "new" | "modified" | "partial" | null;
+  loading: boolean;
+  error: string | null;
+  needsLoad: boolean;
+  editable: boolean;
+  onModeChange: (mode: "inline" | "file") => void;
+  onPathChange: (path: string) => void;
+  onContentChange: (content: string) => void;
+  onLoadExisting: () => void;
+};
+
+function SqlQueryField({ state }: { state: SqlEditorProps }) {
+  const origin = state.fileUri
+    || (!state.needsLoad && state.baseUri ? joinDisplayUri(state.baseUri, state.path) : "")
+    || (!state.needsLoad ? state.path : "");
+  const originLabel = state.baseKind === "project_root" ? "project root" : "SQL root";
+  return (
+    <div className="dataflow-edit-row dataflow-edit-row-block dataflow-sql-query-row">
+      <dt>SQL query</dt>
+      <dd>
+        {state.editable ? (
+          <div className="dataflow-sql-editor">
+            <div className="dataflow-sql-mode" role="group" aria-label="SQL storage mode">
+              <button
+                type="button"
+                className={state.mode === "inline" ? "active" : ""}
+                aria-pressed={state.mode === "inline"}
+                onClick={() => state.onModeChange("inline")}
+              >
+                Inline SQL
+              </button>
+              <button
+                type="button"
+                className={state.mode === "file" ? "active" : ""}
+                aria-pressed={state.mode === "file"}
+                onClick={() => state.onModeChange("file")}
+              >
+                SQL file
+              </button>
+            </div>
+            {state.mode === "file" ? (
+              <>
+                {state.draftStatus ? <DraftSqlStatus status={state.draftStatus} /> : null}
+                <div className="dataflow-sql-path-row">
+                  <input
+                    aria-label="SQL file path"
+                    value={state.path}
+                    placeholder="queries/orders.sql"
+                    onChange={(event) => state.onPathChange(event.target.value)}
+                  />
+                  <button
+                    className="text-action"
+                    type="button"
+                    onClick={state.onLoadExisting}
+                    disabled={state.loading || !state.path.trim()}
+                  >
+                    {state.loading ? "Loading…" : "Load existing"}
+                  </button>
+                </div>
+                <small className="dataflow-sql-help">
+                  Relative to the SQL root. Use <code>artifact:/...</code> for a project-root file.
+                </small>
+                {state.needsLoad ? (
+                  <span className="dataflow-sql-status dataflow-sql-status-warning">
+                    Path changed. Existing content is not loaded; the current text will be staged at this path.
+                  </span>
+                ) : null}
+                {origin ? (
+                  <div className="dataflow-sql-origin" title={origin}>
+                    <span>Source: {originLabel}</span>
+                    <code>{displayStorageUri(origin)}</code>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+            {state.loading ? <span className="dataflow-sql-status">Reading SQL file…</span> : null}
+            {state.error ? <span className="dataflow-sql-error">{state.error}</span> : null}
+            <textarea
+              aria-label={state.mode === "file" ? "SQL file content" : "Inline SQL query"}
+              value={state.content}
+              spellCheck={false}
+              placeholder="SELECT ..."
+              onChange={(event) => state.onContentChange(event.target.value)}
+            />
+          </div>
+        ) : (
+          <div className="dataflow-sql-preview">
+            {state.mode === "file" ? (
+              <div className="dataflow-sql-origin" title={origin || state.path}>
+                {state.draftStatus ? <DraftSqlStatus status={state.draftStatus} /> : null}
+                <span>Loaded from {originLabel}</span>
+                <code>{displayStorageUri(origin || state.path)}</code>
+              </div>
+            ) : <span className="dataflow-sql-mode-label">Inline SQL</span>}
+            {state.loading ? <span className="dataflow-sql-status">Reading SQL file…</span> : null}
+            {state.error ? <span className="dataflow-sql-error">{state.error}</span> : null}
+            {state.content ? (
+              <pre className="dataflow-structured-value sql-syntax-light"><code>{highlightStructuredValue(formatPrettySql(state.content), "sql")}</code></pre>
+            ) : <span className="assets-empty-inline">No SQL content.</span>}
+          </div>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+function DraftSqlStatus({ status }: { status: "new" | "modified" | "partial" }) {
+  const label = status === "new"
+    ? "New file · Draft only"
+    : status === "modified"
+      ? "Modified · Draft only"
+      : "Partially published · retry required";
+  return <span className="dataflow-sql-draft-status">{label}</span>;
+}
+
+function joinDisplayUri(baseUri: string, relativePath: string) {
+  return `${baseUri.replace(/[\\/]+$/, "")}/${relativePath.replace(/\\/g, "/")}`;
 }
 
 function RelatedDataflows({

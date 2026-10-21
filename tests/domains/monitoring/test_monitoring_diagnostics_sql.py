@@ -6,7 +6,7 @@ from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.domains.analytics import access as analytics_access
 from datacoolie_studio.domains.analytics.connections import analytics_connections
 from datacoolie_studio.domains.monitoring.context import reader as analytics_reader
-from datacoolie_studio.domains.monitoring import page_service, query_service
+from datacoolie_studio.domains.monitoring import page_dispatch, query_service
 
 def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
@@ -38,11 +38,10 @@ def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(analytics_connections, "connect", counted_connect)
     with analytics_reader(paths) as analytics_context:
-        payload = page_service._build_monitoring_page(
+        payload = page_dispatch.build_monitoring_page(
             paths,
             page="diagnostics",
             filters={"range": "all"},
-            session=object(),
             timezone_info=timezone.utc,
             timezone_label="UTC",
             timezone_source="configured",
@@ -52,7 +51,7 @@ def test_diagnostics_page_uses_bounded_sql_aggregates(tmp_path: Path, monkeypatc
     assert connection_calls == 1
     assert payload["summary"]["dataflow_records"] == 250
     assert payload["summary"]["job_records"] == 50
-    assert payload["coverage"]["enabled_log_paths"] == 2
+    assert payload["coverage"]["enabled_log_base_paths"] == 2
     assert payload["diagnostics"]["job_linkage_summary"]
     assert len(payload["diagnostics"]["field_completeness"]) == 12
     required_groups = [

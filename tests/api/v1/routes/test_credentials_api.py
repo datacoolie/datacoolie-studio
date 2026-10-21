@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from datacoolie_studio.api.v1.routes.credentials import (
+from datacoolie_studio.api.v1.dependencies import (
     get_credential_secret_store,
     require_loopback_client,
 )

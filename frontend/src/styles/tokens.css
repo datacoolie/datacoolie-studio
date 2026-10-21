@@ -60,19 +60,23 @@
   --color-success: #16855e;
   --color-success-soft: #e5f5ee;
   --color-warning: #b66a04;
+  --color-warning-text: #995800;
   --color-warning-soft: #fbefd8;
   --color-danger: #cf3348;
   --color-danger-soft: #fce8ec;
   --color-info: #2563eb;
   --color-info-soft: #e6efff;
 
-  /* Reference resolution: automatic=success, manual=user override, unresolved=attention */
-  --resolution-automatic-color: var(--color-success);
+  /* Asset identity/reference resolution: resolved=success, unresolved=attention, conflicts=review */
+  --resolution-resolved-color: var(--color-success);
+  --resolution-automatic-color: var(--resolution-resolved-color);
   --resolution-automatic-bg: var(--color-success-soft);
   --resolution-manual-color: var(--color-info);
   --resolution-manual-bg: var(--color-info-soft);
-  --resolution-unresolved-color: var(--color-warning);
+  --resolution-unresolved-color: var(--color-warning-text);
   --resolution-unresolved-bg: var(--color-warning-soft);
+  --resolution-review-color: #6a5d8e;
+  --resolution-review-bg: #f7f5fb;
 
   /* Spacing scale (4px base) */
   --space-1: 4px;
@@ -113,6 +117,10 @@
   --font-weight-bold: 700;
   --line-height-compact: 1.18;
   --line-height-body: 1.42;
+
+  /* Report panel header: the single source of truth for every panel header height */
+  --report-panel-header-height: 32px;
+  --report-panel-header-control-height: 22px;
 
   /* Motion */
   --transition-fast: 120ms ease;

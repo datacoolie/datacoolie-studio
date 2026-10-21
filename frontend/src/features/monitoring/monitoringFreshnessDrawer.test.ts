@@ -1,8 +1,29 @@
-import { describe, expect, it } from "vitest";import { freshnessDrawerHealth, freshnessRunTimeLines } from "./details/detailPrimitives";
-import { freshnessEndpointLabel, isFreshnessWatermarkConfigured } from "./details/FreshnessDetails";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPrimitives";
+import { describe, expect, it } from "vitest";import { formatFreshnessAge, freshnessDrawerHealth, freshnessRunTimeLines } from "./details/detailPrimitives";
+import { freshnessEndpointLabel, isFreshnessWatermarkConfigured } from "./details/FreshnessDetails";import { formatPhasePercent, monitoringEndpointPresentation } from "./components/monitoringPresentation";
 import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
 
 describe("Freshness registry drawer semantics", () => {
+  it.each([
+    [null, null, "-"], [undefined, undefined, "-"], ["", "", "-"],
+    [" ", null, "-"], [false, null, "-"], [0, null, "0s"],
+    [null, 2, "2d"], ["invalid", 1, "1d"], [90, null, "1.5m"],
+  ])("preserves unknown and reported zero ages (%s, %s)", (seconds, days, expected) => {
+    expect(formatFreshnessAge(seconds, days)).toBe(expected);
+  });
+
+  it.each([undefined, null, "unknown", ""])("does not turn an unreported latest status into a prior success (%s)", (status) => {
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-10-02", latest_freshness_at: "2026-10-01",
+      latest_freshness_status: "succeeded", latest_run_status: status, age_days: 1 }))
+      .toEqual({ label: "Needs review", tone: "warning" });
+  });
+
+  it.each(["succeeded", "skipped"])("requires freshness age evidence for %s", (status) => {
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-10-02", latest_run_status: status,
+      age_seconds: null, age_days: null })).toEqual({ label: "Needs review", tone: "warning" });
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-10-02", latest_run_status: status,
+      age_seconds: 0, age_days: 0 })).toEqual({ label: "Current", tone: "success" });
+  });
+
   it("formats runtime phase contribution with one decimal place", () => {
     expect(formatPhasePercent(47.129)).toBe("47.1%");
     expect(formatPhasePercent(50)).toBe("50%");
@@ -42,16 +63,24 @@ describe("Freshness registry drawer semantics", () => {
       label: "Needs review",
       tone: "failed",
     });
-    expect(freshnessDrawerHealth({ latest_run_at: "2026-07-15", latest_run_status: "succeeded", movement_state: "incomplete", age_days: 1 })).toEqual({
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-07-15", latest_run_status: "succeeded", movement_state: "unknown", watermark_issue_state: "insufficient_evidence", age_days: 1 })).toEqual({
       label: "Needs review",
       tone: "warning",
+    });
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-07-15", latest_run_status: "succeeded", save_status: "save_error", age_days: 1 })).toEqual({
+      label: "Needs review",
+      tone: "failed",
+    });
+    expect(freshnessDrawerHealth({ latest_run_at: "2026-07-15", latest_run_status: "succeeded", movement_state: "unknown", save_status: "save_error", age_days: 1 })).toEqual({
+      label: "Needs review",
+      tone: "failed",
     });
     expect(freshnessDrawerHealth({})).toEqual({ label: "No evidence", tone: "neutral" });
   });
 
   it("collapses not-configured watermark evidence but keeps configured evidence", () => {
-    expect(isFreshnessWatermarkConfigured({ coverage_state: "not_configured", source_watermark_before: { id: 1 } })).toBe(false);
-    expect(isFreshnessWatermarkConfigured({ movement_state: "advanced", source_watermark_before: { id: 1 } })).toBe(true);
+    expect(isFreshnessWatermarkConfigured({ coverage_state: "not_configured", saved_watermark: { id: 1 } })).toBe(false);
+    expect(isFreshnessWatermarkConfigured({ movement_state: "advanced", loaded_watermark: { id: 1 }, save_status: "saved" })).toBe(true);
   });
 
   it("builds an original-case route and uses representative SQL and Python labels", () => {

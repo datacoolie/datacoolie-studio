@@ -69,10 +69,11 @@ export function SettingsPage({
   }, [publish]);
   const closeConfigurationDrawer = useCallback(() => setConfigurationDrawerOpen(false), []);
   const workspaceDatabase = diagnostics?.workspace_database;
+  const analyticsResourceLimits = diagnostics?.analytics_cache.resource_limits;
   const analyticsCache = cache.status?.analytics_cache;
   const analyticsUpgrade = analyticsCache?.upgrade;
   const upgradeActive = analyticsUpgrade
-    ? ["pending", "building", "repairing", "validating", "publishing"].includes(analyticsUpgrade.state)
+    ? ["pending", "building", "staging", "repairing", "finalizing", "validating", "publishing"].includes(analyticsUpgrade.state)
     : false;
   const upgradeFailed = analyticsUpgrade?.state === "failed";
   const upgradeUpToDate = analyticsUpgrade
@@ -387,6 +388,19 @@ export function SettingsPage({
                     ? `${formatCount(analyticsCache.dataflow_rows)} df · ${formatCount(analyticsCache.job_rows)} jobs`
                     : loadingValue(cache.loading)}
                 />
+                {analyticsResourceLimits ? (
+                  <>
+                    <StatRow
+                      label="DuckDB budget"
+                      value={`${analyticsResourceLimits.duckdb_threads ?? "—"} threads · ${analyticsResourceLimits.duckdb_memory_limit ?? "—"}`}
+                    />
+                    <StatRow
+                      label="Spill directory"
+                      value={String(analyticsResourceLimits.duckdb_temp_directory ?? "—")}
+                      code
+                    />
+                  </>
+                ) : null}
               </dl>
             </div>
           </div>
@@ -484,6 +498,8 @@ function analyticsUpgradeLabel(state: string): string {
   const labels: Record<string, string> = {
     pending: "Waiting to upgrade",
     building: "Rebuilding from Log sources",
+    staging: "Staging analytics candidate",
+    finalizing: "Finalizing analytics candidate",
     validating: "Validating candidate",
     publishing: "Publishing atomically",
     succeeded: "Current",

@@ -27,6 +27,9 @@ from datacoolie_studio.domains.sources.service import (
     record_source_validation,
     stored_source_validation_error,
 )
+from datacoolie_studio.domains.sources.validation_diagnostics import (
+    unexpected_validation_result,
+)
 from datacoolie_studio.domains.sources.scan_policy import (
     CODE_SCAN_EXCLUDED_DIRECTORIES,
     is_excluded_code_directory,
@@ -71,8 +74,16 @@ def validate_code_artifact(
                 secret_store=secret_store,
             ),
         )
-    except Exception as exc:
+    except ArtifactIndexError as exc:
         result = _error_result(source, str(exc))
+    except Exception as exc:
+        result = unexpected_validation_result(
+            source,
+            operation="code-artifact-validation",
+            message="Code artifact validation failed",
+            exc=exc,
+            provider=_storage_provider(source),
+        )
     return record_source_validation(session, source, result)
 
 
@@ -121,7 +132,7 @@ def refresh_code_artifact(
                 materialization.analyzer_version = ANALYZER_VERSION
                 materialization.materialized_at = utc_now()
         if revision_changed or analyzer_changed:
-            invalidate_environment_derived_caches(session, source.environment_id, structural=True)
+            invalidate_environment_derived_caches(source.environment_id, structural=True, identity=False)
         sync.record_source_observation(session, source=source, status="ok", revision=revision, error=None, checked_at=utc_now())
         sync.finish_sync_job(
             session,

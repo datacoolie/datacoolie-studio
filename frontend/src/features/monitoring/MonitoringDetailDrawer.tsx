@@ -1,37 +1,49 @@
-import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
-import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { ArrowLeft, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
+import { Suspense, useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import type { MonitoringRecord } from "../../shared/api/domainTypes";
+import { numberValue } from "../../shared/api/transportValues";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
-import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../shared/time";
-import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../shared/statusPresentation";
-import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableColumn, type TableSort } from "./MonitoringCharts";
+import { lifecycleStatusPresentation } from "../../shared/statusPresentation";
+import { LineageFormatIcon } from "../../shared/components/FormatIcon";
+import { StatusCell, type TableSort } from "../../shared/components/DataTable";
+import { Help } from "../../shared/components/Help";
 import {
   diagnosticsCategoryLabel,
-  diagnosticsEvidenceItems,
-  diagnosticsInvestigationActions,
-  diagnosticsLinkedJobRow,
-  diagnosticsRuleDescription,
   diagnosticsSeverityPresentation,
 } from "./diagnosticsPresentation";
-import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "./maintenancePresentation";
-import { CompactNumberValue, formatCompactNumber, formatPhasePercent, monitoringEndpointPresentation, TablePager } from "./components/monitoringPrimitives";
+import { maintenanceFormatIconKind } from "./maintenancePresentation";
+import { destinationTooltip, presentDestination } from "./destinationPresentation";
 import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
 import { SystemLogViewer } from "./SystemLogViewer";
-import { FreshnessDrawerHealthTone, FreshnessRunTimeCell, IssueCell, MaintenanceHealthChip, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, freshnessRunTimeLines, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
+import { monitoringRowSessionScope, type MonitoringRegistryOrigin, type MonitoringRegistryRunReference } from "./monitoringQueries";
+import { formatRawRecordJson, rawRecordJsonForCopy } from "../../shared/api/monitoringAdapters";
+import { FreshnessDrawerHealthTone, copyToClipboard, detailValue, firstValue, formatFreshnessAge, freshnessDrawerHealth, hasValue, highlightJson, humanize, isErrorField, jobStatusTone } from "./details/detailPrimitives";
+import { buildJobStory, jobIdentitySeed } from "./details/jobStoryModel";
 import "./monitoring.css";
 import { lazy } from "react";
-const JobDetailSections = lazy(() => import("./details/JobDetails").then((module) => ({ default: module.JobDetailSections })));
+export { jobChildDataflowColumns, childDataflowRowLines, childDataflowStageOperationLines } from "./details/JobExecution";
+import { JobDetailSections, preloadJobDetailSections } from "./monitoringJobDetailModule";
 const DataflowDetailSections = lazy(() => import("./details/DataflowDetails").then((module) => ({ default: module.DataflowDetailSections })));
 const FreshnessDetailSections = lazy(() => import("./details/FreshnessDetails").then((module) => ({ default: module.FreshnessDetailSections })));
+const DataflowRegistryDetailSections = lazy(() => import("./details/DataflowRegistryDetails").then((module) => ({ default: module.DataflowRegistryDetailSections })));
 const VolumeDetailSections = lazy(() => import("./details/VolumeDetails").then((module) => ({ default: module.VolumeDetailSections })));
 const MaintenanceDetailSections = lazy(() => import("./details/MaintenanceDetails").then((module) => ({ default: module.MaintenanceDetailSections })));
 const DiagnosticsDetailSections = lazy(() => import("./details/DiagnosticsDetails").then((module) => ({ default: module.DiagnosticsDetailSections })));
 
-export type MonitoringDetailKind = "job" | "dataflow" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";
+export type MonitoringDetailKind = "job" | "dataflow" | "dataflow-registry" | "failure" | "performance" | "maintenance" | "freshness" | "volume" | "diagnostics";
 
 export interface MonitoringDetailDrawerProps {
+  background?: boolean;
+  jobDetailAvailability?: "loading" | "error" | "not-found" | "ready";
+  destinationDetailAvailability?: "loading" | "error" | "not-found" | "ready";
+  destinationScopeLabel?: string;
+  onRetryDestinationDetail?: () => void;
+  onRetryJobDetail?: () => void;
+  relatedDataflowsError?: string | null;
+  onRetryRelatedDataflows?: () => void;
+  dataflowDetailAvailability?: "loading" | "error" | "not-found" | "ready";
+  onRetryDataflowDetail?: () => void;
   kind: MonitoringDetailKind;
   row: Record<string, unknown>;
   environmentId?: number | null;
@@ -44,12 +56,43 @@ export interface MonitoringDetailDrawerProps {
   onRelatedDataflowsPageChange?: (offset: number) => void;
   onRelatedDataflowsPageSizeChange?: (limit: number) => void;
   onRelatedDataflowsSort?: (sort: TableSort) => void;
-  reconciliationChecks?: Array<Record<string, string | number>>;
   timezoneName?: string | null;
-  onOpenDataflow?: (row: MonitoringRecord) => void;
+  jobLabel?: string | null;
+  dataflowLabel?: string | null;
+  onOpenDataflow?: (row: MonitoringRecord, reference?: MonitoringRegistryRunReference) => void;
   onOpenJob?: (row: Record<string, unknown>) => void;
+  onOpenSources?: () => void;
   onBack?: () => void;
   onClose: () => void;
+  onOpenRegistrySection?: (section: "read-watermark" | "configuration" | "technical") => void;
+  registrySectionStates?: Partial<Record<"read-watermark" | "configuration" | "technical", { loading: boolean; ready?: boolean; empty?: boolean; error: string | null; retry: () => void }>>;
+  registrySectionRows?: Partial<Record<"read-watermark" | "configuration" | "technical", Record<string, unknown>>>;
+  registryAnalyticsGeneration?: string | null;
+  registryOrigin?: MonitoringRegistryOrigin | null;
+  onOpenRegistryRun?: (row: MonitoringRecord, reference?: MonitoringRegistryRunReference) => void;
+  registryRuntimeRows?: Record<string, unknown>[];
+  registryRuntimeTotal?: number;
+  registryRuntimeOffset?: number;
+  registryRuntimeLimit?: number;
+  registryRuntimeLoading?: boolean;
+  registryRuntimeError?: string | null;
+  onRetryRegistryRuntime?: () => void;
+  registryRuntimeSort?: TableSort;
+  onRegistryRuntimePageChange?: (offset: number) => void;
+  onRegistryRuntimePageSizeChange?: (limit: number) => void;
+  onRegistryRuntimeSort?: (sort: TableSort) => void;
+  registryOverviewState?: { loading: boolean; ready: boolean; preview?: boolean; error: string | null; retry: () => void };
+  registryExecutionRows?: MonitoringRecord[];
+  registryExecutionTotal?: number;
+  registryExecutionOffset?: number;
+  registryExecutionLimit?: number;
+  onRegistryExecutionPageChange?: (offset: number) => void;
+  onRegistryExecutionPageSizeChange?: (limit: number) => void;
+  registryExecutionLoading?: boolean;
+  registryExecutionError?: string | null;
+  onRetryRegistryExecution?: () => void;
+  registryExecutionSort?: TableSort;
+  onRegistryExecutionSort?: (sort: TableSort) => void;
 }
 
 const PRIMARY_FIELDS = [
@@ -82,9 +125,6 @@ const SOURCE_FIELDS = [
   "source_rows_read",
   "source_duration_seconds",
   "source_status",
-  "source_watermark_before",
-  "source_watermark_after",
-  "source_watermark_effective",
 ];
 
 const TRANSFORM_FIELDS = [
@@ -135,9 +175,19 @@ const ERROR_FIELDS = [
 const DEFAULT_RELATED_DATAFLOW_SORT: TableSort = { sortBy: "start_time", sortDir: "desc" };
 
 export function MonitoringDetailDrawer({
+  background = false,
   kind,
+  dataflowDetailAvailability = "ready",
+  onRetryDataflowDetail,
   row,
   environmentId,
+  jobDetailAvailability = "ready",
+  destinationDetailAvailability = "ready",
+  destinationScopeLabel,
+  onRetryDestinationDetail,
+  onRetryJobDetail,
+  relatedDataflowsError,
+  onRetryRelatedDataflows,
   relatedDataflows = [],
   relatedDataflowsTotal = relatedDataflows.length,
   relatedDataflowsOffset = 0,
@@ -147,44 +197,80 @@ export function MonitoringDetailDrawer({
   onRelatedDataflowsPageChange,
   onRelatedDataflowsPageSizeChange,
   onRelatedDataflowsSort,
-  reconciliationChecks = [],
   timezoneName,
+  jobLabel,
+  dataflowLabel,
   onOpenDataflow,
   onOpenJob,
+  onOpenSources,
   onBack,
   onClose,
+  onOpenRegistrySection,
+  registrySectionStates,
+  registrySectionRows,
+  registryAnalyticsGeneration,
+  registryOrigin,
+  onOpenRegistryRun,
+  registryRuntimeRows,
+  registryRuntimeTotal,
+  registryRuntimeOffset,
+  registryRuntimeLimit,
+  registryRuntimeLoading,
+  registryRuntimeError,
+  onRetryRegistryRuntime,
+  registryRuntimeSort,
+  onRegistryRuntimePageChange,
+  onRegistryRuntimePageSizeChange,
+  onRegistryRuntimeSort,
+  registryOverviewState,
+  registryExecutionRows,
+  registryExecutionTotal,
+  registryExecutionOffset,
+  registryExecutionLimit,
+  onRegistryExecutionPageChange,
+  onRegistryExecutionPageSizeChange,
+  registryExecutionLoading,
+  registryExecutionError,
+  onRetryRegistryExecution,
+  registryExecutionSort,
+  onRegistryExecutionSort,
 }: MonitoringDetailDrawerProps) {
+  const headerStatus = useMemo(() => kind === "job" ? buildJobStory(row, jobDetailAvailability).reported.status : row.status, [kind, row, jobDetailAvailability]);
   const title = detailTitle(row, kind);
   const [headerCopied, setHeaderCopied] = useState(false);
   const [systemLogsOpen, setSystemLogsOpen] = useState(false);
 
   useDrawerEscape(onClose, !systemLogsOpen);
 
-  const sortableRelatedDataflows = useMemo(
-    () => kind === "volume"
-      ? relatedDataflows.map((item) => ({ ...item, volume_est_rows_written: volumeRunEstRowsWritten(item) }))
-      : relatedDataflows,
-    [kind, relatedDataflows]
-  );
+  const sortableRelatedDataflows = relatedDataflows;
   const handleChildDataflowSort = (nextSort: TableSort) => {
     onRelatedDataflowsSort?.(nextSort);
   };
   const copyTitle = headerCopyValue(row, kind, title);
-  const copyLabel = kind === "job" ? "job id" : kind === "dataflow" ? "dataflow run id" : `${kindLabel(kind)} title`;
+  const copyLabel = kind === "job" ? "job id" : kind === "dataflow" ? "dataflow run id" : kind === "dataflow-registry" ? "dataflow id" : kind === "maintenance" ? "destination location" : `${kindLabel(kind)} title`;
   const jobId = typeof row.job_id === "string" ? row.job_id : "";
+  const sourceIdValue = row._source_id ?? row.source_id;
+  const sourceId = sourceIdValue === undefined || sourceIdValue === null
+    ? undefined
+    : numberValue(sourceIdValue);
+  const logSessionId = typeof row.log_session_id === "string" ? row.log_session_id : "";
+  const logSessionScope = monitoringRowSessionScope(row);
   const dataflowId = kind === "dataflow" && typeof row.dataflow_id === "string" ? row.dataflow_id : "";
-  const drawerStatusClass = kind === "job" || kind === "dataflow" ? jobStatusTone(row.status) : "";
-  const jobStatusPresentation = kind === "job" ? lifecycleStatusPresentation(row.status) : null;
+  const dataflowRunId = kind === "dataflow" && typeof row.dataflow_run_id === "string" ? row.dataflow_run_id : "";
+  const eventName = typeof row.event_name === "string" ? row.event_name : "";
+  const resolvedJobLabel = jobLabel ?? (typeof row.job_name === "string" ? row.job_name : undefined);
+  const resolvedDataflowLabel = dataflowLabel ?? (typeof row.dataflow_name === "string" ? row.dataflow_name : undefined);
+  const drawerStatusClass = kind === "job" || kind === "dataflow" ? jobStatusTone(headerStatus) : "";
+  const jobStatusPresentation = kind === "job" ? lifecycleStatusPresentation(headerStatus) : null;
   const jobStatusStyle = jobStatusPresentation ? {
     "--monitoring-job-status-surface": jobStatusPresentation.drawerSurface,
     "--monitoring-job-status-border": jobStatusPresentation.drawerBorder,
   } as CSSProperties : undefined;
   const freshnessHealthClass = kind === "freshness" ? ` is-freshness-${freshnessDrawerHealth(row).tone}` : "";
-  const maintenanceHealthClass = kind === "maintenance" ? ` is-maintenance-health-${maintenanceTableHealthTone(row.table_health)}` : "";
   const diagnosticsHealthClass = kind === "diagnostics" ? ` is-diagnostics-${diagnosticsSeverityPresentation(row.severity).tone}` : "";
   return createPortal(
-    <div className="metadata-drawer-backdrop monitoring-detail-backdrop" onMouseDown={onClose}>
-      <aside className={`metadata-drawer monitoring-detail-drawer is-${kind}${drawerStatusClass ? ` ${drawerStatusClass}` : ""}${freshnessHealthClass}${maintenanceHealthClass}${diagnosticsHealthClass}`} style={jobStatusStyle} aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
+    <div className={`metadata-drawer-backdrop monitoring-detail-backdrop${background ? " is-background" : ""}`} onMouseDown={background ? undefined : onClose}>
+      <aside className={`metadata-drawer monitoring-detail-drawer is-${kind}${drawerStatusClass ? ` ${drawerStatusClass}` : ""}${freshnessHealthClass}${diagnosticsHealthClass}`} style={jobStatusStyle} aria-label="Monitoring details" onMouseDown={(event) => event.stopPropagation()}>
         <header className="metadata-drawer-header">
           {onBack ? (
             <button className="icon-action monitoring-detail-back" type="button" aria-label="Back to previous monitoring detail" onClick={onBack}>
@@ -199,7 +285,7 @@ export function MonitoringDetailDrawer({
                   <span className="monitoring-detail-kind-label">Freshness</span>
                   <h2>{title}</h2>
                   {copyTitle ? (
-                    <button
+                    <Help as="button"
                       className="icon-action monitoring-detail-copy"
                       type="button"
                       aria-label={`Copy ${copyLabel}`}
@@ -210,7 +296,7 @@ export function MonitoringDetailDrawer({
                       }}
                     >
                       {headerCopied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
+                    </Help>
                   ) : null}
                 </div>
                 <FreshnessHeaderChips row={row} />
@@ -226,7 +312,7 @@ export function MonitoringDetailDrawer({
                 <div className="monitoring-detail-title-row">
                   <h2>{title}</h2>
                   {copyTitle ? (
-                    <button
+                    <Help as="button"
                       className="icon-action monitoring-detail-copy"
                       type="button"
                       aria-label={`Copy ${copyLabel}`}
@@ -237,7 +323,7 @@ export function MonitoringDetailDrawer({
                       }}
                     >
                       {headerCopied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
+                    </Help>
                   ) : null}
                 </div>
               </>
@@ -245,7 +331,7 @@ export function MonitoringDetailDrawer({
               <>
                 <div className="monitoring-detail-kind-row">
                   {kind === "job" ? <BriefcaseBusiness className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
-                  {kind === "dataflow" ? <Workflow className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
+                  {kind === "dataflow" || kind === "dataflow-registry" ? <Workflow className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
                   {kind === "volume" ? <Boxes className="monitoring-detail-kind-icon" size={14} aria-hidden="true" /> : null}
                   {kind === "maintenance" ? (
                     <LineageFormatIcon
@@ -254,14 +340,14 @@ export function MonitoringDetailDrawer({
                       size={16}
                     />
                   ) : null}
-                  <span className="monitoring-detail-kind-label">{kind === "job" ? "Job run" : kind === "dataflow" ? "Dataflow run" : kind === "volume" ? "Volume" : kind === "maintenance" ? "Destination table" : kindLabel(kind)}</span>
-                  {kind === "job" || kind === "dataflow" ? <StatusCell row={row} /> : null}
-                  {kind === "maintenance" ? <MaintenanceHealthChip health={row.table_health} reason={row.attention_reason} /> : null}
+                  <span className="monitoring-detail-kind-label">{kind === "job" ? "Job run" : kind === "dataflow" ? "Dataflow run" : kind === "dataflow-registry" ? "Dataflow" : kind === "volume" ? "Volume" : kind === "maintenance" ? "Destination" : kindLabel(kind)}</span>
+                  {kind === "job" || kind === "dataflow" ? <StatusCell row={{ status: headerStatus }} /> : null}
+                  {kind === "maintenance" ? <DestinationIdentityChip row={row} /> : null}
                 </div>
                 <div className="monitoring-detail-title-row">
                   <h2>{title}</h2>
-                  {copyTitle ? (
-                    <button
+                  {copyTitle && kind !== "dataflow-registry" ? (
+                    <Help as="button"
                       className="icon-action monitoring-detail-copy"
                       type="button"
                       aria-label={`Copy ${copyLabel}`}
@@ -272,10 +358,10 @@ export function MonitoringDetailDrawer({
                       }}
                     >
                       {headerCopied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
+                    </Help>
                   ) : null}
                   {environmentId && jobId && kind !== "volume" && kind !== "maintenance" ? (
-                    <button
+                    <Help as="button"
                       className="icon-action monitoring-detail-copy"
                       type="button"
                       aria-label="View system logs"
@@ -286,10 +372,10 @@ export function MonitoringDetailDrawer({
                       }}
                     >
                       <FileText size={14} />
-                    </button>
+                    </Help>
                   ) : null}
                 </div>
-                {kind === "maintenance" ? <MaintenanceHeaderContext row={row} title={title} /> : null}
+                {kind === "maintenance" ? <><MaintenanceHeaderContext row={row} /><small className="destination-drawer-scope">{destinationScopeLabel || "Current filters"}</small></> : null}
               </>
             )}
           </div>
@@ -298,12 +384,18 @@ export function MonitoringDetailDrawer({
           </button>
         </header>
         <div className="metadata-drawer-body monitoring-detail-body">
+          {kind === "dataflow" && row.job_id ? <LinkedJobSection row={row} onOpenJob={onOpenJob} /> : null}
           {kind === "job" ? (
-            <>
-              <JobDetailSections row={row} timezoneName={timezoneName} />
-            </>
+            <Suspense fallback={<section className="monitoring-detail-section" role="status">Loading job details…</section>}>
+              <JobDetailSections key={`${String(row._source_id ?? row.source_id ?? "all")}:${monitoringRowSessionScope(row)}:${String(row.log_session_id ?? "")}:${String(row.job_id)}`} row={row} availability={jobDetailAvailability} onRetry={onRetryJobDetail} timezoneName={timezoneName}
+                execution={{ rows: sortableRelatedDataflows, total: relatedDataflowsTotal, offset: relatedDataflowsOffset, limit: relatedDataflowsLimit, sort: relatedDataflowsSort, loading: relatedDataflowsLoading, error: relatedDataflowsError, onRetry: onRetryRelatedDataflows, onPageChange: onRelatedDataflowsPageChange, onPageSizeChange: onRelatedDataflowsPageSizeChange, onSort: handleChildDataflowSort, onOpenDataflow }} />
+            </Suspense>
           ) : kind === "dataflow" ? (
-            <DataflowDetailSections row={row} timezoneName={timezoneName} />
+            <DataflowDetailSections key={`${row._source_id}:${row.log_session_id}:${row.dataflow_run_id}`} row={row} timezoneName={timezoneName} availability={dataflowDetailAvailability} onRetry={onRetryDataflowDetail} />
+          ) : kind === "dataflow-registry" ? (
+            <Suspense fallback={<section className="monitoring-detail-section" role="status">Loading dataflow registry details…</section>}>
+              <DataflowRegistryDetailSections key={`${environmentId ?? "environment"}:${String(row.dataflow_id ?? "")}`} row={row} timezoneName={timezoneName} overviewState={registryOverviewState} onSectionOpen={onOpenRegistrySection} sectionStates={registrySectionStates} sectionRows={registrySectionRows} analyticsGeneration={registryAnalyticsGeneration} registryOrigin={registryOrigin} runtimeRows={registryRuntimeRows} runtimeTotal={registryRuntimeTotal} runtimeOffset={registryRuntimeOffset} runtimeLimit={registryRuntimeLimit} runtimeLoading={registryRuntimeLoading} runtimeError={registryRuntimeError} onRetryRuntime={onRetryRegistryRuntime} runtimeSort={registryRuntimeSort} onRuntimePageChange={onRegistryRuntimePageChange} onRuntimePageSizeChange={onRegistryRuntimePageSizeChange} onRuntimeSort={onRegistryRuntimeSort} onOpenRun={onOpenRegistryRun} executionRows={registryExecutionRows} executionTotal={registryExecutionTotal} executionOffset={registryExecutionOffset} executionLimit={registryExecutionLimit} onExecutionPageChange={onRegistryExecutionPageChange} onExecutionPageSizeChange={onRegistryExecutionPageSizeChange} executionLoading={registryExecutionLoading} executionError={registryExecutionError} onRetryExecution={onRetryRegistryExecution} executionSort={registryExecutionSort} onExecutionSort={onRegistryExecutionSort} onOpenDataflow={onOpenDataflow} />
+            </Suspense>
           ) : kind === "freshness" ? (
             <FreshnessDetailSections
               row={row}
@@ -317,6 +409,9 @@ export function MonitoringDetailDrawer({
               onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
               onOpenDataflow={onOpenDataflow}
               timezoneName={timezoneName}
+              loading={relatedDataflowsLoading}
+              error={relatedDataflowsError}
+              onRetry={onRetryRelatedDataflows}
             />
           ) : kind === "volume" ? (
             <VolumeDetailSections
@@ -335,6 +430,10 @@ export function MonitoringDetailDrawer({
           ) : kind === "maintenance" ? (
             <MaintenanceDetailSections
               row={row}
+              detailAvailability={destinationDetailAvailability}
+              onRetryDetail={onRetryDestinationDetail}
+              historyError={relatedDataflowsError}
+              onRetryHistory={onRetryRelatedDataflows}
               relatedDataflows={sortableRelatedDataflows}
               total={relatedDataflowsTotal}
               loading={relatedDataflowsLoading}
@@ -348,14 +447,11 @@ export function MonitoringDetailDrawer({
               timezoneName={timezoneName}
             />
           ) : kind === "diagnostics" ? (
-            <DiagnosticsDetailSections row={row} timezoneName={timezoneName} onOpenJob={onOpenJob} />
+            <DiagnosticsDetailSections row={row} timezoneName={timezoneName} onOpenJob={onOpenJob} onOpenDataflow={onOpenDataflow} onOpenSources={onOpenSources} />
           ) : (
             <DetailSection title="Detail" row={row} fields={PRIMARY_FIELDS} timezoneName={timezoneName} />
           )}
-          {kind === "dataflow" && row.job_id ? (
-            <LinkedJobSection row={row} onOpenJob={onOpenJob} />
-          ) : null}
-          {kind !== "job" && kind !== "dataflow" && kind !== "freshness" && kind !== "volume" && kind !== "maintenance" && kind !== "diagnostics" ? (
+          {kind !== "job" && kind !== "dataflow" && kind !== "dataflow-registry" && kind !== "freshness" && kind !== "volume" && kind !== "maintenance" && kind !== "diagnostics" ? (
             <>
               <DetailSection title="Source runtime" row={row} fields={SOURCE_FIELDS} timezoneName={timezoneName} />
               <DetailSection title="Transform runtime" row={row} fields={TRANSFORM_FIELDS} timezoneName={timezoneName} />
@@ -364,62 +460,21 @@ export function MonitoringDetailDrawer({
               <DetailSection title="Errors and notes" row={row} fields={ERROR_FIELDS} wide timezoneName={timezoneName} />
             </>
           ) : null}
-          {kind === "job" && (relatedDataflows.length || relatedDataflowsLoading) ? (
-            <section className="monitoring-detail-section">
-              <div className="monitoring-detail-section-header monitoring-freshness-runs-header monitoring-child-dataflows-section-header">
-                <div className="monitoring-child-dataflows-header">
-                  <h3>Child dataflows</h3>
-                </div>
-                <TablePager
-                  limit={relatedDataflowsLimit}
-                  offset={relatedDataflowsOffset}
-                  loadedRows={relatedDataflows.length}
-                  totalRows={relatedDataflowsTotal}
-                  loading={relatedDataflowsLoading}
-                  onPageChange={(offset) => onRelatedDataflowsPageChange?.(offset)}
-                  onPageSizeChange={(limit) => onRelatedDataflowsPageSizeChange?.(limit)}
-                />
-              </div>
-              <DataTable
-                rows={sortableRelatedDataflows}
-                compactNumbers
-                columns={jobChildDataflowColumns(timezoneName)}
-                maxRows={relatedDataflowsLimit}
-                offset={0}
-                onRowClick={onOpenDataflow}
-                sort={relatedDataflowsSort}
-                onSort={handleChildDataflowSort}
-                fixedLayout
-                className="monitoring-child-dataflows-table"
-                timezoneName={timezoneName}
-              />
-            </section>
-          ) : null}
-          {kind === "job" && reconciliationChecks.length ? (
-            <section className="monitoring-detail-section">
-              <h3>Reconciliation checks</h3>
-              <DataTable
-                rows={reconciliationChecks}
-                compactNumbers
-                columns={[
-                  { key: "severity", label: "Severity" },
-                  { key: "metric", label: "Metric" },
-                  { key: "expected", label: "Expected" },
-                  { key: "observed", label: "Observed" },
-                  { key: "difference", label: "Difference" },
-                ]}
-                maxRows={20}
-              />
-            </section>
-          ) : null}
-          <RawPayloadSection row={row} label={kind === "diagnostics" ? "Full evidence" : "Raw payload"} />
+          {kind !== "dataflow" && kind !== "dataflow-registry" && kind !== "job" && kind !== "freshness" && kind !== "maintenance" ? <RawPayloadSection row={row} label={kind === "diagnostics" ? "Full evidence" : "Raw payload"} /> : null}
         </div>
       </aside>
       {systemLogsOpen && environmentId && jobId ? (
         <SystemLogViewer
           environmentId={environmentId}
           jobId={jobId}
+          jobLabel={resolvedJobLabel}
+          sourceId={sourceId}
+          logSessionScope={logSessionScope}
+          logSessionId={logSessionScope === "exact" ? logSessionId : undefined}
           dataflowId={dataflowId || undefined}
+          dataflowLabel={resolvedDataflowLabel}
+          dataflowRunId={dataflowRunId || undefined}
+          eventName={eventName || undefined}
           timezoneName={timezoneName}
           onClose={() => setSystemLogsOpen(false)}
         />
@@ -429,108 +484,45 @@ export function MonitoringDetailDrawer({
   );
 }
 
-export function jobChildDataflowColumns(timezoneName?: string | null): TableColumn<MonitoringRecord>[] {
-  return [
-    { key: "dataflow_name", label: "Dataflow", sortable: true, width: 160 },
-    {
-      key: "stage_operation",
-      label: "Stage / operation",
-      sortable: true,
-      sortKey: "stage",
-      autoFit: true,
-      minWidth: 112,
-      maxWidth: 180,
-      render: (child) => <ChildDataflowStageOperationCell row={child} />,
-      measureValue: childDataflowStageOperationLines,
-    },
-    {
-      key: "start_time",
-      label: "Time",
-      sortable: true,
-      autoFit: true,
-      minWidth: 144,
-      maxWidth: 216,
-      render: (child) => <FreshnessRunTimeCell row={child} timezoneName={timezoneName} />,
-      measureValue: (child, activeTimezone) => freshnessRunTimeLines(child, activeTimezone),
-    },
-    { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 76, maxWidth: 104, render: (child) => <StatusCell row={child} /> },
-    { key: "duration_seconds", label: "Duration", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (child) => formatSeconds(num(child, "duration_seconds")) },
-    {
-      key: "row_counts",
-      label: "Rows",
-      sortable: true,
-      sortKey: "source_rows_read",
-      autoFit: true,
-      minWidth: 118,
-      maxWidth: 180,
-      render: (child) => <ChildDataflowRowsCell row={child} />,
-      measureValue: childDataflowCompactRowLines,
-    },
-    { key: "error_preview", label: "Issue", sortable: true, width: 240, className: "monitoring-child-issue-column", render: (child) => <IssueCell row={child} /> },
-  ];
-}
-
-export function childDataflowStageOperationLines(row: MonitoringRecord) {
-  return [String(row.stage || "-"), String(row.operation_type || "-")];
-}
-
-export function childDataflowRowLines(row: MonitoringRecord) {
-  return [
-    `${formatNumber(num(row, "source_rows_read"))} read`,
-    `${formatNumber(num(row, "destination_rows_written"))} written`,
-  ];
-}
-
-function childDataflowCompactRowLines(row: MonitoringRecord) {
-  return [
-    `${formatCompactNumber(num(row, "source_rows_read"))} read`,
-    `${formatCompactNumber(num(row, "destination_rows_written"))} written`,
-  ];
-}
-
-function ChildDataflowStageOperationCell({ row }: { row: MonitoringRecord }) {
-  const [stage, operation] = childDataflowStageOperationLines(row);
-  return (
-    <span className="freshness-run-stack-cell" title={`Stage: ${stage}\nOperation: ${operation}`}>
-      <strong>{stage}</strong>
-      <small>{operation}</small>
-    </span>
-  );
-}
-
-function ChildDataflowRowsCell({ row }: { row: MonitoringRecord }) {
-  const rowsRead = num(row, "source_rows_read");
-  const rowsWritten = num(row, "destination_rows_written");
-  return (
-    <span className="freshness-run-stack-cell" title={`Rows read: ${formatNumber(rowsRead)}\nRows written: ${formatNumber(rowsWritten)}`}>
-      <strong><CompactNumberValue value={rowsRead} /> read</strong>
-      <small><CompactNumberValue value={rowsWritten} /> written</small>
-    </span>
-  );
-}
-
 const WATERMARK_FIELDS = [
   "movement_state",
-  "source_watermark_before",
-  "source_watermark_after",
-  "source_watermark_effective",
   "source_watermark_columns",
 ];
 
-function MaintenanceHeaderContext({ row, title }: { row: Record<string, unknown>; title: string }) {
-  const canonicalTarget = String(row.target ?? title);
-  const connection = String(firstValue(row, ["destination_name", "destination_connection_name"]) ?? "unknown connection");
-  const connectionType = String(row.destination_connection_type ?? "unknown");
-  const format = String(row.destination_format ?? row.format ?? "table");
-  const stageClass = monitoringConnectionStageClass(connection);
-  const normalize = (value: string) => value.replace(/`/g, "").trim().toLowerCase();
-  const showCanonicalTarget = Boolean(canonicalTarget && normalize(canonicalTarget) !== normalize(title));
+function MaintenanceHeaderContext({ row }: { row: Record<string, unknown> }) {
+  const identity = presentDestination(row);
+  const stageClass = monitoringConnectionStageClass(identity.connection);
   return (
     <div className={["monitoring-maintenance-header-context", stageClass].filter(Boolean).join(" ")}>
-      <span>{connection} · {connectionType} · {format}</span>
-      {showCanonicalTarget ? <code title={canonicalTarget}>{canonicalTarget}</code> : null}
+      <Help title={destinationTooltip(identity)}>{identity.subtitle}</Help>
     </div>
   );
+}
+
+function DestinationIdentityChip({ row }: { row: Record<string, unknown> }) {
+  const identity = String(row.identity_status ?? "unknown").trim().toLowerCase();
+  const provenance = identityProvenanceLabel(row);
+  const label = identity === "resolved"
+    ? provenance === "published metadata fallback" ? "Resolved · metadata fallback" : "Resolved"
+    : identity === "unresolved"
+      ? "Identity unresolved"
+      : identity === "conflict"
+        ? "Identity conflict"
+        : "Identity unknown";
+  const reason = String(row.identity_reason ?? row.attention_reason ?? "").trim();
+  const title = [reason, provenance ? `Source: ${provenance}` : ""].filter(Boolean).join(" · ") || label;
+  const tone = identity === "conflict" ? "is-conflict" : identity === "unresolved" ? "is-unresolved" : identity === "resolved" ? "is-succeeded" : "is-unknown";
+  return <Help className={`monitoring-destination-identity-chip ${tone}`} title={title}>{label}</Help>;
+}
+
+function identityProvenanceLabel(row: Record<string, unknown>) {
+  const provenance = row.identity_provenance;
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) return "";
+  const values = Object.values(provenance as Record<string, unknown>);
+  if (values.includes("metadata")) return "published metadata fallback";
+  if (values.includes("captured")) return "captured endpoint";
+  if (values.includes("derived")) return "derived identity";
+  return "";
 }
 
 function DiagnosticsSeverityLabel({ value }: { value: string }) {
@@ -540,8 +532,9 @@ function DiagnosticsSeverityLabel({ value }: { value: string }) {
 
 function FreshnessHeaderChips({ row }: { row: Record<string, unknown> }) {
   const health = freshnessDrawerHealth(row);
-  const latestStatus = String(firstValue(row, ["latest_run_status", "latest_freshness_status"]) ?? "unknown").toLowerCase();
-  const watermarkState = String(firstValue(row, ["movement_state", "coverage_state"]) ?? "not_configured").toLowerCase();
+  const latestStatus = String(row.latest_run_status ?? "unknown").toLowerCase();
+  const saveStatus = String(firstValue(row, ["save_status", "persistence_state"]) ?? "").toLowerCase();
+  const watermarkState = saveStatus === "save_error" ? saveStatus : String(firstValue(row, ["movement_state", "save_status", "load_status", "coverage_state"]) ?? "not_configured").toLowerCase();
   return (
     <div className="monitoring-freshness-header-chips" aria-label="Freshness status summary">
       <span className={`monitoring-freshness-header-chip is-${health.tone}`}>{health.label}</span>
@@ -560,19 +553,10 @@ function statusHeaderTone(status: string): FreshnessDrawerHealthTone {
 }
 
 function watermarkHeaderTone(status: string): FreshnessDrawerHealthTone {
-  if (["advanced", "initialized"].includes(status)) return "success";
-  if (["unchanged", "incomplete"].includes(status)) return "warning";
-  if (status === "invalid") return "failed";
+  if (["advanced", "initialized", "saved"].includes(status)) return "success";
+  if (["changed", "unchanged", "unknown"].includes(status)) return "warning";
+  if (status === "save_error") return "failed";
   return "neutral";
-}
-
-function volumeRunEstRowsWritten(row: MonitoringRecord) {
-  const observed = num(row, "destination_rows_written");
-  const destinationIdentity = [row.destination_connection_type, row.destination_format, row.destination_name, row.destination_path]
-    .map((value) => String(value ?? "").toLowerCase())
-    .join(" ");
-  const isLakehouse = ["lakehouse", "delta", "iceberg", "onelake", "deltalake"].some((token) => destinationIdentity.includes(token));
-  return !isLakehouse && String(row.status ?? "").toLowerCase() === "succeeded" ? num(row, "source_rows_read") || observed : observed;
 }
 
 function LinkedJobSection({
@@ -582,35 +566,31 @@ function LinkedJobSection({
   row: Record<string, unknown>;
   onOpenJob?: (row: Record<string, unknown>) => void;
 }) {
+  const [copied, setCopied] = useState(false);
   const jobId = String(row.job_id ?? "");
   if (!jobId) return null;
-  const jobRow = {
-    ...row,
-    job_id: jobId,
-    status: row.linked_job_status ?? row.job_status,
-    duration_seconds: row.linked_job_duration_seconds ?? row.job_duration_seconds,
-    engine_name: row.engine_name,
-    metadata_provider_name: row.metadata_provider_name,
-    platform_name: row.platform_name,
-  };
+  const jobRow = jobIdentitySeed(row);
   return (
-    <section className="monitoring-detail-section monitoring-linked-job-section">
-      <h3>Linked job</h3>
-      <button
-        className="monitoring-linked-job-row"
-        type="button"
-        onClick={() => onOpenJob?.(jobRow)}
-        disabled={!onOpenJob}
-      >
-        <BriefcaseBusiness size={15} aria-hidden="true" />
-        <span className="monitoring-linked-job-identity">
-          <strong>{jobId}</strong>
-          <small>Parent job run</small>
-        </span>
-        <StatusCell row={jobRow} />
-        <span className="monitoring-linked-job-duration">{formatSeconds(num(jobRow, "duration_seconds"))}</span>
-        <ChevronRight size={16} aria-hidden="true" />
-      </button>
+    <section className="monitoring-detail-section monitoring-linked-job-section dataflow-run-job">
+      <span>Job</span>
+      <div className="dataflow-run-job-identity">
+        <button
+          className="monitoring-linked-job-row"
+          type="button"
+          onClick={() => onOpenJob?.(jobRow)}
+          onMouseEnter={onOpenJob ? preloadJobDetailSections : undefined}
+          onFocus={onOpenJob ? preloadJobDetailSections : undefined}
+          onPointerDown={onOpenJob ? preloadJobDetailSections : undefined}
+          disabled={!onOpenJob}
+        >
+          <BriefcaseBusiness size={15} aria-hidden="true" />
+          <span className="monitoring-linked-job-identity">
+            <strong>{jobId}</strong>
+          </span>
+        </button>
+        <Help as="button" type="button" className="icon-action small" aria-label="Copy job id" title={`Copy ${jobId}`} onClick={() => { void copyToClipboard(jobId, setCopied); }}>{copied ? <Check size={14} /> : <Copy size={14} />}</Help>
+      </div>
+      {onOpenJob ? <Help as="button" type="button" className="icon-action small dataflow-run-job-open" aria-label="Open job details" title="Open job details" onMouseEnter={preloadJobDetailSections} onFocus={preloadJobDetailSections} onPointerDown={preloadJobDetailSections} onClick={() => onOpenJob(jobRow)}><ChevronRight size={16} aria-hidden="true" /></Help> : null}
     </section>
   );
 }
@@ -646,6 +626,8 @@ function DetailSection({
 }
 
 function detailTitle(row: Record<string, unknown>, kind: MonitoringDetailKind) {
+  if (kind === "job") return String(row.job_id ?? "Job");
+  if (kind === "maintenance") return presentDestination(row).name;
   return String(
     row.dataflow_name ??
       row.job_id ??
@@ -660,8 +642,9 @@ function detailTitle(row: Record<string, unknown>, kind: MonitoringDetailKind) {
 }
 
 function headerCopyValue(row: Record<string, unknown>, kind: MonitoringDetailKind, title: string) {
+  if (kind === "maintenance") return presentDestination(row).locator;
   if (kind === "job") return String(row.job_id ?? title ?? "");
-  if (kind === "dataflow") return String(row.dataflow_run_id ?? row.dataflow_id ?? title ?? "");
+  if (kind === "dataflow" || kind === "dataflow-registry") return String(kind === "dataflow-registry" ? row.dataflow_id ?? title ?? "" : row.dataflow_run_id ?? row.dataflow_id ?? title ?? "");
   return String(title ?? "");
 }
 
@@ -671,25 +654,27 @@ function kindLabel(kind: MonitoringDetailKind) {
 
 function RawPayloadSection({ row, label = "Raw payload" }: { row: Record<string, unknown>; label?: string }) {
   const [copied, setCopied] = useState(false);
-  const payload = JSON.stringify(row, null, 2);
+  const executionPayload = rawRecordJsonForCopy(row.raw_record_json ?? row.latest_raw_record_json);
+  const payload = executionPayload ?? JSON.stringify(row, null, 2) ?? String(row);
+  const displayPayload = executionPayload ? formatRawRecordJson(executionPayload) : payload;
   return (
     <details className="monitoring-raw-detail">
       <summary>{label}</summary>
       <div className="monitoring-json-box monitoring-raw-json-box">
-        <button
+        <Help as="button"
           className="icon-action small monitoring-json-copy"
           type="button"
-          aria-label={`Copy ${label.toLowerCase()} JSON`}
-          title="Copy JSON"
+          aria-label={executionPayload ? "Copy reconstructed execution JSON" : `Copy ${label.toLowerCase()} JSON`}
+          title={executionPayload ? "Copy reconstructed execution JSON" : "Copy JSON"}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            void copyToClipboard(payload, setCopied);
+            void copyToClipboard(executionPayload ?? payload, setCopied);
           }}
         >
           {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
-        <pre>{highlightJson(payload)}</pre>
+        </Help>
+        <pre>{highlightJson(displayPayload)}</pre>
       </div>
     </details>
   );

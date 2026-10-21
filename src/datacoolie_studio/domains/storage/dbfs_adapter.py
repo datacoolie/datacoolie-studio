@@ -265,11 +265,18 @@ class DbfsStorageAdapter:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
         digest = hashlib.sha256()
+        bytes_written = 0
         try:
             with source, temporary.open("wb") as output:
                 while chunk := source.read(1024 * 1024):
                     digest.update(chunk)
                     output.write(chunk)
+                    bytes_written += len(chunk)
+            if observed.size > 0 and observed.size != bytes_written:
+                raise StorageConflictError(
+                    uri,
+                    "Downloaded content length does not match the source revision",
+                )
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

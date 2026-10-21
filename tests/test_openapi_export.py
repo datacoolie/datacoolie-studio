@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from datacoolie_studio.openapi_export import export_openapi, normalized_openapi
@@ -27,3 +28,22 @@ def test_openapi_export_does_not_create_runtime_databases(tmp_path: Path, monkey
 
     assert not studio.exists()
     assert not result_cache.exists()
+
+
+def test_monitoring_query_endpoints_expose_named_response_contracts():
+    document = json.loads(normalized_openapi())
+    expected = {
+        "/api/v1/environments/{environment_id}/monitoring/dataflows": "MonitoringDataflowRecordsResponse",
+        "/api/v1/environments/{environment_id}/monitoring/filter-options": "MonitoringFilterOptionsResponse",
+        "/api/v1/environments/{environment_id}/monitoring/jobs": "MonitoringJobRecordsResponse",
+        "/api/v1/environments/{environment_id}/monitoring/latest-status": "MonitoringLatestStatusResponse",
+        "/api/v1/environments/{environment_id}/monitoring/system-logs": "MonitoringSystemLogsResponse",
+    }
+    for path, model_name in expected.items():
+        schema = document["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema == {"$ref": f"#/components/schemas/{model_name}"}
+
+    evidence_schema = document["paths"][
+        "/api/v1/environments/{environment_id}/monitoring/pages/{page}/evidence"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert evidence_schema == {"$ref": "#/components/schemas/MonitoringEvidenceResponse"}

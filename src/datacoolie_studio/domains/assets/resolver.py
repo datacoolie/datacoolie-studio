@@ -116,7 +116,7 @@ class AssetResolver:
         addressing_mode = reference_addressing_mode(evidence, context)
         qualification_level = reference_qualification_level(evidence)
 
-        identifier = _evidence_identifier(evidence, context)
+        identifier = _evidence_identifier(evidence)
         if identifier is not None:
             asset_id = self.registry.resolve_identifier(identifier["kind"], identifier["normalized_value"])
             if asset_id:
@@ -211,7 +211,7 @@ class AssetResolver:
         )
 
 
-def _evidence_identifier(evidence: InputEvidence, context: dict[str, Any]) -> dict[str, str] | None:
+def _evidence_identifier(evidence: InputEvidence) -> dict[str, str] | None:
     if evidence.kind == "path":
         normalized = normalize_physical_path(evidence.value)
         return {

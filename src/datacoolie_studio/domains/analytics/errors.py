@@ -31,5 +31,9 @@ class AnalyticsSchemaIncompatibleError(RuntimeError):
     code = "schema_incompatible"
 
 
+class AnalyticsInvalidJsonError(AnalyticsSchemaIncompatibleError):
+    code = "invalid_json"
+
+
 class AnalyticsFileChangedDuringPublishError(RuntimeError):
     code = "file_changed_during_sync"

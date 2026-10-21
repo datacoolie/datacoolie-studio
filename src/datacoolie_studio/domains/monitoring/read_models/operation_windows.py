@@ -28,6 +28,10 @@ def operation_windows(
         [*params, timezone_name, local_today, reference_now],
     ))
     result = {name: _empty_window() for name in ("today", "last_24_hours", "last_7_days")}
+    unknown_child_totals = {
+        name: {state: False for state in ("running", "pending")}
+        for name in result
+    }
     for value in values:
         window = result[str(value["window_name"])]
         kind = str(value["record_kind"])
@@ -39,7 +43,16 @@ def operation_windows(
         if kind == "job":
             for state in ("running", "pending", "skipped"):
                 key = f"job_{state}"
-                window[key] = int(window[key]) + int(value.get(f"child_{state}") or 0)
+                child_value = value.get(f"child_{state}")
+                window_name = str(value["window_name"])
+                if child_value is None and state in unknown_child_totals[window_name]:
+                    unknown_child_totals[window_name][state] = True
+                elif child_value is not None:
+                    window[key] = int(window[key]) + int(child_value)
+    for window_name, states in unknown_child_totals.items():
+        for state, is_unknown in states.items():
+            if is_unknown:
+                result[window_name][f"job_{state}"] = None
     for window in result.values():
         for kind in ("job", "dataflow"):
             executable = int(window[f"{kind}_succeeded"]) + int(window[f"{kind}_failed"])
@@ -82,18 +95,19 @@ _QUERY = """
   SELECT 'last_7_days', 'dataflow', normalized_status, 0, 0, 0
   FROM filtered_dataflows, window_bounds WHERE event_time >= current_time - INTERVAL 7 DAY
   UNION ALL
-  SELECT 'today', 'job', normalized_status, COALESCE(total_running, 0), COALESCE(total_pending, 0), COALESCE(total_skipped, 0)
+  SELECT 'today', 'job', normalized_status, total_running, total_pending, COALESCE(total_skipped, 0)
   FROM filtered_jobs, window_bounds
   WHERE CAST(timezone(timezone_name, event_time) AS DATE) = local_today
   UNION ALL
-  SELECT 'last_24_hours', 'job', normalized_status, COALESCE(total_running, 0), COALESCE(total_pending, 0), COALESCE(total_skipped, 0)
+  SELECT 'last_24_hours', 'job', normalized_status, total_running, total_pending, COALESCE(total_skipped, 0)
   FROM filtered_jobs, window_bounds WHERE event_time >= current_time - INTERVAL 24 HOUR
   UNION ALL
-  SELECT 'last_7_days', 'job', normalized_status, COALESCE(total_running, 0), COALESCE(total_pending, 0), COALESCE(total_skipped, 0)
+  SELECT 'last_7_days', 'job', normalized_status, total_running, total_pending, COALESCE(total_skipped, 0)
   FROM filtered_jobs, window_bounds WHERE event_time >= current_time - INTERVAL 7 DAY
 )
 SELECT window_name, record_kind, status, COUNT(*) AS records,
-       SUM(child_running) AS child_running, SUM(child_pending) AS child_pending,
+       CASE WHEN COUNT(*) = COUNT(child_running) THEN SUM(child_running) ELSE NULL END AS child_running,
+       CASE WHEN COUNT(*) = COUNT(child_pending) THEN SUM(child_pending) ELSE NULL END AS child_pending,
        SUM(child_skipped) AS child_skipped
 FROM windowed_runs
 GROUP BY window_name, record_kind, status

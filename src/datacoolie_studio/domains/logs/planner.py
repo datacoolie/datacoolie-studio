@@ -9,14 +9,15 @@ from datacoolie_studio.domains.logs.discovery import (
     DiscoveredPartition,
     LogSyncMode,
     LogSyncSpec,
+    PartitionFormatError,
     discover_partition_files,
-    discover_partitions,
 )
 from datacoolie_studio.domains.logs.partition import (
     ParsedPartition,
     PartitionGranularity,
     PartitionLayout,
     PartitionValue,
+    parse_partition_path,
     partition_datetime,
 )
 from datacoolie_studio.domains.storage.adapters import (
@@ -24,6 +25,10 @@ from datacoolie_studio.domains.storage.adapters import (
     StorageAdapter,
 )
 from datacoolie_studio.domains.storage.uri import join_uri
+from datacoolie_studio.domains.storage.inventory import (
+    StorageInventoryRequest,
+    inventory,
+)
 
 LayoutStatus = Literal["learned", "unpartitioned", "pending"]
 
@@ -44,8 +49,6 @@ class PlannerState:
     layout_status: LayoutStatus
     partition_format: str | None = None
     partition_granularity: PartitionGranularity | None = None
-    checkpoint_partition_value: PartitionValue | None = None
-    boundary_last_modified: datetime | None = None
     last_scanned_partition_value: PartitionValue | None = None
 
     @property
@@ -70,6 +73,11 @@ class StreamPlan:
     candidates: tuple[DiscoveredLogFile, ...]
     incremental_partition_values: tuple[PartitionValue, ...]
     lookback_partition_values: tuple[PartitionValue, ...]
+    inventory_requests: int = 0
+    inventory_pages: int = 0
+    objects_inspected: int = 0
+    stat_requests: int = 0
+    removed_files: tuple[str, ...] = ()
 
     @property
     def scanned_partition_count(self) -> int:
@@ -108,17 +116,20 @@ def plan_stream_sync(
 
     incremental_values = _incremental_values(layout, state, current_partition)
     lookback_values = _lookback_values(layout, spec)
+    discovery_diagnostics: dict[str, int] = {}
     incremental_files = _files_for_values(
         adapter,
         definition,
         layout,
         incremental_values,
+        diagnostics=discovery_diagnostics,
     )
     lookback_files = _files_for_values(
         adapter,
         definition,
         layout,
         lookback_values,
+        diagnostics=discovery_diagnostics,
     )
     all_files = _deduplicate_files(incremental_files, lookback_files)
     candidates = _changed_files(all_files, manifest)
@@ -136,6 +147,11 @@ def plan_stream_sync(
         candidates=tuple(candidates),
         incremental_partition_values=incremental_values,
         lookback_partition_values=lookback_values,
+        inventory_requests=discovery_diagnostics.get("inventory_requests", 0),
+        inventory_pages=discovery_diagnostics.get("inventory_pages", 0),
+        objects_inspected=discovery_diagnostics.get("objects_inspected", 0),
+        stat_requests=discovery_diagnostics.get("stat_requests", 0),
+        removed_files=_removed_files(definition, all_files, manifest, layout=layout, scanned_values=(*incremental_values, *lookback_values)),
     )
 
 
@@ -146,21 +162,16 @@ def _initial_plan(
     manifest: dict[str, StorageRevision],
     current_partition: PartitionValue,
 ) -> StreamPlan:
-    partitions = discover_partitions(adapter, definition.root_uri)
+    discovery_diagnostics: dict[str, int] = {}
+    files, partitions = _initial_inventory(
+        adapter,
+        definition,
+        current_partition,
+        diagnostics=discovery_diagnostics,
+    )
     if partitions:
         first = partitions[0].partition
-        layout = PartitionLayout(
-            first.partition_format,
-            first.partition_granularity,
-        )
-        files = _filter_files(
-            discover_partition_files(
-                adapter,
-                partitions,
-                suffix=definition.suffix,
-            ),
-            definition,
-        )
+        layout = PartitionLayout(first.partition_format, first.partition_granularity)
         incremental_values = tuple(
             sorted({item.partition.partition_value for item in partitions})
         )
@@ -178,6 +189,7 @@ def _initial_plan(
             definition,
             layout,
             (current_partition,),
+            diagnostics=discovery_diagnostics,
         )
         incremental_values = (layout.normalize(current_partition),)
         state = PlannerState(
@@ -215,7 +227,145 @@ def _initial_plan(
         candidates=tuple(_changed_files(all_files, manifest)),
         incremental_partition_values=incremental_values,
         lookback_partition_values=lookback_values,
+        inventory_requests=discovery_diagnostics.get("inventory_requests", 0),
+        inventory_pages=discovery_diagnostics.get("inventory_pages", 0),
+        objects_inspected=discovery_diagnostics.get("objects_inspected", 0),
+        stat_requests=discovery_diagnostics.get("stat_requests", 0),
+        removed_files=_removed_files(definition, all_files, manifest),
     )
+
+
+def _initial_inventory(
+    adapter: StorageAdapter,
+    definition: StreamDefinition,
+    current_partition: PartitionValue,
+    diagnostics: dict[str, int],
+) -> tuple[list[DiscoveredLogFile], list[DiscoveredPartition]]:
+    """Build the initial file/partition map from one recursive inventory.
+
+    Initial discovery has no watermark, so a provider-side recursive file
+    inventory is the only useful scan. It returns file revisions and lets the
+    planner infer partition folders from each relative file URI. This avoids
+    enumerating every directory first and then issuing one listing per folder.
+    Incremental scans use the learned layout and do not call this path.
+    """
+
+    observed = inventory(
+        adapter,
+        StorageInventoryRequest(
+            uri=definition.root_uri,
+            purpose="logs",
+            recursive=True,
+            object_types=frozenset({"file"}),
+            suffixes=frozenset({definition.suffix}),
+            name_prefix=definition.name_prefix,
+        ),
+    )
+    if observed.completeness != "complete":
+        raise ValueError("Log refresh requires a complete file inventory")
+    diagnostics.update(
+        {
+            "inventory_requests": diagnostics.get("inventory_requests", 0)
+            + observed.requests,
+            "inventory_pages": diagnostics.get("inventory_pages", 0)
+            + observed.pages,
+            "objects_inspected": diagnostics.get("objects_inspected", 0)
+            + observed.objects_inspected,
+        }
+    )
+    files: list[DiscoveredLogFile] = []
+    partitions_by_uri: dict[str, DiscoveredPartition] = {}
+    formats: set[str] = set()
+    unpartitioned = False
+    for item in observed.files:
+        relative = _relative_uri(definition.root_uri, item.canonical_uri)
+        directory = relative.rsplit("/", 1)[0] if "/" in relative else ""
+        parsed = parse_partition_path(directory)
+        if parsed is None:
+            if directory:
+                # Files below an unknown nested folder are outside the supported
+                # partition contract; keep the old behavior of not ingesting
+                # them instead of guessing a layout.
+                continue
+            unpartitioned = True
+            parsed = ParsedPartition(
+                partition_value=partition_datetime(current_partition),
+                raw_partition_path="",
+                partition_granularity=PartitionGranularity.UNPARTITIONED,
+                partition_format="",
+            )
+            revision = StorageRevision(
+                canonical_uri=item.canonical_uri,
+                size=int(item.size or 0),
+                last_modified=item.last_modified
+                or _stat_with_diagnostics(
+                    adapter,
+                    item.canonical_uri,
+                    diagnostics,
+                ).last_modified,
+                provider_revision=item.provider_revision,
+            )
+            files.append(DiscoveredLogFile(partition=parsed, revision=revision))
+            continue
+        else:
+            formats.add(parsed.partition_format)
+        partition_uri = (
+            join_uri(definition.root_uri, parsed.raw_partition_path)
+            if parsed.raw_partition_path
+            else definition.root_uri
+        )
+        partition = partitions_by_uri.setdefault(
+            partition_uri,
+            DiscoveredPartition(
+                uri=adapter.canonical_uri(partition_uri),
+                partition=parsed,
+            ),
+        )
+        revision = StorageRevision(
+            canonical_uri=item.canonical_uri,
+            size=int(item.size or 0),
+            last_modified=item.last_modified
+            or _stat_with_diagnostics(
+                adapter,
+                item.canonical_uri,
+                diagnostics,
+            ).last_modified,
+            provider_revision=item.provider_revision,
+        )
+        files.append(DiscoveredLogFile(partition=partition.partition, revision=revision))
+
+    if unpartitioned and formats:
+        raise PartitionFormatError(
+            "Partitioned and unpartitioned log files cannot share one stream"
+        )
+    if len(formats) > 1:
+        raise PartitionFormatError(
+            f"Mixed partition formats are not supported: {', '.join(sorted(formats))}"
+        )
+    partitions = sorted(
+        partitions_by_uri.values(),
+        key=lambda item: (item.partition.partition_value, item.partition.raw_partition_path),
+    )
+    files.sort(key=lambda item: (item.partition.partition_value, item.canonical_uri))
+    return files, partitions
+
+
+def _relative_uri(root_uri: str, child_uri: str) -> str:
+    root = root_uri.rstrip("/\\").replace("\\", "/")
+    child = child_uri.rstrip("/\\").replace("\\", "/")
+    prefix = f"{root}/"
+    if child.startswith(prefix):
+        return child[len(prefix) :]
+    return child.rsplit("/", 1)[-1]
+
+
+def _stat_with_diagnostics(
+    adapter: StorageAdapter,
+    uri: str,
+    diagnostics: dict[str, int],
+) -> StorageRevision:
+    diagnostics["stat_requests"] = diagnostics.get("stat_requests", 0) + 1
+    return adapter.stat(uri)
 
 
 def _incremental_values(
@@ -225,25 +375,20 @@ def _incremental_values(
 ) -> tuple[PartitionValue, ...]:
     if layout.granularity is PartitionGranularity.UNPARTITIONED:
         return (layout.normalize(current_partition),)
-    # Always revisit the latest partition known to contain files so late writes
-    # and in-place replacements remain visible. Scan forward only from the last
-    # attempted partition to avoid repeatedly walking every empty partition
-    # between the checkpoint and today.
-    checkpoint = state.checkpoint_partition_value
-    forward_start = state.last_scanned_partition_value or checkpoint or current_partition
-    values = set(layout.values(forward_start, current_partition))
-    if checkpoint is not None:
-        values.add(layout.normalize(checkpoint))
-    if layout.granularity is PartitionGranularity.HOUR:
-        # A run can start near an hour boundary and close after the next hour has
-        # already produced files. Revisit one completed hour so that immutable
-        # late arrivals are discovered without turning every sync into a day scan.
-        values.add(
-            layout.normalize(
-                partition_datetime(current_partition) - timedelta(hours=1)
-            )
-        )
-    return tuple(sorted(values))
+    # A scan has two deliberately separate responsibilities:
+    #   * move the watermark forward over partitions that have never been seen;
+    #   * revisit the bounded overwrite window for mutable snapshot files.
+    # The union is inclusive at both ends.  Normalizing the 24-hour boundary to
+    # the learned layout gives two daily partitions or 25 hourly partitions when
+    # the source is caught up, while preserving the same rule for coarser layouts.
+    forward_start = layout.normalize(
+        state.last_scanned_partition_value or current_partition
+    )
+    overwrite_start = layout.normalize(
+        partition_datetime(current_partition) - timedelta(days=1)
+    )
+    start = min(forward_start, overwrite_start)
+    return layout.values(start, current_partition)
 
 
 def _lookback_values(
@@ -266,6 +411,8 @@ def _files_for_values(
     definition: StreamDefinition,
     layout: PartitionLayout,
     values: tuple[PartitionValue, ...],
+    *,
+    diagnostics: dict[str, int],
 ) -> list[DiscoveredLogFile]:
     partitions: list[DiscoveredPartition] = []
     for value in values:
@@ -291,6 +438,7 @@ def _files_for_values(
             adapter,
             partitions,
             suffix=definition.suffix,
+            diagnostics=diagnostics,
         ),
         definition,
     )
@@ -323,6 +471,28 @@ def _changed_files(
     ]
 
 
+def _removed_files(
+    definition: StreamDefinition,
+    files: list[DiscoveredLogFile],
+    manifest: dict[str, StorageRevision],
+    *,
+    layout: PartitionLayout | None = None,
+    scanned_values: tuple[PartitionValue, ...] = (),
+) -> tuple[str, ...]:
+    """Remove absent members only from the successfully inventoried scope."""
+    current = {item.canonical_uri for item in files}
+    scanned_paths = {layout.render(value) for value in scanned_values} if layout else None
+    return tuple(sorted(
+        uri for uri in manifest
+        if uri not in current
+        and (
+            scanned_paths is None
+            or _relative_uri(definition.root_uri, uri).rsplit("/", 1)[0] in scanned_paths
+            or ("" in scanned_paths and "/" not in _relative_uri(definition.root_uri, uri))
+        )
+    ))
+
+
 def _deduplicate_files(
     *groups: list[DiscoveredLogFile],
 ) -> list[DiscoveredLogFile]:
@@ -344,38 +514,6 @@ def _next_state(
     incremental_files: list[DiscoveredLogFile],
     incremental_values: tuple[PartitionValue, ...],
 ) -> PlannerState:
-    checkpoint = (
-        layout.normalize(previous.checkpoint_partition_value)
-        if previous.checkpoint_partition_value is not None
-        else None
-    )
-    boundary = previous.boundary_last_modified
-    if incremental_files:
-        checkpoint = max(
-            [
-                value
-                for value in (
-                    checkpoint,
-                    max(
-                        item.partition.partition_value
-                        for item in incremental_files
-                    ),
-                )
-                if value is not None
-            ]
-        )
-        latest_revisions = [
-            item.revision.last_modified
-            for item in incremental_files
-            if item.partition.partition_value == checkpoint
-        ]
-        if latest_revisions:
-            candidate_boundary = max(latest_revisions)
-            boundary = (
-                max(boundary, candidate_boundary)
-                if boundary is not None
-                else candidate_boundary
-            )
     last_scanned = (
         layout.normalize(previous.last_scanned_partition_value)
         if previous.last_scanned_partition_value is not None
@@ -394,7 +532,5 @@ def _next_state(
         layout_status=previous.layout_status,
         partition_format=layout.partition_format,
         partition_granularity=layout.granularity,
-        checkpoint_partition_value=checkpoint,
-        boundary_last_modified=boundary,
         last_scanned_partition_value=last_scanned,
     )

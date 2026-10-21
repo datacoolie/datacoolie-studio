@@ -2,7 +2,7 @@ import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { Icon } from "@iconify/react";
 import type { LineageAssetFlowNode } from "../model/types";
-import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../model/presentation";
+import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../../../shared/assetPresentation";
 import { LineageEntityIcon } from "./LineageEntityIcon";
 
 export const LineageAssetNode = memo(function LineageAssetNode({

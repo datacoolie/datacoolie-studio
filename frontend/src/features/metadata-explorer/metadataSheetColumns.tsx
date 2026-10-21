@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { checkboxColumn, createTextColumn, keyColumn, type CellComponent, type Column } from "react-datasheet-grid";
 import { Filter } from "lucide-react";
 import type { MetadataEditorIssue } from "../../shared/api/domainTypes";
+import { MetadataStructuredCell } from "../../shared/metadata/MetadataStructuredCell";
+import { formatCellValue, parseCellText, structuredCellKind } from "../../shared/metadata/metadataCellValues";
 import { displayStorageUri } from "../../shared/lib/storage";
 import { MetadataColumnFilterPopover } from "./MetadataColumnFilterPopover";
 import type { MetadataFilterOption } from "./metadataColumnFilters";
@@ -10,8 +12,7 @@ import {
   fitMetadataColumnHeader,
   normalizeMetadataColumnWidth
 } from "./metadataColumnHeaderLayout";
-import { MetadataStructuredCell } from "./MetadataStructuredCell";
-import { formatCellValue, parseCellText, structuredCellKind, type MetadataSourceOption } from "./metadataSheetOperations";
+import type { MetadataSourceOption } from "./metadataSheetOperations";
 import type { SheetRow } from "./metadataSheetTypes";
 
 interface SheetColumn {
@@ -238,7 +239,8 @@ const studioMetadataSourceCell: CellComponent<SheetRow, MetadataSourceColumnData
       __metadata_source_id: option?.source_id ?? null,
       __metadata_source_name: option?.name ?? value,
       __metadata_source_uri: option?.uri ?? "",
-      __metadata_source_kind: "metadata"
+      __metadata_source_kind: "metadata",
+      __metadata_source_read_only: option?.read_only ?? false
     });
     setDraftValue(option?.name ?? value);
     setOpen(false);
@@ -324,7 +326,8 @@ function createStudioMetadataSourceColumn(columnKey: string, options: MetadataSo
         __metadata_source_id: null,
         __metadata_source_name: formatCellValue(sourceName),
         __metadata_source_uri: "",
-        __metadata_source_kind: "metadata"
+        __metadata_source_kind: "metadata",
+        __metadata_source_read_only: false
       };
     },
     deleteValue: ({ rowData }) => ({
@@ -332,7 +335,8 @@ function createStudioMetadataSourceColumn(columnKey: string, options: MetadataSo
       __metadata_source_id: null,
       __metadata_source_name: "",
       __metadata_source_uri: "",
-      __metadata_source_kind: "metadata"
+      __metadata_source_kind: "metadata",
+      __metadata_source_read_only: false
     }),
     isCellEmpty: ({ rowData }) => !formatCellValue(rowData.__metadata_source_name)
   };

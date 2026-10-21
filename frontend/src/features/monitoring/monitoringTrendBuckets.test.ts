@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";
-import { monitoringTrendBucketTestUtils } from "./MonitoringPages";
+import { fillMissingFailureTrendDates } from "./pages/FailurePagePresentation";
+import { resolveTrendBucketKeys } from "./components/monitoringTime";
+import { workloadVolumeTrendOption } from "./components/monitoringChartOptions";
+import { formatBytesShort, formatPercent } from "./components/monitoringFormatting";
 
 describe("monitoring trend buckets", () => {
+  it("keeps unknown metric labels visible as unknown instead of zero", () => {
+    expect(formatPercent(null)).toBe("-");
+    expect(formatBytesShort(null)).toBe("-");
+  });
+
   it("fills every hour for a 3 day range when hour grain is selected", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "3d", grain: "hour" },
       { min: null, max: null },
       "Asia/Saigon",
@@ -17,7 +25,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("fills 24 hourly buckets for the rolling 24h range", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "24h", grain: "hour" },
       { min: null, max: null },
       "Asia/Saigon",
@@ -31,7 +39,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("uses hourly buckets for auto grain up to 3 days", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "3d", grain: "auto" },
       { min: null, max: null },
       "Asia/Saigon",
@@ -44,7 +52,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("uses daily buckets for auto grain above 3 days", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "7d", grain: "auto" },
       { min: null, max: null },
       "Asia/Saigon",
@@ -57,7 +65,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("uses daily buckets for auto grain up to 90 days", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "90d", grain: "auto" },
       { min: null, max: null },
       "Asia/Saigon",
@@ -70,7 +78,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("keeps backend weekly grain for all time instead of forcing month", () => {
-    const keys = monitoringTrendBucketTestUtils.resolveTrendBucketKeys(
+    const keys = resolveTrendBucketKeys(
       { ...DEFAULT_MONITORING_FILTERS, range: "all", grain: "week" },
       { min: "2026-03-01", max: "2026-06-18" },
       "Asia/Ho_Chi_Minh",
@@ -84,7 +92,7 @@ describe("monitoring trend buckets", () => {
   });
 
   it("fills missing failure trend buckets with zero values", () => {
-    const rows = monitoringTrendBucketTestUtils.fillMissingFailureTrendDates(
+    const rows = fillMissingFailureTrendDates(
       [
         { date: "2026-06-20", bucket: "2026-06-20", grain: "day", failed_jobs: 1, failed_dataflows: 3 }
       ],
@@ -100,18 +108,16 @@ describe("monitoring trend buckets", () => {
     expect(rows.filter((row) => row.bucket !== "2026-06-20").every((row) => row.failed_jobs === 0 && row.failed_dataflows === 0)).toBe(true);
   });
 
-  it("uses estimated rows written for the Overview workload series", () => {
-    const option = monitoringTrendBucketTestUtils.workloadVolumeTrendOption(
+  it("uses transported rows written for the Overview workload series", () => {
+    const option = workloadVolumeTrendOption(
       [
         {
           date: "2026-06-20",
           bucket: "2026-06-20",
           grain: "day",
           rows_read: 120,
-          rows_written: 40,
-          est_rows_written: 110,
-          rows_output: 75,
-          rows_output_estimated: 35
+          rows_written: 110,
+          lakehouse_rows_written: 75
         }
       ],
       [],
@@ -121,9 +127,9 @@ describe("monitoring trend buckets", () => {
       "day"
     );
     const series = (option?.series ?? []) as Array<{ name?: string; data?: number[] }>;
-    const estimatedSeries = series.find((item) => item.name === "Est rows written");
+    const writtenSeries = series.find((item) => item.name === "Rows written");
 
-    expect(estimatedSeries?.data).toEqual([110]);
+    expect(writtenSeries?.data).toEqual([110]);
     expect(series.some((item) => item.name === "Rows output")).toBe(false);
   });
 });

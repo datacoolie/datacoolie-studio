@@ -5,15 +5,15 @@ from typing import Any, ContextManager
 from datacoolie_studio.db.models import EnvironmentSource
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.analytics import access
+from datacoolie_studio.domains.monitoring.metrics.v6_semantics import register_freshness_functions
 from datacoolie_studio.domains.source_observation.repository import paused_source_ids
-from datacoolie_studio.domains.sources import service as source_validation
 
 
 def source_ids(paths: list[EnvironmentSource]) -> list[int]:
     candidate = [
         path.id
         for path in paths
-        if path.enabled and not source_validation.is_validated_empty_log_source(path)
+        if path.enabled
     ]
     if not candidate:
         return []
@@ -36,5 +36,12 @@ def materialization_token(paths: list[EnvironmentSource]) -> str:
 
 def reader(
     paths: list[EnvironmentSource],
+    *,
+    snapshot: bool = False,
 ) -> ContextManager[tuple[Any, list[int], str]]:
+    if snapshot:
+        return access.reader(
+            source_ids(paths), snapshot=True,
+            prepare_connection=register_freshness_functions,
+        )
     return access.reader(source_ids(paths))

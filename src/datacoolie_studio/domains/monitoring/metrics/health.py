@@ -28,7 +28,7 @@ def environment_health(
 
     if coverage.get("status") in {"missing_sources", "no_records"}:
         status = "no_log_evidence"
-        reasons.append("No complete ETL log evidence is available.")
+        reasons.append("No complete execution log evidence is available.")
     if coverage.get("status") in {"error", "partial"}:
         status = _max_status(status, "warning")
         reasons.append("Log coverage is partial or has read errors.")
@@ -50,9 +50,6 @@ def environment_health(
     elif maintenance_failed_last_14_days:
         status = _max_status(status, "warning")
         reasons.append("Maintenance failures were found in the last 14 days.")
-    if maintenance_skipped_last_7_days:
-        status = _max_status(status, "warning")
-        reasons.append("Skipped maintenance operations were found in the last 7 days.")
     if reconciliation.get("mismatch_count"):
         status = _max_status(status, "warning")
         reasons.append("Job and dataflow log totals do not fully reconcile.")

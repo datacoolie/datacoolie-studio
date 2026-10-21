@@ -2,9 +2,9 @@ import { X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AssetDefinitionResponse, LineageAsset } from "../../../shared/api/domainTypes";
-import { SourceCodeViewer } from "../../assets/SourceCodeViewer";
-import { assetIconKind, assetTypeTone, presentLineageAsset } from "../model/presentation";
-import { LineageFormatIcon } from "./LineageFormatIcon";
+import { SourceCodeViewer } from "../../../shared/components/SourceCodeViewer";
+import { assetIconKind, assetTypeTone, presentLineageAsset } from "../../../shared/assetPresentation";
+import { LineageFormatIcon } from "../../../shared/components/FormatIcon";
 
 interface LineageCodeDialogProps {
   asset: LineageAsset;

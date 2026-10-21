@@ -18,21 +18,17 @@ from datacoolie_studio.db.models import (
     SyncJob,
 )
 from datacoolie_studio.db.session import create_session, init_db
-from datacoolie_studio.domains.metadata.editor import (
-    MetadataConflictError,
-    load_editor_document_from_raw,
-    restore_backup,
-    save_editor_document,
-)
+from datacoolie_studio.domains.metadata.backup_application import restore_backup
+from datacoolie_studio.domains.metadata.errors import MetadataConflictError
 from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
 from datacoolie_studio.domains.metadata.storage_io import MetadataStorage
+from datacoolie_studio.domains.metadata.storage_io import conditional_replace_uri
 from datacoolie_studio.domains.sources.initialization import (
     queue_source_initializations,
     run_source_initialization_jobs,
 )
 from datacoolie_studio.domains.storage.adapters import (
-    StorageObject,
     StorageRevision,
 )
 from datacoolie_studio.domains.storage.errors import StorageConflictError
@@ -43,10 +39,6 @@ from datacoolie_studio.domains.storage.inventory import StorageInventory
 def cloud_source(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{(tmp_path / 'studio.db').as_posix()}")
-    monkeypatch.setattr(
-        "datacoolie_studio.domains.metadata.storage_io.backup_dir",
-        lambda: tmp_path / "backups",
-    )
     init_db()
     session = create_session()
     project = Project(name="project")
@@ -75,26 +67,107 @@ def test_cloud_save_is_conditional_backed_up_and_timeout_reconciled(
     writer = _MemoryWriter(adapter, timeout_after_success=True)
     storage = MetadataStorage(adapter=adapter, writer=writer)
     monkeypatch.setattr(
-        "datacoolie_studio.domains.metadata.editor.storage_for_source",
+        "datacoolie_studio.domains.metadata.write_executor.storage_for_source",
         lambda *_args, **_kwargs: storage,
     )
-    raw = read_metadata_bytes(source.uri, adapter.data)
-    revision = _revision(adapter)
-    document = load_editor_document_from_raw(source, raw, revision)
-    document["sheets"]["connections"]["rows"][0]["description"] = "after"
-
-    saved = save_editor_document(
-        session,
-        source,
-        document,
-        revision,
-        confirm_overwrite=True,
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.metadata.service.storage_for_source",
+        lambda *_args, **_kwargs: storage,
+    )
+    from datacoolie_studio.domains.metadata.service import (
+        ensure_metadata_materialization,
+        load_environment_editor_workspace,
+    )
+    from datacoolie_studio.domains.metadata.write_executor import (
+        apply_environment_write,
+        prepare_environment_write,
     )
 
-    assert saved["source"]["revision"]["content_hash"]
+    ensure_metadata_materialization(session, source, force=True)
+    document = load_environment_editor_workspace(
+        session, source.environment_id, [source]
+    )["document"]
+    document["sheets"]["connections"]["rows"][0]["description"] = "after"
+    operation = prepare_environment_write(
+        session,
+        source.environment_id,
+        [source],
+        document,
+        document["source"]["revision"],
+    )
+    saved = apply_environment_write(
+        session,
+        operation.operation_key,
+        environment_id=source.environment_id,
+        confirm=True,
+    )
+
+    assert saved.state == "succeeded"
     assert b'"after"' in adapter.data
-    backups = list((Path(session.bind.url.database).parent / "backups").rglob("*metadata.json"))
-    assert len(backups) == 1
+    assert session.execute(select(MetadataBackup.id)).scalar_one()
+
+
+def test_dbfs_binding_uses_verified_safety_through_shared_write_saga(
+    cloud_source, monkeypatch
+):
+    session, source = cloud_source
+    source.uri = "dbfs:/Volumes/catalog/schema/volume/metadata.json"
+    source.storage_provider = "dbfs"
+    source.storage_auth_mode = "ambient"
+    source.storage_config_json = json.dumps({"host": "https://workspace.example"})
+    session.commit()
+
+    adapter = _MemoryAdapter(_metadata_json("before"))
+    storage = MetadataStorage(adapter=adapter, writer=_MemoryWriter(adapter))
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.metadata.write_executor.storage_for_source",
+        lambda *_args, **_kwargs: storage,
+    )
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.metadata.service.storage_for_source",
+        lambda *_args, **_kwargs: storage,
+    )
+    from datacoolie_studio.domains.metadata.service import (
+        ensure_metadata_materialization,
+        load_environment_editor_workspace,
+    )
+    from datacoolie_studio.domains.metadata.write_executor import (
+        apply_environment_write,
+        operation_response,
+        prepare_environment_write,
+    )
+
+    ensure_metadata_materialization(session, source, force=True)
+    document = load_environment_editor_workspace(
+        session, source.environment_id, [source]
+    )["document"]
+    document["sheets"]["connections"]["rows"][0]["description"] = "after"
+    operation = prepare_environment_write(
+        session,
+        source.environment_id,
+        [source],
+        document,
+        document["source"]["revision"],
+    )
+
+    item = operation_response(session, operation)["items"][0]
+    assert item["provider"] == "dbfs"
+    assert item["write_safety"] == "verified"
+    saved = apply_environment_write(
+        session,
+        operation.operation_key,
+        environment_id=source.environment_id,
+        confirm=True,
+    )
+
+    assert saved.state == "succeeded"
+    assert b'"after"' in adapter.data
+    assert apply_environment_write(
+        session,
+        operation.operation_key,
+        environment_id=source.environment_id,
+        confirm=True,
+    ).state == "succeeded"
 
 
 def test_external_cloud_change_returns_conflict_without_overwrite(
@@ -104,24 +177,34 @@ def test_external_cloud_change_returns_conflict_without_overwrite(
     adapter = _MemoryAdapter(_metadata_json("original"))
     storage = MetadataStorage(adapter=adapter, writer=_MemoryWriter(adapter))
     monkeypatch.setattr(
-        "datacoolie_studio.domains.metadata.editor.storage_for_source",
+        "datacoolie_studio.domains.metadata.write_executor.storage_for_source",
         lambda *_args, **_kwargs: storage,
     )
-    revision = _revision(adapter)
-    document = load_editor_document_from_raw(
-        source, read_metadata_bytes(source.uri, adapter.data), revision
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.metadata.service.storage_for_source",
+        lambda *_args, **_kwargs: storage,
     )
+    from datacoolie_studio.domains.metadata.service import (
+        ensure_metadata_materialization,
+        load_environment_editor_workspace,
+    )
+    from datacoolie_studio.domains.metadata.write_executor import prepare_environment_write
+
+    ensure_metadata_materialization(session, source, force=True)
+    document = load_environment_editor_workspace(
+        session, source.environment_id, [source]
+    )["document"]
     document["sheets"]["connections"]["rows"][0]["description"] = "studio"
     adapter.data = _metadata_json("external")
     adapter.version += 1
 
     with pytest.raises(MetadataConflictError):
-        save_editor_document(
+        prepare_environment_write(
             session,
-            source,
+            source.environment_id,
+            [source],
             document,
-            revision,
-            confirm_overwrite=True,
+            document["source"]["revision"],
         )
 
     assert b'"external"' in adapter.data
@@ -133,28 +216,74 @@ def test_cloud_backup_restore_is_conditional(cloud_source, monkeypatch):
     adapter = _MemoryAdapter(_metadata_json("before"))
     storage = MetadataStorage(adapter=adapter, writer=_MemoryWriter(adapter))
     monkeypatch.setattr(
-        "datacoolie_studio.domains.metadata.editor.storage_for_source",
+        "datacoolie_studio.domains.metadata.write_executor.storage_for_source",
         lambda *_args, **_kwargs: storage,
     )
-    revision = _revision(adapter)
-    document = load_editor_document_from_raw(
-        source, read_metadata_bytes(source.uri, adapter.data), revision
+    monkeypatch.setattr(
+        "datacoolie_studio.domains.metadata.service.storage_for_source",
+        lambda *_args, **_kwargs: storage,
     )
+    from datacoolie_studio.domains.metadata.service import (
+        ensure_metadata_materialization,
+        load_environment_editor_workspace,
+    )
+    from datacoolie_studio.domains.metadata.write_executor import (
+        apply_environment_write,
+        prepare_environment_write,
+    )
+
+    ensure_metadata_materialization(session, source, force=True)
+    document = load_environment_editor_workspace(
+        session, source.environment_id, [source]
+    )["document"]
     document["sheets"]["connections"]["rows"][0]["description"] = "after"
-    saved = save_editor_document(
-        session, source, document, revision, confirm_overwrite=True
+    operation = prepare_environment_write(
+        session,
+        source.environment_id,
+        [source],
+        document,
+        document["source"]["revision"],
     )
+    saved = apply_environment_write(
+        session,
+        operation.operation_key,
+        environment_id=source.environment_id,
+        confirm=True,
+    )
+    assert saved.state == "succeeded"
     backup_id = session.execute(select(MetadataBackup.id)).scalar_one()
+    current_document = load_environment_editor_workspace(
+        session, source.environment_id, [source]
+    )["document"]
 
     restored = restore_backup(
         session,
         backup_id,
-        saved["source"]["revision"],
+        current_document["source"]["revision"]["sources"][0]["revision"],
         True,
     )
 
     assert b'"before"' in adapter.data
     assert restored["source"]["revision"]["provider_revision"]
+
+
+def test_conditional_write_returns_typed_verified_receipt():
+    adapter = _MemoryAdapter(_metadata_json("before"))
+    storage = MetadataStorage(adapter=adapter, writer=_MemoryWriter(adapter))
+    expected = _revision(adapter)
+    receipt = conditional_replace_uri(
+        storage,
+        "s3://bucket/metadata.json",
+        _metadata_json("after"),
+        expected,
+        verified_revision=expected,
+    )
+
+    assert receipt.content_hash == receipt.revision["content_hash"]
+    assert receipt.size == len(adapter.data)
+    assert receipt.provider_revision == "version-2"
+    assert receipt.verification == "content_readback"
+    assert receipt.revision_dict()["content_hash"] == receipt.content_hash
 
 
 def test_metadata_bytes_parse_json_yaml_and_xlsx():

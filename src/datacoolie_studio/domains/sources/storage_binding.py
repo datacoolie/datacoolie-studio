@@ -160,12 +160,14 @@ def _validate_secondary_uris(
         if configured is None:
             continue
         _input_key, value = configured
-        try:
-            validate_storage_uri(value, binding.provider)
-        except StorageConfigurationError as exc:
-            raise StorageConfigurationError(
-                f"{key} must use the source storage provider and credential binding"
-            ) from exc
+        values = [value] if isinstance(value, str) else value
+        for item in values:
+            try:
+                validate_storage_uri(item, binding.provider)
+            except StorageConfigurationError as exc:
+                raise StorageConfigurationError(
+                    f"{key} must use the source storage provider and credential binding"
+                ) from exc
 
 
 def _optional_string(value: object) -> str | None:

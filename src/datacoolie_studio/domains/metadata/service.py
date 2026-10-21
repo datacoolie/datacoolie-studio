@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.db.models import EnvironmentSource, MetadataMaterialization, utc_now
 from datacoolie_studio.domains.freshness.service import metadata_catalog_version
-from datacoolie_studio.domains.metadata.editor import (
-    _canonical_editor_columns,
-    _metadata_source_name,
-    load_editor_document_from_raw,
-    load_environment_editor_draft,
-    validate_editor_document,
+from datacoolie_studio.domains.metadata.editor import load_editor_document_from_raw
+from datacoolie_studio.domains.metadata.drafts import load_environment_editor_draft
+from datacoolie_studio.domains.metadata.source_policy import (
+    metadata_source_name,
+    metadata_source_uses_strict_validation,
+    source_is_read_only,
+)
+from datacoolie_studio.domains.metadata.environment_documents import (
+    merge_editor_sheet_documents,
 )
 from datacoolie_studio.domains.metadata.normalizer import (
     METADATA_NORMALIZER_VERSION,
@@ -22,18 +27,17 @@ from datacoolie_studio.domains.metadata.normalizer import (
 )
 from datacoolie_studio.domains.metadata.ordering import canonicalize_editor_document
 from datacoolie_studio.domains.metadata.reader import MetadataReadError
-from datacoolie_studio.domains.metadata.reader import read_metadata_file  # noqa: F401
-from datacoolie_studio.domains.metadata.reader import read_metadata_bytes
+from datacoolie_studio.domains.metadata.reader import read_metadata_document_bytes
 from datacoolie_studio.domains.metadata.storage_io import (
     current_revision as storage_current_revision,
     read_source_bytes,
-    same_revision,
     storage_revision_from_dict,
     storage_for_source,
 )
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.environment_caches import invalidate_environment_derived_caches
 from datacoolie_studio.domains.storage.inventory import storage_diagnostics
+from datacoolie_studio.domains.storage.revision_contract import same_revision
 from datacoolie_studio.domains.sources.service import stored_source_validation_error
 from datacoolie_studio.domains.sync import service as sync
 
@@ -213,9 +217,18 @@ def merge_environment_editor_documents(
     errors: list[dict] | None = None,
 ) -> dict:
     sheets = {
-        sheet_name: _merge_editor_sheet_documents(documents, sheet_name)
+        sheet_name: merge_editor_sheet_documents(documents, sheet_name)
         for sheet_name in ("connections", "dataflows", "schema_hints")
     }
+    enabled_metadata_sources = [
+        source
+        for source in sources
+        if source.enabled and source.source_kind == "metadata"
+    ]
+    environment_read_only = bool(enabled_metadata_sources) and all(
+        source_is_read_only(source) for source in enabled_metadata_sources
+    )
+    metadata_documents = _metadata_document_entries(documents)
     document = canonicalize_editor_document({
         "source": {
             "source_id": 0,
@@ -225,7 +238,7 @@ def merge_environment_editor_documents(
             "name": "All metadata sources",
             "format": "merged",
             "scope": "environment",
-            "read_only": False,
+            "read_only": environment_read_only,
             "revision": {
                 "sources": [
                     doc.get("source", {})
@@ -235,10 +248,30 @@ def merge_environment_editor_documents(
             },
         },
         "sheets": sheets,
+        "metadata_documents": metadata_documents,
         "issues": [],
     })
-    document["issues"] = validate_editor_document(document)["issues"]
+    document["issues"] = []
     return document
+
+
+def _metadata_document_entries(documents: list[dict]) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for document in documents:
+        source = document.get("source") or {}
+        source_id = source.get("source_id")
+        if source_id is None:
+            continue
+        state = document.get("metadata_document")
+        if not isinstance(state, dict):
+            state = {}
+        extras = state.get("extras")
+        entries[str(source_id)] = {
+            "wrapper": state.get("wrapper") if state.get("wrapper") == "metadata" else None,
+            "extras": deepcopy(extras) if isinstance(extras, dict) else {},
+        }
+    return entries
+
 
 
 def store_metadata_materialization_from_bytes(
@@ -246,10 +279,22 @@ def store_metadata_materialization_from_bytes(
     source: EnvironmentSource,
     content: bytes,
     revision: dict,
+    *,
+    commit: bool = True,
 ) -> MetadataMaterialization:
     """Refresh the materialization from bytes already confirmed by a write."""
-    raw = read_metadata_bytes(source.uri, content)
-    editor_document = load_editor_document_from_raw(source, raw, revision)
+    document_info = read_metadata_document_bytes(
+        source.uri,
+        content,
+        strict=metadata_source_uses_strict_validation(source),
+    )
+    raw = document_info.payload
+    editor_document = load_editor_document_from_raw(
+        source,
+        raw,
+        revision,
+        document_info=document_info,
+    )
     normalized = normalize_metadata_document(source.id, source.uri, raw)
     materialization = _upsert_metadata_materialization(
         session,
@@ -266,7 +311,10 @@ def store_metadata_materialization_from_bytes(
         error=None,
         checked_at=utc_now(),
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return materialization
 
 
@@ -289,7 +337,7 @@ def load_environment_editor_workspace(
     )
     if resolved_draft is not None:
         resolved_draft = canonicalize_editor_document(resolved_draft)
-        resolved_draft["issues"] = validate_editor_document(resolved_draft)["issues"]
+        resolved_draft["issues"] = []
     return {
         "schema_version": "metadata-editor-workspace.v1",
         "environment_id": environment_id,
@@ -300,7 +348,7 @@ def load_environment_editor_workspace(
 
 
 def _refresh_editor_document_routing(source: EnvironmentSource, document: dict) -> dict:
-    source_name = _metadata_source_name(source)
+    source_name = metadata_source_name(source)
     source_info = document.setdefault("source", {})
     source_info["source_id"] = source.id
     source_info["environment_id"] = source.environment_id
@@ -321,6 +369,7 @@ def _refresh_editor_document_routing(source: EnvironmentSource, document: dict) 
             row["__metadata_source_name"] = source_name
             row["__metadata_source_uri"] = source.uri
             row["__metadata_source_kind"] = "metadata"
+            row["__metadata_source_read_only"] = source_is_read_only(source)
     return document
 
 
@@ -339,12 +388,14 @@ def ensure_metadata_materialization(
     force: bool = False,
     secret_store: CredentialSecretStore | None = None,
 ) -> MetadataMaterialization:
-    materialization, _ = ensure_metadata_materialization_result(
+    materialization, error = ensure_metadata_materialization_result(
         session,
         source,
         force=force,
         secret_store=secret_store,
     )
+    if force and error is not None:
+        raise MetadataReadError(str(error.get("message") or "Metadata refresh failed"))
     return materialization
 
 
@@ -387,6 +438,13 @@ def ensure_metadata_materialization_result(
             ),
         }
         if current_materialization is not None:
+            if force:
+                _record_metadata_refresh_failure(
+                    session,
+                    source,
+                    error,
+                    job_type="force_refresh",
+                )
             return current_materialization, error
         job = sync.begin_sync_job(
             session, source, "force_refresh" if force else "auto_refresh"
@@ -450,8 +508,18 @@ def ensure_metadata_materialization_result(
             source,
             expected_revision=storage_revision_from_dict(current),
         )
-        raw = read_metadata_bytes(source.uri, content)
-        editor_document = load_editor_document_from_raw(source, raw, current)
+        document_info = read_metadata_document_bytes(
+            source.uri,
+            content,
+            strict=metadata_source_uses_strict_validation(source),
+        )
+        raw = document_info.payload
+        editor_document = load_editor_document_from_raw(
+            source,
+            raw,
+            current,
+            document_info=document_info,
+        )
         normalized = normalize_metadata_document(source.id, source.uri, raw)
     except MetadataReadError as exc:
         error = {"message": str(exc), "code": "metadata_read_error"}
@@ -496,6 +564,40 @@ def ensure_metadata_materialization_result(
         },
     )
     return current_materialization, None
+
+
+def _record_metadata_refresh_failure(
+    session: Session,
+    source: EnvironmentSource,
+    error: dict,
+    *,
+    job_type: str,
+) -> None:
+    """Persist a failed refresh attempt without replacing last-good data."""
+
+    checked_at = utc_now()
+    job = sync.begin_sync_job(session, source, job_type)
+    sync.record_source_observation(
+        session,
+        source=source,
+        status="error",
+        revision=None,
+        error=error,
+        checked_at=checked_at,
+    )
+    sync.finish_sync_job(
+        session,
+        job,
+        status="failed",
+        message=str(error.get("message") or "Metadata refresh failed"),
+        result={
+            "status": "error",
+            "message": str(error.get("message") or "Metadata refresh failed"),
+            "revision": None,
+            "error": error,
+        },
+        completed_at=checked_at,
+    )
 
 
 def metadata_materialization(session: Session, source_id: int) -> MetadataMaterialization | None:
@@ -561,30 +663,9 @@ def _upsert_metadata_materialization(
         materialization.materialized_at = utc_now()
     if previous_fingerprint != fingerprint:
         invalidate_environment_derived_caches(
-            session, source.environment_id, structural=True
+            source.environment_id, structural=True
         )
     return materialization
-
-
-def _merge_editor_sheet_documents(documents: list[dict], sheet_name: str) -> dict:
-    columns: list[dict] = []
-    rows: list[dict] = []
-    seen_columns: set[str] = set()
-    for document in documents:
-        sheet = (document.get("sheets") or {}).get(sheet_name) or {}
-        for column in sheet.get("columns") or []:
-            if not isinstance(column, dict):
-                continue
-            key = column.get("key")
-            if not key or key in seen_columns:
-                continue
-            seen_columns.add(str(key))
-            columns.append(column)
-        rows.extend(row for row in sheet.get("rows") or [] if isinstance(row, dict))
-    return {
-        "columns": _canonical_editor_columns(sheet_name, columns, rows),
-        "rows": rows,
-    }
 
 
 def _same_revision_json(current: dict, stored_json: str | None) -> bool:

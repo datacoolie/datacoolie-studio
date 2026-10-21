@@ -28,7 +28,6 @@ def empty_parameters_fingerprint() -> str:
 
 
 def cached_read_model(
-    session: Session,
     *,
     environment_id: int,
     model_key: str,
@@ -48,7 +47,6 @@ def cached_read_model(
 
 
 def replace_read_model(
-    session: Session,
     *,
     environment_id: int,
     model_key: str,
@@ -91,7 +89,6 @@ def read_model_generation(
 
 
 def invalidate_environment_read_models(
-    session: Session,
     environment_id: int,
     *,
     model_keys: set[str] | None = None,

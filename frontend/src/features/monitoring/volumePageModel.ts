@@ -1,4 +1,4 @@
-import type { TableSort } from "./MonitoringCharts";
+import type { TableSort } from "../../shared/components/DataTable";
 
 export function sortVolumeRows<T extends Record<string, unknown>>(rows: T[], sort?: TableSort): T[] {
   if (!sort) return rows;

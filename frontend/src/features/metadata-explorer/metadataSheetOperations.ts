@@ -1,4 +1,5 @@
 import type { MetadataEditorDocument, MetadataEditorSheet } from "../../shared/api/domainTypes";
+import { formatCellValue, parseCellText } from "../../shared/metadata/metadataCellValues";
 import { normalizeStage, stageFilterMatches } from "../../shared/stagePresentation";
 import { metadataColumnFilterMatches, type MetadataColumnFilterMap } from "./metadataColumnFilters";
 import type { SheetKey, SheetRow } from "./metadataSheetTypes";
@@ -7,7 +8,8 @@ export const STUDIO_METADATA_SOURCE_FIELDS = [
   "__metadata_source_id",
   "__metadata_source_name",
   "__metadata_source_uri",
-  "__metadata_source_kind"
+  "__metadata_source_kind",
+  "__metadata_source_read_only"
 ] as const;
 
 export function filterMetadataRows(
@@ -158,76 +160,6 @@ export async function readClipboard() {
   return navigator.clipboard.readText();
 }
 
-export function parseCellText(value: string) {
-  const normalized = value.trim();
-  if (!normalized) return null;
-  if (normalized.toLowerCase() === "true") return true;
-  if (normalized.toLowerCase() === "false") return false;
-  return value;
-}
-
-export function formatCellValue(value: unknown) {
-  if (value == null) return "";
-  if (Array.isArray(value) || typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-const structuredArrayFields = new Set([
-  "additional_columns",
-  "deduplicate_columns",
-  "latest_data_columns",
-  "merge_keys",
-  "partition_columns",
-  "schema_hints",
-  "source_watermark_columns",
-  "transform_drop_columns",
-  "transform_hash_columns",
-  "transform_masking_rules",
-  "transform_select_columns",
-  "transform_value_rules"
-]);
-
-const structuredObjectFields = new Set([
-  "transform_rename_columns"
-]);
-
-const structuredSqlFields = new Set([
-  "source_query",
-  "source_filter_expression",
-  "transform_filter_expression"
-]);
-
-export type StructuredCellKind = "array" | "object" | "sql";
-
-export function structuredCellKind(columnKey: string, value: unknown): StructuredCellKind | null {
-  if (structuredSqlFields.has(columnKey)) return "sql";
-  const parsed = parseStructuredValue(value);
-  if (parsed) return Array.isArray(parsed) ? "array" : "object";
-  if (structuredArrayFields.has(columnKey)) return "array";
-  if (structuredObjectFields.has(columnKey)) return "object";
-  if (columnKey === "configure" || columnKey.endsWith("_configure")) return "object";
-  return null;
-}
-
-export function parseStructuredValue(value: unknown): Record<string, unknown> | unknown[] | null {
-  if (Array.isArray(value)) return value;
-  if (value && typeof value === "object") return value as Record<string, unknown>;
-  if (typeof value !== "string" || !value.trim()) return null;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) || (parsed !== null && typeof parsed === "object")
-      ? parsed as Record<string, unknown> | unknown[]
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-export function formatPrettyStructuredValue(value: unknown) {
-  const parsed = parseStructuredValue(value);
-  return parsed ? JSON.stringify(parsed, null, 2) : "";
-}
-
 export function connectionNameOptions(document: MetadataEditorDocument | null) {
   const rows = document?.sheets.connections?.rows ?? [];
   return rows.map((row) => formatCellValue(row.name).trim()).filter(Boolean);
@@ -299,14 +231,16 @@ export function studioRoutingValues(document: MetadataEditorDocument | null) {
       __metadata_source_id: firstSource.source_id,
       __metadata_source_name: firstSource.name,
       __metadata_source_uri: firstSource.uri,
-      __metadata_source_kind: "metadata"
+      __metadata_source_kind: "metadata",
+      __metadata_source_read_only: firstSource.read_only ?? false
     };
   }
   return {
     __metadata_source_id: document?.source.source_id ?? null,
     __metadata_source_name: document?.source.name ?? sourceNameFromUri(document?.source.uri ?? ""),
     __metadata_source_uri: document?.source.uri ?? "",
-    __metadata_source_kind: "metadata"
+    __metadata_source_kind: "metadata",
+    __metadata_source_read_only: Boolean(document?.source.read_only)
   };
 }
 
@@ -314,6 +248,7 @@ export interface MetadataSourceOption {
   source_id: number;
   name: string;
   uri: string;
+  read_only: boolean;
   record_counts: Partial<Record<SheetKey, number>>;
 }
 
@@ -333,6 +268,7 @@ export function environmentMetadataSourceOptions(document: MetadataEditorDocumen
         source_id: sourceId,
         name,
         uri,
+        read_only: source.read_only === true,
         record_counts: {
           ...metadataRecordCounts(source.record_counts),
           ...(countsBySource.get(sourceId) ?? {})

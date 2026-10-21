@@ -1,6 +1,6 @@
-import type { JobRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import type { JobRecord, MonitoringMetric, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";import { ChildFanoutDistributionPanel, JobDurationByOperationBoxPlot, JobRunsTable, JobStageHealthPanel, JobWorkloadEfficiencyScatter, WorkloadEfficiencyLegend } from "./JobsPageSupport";
-import { CompactNumberValue, DetailMetric, DurationHeadline, HealthStripCard, LifecycleStatusValues, ReportChart, ReportPanel, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, durationIntent, durationPercentilesDetail, durationStatsTitle, formatPercent, formatTimestampForDisplay, jobStatusTrendOption, monitoringTimezone, successRateIntent } from "../components/monitoringPrimitives";
+import { CompactNumberValue, DetailMetric, DurationHeadline, HealthStripCard, LifecycleStatusValues, ReportChart, ReportPanel, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, durationIntent, durationPercentilesDetail, durationStatsTitle, formatPercent, formatTimestampForDisplay, jobStatusTrendOption, metricNumber, metricValue, monitoringTimezone, successRateIntent } from "../components/monitoringPresentation";
 
 export function JobsPage({
   report,
@@ -33,21 +33,23 @@ export function JobsPage({
 }) {
   const kpis = report.operations.kpis;
   const dataflowKpis = report.operations.dataflow_kpis;
-  const jobDurationStats = (report.operations.job_duration_stats ?? {}) as Record<string, number>;
+  const jobDurationStats = (report.operations.job_duration_stats ?? {}) as Record<string, MonitoringMetric>;
   const latestFailedJob = report.operations.latest_failed_job;
   const latestFailedTime = latestFailedJob ? String(latestFailedJob.end_time ?? latestFailedJob.start_time ?? "") : "";
   const durationByOperationRows = report.operations.job_duration_by_operation_types ?? [];
   const jobTrendRows = report.operations.jobs_by_date_status ?? [];
   const workloadEfficiencyRows = report.operations.job_workload_efficiency ?? [];
   const childFanoutRows = report.operations.job_child_fanout_distribution ?? [];
-  const last24Window = (report.operations.windows?.last_24_hours ?? {}) as Record<string, number>;
-  const last7Window = (report.operations.windows?.last_7_days ?? {}) as Record<string, number>;
-  const jobP50Duration = jobDurationStats.p50_duration_seconds ?? jobDurationStats.avg_duration_seconds ?? kpis.avg_duration_seconds ?? 0;
-  const jobP95Duration = jobDurationStats.p95_duration_seconds ?? kpis.p95_duration_seconds ?? 0;
-  const jobP99Duration = jobDurationStats.p99_duration_seconds ?? 0;
-  const jobExecutableRuns = (kpis.total_succeeded ?? 0) + (kpis.total_failures ?? 0);
-  const jobRateIntent = successRateIntent(kpis.job_success_rate ?? 0, kpis.job_failure_rate ?? 0, jobExecutableRuns);
-  const childMismatchCount = report.reconciliation.mismatch_count ?? 0;
+  const last24Window = (report.operations.windows?.last_24_hours ?? {}) as Record<string, unknown>;
+  const last7Window = (report.operations.windows?.last_7_days ?? {}) as Record<string, unknown>;
+  const metricOr = (row: Record<string, MonitoringMetric>, key: string, fallback: MonitoringMetric | undefined): MonitoringMetric | undefined => row[key] === undefined ? fallback : row[key];
+  const jobAvgDuration = metricOr(jobDurationStats, "avg_duration_seconds", kpis.avg_duration_seconds);
+  const jobP50Duration = metricOr(jobDurationStats, "p50_duration_seconds", jobAvgDuration);
+  const jobP95Duration = metricOr(jobDurationStats, "p95_duration_seconds", kpis.p95_duration_seconds);
+  const jobP99Duration = metricOr(jobDurationStats, "p99_duration_seconds", undefined);
+  const jobExecutableRuns = metricNumber(kpis.total_succeeded) + metricNumber(kpis.total_failures);
+  const jobRateIntent = successRateIntent(metricNumber(kpis.job_success_rate), metricNumber(kpis.job_failure_rate), jobExecutableRuns);
+  const childMismatchCount = report.reconciliation.mismatch_count;
   const jobStageRows = report.operations.job_status_by_stage ?? [];
   const timezoneName = monitoringTimezone(report);
   return (
@@ -55,14 +57,14 @@ export function JobsPage({
       <section className="overview-health-strip monitoring-job-health-strip">
         <HealthStripCard
           label="Job runs"
-          value={<CompactNumberValue value={kpis.total_jobs ?? 0} />}
+          value={<CompactNumberValue value={metricValue(kpis, "total_jobs")} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={<CompactNumberValue value={last24Window.job_runs ?? 0} />}
+              firstValue={<CompactNumberValue value={metricValue(last24Window, "job_runs")} />}
               firstTone="headline"
               secondLabel="7d"
-              secondValue={<CompactNumberValue value={last7Window.job_runs ?? 0} />}
+              secondValue={<CompactNumberValue value={metricValue(last7Window, "job_runs")} />}
               secondTone="headline"
             />
           }
@@ -70,15 +72,15 @@ export function JobsPage({
         />
         <HealthStripCard
           label="Execution rate"
-          value={`${formatPercent(kpis.job_success_rate ?? 0)} success`}
+          value={`${formatPercent(metricValue(kpis, "job_success_rate"))} success`}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={`${formatPercent(last24Window.job_success_rate ?? 0)}`}
-              firstTone={Number(last24Window.job_success_rate ?? 0) > 0 ? "good" : "warning"}
+              firstValue={`${formatPercent(metricValue(last24Window, "job_success_rate"))}`}
+              firstTone={metricNumber(metricValue(last24Window, "job_success_rate")) > 0 ? "good" : "warning"}
               secondLabel="7d"
-              secondValue={`${formatPercent(last7Window.job_success_rate ?? 0)}`}
-              secondTone={Number(last7Window.job_success_rate ?? 0) > 0 ? "good" : "warning"}
+              secondValue={`${formatPercent(metricValue(last7Window, "job_success_rate"))}`}
+              secondTone={metricNumber(metricValue(last7Window, "job_success_rate")) > 0 ? "good" : "warning"}
             />
           }
           intent={jobRateIntent}
@@ -88,28 +90,28 @@ export function JobsPage({
         />
         <HealthStripCard
           label="Failed jobs"
-          value={<CompactNumberValue value={kpis.total_failures ?? 0} />}
+          value={<CompactNumberValue value={metricValue(kpis, "total_failures")} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={<CompactNumberValue value={last24Window.job_failed ?? 0} />}
-              firstTone={Number(last24Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
+              firstValue={<CompactNumberValue value={metricValue(last24Window, "job_failed")} />}
+              firstTone={metricNumber(metricValue(last24Window, "job_failed")) > 0 ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={<CompactNumberValue value={last7Window.job_failed ?? 0} />}
-              secondTone={Number(last7Window.job_failed ?? 0) > 0 ? "bad" : "neutral"}
+              secondValue={<CompactNumberValue value={metricValue(last7Window, "job_failed")} />}
+              secondTone={metricNumber(metricValue(last7Window, "job_failed")) > 0 ? "bad" : "neutral"}
             />
           }
-          intent={(last24Window.job_failed ?? 0) || (last7Window.job_failed ?? 0) || (kpis.total_failures ?? 0) ? "bad" : "neutral"}
+          intent={metricNumber(metricValue(last24Window, "job_failed")) || metricNumber(metricValue(last7Window, "job_failed")) || metricNumber(metricValue(kpis, "total_failures")) ? "bad" : "neutral"}
           accent="intent"
           title={latestFailedTime ? `Latest failed job time: ${formatTimestampForDisplay(latestFailedTime, timezoneName)}` : "No failed jobs in current filters."}
         />
         <HealthStripCard
-          label="Skipped / Running / Pending"
+          label="Child flows: Skipped / Running / Pending"
           value={
             <LifecycleStatusValues
-              running={kpis.total_running ?? 0}
-              pending={kpis.total_pending ?? 0}
-              skipped={kpis.total_skipped ?? 0}
+              running={kpis.total_running}
+              pending={kpis.total_pending}
+              skipped={metricValue(kpis, "total_skipped")}
             />
           }
           detail={
@@ -117,51 +119,53 @@ export function JobsPage({
               firstLabel="24h"
               firstValue={
                 <LifecycleStatusValues
-                  running={last24Window.job_running ?? 0}
-                  pending={last24Window.job_pending ?? 0}
-                  skipped={last24Window.job_skipped ?? 0}
+              running={metricValue(last24Window, "job_running")}
+              pending={metricValue(last24Window, "job_pending")}
+              skipped={metricValue(last24Window, "job_skipped")}
                 />
               }
               firstTone="neutral"
               secondLabel="7d"
               secondValue={
                 <LifecycleStatusValues
-                  running={last7Window.job_running ?? 0}
-                  pending={last7Window.job_pending ?? 0}
-                  skipped={last7Window.job_skipped ?? 0}
+              running={metricValue(last7Window, "job_running")}
+              pending={metricValue(last7Window, "job_pending")}
+              skipped={metricValue(last7Window, "job_skipped")}
                 />
               }
               secondTone="neutral"
             />
           }
-          intent={(kpis.total_running ?? 0) || (kpis.total_pending ?? 0) ? "warning" : "neutral"}
+          intent={kpis.total_running == null || kpis.total_pending == null
+            ? "neutral"
+            : (metricNumber(kpis.total_running) || metricNumber(kpis.total_pending)) ? "warning" : "neutral"}
           accent="intent"
-          title="Child dataflow totals from job log fields: total_running / total_pending / total_skipped. These are not recalculated from dataflow logs."
+          title="Child dataflow totals from job log fields: total_running / total_pending / total_skipped. These are not recalculated from dataflow logs. A dash means the job log did not report that total; it is not an observed zero."
         />
         <HealthStripCard
           label="Job duration"
-          value={<DurationHeadline avgSeconds={jobDurationStats.avg_duration_seconds ?? kpis.avg_duration_seconds ?? 0} p50Seconds={jobP50Duration} />}
+          value={<DurationHeadline avgSeconds={jobAvgDuration} p50Seconds={jobP50Duration} />}
           detail={durationPercentilesDetail({
-            q3_duration_seconds: jobDurationStats.p75_duration_seconds ?? jobDurationStats.q3_duration_seconds ?? 0,
+            q3_duration_seconds: metricOr(jobDurationStats, "p75_duration_seconds", metricOr(jobDurationStats, "q3_duration_seconds", undefined)),
             p95_duration_seconds: jobP95Duration,
             p99_duration_seconds: jobP99Duration
           })}
-          intent={durationIntent(jobDurationStats, kpis.avg_duration_seconds ?? 0, kpis.p95_duration_seconds ?? 0)}
+          intent={durationIntent(jobDurationStats, metricNumber(kpis.avg_duration_seconds), metricNumber(kpis.p95_duration_seconds))}
           accent="intent"
           title={durationStatsTitle("Job duration", jobDurationStats)}
           className="overview-health-card-duration"
         />
         <HealthStripCard
           label="Dataflow impact"
-          value={<><CompactNumberValue value={dataflowKpis.failed ?? 0} /> failed / <CompactNumberValue value={dataflowKpis.total_dataflows ?? 0} /></>}
+          value={<><CompactNumberValue value={metricValue(dataflowKpis, "failed")} /> failed / <CompactNumberValue value={metricValue(dataflowKpis, "total_dataflows")} /></>}
           detail={
             <DetailMetric
               label="reconcile mismatch checks"
               value={<CompactNumberValue value={childMismatchCount} />}
-              tone={childMismatchCount ? "warning" : "neutral"}
+              tone={metricNumber(childMismatchCount) ? "warning" : "neutral"}
             />
           }
-          intent={(dataflowKpis.failed ?? 0) ? "bad" : childMismatchCount ? "warning" : "neutral"}
+          intent={metricNumber(dataflowKpis.failed) ? "bad" : metricNumber(childMismatchCount) ? "warning" : "neutral"}
           accent="intent"
           title="Dataflow impact is calculated from dataflow logs linked by job_id. Reconciliation mismatch checks compare job-log totals (total_dataflows, total_failed, total_skipped, total_succeeded) with child dataflow rollups by job_id."
         />
@@ -199,10 +203,10 @@ export function JobsPage({
           </ReportPanel>
           <ReportPanel
             title="Workload efficiency"
-            titleTooltip="Each point is a job_id + dataflow operation_type group. X is total dataflow runs, Y is total dataflow duration, color is operation_type, and point size is rows read divided by duration."
+            titleTooltip="Every operation type with positive duration is included, including maintenance and destination compact/cleanup operations. Each point is a job + operation group: X is dataflow runs, Y is total duration, and color is operation type. Pipeline point size uses rows read/second; maintenance point size uses bytes processed (added + removed)/second. Sizes are normalized within each unit, so compare only points using the same metric. For responsiveness, the chart shows the 500 longest groups plus one representative group per operation type."
             headerAction={<WorkloadEfficiencyLegend rows={workloadEfficiencyRows} />}
           >
-            <JobWorkloadEfficiencyScatter rows={workloadEfficiencyRows} onInspect={onInspect} />
+            <JobWorkloadEfficiencyScatter rows={workloadEfficiencyRows} />
           </ReportPanel>
           <ReportPanel
             title="Job fan-out distribution"

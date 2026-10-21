@@ -1,32 +1,30 @@
 import { Boxes, FilterX, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
-import type { AssetInventoryItem, AssetInventoryResponse, AssetReferenceGroupItem, MetadataEditorDocument } from "../../shared/api/domainTypes";
+import type { AssetInventoryItem, AssetInventoryResponse, AssetReferenceGroupItem, MetadataEditorDocument, MetadataWriteOperation } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
+import type { MetadataDataflowSelection } from "../../shared/metadata/metadataDataflowModel";
+import { useMetadataDataflowEditor } from "../../shared/metadata/useMetadataDataflowEditor";
+import { MetadataEditorLoadingDrawer } from "../dataflows/MetadataEditorLoadingDrawer";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import type { LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { connectionStageFamily } from "../../shared/connectionOrder";
-import { DataTable, formatNumber, type TableColumn, type TableSort } from "../monitoring/MonitoringCharts";
-import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
+import { DataTable, formatNumber, type TableColumn } from "../../shared/components/DataTable";
+import { LineageFormatIcon } from "../../shared/components/FormatIcon";
+import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../../shared/assetPresentation";
+import { assetFriendlyAlias, assetLocatorDetail } from "../../shared/assetNaming";
 import { MetadataDataflowDrawer } from "../dataflows/MetadataDataflowDrawer";
-import {
-  buildMetadataDataflowRecords,
-  findMetadataDataflowRecord,
-  isEditableMetadataDataflowRecord,
-  type MetadataDataflowSelection,
-  updateMetadataDataflowRow,
-} from "../dataflows/metadataDataflowModel";
-import { metadataSaveConfirmation } from "../metadata-explorer/metadataSaveConfirmation";
-import { MetadataSourceSaveConfirmationDialog } from "../metadata-explorer/MetadataSourceSaveConfirmationDialog";
-import { metadataQueryForAsset, presentAsset, presentReference, referenceConsumerTypeSummary, referenceContextLine, referenceProvenanceDescription, referenceProvenanceLabel, referenceProvenanceTone, referenceResolutionPresentation } from "./assetsPresentation";
-import { orderAssetsByConnection, orderReferencesByAction, RECOMMENDED_ASSET_SORT_KEY, RECOMMENDED_SORT, startsConnectionGroup, startsReferenceResolutionGroup } from "./assetsOrdering";
+import { MetadataSourceSaveConfirmationDialog } from "../../shared/metadata/MetadataSourceSaveConfirmationDialog";
+import { presentAsset, presentReference, referenceConsumerTypeSummary, referenceContextLine, referenceProvenanceDescription, referenceProvenanceLabel, referenceProvenanceTone, referenceResolutionPresentation } from "./assetsPresentation";
+import { orderAssetsByConnection, orderReferencesByAction, RECOMMENDED_ASSET_SORT_KEY, startsConnectionGroup, startsReferenceResolutionGroup } from "./assetsOrdering";
 import { AssetsDrawer } from "./AssetsDrawer";
 import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import { ReferenceMappingClearAction } from "../reference-mappings/ReferenceMappingClearAction";
 import { ReferenceDrawer } from "./ReferenceDrawer";
 import { useAssetsResources } from "./assetsQueries";
+import { useAssetsInventoryController } from "./useAssetsInventoryController";
+import { NEEDS_MAPPING_FILTER, useAssetsReferenceController } from "./useAssetsReferenceController";
 
 interface AssetsViewProps {
   environmentId: number;
@@ -34,9 +32,10 @@ interface AssetsViewProps {
   metadataEditorDraft: MetadataEditorDocument | null;
   onEnsureMetadataEditor: () => Promise<void>;
   metadataBusy: boolean;
-  onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  onPrepareMetadataWrite: (document: MetadataEditorDocument) => Promise<MetadataWriteOperation>;
+  onApplyMetadataWrite: (operation: MetadataWriteOperation) => Promise<MetadataEditorDocument>;
+  onAbandonMetadataWrite: (operation: MetadataWriteOperation) => Promise<MetadataWriteOperation>;
   routeSearch?: string;
   onFocusInLineage: (assetId: string) => void;
   onFocusDataflowInLineage: (target: LineageDataflowFocusTarget) => void;
@@ -51,38 +50,6 @@ type AssetsTab = "inventory" | "references";
 type AssetRow = AssetInventoryItem & Record<string, unknown>;
 type ReferenceRow = AssetReferenceGroupItem & Record<string, unknown>;
 
-interface AssetFilters {
-  connection: string;
-  format: string;
-  assetType: string;
-  role: string;
-  attentionState: string;
-  scope: string;
-}
-
-interface ReferenceFilters {
-  referenceType: string;
-  provenance: string;
-  resolutionState: string;
-  attentionState: string;
-}
-
-const EMPTY_ASSET_FILTERS: AssetFilters = {
-  connection: "",
-  format: "",
-  assetType: "",
-  role: "",
-  attentionState: "",
-  scope: "",
-};
-
-const EMPTY_REFERENCE_FILTERS: ReferenceFilters = {
-  referenceType: "",
-  provenance: "",
-  resolutionState: "",
-  attentionState: "",
-};
-
 const ASSETS_DRAWER_SEARCH_KEYS = [
   "assetId",
   "referenceId",
@@ -92,7 +59,6 @@ const ASSETS_DRAWER_SEARCH_KEYS = [
 ] as const;
 
 const ASSETS_DRAWER_HISTORY_KEY = "datacoolieAssetsDrawer";
-const NEEDS_MAPPING_FILTER = "unresolved";
 
 type AssetsDrawerHistoryState =
   | { kind: "asset"; assetTrail: string[]; depth: number }
@@ -195,9 +161,10 @@ export function AssetsView({
   metadataEditorDraft,
   onEnsureMetadataEditor,
   metadataBusy,
-  onValidateMetadata,
   onSaveMetadataDraft,
-  onSaveMetadata,
+  onPrepareMetadataWrite,
+  onApplyMetadataWrite,
+  onAbandonMetadataWrite,
   routeSearch,
   onFocusInLineage,
   onFocusDataflowInLineage,
@@ -208,42 +175,47 @@ export function AssetsView({
   onDeleteReferenceMapping,
 }: AssetsViewProps) {
   const [activeTab, setActiveTab] = useState<AssetsTab>("inventory");
-  const [assetQuery, setAssetQuery] = useState("");
-  const [referenceQuery, setReferenceQuery] = useState("");
-  const [assetFilters, setAssetFilters] = useState<AssetFilters>(EMPTY_ASSET_FILTERS);
-  const [referenceFilters, setReferenceFilters] = useState<ReferenceFilters>(EMPTY_REFERENCE_FILTERS);
-  const [assetSort, setAssetSort] = useState<TableSort>(RECOMMENDED_SORT);
-  const [referenceSort, setReferenceSort] = useState<TableSort>(RECOMMENDED_SORT);
+  const inventoryController = useAssetsInventoryController({
+    onActivateTab: () => setActiveTab("inventory"),
+  });
+  const referenceController = useAssetsReferenceController({
+    onActivateTab: () => setActiveTab("references"),
+  });
+  const {
+    query: assetQuery,
+    setQuery: setAssetQuery,
+    filters: assetFilters,
+    setFilters: setAssetFilters,
+    sort: assetSort,
+    parameters: inventoryParameters,
+    reset: resetAssetFilters,
+    handleSort: handleAssetSort,
+    showAll: showAllAssets,
+    showAttention: showAttentionAssets,
+  } = inventoryController;
+  const {
+    query: referenceQuery,
+    setQuery: setReferenceQuery,
+    filters: referenceFilters,
+    setFilters: setReferenceFilters,
+    sort: referenceSort,
+    parameters: referenceParameters,
+    selectedId: selectedReferenceId,
+    setSelectedId: setSelectedReferenceId,
+    drawerMode: referenceDrawerMode,
+    setDrawerMode: setReferenceDrawerMode,
+    clearId: clearReferenceId,
+    setClearId: setClearReferenceId,
+    actionError: referenceActionError,
+    reset: resetReferenceFilters,
+    handleSort: handleReferenceSort,
+    showNeedingMapping: showReferencesNeedingMapping,
+    showAttention: showAttentionReferences,
+    clearMapping: clearReferenceMapping,
+  } = referenceController;
   const [selectedAssetTrail, setSelectedAssetTrail] = useState<string[]>([]);
-  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
-  const [referenceDrawerMode, setReferenceDrawerMode] = useState<"details" | "mapping">("details");
-  const [clearReferenceId, setClearReferenceId] = useState<string | null>(null);
-  const [referenceActionError, setReferenceActionError] = useState<{ referenceId: string; message: string } | null>(null);
   const [selectedDataflow, setSelectedDataflow] = useState<MetadataDataflowSelection | null>(null);
-  const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
   const selectedAssetId = selectedAssetTrail.length ? selectedAssetTrail[selectedAssetTrail.length - 1] : null;
-  const debouncedAssetQuery = useDebouncedValue(assetQuery, 200);
-  const debouncedReferenceQuery = useDebouncedValue(referenceQuery, 200);
-  const inventoryParameters = useMemo(() => ({
-    q: debouncedAssetQuery.trim() || undefined,
-    connection: assetFilters.connection || undefined,
-    format: assetFilters.format || undefined,
-    asset_type: assetFilters.assetType || undefined,
-    role: assetFilters.role || undefined,
-    attention_state: assetFilters.attentionState || undefined,
-    scope: assetFilters.scope || undefined,
-    sort_by: assetSort.sortBy === "display_name" || assetSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? undefined : assetSort.sortBy,
-    sort_dir: assetSort.sortDir === "asc" ? undefined : assetSort.sortDir,
-  }), [assetFilters, assetSort, debouncedAssetQuery]);
-  const referenceParameters = useMemo(() => ({
-    q: debouncedReferenceQuery.trim() || undefined,
-    reference_type: referenceFilters.referenceType || undefined,
-    provenance: referenceFilters.provenance || undefined,
-    resolution_state: referenceFilters.resolutionState || undefined,
-    attention_state: referenceFilters.attentionState || undefined,
-    sort_by: referenceSort.sortBy === "display_name" || referenceSort.sortBy === RECOMMENDED_ASSET_SORT_KEY ? undefined : referenceSort.sortBy,
-    sort_dir: referenceSort.sortDir === "asc" ? undefined : referenceSort.sortDir,
-  }), [debouncedReferenceQuery, referenceFilters, referenceSort]);
   const resources = useAssetsResources({
     environmentId,
     activeTab,
@@ -251,6 +223,32 @@ export function AssetsView({
     referenceParameters,
     selectedAssetId,
     selectedReferenceId,
+  });
+
+  const {
+    activeDocument: activeMetadataDocument,
+    selectedRecord: selectedDataflowRecord,
+    selectedEditable: selectedDataflowEditable,
+    pendingDocument: pendingMetadataSave,
+    cancelSave: cancelMetadataSave,
+    saveConfirmation: sourceSaveConfirmation,
+    saveDraft: saveSelectedDataflowDraft,
+    save: saveSelectedDataflow,
+    confirmSave: confirmMetadataSave,
+    loading: editorLoading,
+    loadError: editorLoadError,
+    retryEditor,
+  } = useMetadataDataflowEditor({
+    environmentId,
+    sourceDocument: metadataEditorDocument,
+    draftDocument: metadataEditorDraft,
+    selection: selectedDataflow,
+    onEnsureEditor: onEnsureMetadataEditor,
+    onSaveDraft: onSaveMetadataDraft,
+    onPrepareSave: onPrepareMetadataWrite,
+    onApplySave: onApplyMetadataWrite,
+    onAbandonSave: onAbandonMetadataWrite,
+    onSaved: closeDataflowDrawer,
   });
 
   useEffect(() => {
@@ -319,76 +317,12 @@ export function AssetsView({
     ? (referenceDetail?.reference.id === selectedReferenceId ? referenceDetail.reference : referenceById.get(selectedReferenceId) ?? null)
     : null;
   const drawerAsset = assetDetail?.asset ?? selectedAsset;
-  const activeMetadataDocument = metadataEditorDraft ?? metadataEditorDocument;
-  const dataflowRecords = useMemo(
-    () => buildMetadataDataflowRecords(activeMetadataDocument),
-    [activeMetadataDocument],
-  );
-  const selectedDataflowRecord = useMemo(
-    () => findMetadataDataflowRecord(dataflowRecords, selectedDataflow),
-    [dataflowRecords, selectedDataflow],
-  );
-  const selectedDataflowEditable = isEditableMetadataDataflowRecord(activeMetadataDocument, selectedDataflowRecord);
-  const sourceSaveConfirmation = pendingMetadataSave ? metadataSaveConfirmation(metadataEditorDocument, pendingMetadataSave) : null;
   const searchMappingTargets = useCallback(async (query: string, connectionName: string) => (
     await resources.searchAssets({
       q: query.trim() || undefined,
       connection: connectionName || undefined,
     })
   ).items, [resources.searchAssets]);
-
-  useEffect(() => {
-    if (!selectedDataflow || activeMetadataDocument) return;
-    void onEnsureMetadataEditor();
-    // The workspace callback is intentionally excluded: drawer identity, not
-    // parent renders, controls this action-driven resource load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environmentId, selectedDataflow?.metadataSourceId, selectedDataflow?.rowIndex, selectedDataflow?.dataflowId, selectedDataflow?.name, activeMetadataDocument]);
-
-  function selectedDataflowDocument(nextRow: Record<string, unknown>) {
-    if (!activeMetadataDocument || !selectedDataflowRecord || !selectedDataflowEditable) return null;
-    return updateMetadataDataflowRow(activeMetadataDocument, selectedDataflowRecord.rowIndex, nextRow);
-  }
-
-  async function validateSelectedDataflow(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    try {
-      return await onValidateMetadata(nextDocument);
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function saveSelectedDataflowDraft(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    try {
-      return await onSaveMetadataDraft(nextDocument);
-    } catch {
-      return undefined;
-    }
-  }
-
-  function saveSelectedDataflow(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    setPendingMetadataSave(nextDocument);
-  }
-
-  async function confirmMetadataSave() {
-    if (!pendingMetadataSave) return;
-    try {
-      const saved = await onSaveMetadata(pendingMetadataSave);
-      if (saved) {
-        setPendingMetadataSave(null);
-        closeDataflowDrawer();
-      }
-      return saved;
-    } catch {
-      return undefined;
-    }
-  }
 
   const assetMetrics = useMemo(() => calculateAssetMetrics(inventory, references, assets?.summary), [inventory, references, assets?.summary]);
   // Pages already reflect the server query. Retain the previous page while a
@@ -574,7 +508,7 @@ export function AssetsView({
               <ReferenceMappingClearAction
                 confirming={clearReferenceId === reference.id}
                 disabled={Boolean(mappingBusy)}
-                onClear={() => void clearReferenceMapping(reference)}
+                onClear={() => void clearReferenceMapping(reference, onDeleteReferenceMapping, resources.refreshAfterMapping)}
                 onDismiss={() => setClearReferenceId(null)}
               />
             ) : null}
@@ -599,79 +533,12 @@ export function AssetsView({
     return <EmptyState icon={<Boxes size={24} />} title="Loading assets" />;
   }
 
-  function resetAssetFilters() {
-    setAssetQuery("");
-    setAssetFilters(EMPTY_ASSET_FILTERS);
-    setAssetSort(RECOMMENDED_SORT);
-  }
-
-  function resetReferenceFilters() {
-    setReferenceQuery("");
-    setReferenceFilters(EMPTY_REFERENCE_FILTERS);
-    setReferenceSort(RECOMMENDED_SORT);
-  }
-
-  function handleAssetSort(nextSort: TableSort) {
-    setAssetSort((current) => current.sortBy === RECOMMENDED_ASSET_SORT_KEY ? { ...nextSort, sortDir: "asc" } : nextSort);
-  }
-
-  function handleReferenceSort(nextSort: TableSort) {
-    setReferenceSort((current) => current.sortBy === RECOMMENDED_ASSET_SORT_KEY ? { ...nextSort, sortDir: "asc" } : nextSort);
-  }
-
   async function refreshAfterReferenceMapping() {
     await resources.refreshAfterMapping();
   }
 
-  async function clearReferenceMapping(reference: AssetReferenceGroupItem) {
-    const mappingId = reference.manual_mapping?.mapping_id;
-    if (!mappingId) return;
-    if (clearReferenceId !== reference.id) {
-      setClearReferenceId(reference.id);
-      setReferenceActionError(null);
-      return;
-    }
-    setReferenceActionError(null);
-    try {
-      await onDeleteReferenceMapping(mappingId);
-      await refreshAfterReferenceMapping();
-      setClearReferenceId(null);
-    } catch (error) {
-      setReferenceActionError({
-        referenceId: reference.id,
-        message: toErrorMessage(error) || "Mapping could not be cleared.",
-      });
-    }
-  }
-
-  function showAllAssets() {
-    setActiveTab("inventory");
-    setAssetQuery("");
-    setAssetFilters(EMPTY_ASSET_FILTERS);
-    setAssetSort(RECOMMENDED_SORT);
-  }
-
-  function showAttentionAssets() {
-    setActiveTab("inventory");
-    setAssetQuery("");
-    setAssetFilters({ ...EMPTY_ASSET_FILTERS, attentionState: "with_attention" });
-    setAssetSort(RECOMMENDED_SORT);
-  }
-
-  function showReferencesNeedingMapping() {
-    setActiveTab("references");
-    setReferenceQuery("");
-    setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, resolutionState: NEEDS_MAPPING_FILTER });
-    setReferenceSort(RECOMMENDED_SORT);
-  }
-
   function showAttentionItems() {
-    if (activeTab === "references") {
-      setReferenceQuery("");
-      setReferenceFilters({ ...EMPTY_REFERENCE_FILTERS, attentionState: "with_attention" });
-      setReferenceSort(RECOMMENDED_SORT);
-      return;
-    }
+    if (activeTab === "references") return showAttentionReferences();
     showAttentionAssets();
   }
 
@@ -960,7 +827,7 @@ export function AssetsView({
         )}
       </section>
 
-      {drawerAsset && selectedAssetId && !selectedDataflowRecord && !selectedReference ? (
+      {drawerAsset && selectedAssetId && !selectedDataflow && !selectedReference ? (
         <AssetsDrawer
           asset={drawerAsset}
           detail={assetDetail}
@@ -981,17 +848,19 @@ export function AssetsView({
         />
       ) : null}
 
+      {selectedDataflow && !selectedDataflowRecord ? <MetadataEditorLoadingDrawer loading={editorLoading} error={editorLoadError ?? (!editorLoading ? "The selected dataflow is no longer available." : null)} onRetry={retryEditor} onClose={closeDataflowDrawer} /> : null}
       {selectedDataflowRecord ? (
         <MetadataDataflowDrawer
           record={selectedDataflowRecord}
+          environmentId={environmentId}
+          pendingSqlFiles={activeMetadataDocument?.sql_files ?? []}
           editable={selectedDataflowEditable}
-          readOnly={Boolean(activeMetadataDocument?.source.read_only)}
+          readOnly={Boolean(activeMetadataDocument?.source.read_only) || Boolean(selectedDataflowRecord?.readOnly)}
           busy={metadataBusy}
           connectionRows={activeMetadataDocument?.sheets.connections?.rows ?? []}
           connectionColumns={activeMetadataDocument?.sheets.connections?.columns ?? []}
           onSave={saveSelectedDataflow}
           onSaveDraft={saveSelectedDataflowDraft}
-          onValidate={validateSelectedDataflow}
           onBack={backFromDataflowDrawer}
           onClose={closeDataflowDrawer}
           onFocusInLineage={(target) => {
@@ -1008,7 +877,7 @@ export function AssetsView({
         <MetadataSourceSaveConfirmationDialog
           busy={metadataBusy}
           confirmation={sourceSaveConfirmation}
-          onCancel={() => setPendingMetadataSave(null)}
+          onCancel={() => void cancelMetadataSave()}
           onConfirm={() => void confirmMetadataSave()}
         />
       ) : null}
@@ -1301,208 +1170,4 @@ function calculateAssetMetrics(assets: AssetInventoryItem[], references: AssetRe
 
 function referenceNeedsMapping(reference: AssetReferenceGroupItem) {
   return reference.resolution.state === "unresolved";
-}
-
-function assetFriendlyAlias(asset: AssetInventoryItem, fallback: string) {
-  if (asset.friendly_name?.trim()) return asset.friendly_name.trim();
-  if (asset.asset_type === "sql_query" || asset.query) return sqlQueryAlias(asset, fallback);
-  if (asset.asset_type === "python_function" || asset.python_function) return pythonFunctionAlias(asset, fallback);
-  if (asset.asset_type === "api") {
-    const endpointAlias = apiEndpointAlias(asset);
-    if (endpointAlias) return endpointAlias;
-  }
-  if (asset.asset_type === "table" && asset.table) return asset.table;
-  if (asset.asset_type === "path" && asset.path) return compactPath(asset.path);
-  if (asset.table) return asset.table;
-  if (asset.path) return compactPath(asset.path);
-  return asset.friendly_name || asset.display_name || fallback || asset.id;
-}
-
-function assetLocatorDetail(asset: AssetInventoryItem, alias: string) {
-  const hasAlias = usesFriendlyAlias(asset, alias);
-  if (asset.asset_type === "python_function" || asset.python_function) return functionContext(asset, alias, hasAlias);
-  if (asset.asset_type === "sql_query" || asset.query) return asset.query ? sqlQueryContext(asset.query) : "";
-  if (asset.asset_type === "api") {
-    const endpoint = apiEndpointLabel(asset);
-    if (endpoint) return hasAlias ? endpoint : apiEndpointContext(endpoint, alias);
-  }
-  if (asset.asset_type === "table" && asset.table) return tableContext(asset);
-  if (asset.asset_type === "path" && asset.path) return pathContext(asset.path, alias);
-  if (asset.table) return tableContext(asset);
-  if (asset.path) return pathContext(asset.path, alias);
-  return nonDuplicateText(asset.display_name || asset.full_identity || "", alias);
-}
-
-function tableContext(asset: AssetInventoryItem) {
-  return [asset.catalog, asset.database, asset.schema_name].filter(Boolean).join(".");
-}
-
-function apiEndpointAlias(asset: AssetInventoryItem) {
-  const endpoint = apiEndpointLabel(asset);
-  if (!endpoint) return null;
-  const withoutQuery = endpoint.split("?", 1)[0] || endpoint;
-  const parts = withoutQuery.split("/").filter(Boolean);
-  return parts.at(-1) || withoutQuery.replace(/^(GET|POST|PUT|PATCH|DELETE)\s+/iu, "") || null;
-}
-
-function apiEndpointLabel(asset: AssetInventoryItem) {
-  if (asset.asset_type !== "api") return null;
-  const identifiers = asset.identifiers ?? [];
-  const identifier = identifiers.find((item) => String(item.kind || "") === "api_endpoint") ?? identifiers[0];
-  const value = stringRecordValue(identifier, "display_value") || stringRecordValue(identifier, "normalized_value") || asset.display_name;
-  const match = value.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)/iu);
-  if (match) return `${match[1].toUpperCase()} ${compactUrlPath(match[2])}`;
-  return value || null;
-}
-
-function sqlQueryAlias(asset: AssetInventoryItem, fallback: string) {
-  const candidates = [asset.friendly_name, asset.display_name, fallback]
-    .map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value));
-  return candidates.find((value) => value.toLocaleLowerCase() !== "sql query") || "SQL query";
-}
-
-function pythonFunctionAlias(asset: AssetInventoryItem, fallback: string) {
-  const locator = functionLocator(asset);
-  if (locator) return locator.split(".").filter(Boolean).at(-1) || locator;
-  return asset.friendly_name || asset.display_name || fallback || asset.id;
-}
-
-function sqlQueryContext(query: string) {
-  const tables = sqlTables(query);
-  if (tables.length === 1) return `from ${tables[0]}`;
-  if (tables.length > 1) return `${tables[0]} + ${tables.length - 1} table${tables.length === 2 ? "" : "s"}`;
-  return compactSql(query);
-}
-
-function sqlTables(query: string | null | undefined) {
-  if (!query) return [];
-  const tables = Array.from(query.matchAll(/\b(?:from|join)\s+([`"[\]\w.-]+)/giu))
-    .map((match) => cleanSqlIdentifier(match[1]))
-    .filter((value): value is string => Boolean(value));
-  return Array.from(new Set(tables));
-}
-
-function firstSqlTable(query: string | null | undefined) {
-  if (!query) return null;
-  const match = query.match(/\b(?:from|join)\s+([`"[\]\w.-]+)/iu);
-  return cleanSqlIdentifier(match?.[1]);
-}
-
-function cleanSqlIdentifier(value: string | undefined) {
-  return value?.replace(/^[`"[]|[`"\]]$/gu, "") || null;
-}
-
-function compactSql(query: string) {
-  const table = firstSqlTable(query);
-  if (table) return `from ${table}`;
-  return normalizeWhitespace(query).slice(0, 80) || "sql query";
-}
-
-function compactPath(path: string) {
-  const normalized = normalizeSlashes(path).replace(/\/+$/u, "");
-  const parts = normalized.split("/").filter(Boolean);
-  if (parts.length >= 3) return parts.slice(-3).join("/");
-  return normalized || path;
-}
-
-function pathContext(path: string, alias: string) {
-  const normalized = normalizeSlashes(path).replace(/\/+$/u, "");
-  const normalizedAlias = normalizeSlashes(alias).replace(/\/+$/u, "");
-  if (!normalizedAlias) return compactPath(normalized);
-  if (normalized === normalizedAlias) return "";
-  if (!normalized.endsWith(normalizedAlias)) return nonDuplicateText(compactPath(normalized), alias);
-  const context = normalized.slice(0, -normalizedAlias.length).replace(/\/+$/u, "");
-  return context ? compactPath(context) : "";
-}
-
-function apiEndpointContext(endpoint: string, alias: string) {
-  const match = endpoint.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)/iu);
-  if (!match) return nonDuplicateText(endpoint, alias);
-  const method = match[1].toUpperCase();
-  const endpointPath = match[2].split("?", 1)[0]?.replace(/\/+$/u, "") || "";
-  const parts = endpointPath.split("/").filter(Boolean);
-  if (!parts.length) return method;
-  const parentPath = `/${parts.slice(0, -1).join("/")}`.replace(/\/$/u, "");
-  return parentPath ? `${method} ${parentPath}` : method;
-}
-
-function functionContext(asset: AssetInventoryItem, alias: string, showFull = false) {
-  const functionName = functionLocator(asset);
-  if (!functionName) return "python function";
-  if (showFull) return nonDuplicateText(functionName, alias) || "python function";
-  const parts = functionName.split(".").filter(Boolean);
-  if (parts.length <= 1) return "python function";
-  const parent = parts.slice(0, -1).join(".");
-  return nonDuplicateText(parent, alias) || "python function";
-}
-
-function functionLocator(asset: AssetInventoryItem) {
-  const candidates = [
-    asset.python_function,
-    asset.display_name,
-    asset.full_identity.split(" · ").at(-1),
-  ].filter((value): value is string => Boolean(value?.trim()));
-  return candidates.find((value) => value.split(".").filter(Boolean).length > 1) || candidates[0] || null;
-}
-
-function nonDuplicateText(value: string, alias: string) {
-  const normalizedValue = value.trim();
-  if (!normalizedValue) return "";
-  const normalizedAlias = alias.trim();
-  if (!normalizedAlias) return normalizedValue;
-  return normalizedValue.toLocaleLowerCase() === normalizedAlias.toLocaleLowerCase() ? "" : normalizedValue;
-}
-
-function usesFriendlyAlias(asset: AssetInventoryItem, title: string) {
-  const friendlyName = asset.friendly_name?.trim();
-  if (!friendlyName || friendlyName !== title.trim()) return false;
-  const expectedLeaf = technicalLeaf(asset);
-  return Boolean(expectedLeaf && friendlyName.toLocaleLowerCase() !== expectedLeaf.toLocaleLowerCase());
-}
-
-function technicalLeaf(asset: AssetInventoryItem) {
-  if (asset.asset_type === "python_function" || asset.python_function) {
-    const locator = functionLocator(asset);
-    return locator?.split(".").filter(Boolean).at(-1) || locator || null;
-  }
-  if (asset.asset_type === "sql_query" || asset.query) return "SQL query";
-  if (asset.asset_type === "api") return apiEndpointAlias(asset);
-  if (asset.asset_type === "table" && asset.table) return asset.table;
-  if (asset.asset_type === "path" && asset.path) return compactPath(asset.path);
-  if (asset.table) return asset.table;
-  if (asset.path) return compactPath(asset.path);
-  return null;
-}
-
-function normalizeWhitespace(value: string) {
-  return value.replace(/\s+/gu, " ").trim();
-}
-
-function compactUrlPath(value: string) {
-  try {
-    const url = new URL(value);
-    return `${url.pathname || "/"}${url.search || ""}`;
-  } catch {
-    return value;
-  }
-}
-
-function normalizeSlashes(value: string) {
-  return value.replace(/\\/g, "/");
-}
-
-function stringRecordValue(value: unknown, key: string) {
-  if (!value || typeof value !== "object") return null;
-  const field = (value as Record<string, unknown>)[key];
-  return typeof field === "string" && field.trim() ? field.trim() : null;
-}
-
-function useDebouncedValue<T>(value: T, delayMs: number) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebounced(value), delayMs);
-    return () => window.clearTimeout(timer);
-  }, [delayMs, value]);
-  return debounced;
 }

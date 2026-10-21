@@ -15,7 +15,7 @@ const freshness = {
     count: 2,
     pending_sync_count: 0,
   },
-  etl_logs: {
+  logs: {
     status: "not_cached",
     max_source_modified_at: "2026-08-18T12:00:00Z",
     cache_synced_at: "2026-08-18T11:58:00Z",
@@ -33,7 +33,7 @@ describe("ContextBar freshness", () => {
         project={{ id: 1, name: "Demo" }}
         environment={{ id: 2, name: "Dev" }}
         metadataSourceCount={2}
-        logPathCount={1}
+        logSourceCount={1}
         freshness={freshness}
         timezoneName="UTC"
         onProjectSelect={vi.fn()}
@@ -43,7 +43,7 @@ describe("ContextBar freshness", () => {
 
     expect(markup).toContain("Not synced");
     expect(markup).toContain("Source modified:");
-    expect(markup).toContain("Cache: 1 of 1 paths not synced");
+    expect(markup).toContain("Cache: 1 of 1 sources not synced");
     expect(markup).toContain("Cache: aligned");
   });
 });

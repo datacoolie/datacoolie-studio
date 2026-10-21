@@ -6,7 +6,11 @@ const structuralStaleTime = Number.POSITIVE_INFINITY;
 export const LINEAGE_RUN_HISTORY_PAGE_SIZE = 10;
 
 export const lineageQueryKeys = {
-  graph: (environmentId: number) => environmentQueryKeys.lineage(environmentId),
+  graph: (environmentId: number, includeDraft = false) => (
+    includeDraft
+      ? [...environmentQueryKeys.lineage(environmentId), "draft"] as const
+      : environmentQueryKeys.lineage(environmentId)
+  ),
   latestStatus: (environmentId: number) => (
     [...environmentQueryKeys.monitoring(environmentId), "latest-status"] as const
   ),
@@ -15,10 +19,10 @@ export const lineageQueryKeys = {
   ),
 };
 
-export function lineageGraphOptions(environmentId: number) {
+export function lineageGraphOptions(environmentId: number, includeDraft = false) {
   return queryOptions({
-    queryKey: lineageQueryKeys.graph(environmentId),
-    queryFn: () => api.getLineage(environmentId),
+    queryKey: lineageQueryKeys.graph(environmentId, includeDraft),
+    queryFn: ({ signal }) => api.getLineage(environmentId, includeDraft, signal),
     staleTime: structuralStaleTime,
   });
 }
@@ -26,7 +30,7 @@ export function lineageGraphOptions(environmentId: number) {
 export function lineageLatestStatusOptions(environmentId: number) {
   return queryOptions({
     queryKey: lineageQueryKeys.latestStatus(environmentId),
-    queryFn: () => api.getLatestStatus(environmentId),
+    queryFn: ({ signal }) => api.getLatestStatus(environmentId, signal),
     staleTime: structuralStaleTime,
   });
 }
@@ -35,15 +39,16 @@ export function lineageDataflowRunsOptions(environmentId: number, dataflowId: st
   return infiniteQueryOptions({
     queryKey: lineageQueryKeys.dataflowRuns(environmentId, dataflowId, dataflowName),
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => api.getMonitoringDataflows(environmentId, {
-        investigateKind: "dataflow",
+    queryFn: ({ pageParam, signal }) => api.getMonitoringDataflows(environmentId, {
+        investigateKind: "dataflow_id",
         investigateValue: dataflowId,
         range: "all",
+        log_session_scope: "all",
         limit: LINEAGE_RUN_HISTORY_PAGE_SIZE,
         offset: pageParam,
         sortBy: "start_time",
         sortDir: "desc",
-      }),
+      }, signal),
     getNextPageParam: (lastPage, pages) => {
       const loaded = pages.reduce((total, page) => total + page.records.length, 0);
       const total = lastPage.summary.total_records;
@@ -54,8 +59,8 @@ export function lineageDataflowRunsOptions(environmentId: number, dataflowId: st
   });
 }
 
-export function useLineageGraph(environmentId: number) {
-  return useQuery(lineageGraphOptions(environmentId));
+export function useLineageGraph(environmentId: number, includeDraft = false) {
+  return useQuery(lineageGraphOptions(environmentId, includeDraft));
 }
 
 export function useLineageLatestStatus(environmentId: number, enabled: boolean) {

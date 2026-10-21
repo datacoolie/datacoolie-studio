@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   SourcePath,
-  SourceSyncStatus,
 } from "../../shared/api/domainTypes";
+import type { SourceSyncStatus } from "../../shared/api/contractTypes";
 import { sourceKey } from "../../shared/lib/sources";
 import { SourcesPage } from "./SourcesPage";
 import { beginSourceOperations } from "./sourceWorkspaceModel";
@@ -24,13 +24,31 @@ const pausedStatus = {
   source_kind: "metadata",
   status: "error",
   message: "access denied",
-  error: { code: "storage_access_failed", message: "access denied" },
-  checked_at: "2026-07-30T12:00:00Z",
-  next_check_at: null,
-  observation_state: "paused",
-  observation_failure_count: 3,
-  observation_paused_at: "2026-07-30T12:00:00Z",
-  latest_job: null,
+  validation: {
+    state: "not_validated",
+    completed_at: null,
+    summary: null,
+    error: null,
+  },
+  observation: {
+    state: "paused",
+    checked_at: "2026-07-30T12:00:00Z",
+    next_check_at: null,
+    pending_changes: null,
+    failure_count: 3,
+    error: { code: "storage_access_failed", message: "access denied" },
+  },
+  sync_execution: {
+    state: "never",
+    trigger: null,
+    job_id: null,
+    started_at: null,
+    completed_at: null,
+    last_successful_at: null,
+    summary: null,
+    error: null,
+    result: null,
+  },
 } as SourceSyncStatus;
 
 function renderPausedSource(retrying = false) {
@@ -45,13 +63,15 @@ function renderPausedSource(retrying = false) {
   return renderToStaticMarkup(
     <SourcesPage
       metadataSources={[metadataSource]}
-      logPaths={[]}
+      sqlSources={[]}
+      logBasePaths={[]}
       codeArtifacts={[]}
       busy={false}
       selectedEnvironmentId={3}
       onImportMetadataSources={async () => null}
+      onAddSqlSource={async () => undefined}
       onImportDatacoolieProjectSources={async () => null}
-      onAddLogPath={async () => undefined}
+      onAddLogBasePath={async () => undefined}
       onAddCodeArtifact={async () => undefined}
       onUpdateSource={async () => undefined}
       onDeleteSource={async () => undefined}
@@ -89,5 +109,29 @@ describe("SourcesPage paused observation", () => {
     expect(markup).toContain("Retrying...");
     expect(markup).toContain('aria-busy="true"');
     expect(markup).toContain("disabled");
+  });
+
+  it("shows repeatable SQL/code fallback rows without implying comma-separated paths", () => {
+    const markup = renderPausedSource();
+
+    expect(markup).toContain("Project root");
+    expect(markup).toContain("Fallback folders");
+    expect(markup).toContain("SQL");
+    expect(markup).toContain("Source code");
+    expect(markup).not.toContain("Metadata fallback folder</strong>");
+    expect(markup).not.toContain("SQL fallback folders");
+    expect(markup).not.toContain("Source-code fallback folders");
+    expect(markup).toContain("Marker files may define multiple SQL/code folders.");
+    expect(markup).toContain('placeholder="metadata"');
+    expect(markup).toContain('placeholder="sql"');
+    expect(markup).toContain('placeholder="functions"');
+    expect(markup).toContain('aria-label="Metadata fallback folder (default: metadata)"');
+    expect(markup).toContain('aria-label="SQL fallback folder 1"');
+    expect(markup).toContain('aria-label="Source-code fallback folder 1"');
+    expect(markup).toContain("+Add");
+    expect(markup).not.toContain("sql1,sql2");
+    expect(markup).not.toContain("From marker");
+    expect(markup).not.toContain("Include metadata");
+    expect(markup).not.toContain("Include source code");
   });
 });

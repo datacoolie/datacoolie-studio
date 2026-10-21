@@ -1,15 +1,57 @@
+import { Help } from "../../../shared/components/Help";
 import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
-import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import { formatTimestampForDisplay } from "../../../shared/time";
-import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";import { CompactNumberValue, DataTable, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TableDateTimeValue, TablePager, baseChartOption, bottomAnchoredValueXAxis, formatBytes, formatBytesShort, formatCompact, formatNumber, formatPercent, formatSeconds, horizontalBarDataZoom, monitoringTimezone, normalizeTrendBucketKey, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys } from "../components/monitoringPrimitives";
-import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
+import type { TableSort } from "../../../shared/components/DataTable";
+import {
+  CompactNumberValue,
+  HealthStripCard,
+  ReportChart,
+  ReportPanel,
+  TablePager,
+  baseChartOption,
+  bottomAnchoredValueXAxis,
+  fixedHorizontalBarGrid,
+  fixedHorizontalAxisLabel,
+  formatBytesShort,
+  formatCompact,
+  formatTooltipBytes,
+  formatTooltipNumber,
+  formatNumber,
+  formatPercent,
+  formatSeconds,
+  horizontalBarDataZoom,
+  humanize,
+  metricNumber,
+  metricValue,
+  monitoringTimezone,
+  normalizeTrendBucketKey,
+  num,
+  reportChartPalette,
+  reportChartGrid,
+  resolveTrendBucketKeys,
+  toApproximateNumber,
+} from "../components/monitoringPresentation";
+import { scatterObservations } from "../components/monitoringObservation";
+import { compareMetricValues } from "../../../shared/lib/numberFormat";
+import { MaintenanceRegistryTable } from "./MaintenanceRegistryTable";
+import { maintenanceStatusOption } from "./maintenanceStatusChart";
+import { destinationHelpContent, presentDestination, presentDestinationRows } from "../destinationPresentation";
+import { chartDurationMetric, chartMetric, chartTooltip, firstChartParam } from "../components/chartTooltip";
 
-const MAINTENANCE_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
+const DESTINATION_STATUSES = ["succeeded", "failed", "skipped", "running", "pending", "unknown"] as const;
 type EfficiencyScaleMode = "linear" | "log";
+export type DestinationMetric = "rows" | "files" | "bytes";
+type DestinationEffect = "added" | "removed";
+type TrendMetric = "files" | "bytes";
+type DestinationReport = MonitoringReport["maintenance"] & Record<string, unknown>;
+type MetricDisplayState = {
+  value: ReturnType<typeof metricValue>;
+  observed: boolean;
+  measured: ReturnType<typeof metricValue>;
+  denominator: ReturnType<typeof metricValue>;
+};
 
 export function MaintenancePage({
   report,
@@ -23,9 +65,14 @@ export function MaintenancePage({
   offset,
   onPageChange,
   onPageSizeChange,
-  onInspect
+  onInspect,
+  timezoneName: timezoneNameProp,
+  reportState,
+  scrollResetKey,
+  tablePending,
+  tableError,
 }: {
-  report: MonitoringReport;
+  report?: MonitoringReport | null;
   filters: MonitoringFilters;
   rows: MonitoringRecord[];
   totalRows: number;
@@ -37,792 +84,528 @@ export function MaintenancePage({
   onPageChange: (offset: number) => void;
   onPageSizeChange: (limit: number) => void;
   onInspect?: (row: MonitoringRecord) => void;
+  timezoneName?: string | null;
+  reportState?: { loading: boolean; error: string | null; retry: () => void };
+  scrollResetKey?: string;
+  tablePending?: boolean;
+  tableError?: string | null;
 }) {
-  const kpis = report.maintenance.kpis ?? {};
-  const timezoneName = monitoringTimezone(report);
+  const maintenance = (report?.maintenance ?? {}) as DestinationReport;
+  const kpis = (maintenance.kpis ?? {}) as Record<string, unknown>;
+  const timezoneName = timezoneNameProp ?? (report ? monitoringTimezone(report) : null);
   const tableRows = rows;
-  const outcomeRows = (report.maintenance.table_outcome ?? []) as MonitoringRecord[];
-  const efficiencyRows = useMemo(
-    () => (report.maintenance.table_efficiency_points ?? []) as Array<Record<string, unknown>>,
-    [report.maintenance.table_efficiency_points]
-  );
-  const [efficiencyScale, setEfficiencyScale] = useState<EfficiencyScaleMode>(() => defaultMaintenanceEfficiencyScale(efficiencyRows));
+  const outcomeRows = useMemo(() => rowsFrom(maintenance.table_outcome), [maintenance.table_outcome]);
+  const efficiencyRows = useMemo(() => rowsFrom(maintenance.table_efficiency_points), [maintenance.table_efficiency_points]);
+  const maintenanceStatusRows = useMemo(() => rowsFrom(maintenance.maintenance_status_counts), [maintenance.maintenance_status_counts]);
+  const maintenanceStatusChart = useMemo(() => maintenanceStatusOption(maintenanceStatusRows), [maintenanceStatusRows]);
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>(() => defaultTrendMetric(maintenance));
+  const [outcomeMetric, setOutcomeMetric] = useState<DestinationMetric>(() => defaultDestinationMetric(outcomeRows, false));
+  const [outcomeEffect, setOutcomeEffect] = useState<DestinationEffect>(() => defaultDestinationEffect(outcomeRows, defaultDestinationMetric(outcomeRows, false), false));
+  const [efficiencyMetric, setEfficiencyMetric] = useState<DestinationMetric>(() => defaultDestinationMetric(efficiencyRows, true));
+  const [efficiencyEffect, setEfficiencyEffect] = useState<DestinationEffect>(() => defaultDestinationEffect(efficiencyRows, defaultDestinationMetric(efficiencyRows, true), true));
+  const [efficiencyScale, setEfficiencyScale] = useState<EfficiencyScaleMode>("linear");
+  const efficiencyObservations = useMemo(() => destinationEfficiencyObservations(efficiencyRows, efficiencyMetric, efficiencyEffect), [efficiencyRows, efficiencyMetric, efficiencyEffect]);
 
-  useEffect(() => {
-    setEfficiencyScale(defaultMaintenanceEfficiencyScale(efficiencyRows));
-  }, [efficiencyRows]);
+  useEffect(() => { setTrendMetric(defaultTrendMetric(maintenance)); }, [maintenance.reclaim_by_date, maintenance.bytes_reclaimed_by_date]);
+  useEffect(() => { const metric = defaultDestinationMetric(outcomeRows, false); setOutcomeMetric(metric); setOutcomeEffect(defaultDestinationEffect(outcomeRows, metric, false)); }, [outcomeRows]);
+  useEffect(() => { const metric = defaultDestinationMetric(efficiencyRows, true); setEfficiencyMetric(metric); setEfficiencyEffect(defaultDestinationEffect(efficiencyRows, metric, true)); }, [efficiencyRows]);
+  useEffect(() => { setEfficiencyScale(defaultEfficiencyScale(efficiencyRows, efficiencyMetric, efficiencyEffect)); }, [efficiencyRows, efficiencyMetric, efficiencyEffect]);
 
-  const health = String(kpis.health_status ?? "no_evidence");
-  const bytesReclaimed = Number(kpis.bytes_reclaimed ?? 0);
-  const durationSeconds = Number(kpis.duration_seconds ?? 0);
-  const coverageRate = Number(kpis.coverage_rate ?? 0);
-  const filesRemoved = Number(kpis.files_removed ?? 0);
-  const noOpRuntimeShare = Number(kpis.no_op_runtime_share ?? 0);
-  const laggedTables = Number(kpis.lagged_tables ?? 0);
-  const latestFailedTables = Number(kpis.latest_failed_tables ?? 0);
-  const lagWarningDays = Number(kpis.maintenance_lag_warning_days ?? 7);
+  if (!report) {
+    return <div className="monitoring-page monitoring-maintenance-report"><div className="table-empty" role="status">{reportState?.error ?? (reportState?.loading === false ? "No destination report" : "Loading destination report…")}</div></div>;
+  }
+
+  const destinationCount = firstMetric(kpis, "destination_count");
+  const resolvedDestinations = firstMetric(kpis, "resolved_destinations");
+  const unresolvedDestinations = firstMetric(kpis, "unresolved_binding_destinations");
+  const conflictingDestinations = firstMetric(kpis, "conflicting_destinations");
+  const activeDestinations = firstMetric(kpis, "active_destinations");
+  const totalDestinationNumber = toApproximateNumber(destinationCount);
+  const activeDestinationNumber = toApproximateNumber(activeDestinations);
+  const destinationsWithChangesRate = totalDestinationNumber !== null && totalDestinationNumber > 0 && activeDestinationNumber !== null
+    ? `${(activeDestinationNumber / totalDestinationNumber * 100).toFixed(1)}%`
+    : "-";
+  const destinationsWithFailures = firstMetric(kpis, "destinations_with_failures");
+  const failedDestinationNumber = toApproximateNumber(destinationsWithFailures);
+  const destinationsWithFailuresRate = totalDestinationNumber !== null && totalDestinationNumber > 0 && failedDestinationNumber !== null
+    ? `${(failedDestinationNumber / totalDestinationNumber * 100).toFixed(1)}%`
+    : "-";
+  const operationCount = firstMetric(kpis, "operation_count");
+  const operationTypes = rowsFrom(maintenance.operation_type_counts).map((row) => ({
+    label: row.operation_type === "etl" ? "ETL" : humanize(String(row.operation_type ?? "unknown")),
+    count: metricValue(row, "count"),
+  }));
+  const operationDetail = operationTypes.length ? operationTypes.map(({ label, count }, index) => <span key={label}>{index ? " · " : ""}{label} <b>{formatCompact(count)}</b></span>) : "-";
+  const operationTooltip = ["Operations by type in the current filters.", ...operationTypes.map(({ label, count }) => `${label}: ${formatTooltipNumber(count)}`)].join("\n");
+  const rowsWritten = metricDisplay(kpis, "workload_rows_written");
+  const filesWritten = metricDisplay(kpis, "workload_files_added");
+  const bytesWritten = metricDisplay(kpis, "workload_bytes_added");
+  const filesRemoved = metricDisplay(kpis, "workload_files_removed");
+  const bytesRemoved = metricDisplay(kpis, "workload_bytes_removed");
+  const avgRowsWritten = firstMetric(kpis, "workload_rows_written_avg_per_run");
+  const writtenIsPartial = [rowsWritten, filesWritten, filesRemoved, bytesWritten, bytesRemoved].some((state) => state.observed);
+  const filesTooltip = [
+    "Files added / removed in the current filters (in that order).",
+    `Added: ${formatTooltipNumber(filesWritten.value)}; coverage: ${formatTooltipNumber(filesWritten.measured)} / ${formatTooltipNumber(filesWritten.denominator)} runs.`,
+    `Removed: ${formatTooltipNumber(filesRemoved.value)}; coverage: ${formatTooltipNumber(filesRemoved.measured)} / ${formatTooltipNumber(filesRemoved.denominator)} runs.`,
+    "Reported root metrics, including all operation types. Missing measurements are excluded; recorded zero values are included.",
+  ].join("\n");
+  const bytesTooltip = [
+    "Bytes added / removed in the current filters (in that order).",
+    `Added: ${formatTooltipBytes(bytesWritten.value)}; coverage: ${formatTooltipNumber(bytesWritten.measured)} / ${formatTooltipNumber(bytesWritten.denominator)} runs.`,
+    `Removed: ${formatTooltipBytes(bytesRemoved.value)}; coverage: ${formatTooltipNumber(bytesRemoved.measured)} / ${formatTooltipNumber(bytesRemoved.denominator)} runs.`,
+    "Reported root metrics, including all operation types. Missing measurements are excluded; recorded zero values are included.",
+  ].join("\n");
+  const writtenTooltip = [
+    "Reported destination write workload in the current filters, including all operation types.",
+    writtenIsPartial ? "Observed subtotals: metric coverage is incomplete." : "Totals cover the recorded measurements in the current filters.",
+    "Line 2: total rows written - average rows written per measured run.",
+    "Line 3: files added / removed; bytes added / removed.",
+    `Rows total: ${formatTooltipNumber(rowsWritten.value)}; avg: ${formatTooltipNumber(avgRowsWritten)} per measured run.`,
+    `Rows coverage: ${formatTooltipNumber(rowsWritten.measured)} / ${formatTooltipNumber(rowsWritten.denominator)} runs.`,
+    filesTooltip,
+    bytesTooltip,
+    "Rows average divides by runs recording rows_written, including zero. Missing measurements are excluded.",
+  ].join("\n");
+  const lakehouseDestinations = firstMetric(kpis, "maintenance_lakehouse_destinations");
+  const successfullyMaintained = firstMetric(kpis, "maintenance_successful_destinations");
+  const maintenanceCoverage = toApproximateNumber(firstMetric(kpis, "maintenance_coverage_rate"));
+  const maintenanceTooltip = [
+    "Share of filtered Delta/Iceberg destinations with at least one successful maintenance.",
+    "Requires a non-dry-run job and a successful destination phase; no-change successes count.",
+    `Lakehouse destinations: ${formatTooltipNumber(lakehouseDestinations)}.`,
+    `With a maintenance attempt: ${formatTooltipNumber(firstMetric(kpis, "maintenance_attempted_destinations"))}.`,
+    `With successful maintenance: ${formatTooltipNumber(successfullyMaintained)}.`,
+    `No maintenance recorded: ${formatTooltipNumber(firstMetric(kpis, "maintenance_unrecorded_destinations"))}.`,
+    "Each destination is counted once. Only recorded Delta/Iceberg formats are included; unknown formats are excluded.",
+    "All counts honor the current filters. No recorded maintenance does not establish a storage issue.",
+  ].join("\n");
+  const failuresTone = metricNumber(destinationsWithFailures) > 0 ? "bad" : "neutral";
+  const reportError = reportState?.error;
 
   return (
     <div className="monitoring-page monitoring-maintenance-report">
-      <section className="overview-health-strip monitoring-maintenance-health-strip">
+      <section className="overview-health-strip monitoring-maintenance-health-strip monitoring-destination-kpi-strip">
         <HealthStripCard
-          label="Maintenance health"
-          value={maintenanceHealthLabel(health)}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label="failed" value={<CompactNumberValue value={latestFailedTables} />} tone={latestFailedTables ? "bad" : "neutral"} labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="missing" value={<CompactNumberValue value={Number(kpis.coverage_missing_tables ?? 0)} />} tone={Number(kpis.coverage_missing_tables ?? 0) ? "amber" : "neutral"} labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="lagged" value={<CompactNumberValue value={laggedTables} />} tone={laggedTables ? "amber" : "neutral"} labelFirst />
-            </span>
-          }
-          intent={maintenanceHealthIntent(health)}
-          accent="intent"
-          className="maintenance-kpi maintenance-kpi-health"
-          title={`Healthy when active lakehouse tables have maintenance coverage, no latest failed maintenance, and no maintenance lag over ${lagWarningDays} days. No-op maintenance is an optimization signal, not a health rule.`}
+          label="Destinations"
+          value={<CompactNumberValue value={destinationCount} />}
+          detail={<span className="health-rate-detail">
+            <Help as="span" title="Resolved: enough address and connection information to identify the destination."><b className="destination-identity-count is-resolved">{formatTooltipNumber(resolvedDestinations)}</b> resolved</Help>
+            <span className="separator"> · </span>
+            <Help as="span" title="Unresolved: destination recorded, but its address or connection binding is incomplete or weak."><b className="destination-identity-count is-unresolved">{formatTooltipNumber(unresolvedDestinations)}</b> unresolved</Help>
+            <span className="separator"> · </span>
+            <Help as="span" title="Conflicts: logs and metadata disagree, or multiple destination bindings match."><b className="destination-identity-count is-conflict">{formatTooltipNumber(conflictingDestinations)}</b> conflicts</Help>
+          </span>}
+          title={"Destinations recorded in the current filters.\nResolved: destination identity is sufficiently bound.\nUnresolved: address or connection binding is incomplete or weak.\nConflicts: logs and metadata disagree, or multiple bindings match."}
+          className="maintenance-kpi maintenance-kpi-destinations"
         />
         <HealthStripCard
-          label="Maintenance runs"
-          value={<CompactNumberValue value={Number(kpis.total_maintenance_runs ?? 0)} />}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label="S" value={<CompactNumberValue value={Number(kpis.succeeded_ops ?? 0)} />} tone="good" labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="F" value={<CompactNumberValue value={Number(kpis.failed_ops ?? 0)} />} tone={Number(kpis.failed_ops ?? 0) ? "bad" : "neutral"} labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="Skip" value={<CompactNumberValue value={Number(kpis.skipped_ops ?? 0)} />} tone={Number(kpis.skipped_ops ?? 0) ? "amber" : "neutral"} labelFirst />
-            </span>
-          }
-          intent={Number(kpis.failed_ops ?? 0) ? "bad" : Number(kpis.skipped_ops ?? 0) ? "warning" : "neutral"}
-          accent="intent"
-          className="maintenance-kpi maintenance-kpi-runs"
-          title="Maintenance run counts are dataflow run records identified by operation_type=maintenance or compact/cleanup destination operation fallback."
+          label="Destinations with changes"
+          value={<CompactNumberValue value={activeDestinations} />}
+          detail={<Help as="span" title="Share of destinations with recorded changes in the current filters."><b>{destinationsWithChangesRate}</b> of destinations</Help>}
+          title={"Destinations with at least one recorded change in the current filters.\nRequires a non-dry-run job and a successful destination phase.\nAt least one rows written/inserted/updated/deleted, files added/removed, or bytes added/removed value must be greater than zero.\nIncludes ETL and maintenance; each destination is counted once."}
+          accent="storage"
+          className="maintenance-kpi maintenance-kpi-active-destinations"
         />
         <HealthStripCard
-          label="Maintained tables"
-          value={<><CompactNumberValue value={Number(kpis.maintained_tables ?? 0)} /> / <CompactNumberValue value={Number(kpis.active_lakehouse_tables ?? 0)} /></>}
-          detail={<DetailMetric label="coverage" value={formatPercent(coverageRate)} tone={coverageRate >= 95 ? "good" : Number(kpis.active_lakehouse_tables ?? 0) ? "amber" : "neutral"} labelFirst />}
-          intent={Number(kpis.coverage_missing_tables ?? 0) ? "warning" : Number(kpis.active_lakehouse_tables ?? 0) ? "good" : "neutral"}
-          accent="intent"
+          label="Destinations with failures"
+          value={<CompactNumberValue value={destinationsWithFailures} />}
+          detail={<Help as="span" title="Share of destinations with at least one destination phase failure in the current filters."><b>{destinationsWithFailuresRate}</b> of destinations</Help>}
+          intent={failuresTone}
+          title="Destinations with at least one failed destination phase in the current filters. A later success does not erase historical failures."
+          className="maintenance-kpi maintenance-kpi-failed-destinations"
+        />
+        <HealthStripCard
+          label="Operations"
+          value={<CompactNumberValue value={operationCount} />}
+          detail={<Help as="span" title={operationTooltip}>{operationDetail}</Help>}
+          title={operationTooltip}
+          className="maintenance-kpi maintenance-kpi-operations"
+        />
+        <HealthStripCard
+          label="Written"
+          value={<Help as="span" className="destination-written-kpi-total" title={writtenTooltip}><b>{formatCompact(rowsWritten.value)}</b> r <span className="separator">–</span> Avg <b>{formatCompact(avgRowsWritten)}</b> r</Help>}
+          detail={<span className="destination-written-kpi-effects"><Help as="span" title={filesTooltip}>Files <b>{formatCompact(filesWritten.value)}</b> / <b>{formatCompact(filesRemoved.value)}</b></Help> <span className="separator">·</span> <Help as="span" title={bytesTooltip}>Bytes <b>{writtenBytesLabel(bytesWritten.value)}</b> / <b>{writtenBytesLabel(bytesRemoved.value)}</b></Help></span>}
+          accent="storage"
+          title={writtenTooltip}
+          className="maintenance-kpi maintenance-kpi-written"
+        />
+        <HealthStripCard
+          label="Maintenance coverage"
+          value={maintenanceCoverage === null ? "—" : `${maintenanceCoverage.toFixed(1)}%`}
+          detail={<Help as="span" title={maintenanceTooltip}><b>{formatTooltipNumber(successfullyMaintained)}</b> / <b>{formatTooltipNumber(lakehouseDestinations)}</b> lakehouse</Help>}
+          title={maintenanceTooltip}
           className="maintenance-kpi maintenance-kpi-coverage"
-          title="Coverage = maintained active lakehouse tables / active lakehouse tables. Active lakehouse table means ETL wrote rows, files, or bytes to Delta/Iceberg-like destinations in current filters."
-        />
-        <HealthStripCard
-          label="Tables with reclaim"
-          value={<CompactNumberValue value={Number(kpis.tables_with_reclaim ?? 0)} />}
-          detail={<DetailMetric label="no-op runtime" value={formatPercent(noOpRuntimeShare)} tone={noOpRuntimeShare ? "amber" : "neutral"} labelFirst />}
-          intent="neutral"
-          accent="storage"
-          className="maintenance-kpi maintenance-kpi-reclaim-tables"
-          title="Tables with reclaim have positive bytes removed or files removed. No-op runtime is the share of successful maintenance duration spent on runs that removed 0 bytes and 0 files."
-        />
-        <HealthStripCard
-          label="Bytes reclaimed"
-          value={formatBytes(bytesReclaimed)}
-          detail={<DetailMetric label="saved" value={formatBytes(Number(kpis.bytes_saved ?? 0))} tone="blue" labelFirst />}
-          intent="neutral"
-          accent="storage"
-          className="maintenance-kpi maintenance-kpi-bytes"
-          title="Observed maintenance storage evidence: sum of destination_bytes_removed. Bytes saved uses destination_bytes_saved when available."
-        />
-        <HealthStripCard
-          label="Files removed"
-          value={<CompactNumberValue value={filesRemoved} />}
-          detail={<DetailMetric label="avg bytes/file" value={formatBytes(Number(kpis.avg_bytes_per_file_removed ?? 0))} tone="neutral" labelFirst />}
-          intent="neutral"
-          accent="neutral"
-          className="maintenance-kpi maintenance-kpi-files"
-          title="Files removed is destination_files_removed. Average bytes per removed file = bytes reclaimed / files removed."
         />
       </section>
 
-      <div className="monitoring-maintenance-content report-layout-table-heavy-3">
+      {reportError ? <div className="monitoring-report-error" role="alert">{reportError}</div> : null}
+
+      <div className="monitoring-maintenance-content monitoring-equal-rows-3">
         <section className="monitoring-maintenance-primary-grid">
           <ReportPanel
-            title="Maintenance status trend"
+            title="Destination activity"
             className="monitoring-maintenance-status-trend-panel"
-            titleTooltip="Stacked maintenance run counts by time bucket. Empty buckets are filled with zero using the current time grain."
-            headerAction={<MaintenanceStatusLegend />}
+            titleTooltip="All filtered destination operations by time bucket. Lifecycle status counts are kept separate."
+            headerAction={<DestinationStatusLegend />}
           >
-            <ReportChart
-              option={maintenanceStatusTrendOption(report, filters, timezoneName)}
-              height="100%"
-            />
+            <ReportChart option={destinationStatusTrendOption(report, filters, timezoneName ?? "UTC")} height="100%" />
           </ReportPanel>
           <ReportPanel
-            title="Storage reclaimed trend"
+            title="Added / removed trend"
             className="monitoring-maintenance-reclaim-trend-panel"
-            titleTooltip="Bars show observed bytes reclaimed. Line shows files removed. Tooltips separate bytes and files."
-            headerAction={<MaintenanceReclaimLegend />}
+            titleTooltip="Filtered recorded destination effects. Select files or bytes; added and removed values remain distinct."
+            headerAction={<DestinationMetricToggle value={trendMetric} onChange={setTrendMetric} label="Trend metric" metrics={["files", "bytes"]} />}
           >
-            <ReportChart
-              option={maintenanceReclaimTrendOption(report, filters, timezoneName)}
-              height="100%"
-            />
+            <ReportChart option={destinationChangeTrendOption(report, filters, timezoneName ?? "UTC", trendMetric)} height="100%" />
           </ReportPanel>
         </section>
 
         <section className="monitoring-maintenance-secondary-grid">
           <ReportPanel
-            title="Reclaim by destination table"
-            titleTooltip="One row per destination target, sorted by attention priority, reclaimed bytes, then latest evidence."
+            title="Top destinations"
+            className="monitoring-maintenance-top-destinations-panel"
+            titleTooltip="Metric candidates are ranked before the chart limit. Files and bytes include added and removed recorded effects."
+            headerAction={<div className="monitoring-destination-chart-actions"><DestinationMetricToggle value={outcomeMetric} onChange={(metric) => { setOutcomeMetric(metric); if (metric === "rows") setOutcomeEffect("added"); }} label="Top destination metric" metrics={["rows", "files", "bytes"]} /><DestinationEffectToggle metric={outcomeMetric} value={outcomeEffect} onChange={setOutcomeEffect} label="Top destination effect" /></div>}
           >
-            <ReportChart
-              option={maintenanceTableOutcomeOption(outcomeRows)}
-              height="100%"
-              wheelDataZoomStep={1}
-            />
+            <ReportChart option={destinationOutcomeOption(outcomeRows, outcomeMetric, outcomeEffect)} height="100%" wheelDataZoomStep={1} />
           </ReportPanel>
           <ReportPanel
-            title="Table efficiency map"
-            className="monitoring-maintenance-efficiency-panel"
-            titleTooltip="Each point is a destination table. X = bytes reclaimed, Y = total maintenance duration, size = maintenance run count, color = table health. Log scale keeps zero, small, and large reclaim values visible together; tooltips always show raw values."
-            headerAction={
-              <div className="monitoring-maintenance-efficiency-actions">
-                <MaintenanceHealthLegend />
-                <MaintenanceEfficiencyScaleToggle value={efficiencyScale} onChange={setEfficiencyScale} />
-              </div>
-            }
+            title="Maintenance status"
+            subtitle={<><CompactNumberValue value={lakehouseDestinations} /> lakehouse</>}
+            className="monitoring-maintenance-status-panel"
+            titleTooltip={"Unique Delta/Iceberg destinations by their latest maintenance within the current filters.\nCoverage KPI counts any successful maintenance in the period; this chart shows the latest outcome.\nDry-run and unconfirmed successes remain separate. No maintenance recorded does not establish a storage issue."}
           >
-            <ReportChart
-              option={maintenanceEfficiencyOption(efficiencyRows, efficiencyScale)}
-              height="100%"
-            />
+            <ReportChart option={maintenanceStatusChart} height="100%" wheelDataZoomStep={1} />
+          </ReportPanel>
+          <ReportPanel
+            title="Destination efficiency"
+            subtitle={<Help as="span" title={`Eligible operations with paired ${efficiencyLabel(efficiencyMetric, efficiencyEffect)} and root runtime evidence. Up to 800 destinations.`}>{efficiencyObservations.points.length} destinations</Help>}
+            className="monitoring-maintenance-efficiency-panel"
+            titleTooltip="Each point pairs an authoritative root effect with root operation runtime. Final destination phase runtime remains a separate detail."
+            headerAction={<div className="monitoring-maintenance-efficiency-actions"><DestinationMetricToggle value={efficiencyMetric} onChange={(metric) => { setEfficiencyMetric(metric); if (metric === "rows") setEfficiencyEffect("added"); }} label="Efficiency metric" metrics={["rows", "files", "bytes"]} /><DestinationEffectToggle metric={efficiencyMetric} value={efficiencyEffect} onChange={setEfficiencyEffect} label="Efficiency effect" /><EfficiencyScaleToggle value={efficiencyScale} onChange={setEfficiencyScale} /></div>}
+          >
+            <ReportChart option={maintenanceEfficiencyOption(efficiencyRows, efficiencyScale, efficiencyMetric, efficiencyEffect)} height="100%" />
           </ReportPanel>
         </section>
 
         <ReportPanel
-          title="Destination table maintenance registry"
-          subtitle={<><CompactNumberValue value={totalRows} /> destinations · attention first</>}
+          title="Destination registry"
+          subtitle={<><CompactNumberValue value={totalRows} /> destinations{sort.sortBy === "attention_priority" && sort.sortDir === "desc" ? " · signals first" : ""}</>}
           className="monitoring-maintenance-runs-panel"
-          titleTooltip="One row per destination table or destination asset. Dataflow maintenance runs are evidence behind the table-level health."
-          headerAction={
-            <TablePager
-              limit={limit}
-              offset={offset}
-              loadedRows={tableRows.length}
-              totalRows={totalRows}
-              loading={loading}
-              onPageChange={onPageChange}
-              onPageSizeChange={onPageSizeChange}
-            />
-          }
+          titleTooltip="One row per physical destination object. Lifecycle, effects and maintenance evidence follow the current filters."
+          headerAction={<TablePager limit={limit} offset={offset} loadedRows={tableRows.length} totalRows={totalRows} loading={loading || Boolean(tablePending)} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />}
         >
-          <MaintenanceRegistryTable rows={tableRows} sort={sort} onSort={onSort} timezoneName={timezoneName} onInspect={onInspect} />
+          {tableError ? <div className="monitoring-report-error" role="alert">{tableError}</div> : null}
+          {tablePending && !tableRows.length ? <div className="table-empty" role="status">Loading destination registry…</div> : <MaintenanceRegistryTable rows={tableRows} sort={sort} onSort={onSort} timezoneName={timezoneName} onInspect={onInspect} scrollResetKey={scrollResetKey ?? `${offset}:${sort.sortBy}:${sort.sortDir}`} />}
         </ReportPanel>
       </div>
     </div>
   );
 }
 
-function MaintenanceStatusLegend() {
-  return <MaintenanceChartLegend label="Maintenance status legend" items={MAINTENANCE_STATUSES.map((status) => [statusLabel(status), statusColor(status)] as const)} />;
+function rowsFrom(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object") : [];
 }
 
-function MaintenanceReclaimLegend() {
-  return <MaintenanceChartLegend label="Storage reclaimed legend" items={[
-    ["Bytes reclaimed", reportChartPalette.teal],
-    ["Files removed", reportChartPalette.blue],
-  ]} />;
+function firstMetric(row: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = metricValue(row, key);
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return null;
 }
 
-function MaintenanceHealthLegend() {
-  return <MaintenanceChartLegend label="Table health legend" items={[
-    ["Healthy", maintenanceTableHealthColor("healthy")],
-    ["Warning", maintenanceTableHealthColor("warning")],
-    ["Issues", maintenanceTableHealthColor("has_issues")],
-    ["No evidence", maintenanceTableHealthColor("no_evidence")],
-  ]} />;
+function metricDisplay(row: Record<string, unknown>, key: string): MetricDisplayState {
+  const exact = metricValue(row, key);
+  const observedValue = metricValue(row, `${key}_observed`);
+  const measured = metricValue(row, `${key}_measured_runs`);
+  const denominator = metricValue(row, "operation_count");
+  const value = exact ?? observedValue;
+  const observed = value != null && (exact == null
+    || (measured != null && denominator != null && compareMetricValues(measured, denominator) < 0));
+  return { value, observed, measured, denominator };
 }
 
-function MaintenanceChartLegend({ label, items }: { label: string; items: ReadonlyArray<readonly [string, string]> }) {
-  return (
-    <div className="monitoring-maintenance-chart-legend" aria-label={label}>
-      {items.map(([itemLabel, color]) => (
-        <span key={itemLabel}><i style={{ backgroundColor: color }} aria-hidden="true" />{itemLabel}</span>
-      ))}
-    </div>
-  );
+function writtenBytesLabel(value: ReturnType<typeof metricValue>) {
+  const label = formatBytesShort(value);
+  return label === "0" ? "0 B" : label.replace(/([A-Z]+)$/u, " $1");
 }
 
-function MaintenanceEfficiencyScaleToggle({
-  value,
-  onChange
-}: {
-  value: EfficiencyScaleMode;
-  onChange: (value: EfficiencyScaleMode) => void;
-}) {
-  return (
-    <div
-      className="segmented-control performance-scale-toggle"
-      role="group"
-      aria-label="Table efficiency scale"
-      title="Linear shows raw axis spacing. Log keeps zero, small, and very large reclaimed values visible together; tooltip values remain raw."
-    >
-      <button
-        type="button"
-        className={value === "linear" ? "active" : ""}
-        aria-pressed={value === "linear"}
-        onClick={() => onChange("linear")}
-      >
-        Linear
-      </button>
-      <button
-        type="button"
-        className={value === "log" ? "active" : ""}
-        aria-pressed={value === "log"}
-        onClick={() => onChange("log")}
-      >
-        Log
-      </button>
-    </div>
-  );
-}
-
-function MaintenanceRegistryTable({
-  rows,
-  sort,
-  onSort,
-  timezoneName,
-  onInspect
-}: {
-  rows: MonitoringRecord[];
-  sort: TableSort;
-  onSort: (sort: TableSort) => void;
-  timezoneName?: string | null;
-  onInspect?: (row: MonitoringRecord) => void;
-}) {
-  return (
-    <DataTable<MonitoringRecord>
-      rows={rows}
-      compactNumbers
-      columns={[
-        { key: "target", label: "Destination table", sortable: true, minWidth: 180, fillPriority: "last", render: (row) => <MaintenanceTargetCell row={row} /> },
-        { key: "table_health", label: "Health", sortable: true, autoFit: true, minWidth: 86, maxWidth: 112, render: (row) => <MaintenanceTableHealthCell row={row} />, measureValue: (row) => maintenanceTableHealthLabel(String(row.table_health ?? row.status ?? "unknown")) },
-        { key: "latest_maintenance_time", label: "Latest maintenance", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_maintenance_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_maintenance_time, activeTimezone, "-") },
-        { key: "latest_etl_write_time", label: "Latest ETL", sortable: true, autoFit: true, minWidth: 144, maxWidth: 190, render: (row) => <TableDateTimeValue value={row.latest_etl_write_time} timezoneName={timezoneName} />, measureValue: (row, activeTimezone) => formatTimestampForDisplay(row.latest_etl_write_time, activeTimezone, "-") },
-        { key: "maintenance_lag_seconds", label: "Lag", sortable: true, autoFit: true, minWidth: 64, maxWidth: 88, render: (row) => <MaintenanceLagCell row={row} />, measureValue: (row) => formatMaintenanceLag(num(row, "maintenance_lag_seconds")) },
-        { key: "bytes_reclaimed", label: "Reclaim", sortable: true, autoFit: true, minWidth: 82, maxWidth: 124, render: (row) => <MaintenanceReclaimCell row={row} />, measureValue: (row) => maintenanceReclaimLines(row) },
-        { key: "bytes_reclaimed_per_second", label: "Efficiency", sortable: true, autoFit: true, minWidth: 86, maxWidth: 132, render: (row) => <MaintenanceEfficiencyCell row={row} />, measureValue: (row) => maintenanceEfficiencyLines(row) },
-        { key: "no_op_runs", label: "No-op", sortable: true, autoFit: true, minWidth: 68, maxWidth: 108, render: (row) => <MaintenanceNoOpCell row={row} />, measureValue: (row) => maintenanceNoOpLines(row) },
-        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 72, maxWidth: 108, render: (row) => <MaintenanceRunsCell row={row} />, measureValue: (row) => maintenanceRunLines(row) },
-        { key: "attention_reason", label: "Attention", minWidth: 140, fillPriority: "last", render: (row) => <MaintenanceReasonCell row={row} /> }
-      ]}
-      maxRows={rows.length}
-      sort={sort}
-      onSort={onSort}
-      onRowClick={onInspect}
-      timezoneName={timezoneName}
-      className="monitoring-maintenance-table"
-      rowClassName={(row) => maintenanceStageClass(row) || undefined}
-      fixedLayout
-    />
-  );
-}
-
-function MaintenanceTargetCell({ row }: { row: MonitoringRecord }) {
-  const targetIdentity = String(row.target ?? row.table ?? row.destination_table ?? row.destination_path ?? "unknown");
-  const target = String(row.target_display ?? targetIdentity);
-  const format = String(row.destination_format ?? row.format ?? row.destination_connection_type ?? "table");
-  const meta = [row.destination_name ?? row.destination_connection_name, row.destination_connection_type].filter(Boolean).join(" · ");
-  const stageClass = maintenanceStageClass(row);
-  return (
-    <span className={["monitor-endpoint-cell", stageClass].filter(Boolean).join(" ")} title={`Target: ${targetIdentity}\n${meta}`}>
-      <span className="monitor-endpoint-icon">
-        <LineageFormatIcon kind={maintenanceFormatIconKind(format)} label={format} size={18} />
-      </span>
-      <span className="monitor-endpoint-text">
-        <strong>{target}</strong>
-        <small>{meta || "destination asset"}</small>
-      </span>
-    </span>
-  );
-}
-
-function maintenanceStageClass(row: MonitoringRecord) {
-  return monitoringConnectionStageClass(row.destination_name ?? row.destination_connection_name);
-}
-
-function MaintenanceTableHealthCell({ row }: { row: MonitoringRecord }) {
-  const health = String(row.table_health ?? row.status ?? "unknown");
-  const reason = String(row.attention_reason ?? "");
-  return (
-    <span className={`maintenance-table-health-chip ${maintenanceTableHealthClass(health)}`} title={reason || health}>
-      {maintenanceTableHealthLabel(health)}
-    </span>
-  );
-}
-
-function MaintenanceReclaimCell({ row }: { row: MonitoringRecord }) {
-  const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
-  const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
-  return (
-    <span className="monitor-stack-cell maintenance-reclaim-cell" title={`Bytes reclaimed: ${formatBytes(bytes)}\nFiles removed: ${formatNumber(files)}`}>
-      <strong>{formatBytes(bytes)}</strong>
-      <small><CompactNumberValue value={files} /> files</small>
-    </span>
-  );
-}
-
-function maintenanceReclaimLines(row: MonitoringRecord): [string, string] {
-  const bytes = num(row, "bytes_reclaimed") || num(row, "maintenance_bytes_reclaimed") || num(row, "destination_bytes_removed");
-  const files = num(row, "files_removed") || num(row, "maintenance_files_removed") || num(row, "destination_files_removed");
-  return [formatBytes(bytes), `${formatCompact(files)} files`];
-}
-
-function MaintenanceEfficiencyCell({ row }: { row: MonitoringRecord }) {
-  const [rateLabel, durationLabel] = maintenanceEfficiencyLines(row);
-  return (
-    <span className="monitor-stack-cell" title={`Bytes/sec: ${rateLabel}\nDuration: ${durationLabel}`}>
-      <strong>{rateLabel}</strong>
-      <small>{durationLabel}</small>
-    </span>
-  );
-}
-
-function maintenanceEfficiencyLines(row: MonitoringRecord): [string, string] {
-  const rate = num(row, "bytes_reclaimed_per_second") || num(row, "maintenance_bytes_per_second");
-  return [`${formatBytes(rate)}/s`, formatSeconds(num(row, "duration_seconds"))];
-}
-
-function MaintenanceNoOpCell({ row }: { row: MonitoringRecord }) {
-  const runs = num(row, "no_op_runs");
-  return (
-    <span className={`monitor-stack-cell maintenance-no-op-cell${runs > 0 ? " has-no-op" : ""}`} title={`No-op runs: ${formatNumber(runs)}\nNo-op duration: ${formatSeconds(num(row, "no_op_duration_seconds"))}\nDefinition: succeeded maintenance runs with 0 bytes removed and 0 files removed.`}>
-      <strong><CompactNumberValue value={runs} /></strong>
-      <small>{formatSeconds(num(row, "no_op_duration_seconds"))}</small>
-    </span>
-  );
-}
-
-function maintenanceNoOpLines(row: MonitoringRecord): [string, string] {
-  return [formatCompact(num(row, "no_op_runs")), formatSeconds(num(row, "no_op_duration_seconds"))];
-}
-
-function MaintenanceLagCell({ row }: { row: MonitoringRecord }) {
-  const lag = num(row, "maintenance_lag_seconds");
-  const warning = Boolean(row.maintenance_lag_warning);
-  const thresholdDays = Number(row.maintenance_lag_warning_days ?? 7);
-  return (
-    <span
-      className={warning ? "performance-reason performance-reason-warning" : ""}
-      title={`Lag = latest ETL write time minus latest maintenance time. Warning only when lag is greater than ${thresholdDays} days.`}
-    >
-      {formatMaintenanceLag(lag)}
-    </span>
-  );
-}
-
-function MaintenanceRunsCell({ row }: { row: MonitoringRecord }) {
-  const runCount = num(row, "run_count");
-  const succeeded = num(row, "succeeded");
-  const failed = num(row, "failed");
-  const skipped = num(row, "skipped");
-  return (
-    <span className="monitor-stack-cell" title={`Runs: ${formatNumber(num(row, "run_count"))}\nSucceeded / failed / skipped: ${formatNumber(num(row, "succeeded"))} / ${formatNumber(num(row, "failed"))} / ${formatNumber(num(row, "skipped"))}\nRunning / pending / unknown: ${formatNumber(num(row, "running"))} / ${formatNumber(num(row, "pending"))} / ${formatNumber(num(row, "unknown"))}`}>
-      <strong><CompactNumberValue value={runCount} /></strong>
-      <small>
-        <span style={{ color: reportChartPalette.success }}><CompactNumberValue value={succeeded} /></span>
-        {" / "}
-        <span style={{ color: failed ? reportChartPalette.failed : undefined }}><CompactNumberValue value={failed} /></span>
-        {" / "}
-        <span style={{ color: skipped ? reportChartPalette.skipped : undefined }}><CompactNumberValue value={skipped} /></span>
-      </small>
-    </span>
-  );
-}
-
-function maintenanceRunLines(row: MonitoringRecord): [string, string] {
-  return [
-    formatCompact(num(row, "run_count")),
-    `${formatCompact(num(row, "succeeded"))} / ${formatCompact(num(row, "failed"))} / ${formatCompact(num(row, "skipped"))}`,
-  ];
-}
-
-function MaintenanceReasonCell({ row }: { row: MonitoringRecord }) {
-  const reason = String(row.attention_reason ?? row.maintenance_candidate_reason ?? "");
-  const health = String(row.table_health ?? "");
-  const priority = num(row, "attention_priority");
-  if (!reason || (health === "healthy" && priority <= 0)) return <span className="performance-reason" title="No maintenance attention rule matched.">-</span>;
-  return <span className={`performance-reason ${maintenanceReasonClass(row)}`} title={reason}>{reason}</span>;
-}
-
-function maintenanceStatusTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string): EChartsOption {
-  const visible = maintenanceTrendRows(report.maintenance.status_by_date ?? [], filters, report, timezoneName, createEmptyMaintenanceStatusRow);
-  if (!visible.length) return emptyChartOption("No maintenance status trend in current filters.");
-  return baseChartOption({
-    tooltip: {
-      trigger: "axis",
-      formatter: (params: any) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const row = visible[Number(first?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${row.bucket || row.date || ""}</strong>`,
-          row.grain ? `Grain: ${row.grain}` : "",
-          timezoneName ? `Timezone: ${timezoneName}` : "",
-          `Total: ${formatNumber(num(row, "total"))}`,
-          `Succeeded: ${formatNumber(num(row, "succeeded"))}`,
-          `Failed: ${formatNumber(num(row, "failed"))}`,
-          `Skipped: ${formatNumber(num(row, "skipped"))}`,
-          `Running / pending / unknown: ${formatNumber(num(row, "running"))} / ${formatNumber(num(row, "pending"))} / ${formatNumber(num(row, "unknown"))}`,
-          `Success rate: ${formatPercent(num(row, "success_rate"))}`
-        ].filter(Boolean).join("<br/>");
-      }
-    },
-    grid: reportChartGrid({ left: 34, right: 10, top: 8, containLabel: false }),
-    xAxis: maintenanceBottomCategoryXAxis(visible.map((row) => String(row.bucket || row.date || ""))),
-    yAxis: { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-    series: MAINTENANCE_STATUSES.map((status) => ({
-      name: statusLabel(status),
-      type: "bar" as const,
-      stack: "status",
-      itemStyle: { color: statusColor(status), borderRadius: status === "unknown" ? [3, 3, 0, 0] : 0 },
-      data: visible.map((row) => num(row, status))
-    }))
-  });
-}
-
-function maintenanceReclaimTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string): EChartsOption {
-  const visible = maintenanceTrendRows(report.maintenance.reclaim_by_date ?? report.maintenance.bytes_reclaimed_by_date ?? [], filters, report, timezoneName, createEmptyMaintenanceReclaimRow);
-  if (!visible.length) return emptyChartOption("No maintenance reclaim trend in current filters.");
-  return baseChartOption({
-    tooltip: {
-      trigger: "axis",
-      formatter: (params: any) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const row = visible[Number(first?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${row.bucket || row.date || ""}</strong>`,
-          row.grain ? `Grain: ${row.grain}` : "",
-          timezoneName ? `Timezone: ${timezoneName}` : "",
-          `Bytes reclaimed: ${formatBytes(num(row, "bytes_reclaimed"))}`,
-          `Bytes saved: ${formatBytes(num(row, "bytes_saved"))}`,
-          `Files removed: ${formatNumber(num(row, "files_removed"))}`,
-          `Runs: ${formatNumber(num(row, "runs"))}`
-        ].filter(Boolean).join("<br/>");
-      }
-    },
-    grid: reportChartGrid({ left: 42, right: 42, top: 8, containLabel: false }),
-    xAxis: maintenanceBottomCategoryXAxis(visible.map((row) => String(row.bucket || row.date || ""))),
-    yAxis: [
-      { type: "value", min: 0, axisLabel: { fontSize: 10, formatter: (value: number) => formatBytesShort(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
-      { type: "value", min: 0, axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { show: false } }
-    ],
-    series: [
-      { name: "Bytes reclaimed", type: "bar", itemStyle: { color: reportChartPalette.teal, borderRadius: [3, 3, 0, 0] }, data: visible.map((row) => num(row, "bytes_reclaimed")) },
-      lineSeries("Files removed", visible.map((row) => num(row, "files_removed")), reportChartPalette.blue, 1)
-    ]
-  });
-}
-
-function maintenanceBottomCategoryXAxis(data: string[]) {
-  return {
-    type: "category" as const,
-    position: "bottom" as const,
-    data,
-    axisLine: { onZero: false },
-    axisLabel: { fontSize: 10, hideOverlap: true },
-    axisTick: { show: false },
-  };
-}
-
-function maintenanceEfficiencyOption(rows: Array<Record<string, unknown>>, scaleMode: EfficiencyScaleMode): EChartsOption {
-  const visible = rows.slice(0, 800);
-  if (!visible.length) return emptyChartOption("No table maintenance efficiency signals.");
-  return baseChartOption({
-    grid: reportChartGrid({ left: 42, right: 8, top: 8, containLabel: false }),
-    tooltip: {
-      trigger: "item",
-      formatter: (params: any) => {
-        const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${row.target_display ?? row.target ?? row.table ?? "unknown"}</strong>`,
-          `Health: ${maintenanceTableHealthLabel(String(row.table_health ?? "unknown"))}`,
-          `Format/status: ${row.destination_format ?? row.format ?? "-"} · ${row.latest_status ?? row.status ?? "-"}`,
-          `Runs: ${formatNumber(num(row, "run_count"))}`,
-          `Duration: ${formatSeconds(num(row, "duration_seconds"))}`,
-          `Bytes reclaimed: ${formatBytes(num(row, "bytes_reclaimed") || num(row, "bytes_removed"))}`,
-          `Files removed: ${formatNumber(num(row, "files_removed"))}`,
-          `Efficiency: ${formatBytes(num(row, "bytes_reclaimed_per_second"))}/s`,
-          row.attention_reason ? `Reason: ${row.attention_reason}` : ""
-        ].filter(Boolean).join("<br/>");
-      }
-    },
-    xAxis: {
-      type: "value",
-      scale: true,
-      axisLabel: { fontSize: 10, formatter: (value: number) => formatBytesShort(rawMaintenanceAxisValue(value, scaleMode)) },
-      splitLine: { lineStyle: { color: reportChartPalette.grid } }
-    },
-    yAxis: {
-      type: "value",
-      scale: true,
-      axisLabel: { fontSize: 10, formatter: (value: number) => formatSeconds(rawMaintenanceAxisValue(value, scaleMode)) },
-      splitLine: { lineStyle: { color: reportChartPalette.grid } }
-    },
-    series: [
-      {
-        name: "Maintenance runs",
-        type: "scatter",
-        symbolSize: (_value: unknown, params: any) => {
-          const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-          return Math.max(6, Math.min(20, 6 + Math.sqrt(num(row, "run_count"))));
-        },
-        itemStyle: {
-          color: (params: any) => maintenanceTableHealthColor(String(visible[Number(params?.dataIndex ?? 0)]?.table_health ?? "unknown")),
-          opacity: 0.78,
-          borderColor: "#ffffff",
-          borderWidth: 1
-        },
-        data: visible.map((row) => [
-          maintenanceAxisValue(num(row, "bytes_reclaimed") || num(row, "bytes_removed"), scaleMode),
-          maintenanceAxisValue(num(row, "duration_seconds"), scaleMode)
-        ])
-      }
-    ]
-  });
-}
-
-function defaultMaintenanceEfficiencyScale(rows: Array<Record<string, unknown>>): EfficiencyScaleMode {
-  const values = rows
-    .map((row) => num(row, "bytes_reclaimed") || num(row, "bytes_removed"))
-    .filter((value) => value > 0);
-  if (values.length < 2) return "linear";
-  const p50 = percentileFromNumbers(values, 0.5);
-  const max = Math.max(...values);
-  return p50 > 0 && max / p50 >= 1000 ? "log" : "linear";
-}
-
-function maintenanceAxisValue(value: number, scaleMode: EfficiencyScaleMode) {
-  if (scaleMode === "linear") return value;
-  return Math.log10(Math.max(0, value) + 1);
-}
-
-function rawMaintenanceAxisValue(value: number, scaleMode: EfficiencyScaleMode) {
-  if (scaleMode === "linear") return value;
-  return Math.max(0, Math.pow(10, value) - 1);
-}
-
-function percentileFromNumbers(values: number[], percentile: number) {
-  if (!values.length) return 0;
-  const sorted = values.slice().sort((left, right) => left - right);
-  const index = (sorted.length - 1) * percentile;
-  const lower = Math.floor(index);
-  const upper = Math.ceil(index);
-  if (lower === upper) return sorted[lower] ?? 0;
-  const weight = index - lower;
-  return (sorted[lower] ?? 0) * (1 - weight) + (sorted[upper] ?? 0) * weight;
-}
-
-function maintenanceTableOutcomeOption(rows: Array<Record<string, unknown>>): EChartsOption {
-  const visible = rows.slice().sort((left, right) => {
-    const priority = num(right, "attention_priority") - num(left, "attention_priority");
-    if (priority !== 0) return priority;
-    const reclaim = num(right, "bytes_reclaimed") - num(left, "bytes_reclaimed");
-    if (reclaim !== 0) return reclaim;
-    return String(left.target ?? "").localeCompare(String(right.target ?? ""));
-  });
-  if (!visible.length) return emptyChartOption("No destination table outcomes.");
-  const labels = visible.map((row) => String(row.target_display ?? row.target ?? row.table ?? row.destination_table ?? "unknown"));
-  const dataZoom = horizontalBarDataZoom(visible.length);
-  return baseChartOption({
-    tooltip: {
-      trigger: "item",
-      formatter: (params: any) => {
-        const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${labels[Number(params?.dataIndex ?? 0)] ?? "unknown"}</strong>`,
-          `Runs: ${formatNumber(num(row, "run_count") || num(row, "count"))}`,
-          `Health: ${maintenanceTableHealthLabel(String(row.table_health ?? "unknown"))}`,
-          `Latest status: ${row.latest_status ?? row.status ?? "-"}`,
-          `Format: ${row.format ?? row.destination_format ?? "-"}`,
-          `Bytes reclaimed: ${formatBytes(num(row, "bytes_reclaimed") || num(row, "bytes_removed"))}`,
-          `Files removed: ${formatNumber(num(row, "files_removed"))}`,
-          `Duration: ${formatSeconds(num(row, "duration_seconds"))}`,
-          `No-op runs: ${formatNumber(num(row, "no_op_runs"))}`,
-          `No-op duration: ${formatSeconds(num(row, "no_op_duration_seconds"))}`,
-          row.attention_reason ? `Reason: ${row.attention_reason}` : ""
-        ].join("<br/>");
-      }
-    },
-    grid: reportChartGrid({ left: 236, right: dataZoom ? 24 : 10, top: 8, containLabel: false }),
-    xAxis: bottomAnchoredValueXAxis({ formatter: (value) => formatBytesShort(value) }),
-    yAxis: {
-      type: "category",
-      data: labels,
-      inverse: true,
-      axisTick: { show: false },
-      axisLabel: { align: "right", fontSize: 10, width: 222, overflow: "truncate", margin: 8, color: reportChartPalette.muted }
-    },
-    dataZoom,
-    series: [
-      {
-        name: "Bytes reclaimed",
-        type: "bar",
-        barMaxWidth: 18,
-        itemStyle: {
-          color: (params: any) => {
-            const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-            if (num(row, "bytes_reclaimed") || num(row, "bytes_removed")) return reportChartPalette.teal;
-            return maintenanceTableHealthColor(String(row.table_health ?? "unknown"));
-          },
-          borderRadius: [0, 3, 3, 0]
-        },
-        label: {
-          show: true,
-          position: "right",
-          color: reportChartPalette.text,
-          fontSize: 9,
-          formatter: (params: any) => {
-            const value = Number(params?.value ?? 0);
-            return value > 0 ? formatBytesShort(value) : "";
-          }
-        },
-        data: visible.map((row) => num(row, "bytes_reclaimed") || num(row, "bytes_removed"))
-      }
-    ]
-  });
-}
-
-function maintenanceTrendRows(
-  rows: Array<Record<string, string | number | null>>,
-  filters: MonitoringFilters,
-  report: MonitoringReport,
-  timezoneName: string,
-  createEmpty: (bucket: string, grain: string) => Record<string, string | number | null>
-): Array<Record<string, string | number | null>> {
-  const effectiveGrain = String(rows.find((row) => row.grain)?.grain ?? report.summary.effective_grain ?? filters.grain ?? "day");
-  const normalizedRows = rows.map((row) => {
-    const bucket = normalizeTrendBucketKey(row.bucket ?? row.date, effectiveGrain, timezoneName);
-    return { ...row, bucket, date: bucket };
-  });
-  const knownDateKeys = normalizedRows.map((row) => String(row.bucket ?? "")).filter((date) => date && date !== "unknown");
-  const dateKeys = resolveTrendBucketKeys(filters, report.summary.date_range, timezoneName, knownDateKeys, effectiveGrain);
-  const byKey = new Map(normalizedRows.map((row) => [String(row.bucket), row]));
-  const visible = dateKeys.length > 0
-    ? dateKeys.map((dateKey) => ({ ...createEmpty(dateKey, effectiveGrain), ...(byKey.get(dateKey) ?? {}) }))
-    : normalizedRows;
-  return visible.map((row) => ({
-    ...row,
-    total: num(row, "total") || MAINTENANCE_STATUSES.reduce((sum, status) => sum + num(row, status), 0),
-    bytes_reclaimed: num(row, "bytes_reclaimed"),
-    bytes_saved: num(row, "bytes_saved"),
-    files_removed: num(row, "files_removed"),
-    runs: num(row, "runs")
-  })) as Array<Record<string, string | number | null>>;
-}
-
-function createEmptyMaintenanceStatusRow(bucket: string, grain: string) {
-  return {
-    date: bucket,
-    bucket,
-    grain,
-    succeeded: 0,
-    failed: 0,
-    skipped: 0,
-    running: 0,
-    pending: 0,
-    unknown: 0,
-    total: 0,
-    success_rate: 0
-  };
-}
-
-function createEmptyMaintenanceReclaimRow(bucket: string, grain: string) {
-  return {
-    date: bucket,
-    bucket,
-    grain,
-    bytes_reclaimed: 0,
-    bytes_saved: 0,
-    files_removed: 0,
-    runs: 0
-  };
-}
-
-function maintenanceHealthLabel(value: string) {
-  if (value === "has_issues") return "Has issues";
-  if (value === "no_evidence") return "No evidence";
-  if (value === "warning") return "Warning";
-  if (value === "healthy") return "Healthy";
-  return value || "-";
-}
-
-function maintenanceHealthIntent(value: string): "neutral" | "bad" | "good" | "warning" {
-  if (value === "has_issues") return "bad";
-  if (value === "warning") return "warning";
-  if (value === "healthy") return "good";
-  return "neutral";
-}
-
-function maintenanceTableHealthColor(value: string) {
-  if (value === "has_issues") return reportChartPalette.failed;
-  if (value === "warning" || value === "missing") return reportChartPalette.amber;
-  if (value === "healthy") return reportChartPalette.success;
-  return reportChartPalette.unknown;
-}
-
-function maintenanceReasonClass(row: MonitoringRecord) {
-  const health = String(row.table_health ?? "");
-  if (health === "has_issues") return "performance-reason-bad";
-  if (health === "warning") return "performance-reason-warning";
-  const kind = String(row.maintenance_candidate_kind ?? "");
-  if (kind === "failed") return "performance-reason-bad";
-  if (kind === "skipped" || kind === "no_op" || kind === "high_duration") return "performance-reason-warning";
+function firstText(row: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = row[key];
+    if (value !== undefined && value !== null && String(value).trim() !== "") return String(value);
+  }
   return "";
 }
 
-function statusLabel(status: string) {
-  if (status === "succeeded") return "Succeeded";
-  if (status === "failed") return "Failed";
-  if (status === "skipped") return "Skipped";
-  if (status === "running") return "Running";
-  if (status === "pending") return "Pending";
-  return "Unknown";
+function DestinationStatusLegend() {
+  return <DestinationChartLegend label="Destination status legend" items={DESTINATION_STATUSES.map((status) => [statusLabel(status), statusColor(status)] as const)} />;
 }
 
-function statusColor(status: string) {
-  const normalized = status.toLowerCase();
-  if (normalized === "succeeded") return reportChartPalette.success;
-  if (normalized === "failed") return reportChartPalette.failed;
-  if (normalized === "skipped") return reportChartPalette.skipped;
-  if (normalized === "running") return reportChartPalette.running;
-  if (normalized === "pending") return reportChartPalette.pending;
-  return reportChartPalette.unknown;
+function DestinationChartLegend({ label, items }: { label: string; items: ReadonlyArray<readonly [string, string]> }) {
+  return <div className="monitoring-maintenance-chart-legend" aria-label={label}>{items.map(([itemLabel, color]) => <span key={itemLabel}><i style={{ backgroundColor: color }} aria-hidden="true" />{itemLabel}</span>)}</div>;
 }
 
-function lineSeries(name: string, data: number[], color: string, yAxisIndex = 0) {
-  return {
-    name,
-    type: "line" as const,
-    yAxisIndex,
-    connectNulls: true,
-    showSymbol: false,
-    showAllSymbol: false,
-    symbol: "circle",
-    symbolSize: 5,
-    clip: false,
-    z: 6,
-    smooth: 0.2,
-    lineStyle: { width: 1.5, color },
-    itemStyle: { color: "#ffffff", borderColor: color, borderWidth: 1.3 },
-    data
-  };
+function EfficiencyScaleToggle({ value, onChange }: { value: EfficiencyScaleMode; onChange: (value: EfficiencyScaleMode) => void }) {
+  return <div className="segmented-control performance-scale-toggle" role="group" aria-label="Efficiency scale"><button type="button" className={value === "linear" ? "active" : ""} aria-pressed={value === "linear"} onClick={() => onChange("linear")}>Linear</button><button type="button" className={value === "log" ? "active" : ""} aria-pressed={value === "log"} onClick={() => onChange("log")}>Log</button></div>;
 }
 
-function emptyChartOption(message: string): EChartsOption {
+function DestinationMetricToggle<T extends TrendMetric | DestinationMetric>({ value, onChange, label, metrics }: { value: T; onChange: (value: T) => void; label: string; metrics: readonly T[] }) {
+  return <div className="segmented-control performance-scale-toggle" role="group" aria-label={label}>{metrics.map((metric) => <button key={metric} type="button" className={value === metric ? "active" : ""} aria-pressed={value === metric} onClick={() => onChange(metric)}>{metricLabel(metric)}</button>)}</div>;
+}
+
+function DestinationEffectToggle({ metric, value, onChange, label }: { metric: DestinationMetric; value: DestinationEffect; onChange: (value: DestinationEffect) => void; label: string }) {
+  const options: ReadonlyArray<DestinationEffect> = metric === "rows" ? ["added"] : ["added", "removed"];
+  return <Help as="div" className="segmented-control performance-scale-toggle" role="group" aria-label={label} title={metric === "rows" ? "Rows use authoritative rows written effects." : "Select the recorded effect direction used for ranking and paired runtime."}>{options.map((effect) => <button key={effect} type="button" className={value === effect ? "active" : ""} aria-pressed={value === effect} onClick={() => onChange(effect)}>{metric === "rows" ? "Written" : effect === "added" ? "Added" : "Removed"}</button>)}</Help>;
+}
+
+function metricLabel(metric: string) {
+  return metric === "bytes" ? "Bytes" : metric === "files" ? "Files" : "Rows";
+}
+
+function efficiencyLabel(metric: DestinationMetric, effect: DestinationEffect) {
+  return metric === "rows" ? "rows written" : `${metricLabel(metric).toLowerCase()} ${effect}`;
+}
+
+function destinationStatusTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string): EChartsOption {
+  const rows = trendRows((report.maintenance as DestinationReport).status_by_date, filters, report, timezoneName, createEmptyStatusRow);
+  if (!rows.length) return emptyChartOption("No destination activity in current filters.");
   return baseChartOption({
-    graphic: {
-      type: "text",
-      left: "center",
-      top: "middle",
-      style: { text: message, fill: reportChartPalette.muted, fontSize: 12, fontWeight: 600 }
-    }
+    tooltip: { trigger: "axis", formatter: chartTooltip((params) => {
+      const row = rows[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+      return {
+        title: String(row.bucket || row.date || ""),
+        context: [row.grain ? `Grain: ${row.grain}` : "", timezoneName ? `Timezone: ${timezoneName}` : ""].filter(Boolean).join(" · ") || undefined,
+        metrics: [
+          chartMetric("Total", formatNumber(metricValue(row, "total"))),
+          ...DESTINATION_STATUSES.map((status) => ({ ...chartMetric(statusLabel(status), formatNumber(metricValue(row, status))), valueColor: statusColor(status) })),
+          ...(metricValue(row, "success_rate") == null ? [] : [chartMetric("Success rate", formatPercent(metricValue(row, "success_rate")))]),
+        ]
+      };
+    }) },
+    grid: reportChartGrid({ left: 34, right: 10, top: 8, containLabel: false }),
+    xAxis: bottomCategoryAxis(rows.map((row) => String(row.bucket || row.date || ""))),
+    yAxis: { type: "value", axisLabel: { fontSize: 10, formatter: (value: number) => formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
+    series: DESTINATION_STATUSES.map((status) => ({ name: statusLabel(status), type: "bar" as const, stack: "status", itemStyle: { color: statusColor(status), borderRadius: status === "unknown" ? [3, 3, 0, 0] : 0 }, data: rows.map((row) => plotMetric(metricValue(row, status))) }))
   });
 }
 
+function destinationChangeTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string, metric: TrendMetric): EChartsOption {
+  const section = report.maintenance as DestinationReport;
+  const rows = trendRows(section.reclaim_by_date ?? section.bytes_reclaimed_by_date, filters, report, timezoneName, createEmptyChangeRow);
+  if (!rows.length) return emptyChartOption(`No recorded ${metric} changes in current filters.`);
+  const addedLabel = `${metricLabel(metric)} added`;
+  const removedLabel = `${metricLabel(metric)} removed`;
+  return baseChartOption({
+    tooltip: { trigger: "axis", formatter: chartTooltip((params) => {
+      const row = rows[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+      return {
+        title: String(row.bucket || row.date || ""),
+        context: row.grain ? `Grain: ${row.grain}` : undefined,
+        metrics: [
+          { ...chartMetric("Added", formatMetric(metric, trendMetricValue(row, metric, "added"))), valueColor: reportChartPalette.teal },
+          { ...chartMetric("Removed", formatMetric(metric, trendMetricValue(row, metric, "removed"))), valueColor: reportChartPalette.blue },
+          chartMetric("Runs", formatTooltipNumber(firstMetric(row, "runs", "operation_count"))),
+        ]
+      };
+    }) },
+    grid: reportChartGrid({ left: metric === "bytes" ? 48 : 38, right: 10, top: 8, containLabel: false }),
+    xAxis: bottomCategoryAxis(rows.map((row) => String(row.bucket || row.date || ""))),
+    yAxis: [{ type: "value", min: 0, axisLabel: { fontSize: 10, formatter: (value: number) => metric === "bytes" ? formatBytesShort(value) : formatCompact(value) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } }, { type: "value", show: false, min: 0 }],
+    series: [
+      { name: addedLabel, type: "bar", itemStyle: { color: reportChartPalette.teal, borderRadius: [3, 3, 0, 0] }, data: rows.map((row) => plotMetric(trendMetricValue(row, metric, "added"))) },
+      { ...lineSeries(removedLabel, rows.map((row) => plotMetric(trendMetricValue(row, metric, "removed"))), reportChartPalette.blue, 0), name: removedLabel }
+    ]
+  });
+}
+
+function destinationOutcomeOption(rows: Array<Record<string, unknown>>, metric: DestinationMetric, effect: DestinationEffect): EChartsOption {
+  const visible = rows.filter((row) => metricNumber(destinationMetricValue(row, metric, effect)) > 0).sort((left, right) => compareMetricValues(destinationMetricValue(right, metric, effect), destinationMetricValue(left, metric, effect)) || String(left.target_display ?? "").localeCompare(String(right.target_display ?? ""))).slice(0, 200);
+  if (!visible.length) return emptyChartOption(`No recorded positive ${efficiencyLabel(metric, effect)} changes.`);
+  const names = presentDestinationRows(visible);
+  const namesById = new Map(names.map(value => [value.id, value]));
+  const dataZoom = horizontalBarDataZoom(visible.length);
+  return baseChartOption({
+    tooltip: { trigger: "item", formatter: chartTooltip((params) => {
+      const index = Number(firstChartParam(params)?.dataIndex ?? 0);
+      const row = visible[index] ?? {};
+      const destination = names[index] ?? presentDestination(row);
+      const content = destinationHelpContent(destination);
+      return {
+        ...content,
+        metrics: [
+          ...(content.metrics ?? []),
+          chartMetric(`${metricLabel(metric)} ${metric === "rows" ? "written" : effect}`, formatMetric(metric, destinationMetricValue(row, metric, effect))),
+          chartMetric("Runs", formatTooltipNumber(firstMetric(row, "run_count"))),
+          chartMetric("Latest status", firstText(row, "latest_status") || "unknown"),
+        ]
+      };
+    }) },
+    grid: fixedHorizontalBarGrid(132, Boolean(dataZoom), { right: dataZoom ? 24 : 10, top: 8 }),
+    xAxis: bottomAnchoredValueXAxis({ formatter: (value) => metric === "bytes" ? formatBytesShort(value) : formatCompact(value) }),
+    yAxis: { type: "category", data: names.map(value => value.id), inverse: true, axisTick: { show: false }, axisLabel: fixedHorizontalAxisLabel(132, { margin: 8, fontSize: 10, interval: 0, formatter: (id: string) => namesById.get(id)?.name ?? id }) },
+    dataZoom,
+    series: [{ name: efficiencyLabel(metric, effect), type: "bar", barMaxWidth: 18, itemStyle: { color: effect === "removed" ? reportChartPalette.blue : reportChartPalette.teal, borderRadius: [0, 3, 3, 0] }, label: { show: true, position: "right", color: reportChartPalette.text, fontSize: 9, formatter: (params: any) => formatMetric(metric, params?.value) }, data: visible.map((row) => plotMetric(destinationMetricValue(row, metric, effect))) }]
+  });
+}
+
+export function maintenanceEfficiencyOption(rows: Array<Record<string, unknown>>, scaleMode: EfficiencyScaleMode, metric: DestinationMetric = "bytes", effect: DestinationEffect = "added"): EChartsOption {
+  const observations = destinationEfficiencyObservations(rows, metric, effect);
+  const visible = observations.points.map((point) => point.row);
+  if (!visible.length) return emptyChartOption(`No paired ${efficiencyLabel(metric, effect)} / runtime evidence.`);
+  const fields = efficiencyFields(metric, effect);
+  const names = presentDestinationRows(visible);
+  return baseChartOption({
+    grid: reportChartGrid({ left: 42, right: 8, top: 8, bottom: 18, containLabel: false }),
+    tooltip: { trigger: "item", formatter: chartTooltip((params) => {
+      const index = Number(firstChartParam(params)?.dataIndex ?? 0);
+      const row = visible[index] ?? {};
+      const destination = names[index] ?? presentDestination(row);
+      const content = destinationHelpContent(destination);
+      const latestStatus = firstText(row, "latest_status").toLowerCase() || "unknown";
+      return {
+        ...content,
+        metrics: [
+          ...(content.metrics ?? []),
+          { ...chartMetric("Point color (latest status)", statusLabel(latestStatus)), valueColor: destinationSignalColor(latestStatus) },
+          chartMetric(`Paired ${efficiencyLabel(metric, effect)}`, formatMetric(metric, firstMetric(row, ...fields.effectKeys))),
+          chartMetric("Root runtime", chartDurationMetric(firstMetric(row, ...fields.runtimeKeys), { compactOnly: true })),
+          chartMetric("Paired runs", formatTooltipNumber(firstMetric(row, ...fields.runKeys))),
+        ],
+        note: firstText(row, "attention_reason") ? `Signal: ${firstText(row, "attention_reason")}` : undefined,
+      };
+    }) },
+    xAxis: { type: "value", scale: true, axisLabel: { fontSize: 10, formatter: (value: number) => metric === "bytes" ? formatBytesShort(rawAxisValue(value, scaleMode)) : formatCompact(rawAxisValue(value, scaleMode)) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
+    yAxis: { type: "value", scale: true, name: "Root runtime", nameTextStyle: { fontSize: 10 }, axisLabel: { fontSize: 10, formatter: (value: number) => formatSeconds(rawAxisValue(value, scaleMode)) }, splitLine: { lineStyle: { color: reportChartPalette.grid } } },
+    series: [{ name: `${efficiencyLabel(metric, effect)} / root runtime`, type: "scatter", symbolSize: (_value: unknown, params: any) => Math.max(6, Math.min(20, 6 + Math.sqrt(numFromKeys(visible[Number(params?.dataIndex ?? 0)] ?? {}, fields.runKeys)))), itemStyle: { color: (params: any) => destinationSignalColor(String(visible[Number(params?.dataIndex ?? 0)]?.latest_status ?? "unknown")), opacity: 0.78, borderColor: "#ffffff", borderWidth: 1 }, data: observations.points.map((point) => [axisValue(point.x, scaleMode), axisValue(point.y, scaleMode)]) }]
+  });
+}
+
+function destinationEfficiencyObservations(rows: Array<Record<string, unknown>>, metric: DestinationMetric, effect: DestinationEffect = "added") {
+  const fields = efficiencyFields(metric, effect);
+  const eligible = rows.filter((row) => firstMetric(row, ...fields.effectKeys) != null && numFromKeys(row, fields.runtimeKeys) > 0).sort((left, right) => compareMetricValues(firstMetric(right, ...fields.effectKeys), firstMetric(left, ...fields.effectKeys)) || String(left.target ?? "").localeCompare(String(right.target ?? ""))).slice(0, 800);
+  return scatterObservations(eligible, (row) => firstMetric(row, ...fields.effectKeys), (row) => firstMetric(row, ...fields.runtimeKeys));
+}
+
+function efficiencyFields(metric: DestinationMetric, effect: DestinationEffect = "added") {
+  if (metric === "rows") return { effectKeys: ["paired_rows_written"] as string[], runtimeKeys: ["paired_rows_runtime"] as string[], runKeys: ["paired_rows_runs"] as string[] };
+  if (metric === "files") {
+    return effect === "removed"
+      ? { effectKeys: ["paired_files_removed"] as string[], runtimeKeys: ["paired_files_removed_runtime"] as string[], runKeys: ["paired_files_removed_runs"] as string[] }
+      : { effectKeys: ["paired_files_added"] as string[], runtimeKeys: ["paired_files_runtime"] as string[], runKeys: ["paired_files_runs"] as string[] };
+  }
+  return effect === "removed"
+    ? { effectKeys: ["paired_bytes_removed"] as string[], runtimeKeys: ["paired_bytes_removed_runtime"] as string[], runKeys: ["paired_bytes_removed_runs"] as string[] }
+    : { effectKeys: ["paired_bytes_added"] as string[], runtimeKeys: ["paired_bytes_runtime"] as string[], runKeys: ["paired_bytes_runs"] as string[] };
+}
+
+function defaultDestinationMetric(rows: Array<Record<string, unknown>>, efficiency: boolean): DestinationMetric {
+  const candidates: DestinationMetric[] = ["rows", "files", "bytes"];
+  return candidates.find((metric) => rows.some((row) => {
+    if (metric === "rows") return metricNumber(destinationMetricValue(row, metric, "added")) > 0;
+    if (efficiency) return metricNumber(firstMetric(row, ...efficiencyFields(metric, "added").effectKeys)) > 0 || metricNumber(firstMetric(row, ...efficiencyFields(metric, "removed").effectKeys)) > 0;
+    return metricNumber(effectPart(row, metric, "added")) > 0 || metricNumber(effectPart(row, metric, "removed")) > 0;
+  })) ?? "rows";
+}
+
+function defaultDestinationEffect(rows: Array<Record<string, unknown>>, metric: DestinationMetric, efficiency: boolean): DestinationEffect {
+  if (metric === "rows") return "added";
+  if (efficiency) {
+    if (rows.some((row) => metricNumber(firstMetric(row, ...efficiencyFields(metric, "added").effectKeys)) > 0)) return "added";
+    if (rows.some((row) => metricNumber(firstMetric(row, ...efficiencyFields(metric, "removed").effectKeys)) > 0)) return "removed";
+    return "added";
+  }
+  if (rows.some((row) => metricNumber(effectPart(row, metric, "added")) > 0)) return "added";
+  if (rows.some((row) => metricNumber(effectPart(row, metric, "removed")) > 0)) return "removed";
+  return "added";
+}
+
+function defaultTrendMetric(section: DestinationReport): TrendMetric {
+  const rows = rowsFrom(section.reclaim_by_date ?? section.bytes_reclaimed_by_date);
+  return rows.some((row) => metricNumber(trendMetricValue(row, "bytes", "added")) > 0 || metricNumber(trendMetricValue(row, "bytes", "removed")) > 0) ? "bytes" : "files";
+}
+
+function defaultEfficiencyScale(rows: Array<Record<string, unknown>>, metric: DestinationMetric, effect: DestinationEffect): EfficiencyScaleMode {
+  const values = destinationEfficiencyObservations(rows, metric, effect).points.map((point) => point.x).filter((value) => value > 0);
+  if (values.length < 2) return "linear";
+  const sorted = values.slice().sort((left, right) => left - right);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  return median > 0 && Math.max(...values) / median >= 1000 ? "log" : "linear";
+}
+
+function trendRows(rowsValue: unknown, filters: MonitoringFilters, report: MonitoringReport, timezoneName: string, createEmpty: (bucket: string, grain: string) => Record<string, unknown>) {
+  const rows = rowsFrom(rowsValue);
+  const effectiveGrain = String(rows.find((row) => row.grain)?.grain ?? report.summary.effective_grain ?? filters.grain ?? "day");
+  const normalizedRows = rows.map((row) => { const bucket = normalizeTrendBucketKey(row.bucket ?? row.date, effectiveGrain, timezoneName); return { ...row, bucket, date: bucket }; });
+  const knownKeys = normalizedRows.map((row) => String(row.bucket ?? "")).filter((key) => key && key !== "unknown");
+  const dateKeys = resolveTrendBucketKeys(filters, report.summary.date_range, timezoneName, knownKeys, effectiveGrain);
+  const byKey = new Map(normalizedRows.map((row) => [String(row.bucket), row]));
+  return (dateKeys.length ? dateKeys.map((key) => ({ ...createEmpty(key, effectiveGrain), ...(byKey.get(key) ?? {}) })) : normalizedRows) as Array<Record<string, unknown>>;
+}
+
+function createEmptyStatusRow(bucket: string, grain: string) {
+  return { bucket, date: bucket, grain, succeeded: 0, failed: 0, skipped: 0, running: 0, pending: 0, unknown: 0, total: 0, success_rate: null };
+}
+
+function createEmptyChangeRow(bucket: string, grain: string) {
+  return { bucket, date: bucket, grain, files_added: 0, files_removed: 0, bytes_added: 0, bytes_removed: 0, bytes_reclaimed: 0, runs: 0 };
+}
+
+function destinationMetricValue(row: Record<string, unknown>, metric: DestinationMetric, effect: DestinationEffect = "added") {
+  return effectPart(row, metric, effect);
+}
+
+function trendMetricValue(row: Record<string, unknown>, metric: TrendMetric, part: "added" | "removed") {
+  return effectPart(row, metric, part);
+}
+
+function effectPart(row: Record<string, unknown>, metric: "rows" | "files" | "bytes", part: "added" | "removed") {
+  if (metric === "rows") return firstMetric(row, "rows_written", "rows_written_observed");
+  if (metric === "files") return firstMetric(row, part === "added" ? "files_added" : "files_removed", part === "added" ? "files_added_observed" : "files_removed_observed");
+  return firstMetric(row, part === "added" ? "bytes_added" : "bytes_removed", part === "added" ? "bytes_added_observed" : "bytes_removed_observed");
+}
+
+function numFromKeys(row: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = num(row, key);
+    if (value > 0) return value;
+  }
+  return 0;
+}
+
+function formatMetric(metric: string, value: ReturnType<typeof metricValue>) {
+  return metric === "bytes" ? formatTooltipBytes(value) : formatTooltipNumber(value);
+}
+
+function axisValue(value: number, scaleMode: EfficiencyScaleMode) { return scaleMode === "linear" ? value : Math.log10(Math.max(0, value) + 1); }
+function rawAxisValue(value: number, scaleMode: EfficiencyScaleMode) { return scaleMode === "linear" ? value : Math.max(0, Math.pow(10, value) - 1); }
+function plotMetric(value: ReturnType<typeof metricValue>) { return value == null || value === "" ? null : toApproximateNumber(value); }
+
+function bottomCategoryAxis(data: string[]) {
+  return { type: "category" as const, position: "bottom" as const, data, axisLine: { onZero: false }, axisLabel: { fontSize: 10, hideOverlap: true }, axisTick: { show: false } };
+}
+
+function lineSeries(name: string, data: Array<number | null>, color: string, yAxisIndex = 0) {
+  return { name, type: "line" as const, yAxisIndex, connectNulls: false, showSymbol: false, showAllSymbol: false, symbol: "circle", symbolSize: 5, clip: false, z: 6, smooth: 0.2, lineStyle: { width: 1.5, color }, itemStyle: { color: "#ffffff", borderColor: color, borderWidth: 1.3 }, data };
+}
+
+function statusLabel(status: string) { return status === "succeeded" ? "Succeeded" : status === "failed" ? "Failed" : status === "skipped" ? "Skipped" : status === "running" ? "Running" : status === "pending" ? "Pending" : "Unknown"; }
+function statusColor(status: string) { return status === "succeeded" ? reportChartPalette.success : status === "failed" ? reportChartPalette.failed : status === "skipped" ? reportChartPalette.skipped : status === "running" ? reportChartPalette.running : status === "pending" ? reportChartPalette.pending : reportChartPalette.unknown; }
+function destinationSignalColor(status: string) { return statusColor(status.toLowerCase()); }
+
+function emptyChartOption(message: string): EChartsOption {
+  return baseChartOption({ graphic: { type: "text", left: "center", top: "middle", style: { text: message, fill: reportChartPalette.muted, fontSize: 12, fontWeight: 600 } } });
+}
+
 export const maintenancePageTestUtils = {
+  destinationChangeTrendOption,
+  destinationOutcomeOption,
   maintenanceReclaimTrendOption,
-  maintenanceStatusTrendOption,
+  maintenanceStatusTrendOption: destinationStatusTrendOption,
 };
+
+function maintenanceReclaimTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string, metric: TrendMetric = "files") {
+  return destinationChangeTrendOption(report, filters, timezoneName, metric);
+}

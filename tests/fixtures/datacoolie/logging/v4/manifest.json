@@ -1,0 +1,43 @@
+{
+  "fixture_revision": "t1-framework-0.2.0-projection-v1",
+  "schema_version": 4,
+  "producer": {
+    "package": "datacoolie",
+    "version": "0.2.0",
+    "revision": "75f65139e26eb7079b7a897c877de97859c0120b",
+    "projection": "src/datacoolie/logging/persistence/projection.py",
+    "writer": "src/datacoolie/logging/persistence/writer.py"
+  },
+  "streams": {
+    "dataflow_snapshot.json": {
+      "kind": "dataflow",
+      "rows": 3,
+      "mode": "snapshot",
+      "sha256": "8848C670A710EF33856FA78EC6D39F505D45B8AA5C77B6B5E6DC6C1C7C68F947"
+    },
+    "dataflow_part_00000001.json": {
+      "kind": "dataflow",
+      "rows": 1,
+      "mode": "batch",
+      "sha256": "16D6D559005ECEDC6664E69A923217D8DC9979EEE5C9C2F89CCD22354B72AC8F"
+    },
+    "job_snapshot.json": {
+      "kind": "job",
+      "rows": 1,
+      "mode": "snapshot",
+      "sha256": "F215123BE1385267A0867B072BAC47392C9BE25691CCACE42274529FB8C0B784"
+    },
+    "system_snapshot.json": {
+      "kind": "system",
+      "rows": 1,
+      "mode": "snapshot",
+      "sha256": "B7A138A144DE3C392906168021E371BD7618E709688397FCBCE24DA75CB19B12"
+    },
+    "system_part_00000001.json": {
+      "kind": "system",
+      "rows": 1,
+      "mode": "batch",
+      "sha256": "03BC7189F7C3ABCDADDADB7ABE2F918D8687810B645A861CE53E6543BE8938A7"
+    }
+  }
+}

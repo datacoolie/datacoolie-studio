@@ -1,5 +1,68 @@
-export type TargetIdentifierKind = "logical_table" | "physical_path" | "api_endpoint";
-export type ReferenceType = "table_reference" | "path_reference" | "api_endpoint_reference" | "unknown";
+import type {
+  Environment as EnvironmentTransport,
+  LocalSourceObservation as LocalSourceObservationTransport,
+  MonitoringDataflowRecordTransport,
+  MonitoringDataflowRegistryResponseTransport,
+  MonitoringRegistryRowTransport,
+  MonitoringRegistryRunReferenceTransport,
+  MonitoringRegistryProfileSnapshotTransport,
+  MonitoringJobRecordTransport,
+  MonitoringNamedCountTransport,
+  MonitoringPageResponseTransport,
+  Project as ProjectTransport,
+  ProjectEnvironmentSummary as ProjectEnvironmentSummaryTransport,
+  ProjectReferenceMapping as ProjectReferenceMappingTransport,
+  ProjectSummary as ProjectSummaryTransport,
+  ReferenceType as ReferenceTypeTransport,
+  SourceSyncStatus as SourceSyncStatusTransport,
+  SourceValidationResult as SourceValidationResultTransport,
+  TargetIdentifierKind as TargetIdentifierKindTransport,
+  WriteSafety,
+} from "./contractTypes";
+
+/** Monitoring integer/count/byte metrics remain decimal strings at the API boundary. */
+export type MonitoringInteger = string | number | null;
+export type MonitoringMetric = string | number | null;
+export type MonitoringSessionScope = "all" | "null" | "exact";
+export type MonitoringRegistryRecord = MonitoringRegistryRowTransport;
+export type MonitoringRegistryRunReference = MonitoringRegistryRunReferenceTransport;
+export type MonitoringRegistryProfileSnapshot = MonitoringRegistryProfileSnapshotTransport;
+export type MonitoringRegistryResponse = MonitoringRecordsResponse<MonitoringRegistryRecord> & {
+  section: MonitoringDataflowRegistryResponseTransport["section"];
+};
+
+export interface MonitoringLogAdmissionFile {
+  source_id?: number | null;
+  uri?: string | null;
+  admitted: MonitoringInteger;
+  excluded: MonitoringInteger;
+  versions?: Record<string, MonitoringInteger>;
+  locations?: Array<{ line?: number | null; version?: string | null }>;
+}
+
+export interface MonitoringLogAdmission {
+  admitted: MonitoringInteger;
+  excluded: MonitoringInteger;
+  unsupported_only?: boolean;
+  files: MonitoringLogAdmissionFile[];
+}
+
+export interface MonitoringV6Metrics {
+  [key: string]: MonitoringInteger;
+}
+
+export interface MonitoringV6RecordEvidence {
+  metrics?: MonitoringV6Metrics | null;
+  read_request?: Record<string, unknown> | null;
+  attempts?: unknown[] | null;
+  diagnostic_issues?: unknown[] | null;
+  [key: string]: unknown;
+}
+
+export type { WriteSafety } from "./contractTypes";
+
+export type TargetIdentifierKind = TargetIdentifierKindTransport;
+export type ReferenceType = ReferenceTypeTransport;
 export type ResolutionState = "automatic" | "manual" | "unresolved";
 export type ResolutionReason = "no_match" | "multiple_matches" | "out_of_scope" | "conflicting_targets" | "incomplete" | "target_missing";
 
@@ -8,45 +71,10 @@ export interface ReferenceResolution {
   reason?: ResolutionReason | null;
 }
 
-export interface Project {
-  id: number;
-  name: string;
-  description?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ProjectEnvironmentSummary {
-  id: number;
-  name: string;
-  metadata_source_count: number;
-  etl_log_path_count: number;
-  code_artifact_count: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ProjectSummary extends Project {
-  environment_count: number;
-  metadata_source_count: number;
-  etl_log_path_count: number;
-  reference_mapping_count: number;
-  environments: ProjectEnvironmentSummary[];
-}
-
-export interface ProjectReferenceMapping {
-  id: number;
-  project_id: number;
-  reference_type: ReferenceType;
-  reference_normalized_value: string;
-  reference_signature: Record<string, unknown>;
-  target_identifier_kind: TargetIdentifierKind;
-  target_normalized_value: string;
-  target_display_value: string;
-  note?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Project = ProjectTransport;
+export type ProjectEnvironmentSummary = ProjectEnvironmentSummaryTransport;
+export type ProjectSummary = ProjectSummaryTransport;
+export type ProjectReferenceMapping = ProjectReferenceMappingTransport;
 
 export interface ProjectReferenceRegistryTarget {
   id: string;
@@ -134,7 +162,7 @@ export interface StudioAnalyticsCacheInfo {
   size_bytes?: number | null;
   schema_version?: number | null;
   generation?: number | null;
-  build_state: "ready" | "rebuild_required";
+  build_state: "ready" | "building" | "rebuild_required";
   published_at?: string | null;
   dataflow_row_count: number;
   job_row_count: number;
@@ -143,6 +171,7 @@ export interface StudioAnalyticsCacheInfo {
   active_source_count: number;
   orphan_source_count: number;
   orphan_source_ids: number[];
+  resource_limits: Record<string, string | number>;
 }
 
 export interface StudioDiagnostics {
@@ -154,7 +183,7 @@ export type StudioCacheScope = "read_models" | "analytics" | "all_disposable";
 export type StudioCacheFeature = "overview" | "assets" | "lineage" | "monitoring";
 
 export interface StudioResultCacheStatus {
-  backend: "sqlite";
+  backend: string;
   path: string;
   entries: number;
   payload_bytes: number;
@@ -164,8 +193,8 @@ export interface StudioResultCacheStatus {
 }
 
 export interface AnalyticsUpgradeStatus {
-  state: "not_required" | "current" | "pending" | "building" | "repairing" | "validating" | "publishing" | "succeeded" | "completed_with_warnings" | "failed";
-  operation_kind?: "schema_upgrade" | "cache_rebuild" | "source_repair" | "initialize" | "scope_reconcile" | string;
+  state: string;
+  operation_kind?: string;
   reason_code?: string | null;
   source_schema_version?: number | null;
   target_schema_version?: number | null;
@@ -203,13 +232,13 @@ export interface AnalyticsUpgradeSourceProgress {
 export interface StudioCacheStatus {
   result_cache: StudioResultCacheStatus;
   analytics_cache: {
-    backend: "duckdb";
+    backend: string;
     path: string;
     exists: boolean;
     file_bytes: number;
     schema_version?: number | null;
     generation?: number | null;
-    build_state: "ready" | "rebuild_required";
+    build_state: string;
     published_at?: string | null;
     dataflow_rows: number;
     job_rows: number;
@@ -252,13 +281,7 @@ export interface ModuleInfo {
   enabled: boolean;
 }
 
-export interface Environment {
-  id: number;
-  project_id: number;
-  name: string;
-  created_at: string;
-  updated_at: string;
-}
+export type Environment = EnvironmentTransport;
 
 export interface SourcePath {
   id: number;
@@ -278,11 +301,11 @@ export interface SourcePath {
 
 export interface ConfiguredSourceLocation {
   registration_id: number;
-  purpose: "project" | "metadata" | "code" | "logs";
+  purpose: "project" | "metadata" | "sql" | "code" | "logs";
   input_uri: string;
   canonical_uri: string;
-  input_locations: Record<string, string>;
-  canonical_locations: Record<string, string>;
+  input_locations: Record<string, string | string[]>;
+  canonical_locations: Record<string, string | string[]>;
 }
 
 export type StorageProvider = "local" | "s3" | "minio" | "adls" | "onelake" | "gcs" | "dbfs";
@@ -331,137 +354,17 @@ export interface StorageConnectionValidation {
   error?: Record<string, unknown> | null;
 }
 
-export interface SourceImportItem {
-  status: "created" | "existing" | "stale";
-  id: number;
-  source_kind: string;
-  uri: string;
-  label?: string | null;
-  record_counts: Record<string, number>;
-  source_config: Record<string, unknown>;
-}
-
-export interface SourceImportResponse {
-  created: SourceImportItem[];
-  existing: SourceImportItem[];
-  stale?: SourceImportItem[];
-  errors: Array<Record<string, unknown>>;
-  summary: Record<string, number>;
-}
-
-export interface SourceValidationResult {
-  source_id: number;
-  source_kind: "metadata" | "logs" | string;
-  status: "ok" | "warning" | "error";
-  message: string;
-  detected_provider?: string | null;
-  detected_format?: string | null;
-  record_counts?: Record<string, number>;
-  records_scanned?: number;
-  validated_at?: string | null;
-  errors: Array<Record<string, unknown>>;
-}
-
-export type SourceReadCheckResult = SourceValidationResult;
-
-export interface SourceSyncJob {
-  id: number;
-  environment_id: number;
-  source_id: number;
-  source_kind: "metadata" | "logs" | string;
-  job_type: string;
-  status: "running" | "succeeded" | "failed" | string;
-  message?: string | null;
-  result?: Record<string, unknown> | null;
-  started_at: string;
-  completed_at?: string | null;
-}
-
-export interface SourceFreshnessStatus {
-  state: "current" | "not_synced" | "missing" | "sync_failed" | "unknown" | string;
-  source_modified_at?: string | null;
-  cache_source_modified_at?: string | null;
-  cache_synced_at?: string | null;
-  summary?: string | null;
-}
-
-export interface SourceValidationStatus {
-  state: "not_validated" | "validating" | "ready" | "warning" | "invalid" | string;
-  completed_at?: string | null;
-  summary?: string | null;
-  error?: Record<string, unknown> | null;
-}
-
-export interface SourceObservationStatus {
-  state: "never" | "checking" | "unchanged" | "changed" | "error" | "paused" | string;
-  checked_at?: string | null;
-  pending_changes?: boolean | null;
-  next_check_at?: string | null;
-  failure_count: number;
-  error?: Record<string, unknown> | null;
-}
-
-export interface SourceSyncExecutionStatus {
-  state: "never" | "running" | "succeeded" | "failed" | string;
-  trigger?: "initial" | "manual" | "scheduled" | "automatic" | string | null;
-  started_at?: string | null;
-  completed_at?: string | null;
-  last_successful_at?: string | null;
-  summary?: string | null;
-  error?: Record<string, unknown> | null;
-}
-
-export interface SourceSyncStatus {
-  source_id: number;
-  source_kind: "metadata" | "logs" | string;
-  status: "ok" | "warning" | "error" | "unknown" | string;
-  message: string;
-  revision?: Record<string, unknown> | null;
-  error?: Record<string, unknown> | null;
-  checked_at?: string | null;
-  last_observed_at?: string | null;
-  next_check_at?: string | null;
-  pending_changes?: boolean | null;
-  observation_state: "active" | "retrying" | "paused";
-  observation_failure_count: number;
-  observation_paused_at?: string | null;
-  active_operation?: "validate" | "sync" | null;
-  latest_job?: SourceSyncJob | null;
-  freshness?: SourceFreshnessStatus | null;
-  validation?: SourceValidationStatus | null;
-  observation?: SourceObservationStatus | null;
-  sync_execution?: SourceSyncExecutionStatus | null;
-}
-
-export interface SourceObservationOutcome {
-  source_id: number;
-  source_kind: string;
-  outcome: "changed" | "unchanged" | "error" | "skipped";
-  pending_changes?: boolean | null;
-  error?: Record<string, unknown> | null;
-  started_at: string;
-  completed_at: string;
-  status: SourceSyncStatus;
-}
-
-export interface LocalSourceObservation {
-  environment_id: number;
-  total: number;
-  observed: number;
-  changed: number;
-  skipped: number;
-  failed: number;
-  observed_at: string;
-  outcomes: SourceObservationOutcome[];
-}
+export type SourceValidationResult = SourceValidationResultTransport;
+export type LocalSourceObservation = LocalSourceObservationTransport;
 
 export interface SourcesWorkspace {
   schema_version: "sources-workspace.v1";
   environment_id: number;
   metadata_sources: SourcePath[];
+  sql_sources: SourcePath[];
   log_sources: SourcePath[];
   code_artifacts: SourcePath[];
-  statuses: SourceSyncStatus[];
+  statuses: SourceSyncStatusTransport[];
   earliest_cloud_due_at?: string | null;
   dependency_version: string;
 }
@@ -479,8 +382,12 @@ export type LogSyncRequest =
 export interface SystemLogFile {
   source_id: number;
   file_uri: string;
-  row_count: number;
+  file_kind: string;
+  log_session_id?: string | null;
+  row_count: MonitoringInteger;
   log_timestamp?: string | null;
+  event_min_timestamp?: string | null;
+  event_max_timestamp?: string | null;
   run_date?: string | null;
 }
 
@@ -488,7 +395,7 @@ export interface SystemLogResponse {
   records: Array<Record<string, unknown>>;
   total: number;
   files: SystemLogFile[];
-  errors: Array<Record<string, string>>;
+  errors: Array<Record<string, unknown>>;
 }
 
 export interface FreshnessGroup {
@@ -509,7 +416,7 @@ export interface EnvironmentContext {
     message: string;
     max_source_modified_at?: string | null;
     metadata: FreshnessGroup;
-    etl_logs: FreshnessGroup;
+    logs: FreshnessGroup;
   };
   versions: {
     source_registry: string;
@@ -598,11 +505,11 @@ export interface EnvironmentOverview {
   };
   lineage: LineageSummary & { error_count: number };
   monitoring: {
-    job_records: number;
-    total_failures: number;
+    job_records: MonitoringInteger;
+    total_failures: MonitoringInteger;
     dataflow_success_rate: number;
-    failed_job_windows: { last7: number; last30: number; last365: number };
-    active_engines: number;
+    failed_job_windows: { last7: MonitoringInteger; last30: MonitoringInteger; last365: MonitoringInteger };
+    active_engines: MonitoringInteger;
     latest_log_at: string | null;
     date_range: { min?: string | null; max?: string | null };
     errors: Array<Record<string, unknown>>;
@@ -628,6 +535,20 @@ export interface MetadataEditorIssue {
   message: string;
 }
 
+export interface PendingSqlFileOperation {
+  source_id: number;
+  query: string;
+  content: string;
+  base_revision?: Record<string, unknown> | null;
+  base_kind?: "sql_root" | "project_root" | string;
+  relative_path?: string;
+  base_uri?: string | null;
+  config_revision?: Record<string, unknown> | null;
+  publish_status?: "pending" | "applied";
+  published_revision?: Record<string, unknown> | null;
+  published_content_hash?: string | null;
+}
+
 export interface MetadataEditorDocument {
   source: {
     source_id: number;
@@ -642,6 +563,9 @@ export interface MetadataEditorDocument {
   };
   sheets: Record<string, MetadataEditorSheet>;
   issues: MetadataEditorIssue[];
+  metadata_document?: Record<string, unknown>;
+  metadata_documents?: Record<string, Record<string, unknown>>;
+  sql_files?: PendingSqlFileOperation[];
 }
 
 export interface MetadataEditorWorkspace {
@@ -658,10 +582,43 @@ export interface MetadataBackup {
   environment_id: number;
   source_id: number;
   source_uri: string;
-  backup_path: string;
+  backup_path?: string | null;
+  backup_ref?: string | null;
+  backup_hash?: string | null;
+  backup_size?: number | null;
   source_revision?: Record<string, unknown> | null;
   saved_revision?: Record<string, unknown> | null;
   created_at: string;
+}
+
+export interface MetadataWriteItem {
+  id: number;
+  order: number;
+  kind: string;
+  state: string;
+  source_id?: number | null;
+  source_name?: string | null;
+  source_uri: string;
+  target_uri: string;
+  action: string;
+  label: string;
+  sheets: string[];
+  provider?: string | null;
+  write_safety?: WriteSafety | null;
+  error?: Record<string, unknown> | null;
+}
+
+export interface MetadataWriteOperation {
+  operation_key: string;
+  environment_id: number;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  expires_at: string;
+  error?: Record<string, unknown> | null;
+  summary: Record<string, number>;
+  items: MetadataWriteItem[];
 }
 
 export interface LineageAsset {
@@ -1096,60 +1053,63 @@ export interface ReferenceOccurrenceSourceResponse {
   diagnostics: ReferenceSourceDiagnostic[];
 }
 
-export interface MonitoringRecord {
-  dataflow_name?: string | null;
-  dataflow_id?: string | null;
-  stage?: string | null;
-  status?: string | null;
-  duration_seconds?: number | null;
+export type MonitoringRecord = MonitoringDataflowRecordTransport & MonitoringV6RecordEvidence & {
   started_at?: string | null;
   completed_at?: string | null;
+  raw_record_json?: string | null;
+  /** Assets-owned destination identity metadata (additive across Monitoring versions). */
+  identity_version?: string | null;
+  identity_status?: "resolved" | "unresolved" | "conflict" | string | null;
+  identity_reason?: string | null;
+  identity_provenance?: Record<string, "captured" | "metadata" | "derived" | string> | null;
+  identity_metadata_sources?: Array<{ source_id?: number | null; revision?: string | null; [key: string]: unknown }> | null;
+  read_boundary_adjustment_state?: string | null;
+  read_boundary_adjustment_basis?: string | null;
+  read_boundary_adjustment_reason?: string | null;
+  read_boundary_adjustment_input_json?: string | null;
+  read_boundary_adjustment_effective_json?: string | null;
+};
+
+export type MonitoringFailureActivity = MonitoringRecord & {
+  activity_type?: "failed_run" | "recovered_attempt";
+  activity_time?: string | null;
+  activity_time_source?: "attempt_end_time" | "attempt_start_time" | "dataflow_run_time" | string | null;
+  activity_context?: string | null;
+  activity_message?: string | null;
+  failure_time?: string | null;
+  failure_phase?: string | null;
   failure_category?: string | null;
-  failure_tags?: string[];
-  failure_rule_id?: string | null;
-  [key: string]: unknown;
-}
+  failure_message?: string | null;
+  attempt_number?: MonitoringInteger | null;
+  attempt_message?: string | null;
+};
 
-export interface JobRecord {
-  job_id?: string | null;
-  engine_name?: string | null;
-  metadata_provider_name?: string | null;
-  status?: string | null;
-  duration_seconds?: number | null;
-  error_message?: string | null;
-  total_dataflows?: number | null;
-  total_rows_read?: number | null;
-  total_rows_written?: number | null;
-  total_bytes_added?: number | null;
-  total_bytes_removed?: number | null;
-  start_time?: string | null;
-  end_time?: string | null;
-  [key: string]: unknown;
-}
+export type JobRecord = MonitoringJobRecordTransport & {
+  raw_record_json?: string | null;
+};
 
-export interface NamedCount extends Record<string, unknown> {
-  name?: string;
-  status?: string;
-  category?: string;
-  count: number;
-}
+export type NamedCount = Omit<MonitoringNamedCountTransport, "count"> & {
+  count: MonitoringInteger;
+};
 
 export interface MonitoringReport {
   summary: {
-    dataflow_records: number;
-    job_records: number;
+    dataflow_records: MonitoringInteger;
+    job_records: MonitoringInteger;
     date_range: { min?: string | null; max?: string | null };
     latest_log_at?: string | null;
     latest_job_log_at?: string | null;
     latest_dataflow_log_at?: string | null;
     timezone?: string | null;
-    timezone_source?: "configured" | "server_default" | string;
+    timezone_source?: "configured" | "server_default" | string | null;
     requested_grain?: string | null;
     effective_grain?: string | null;
-    active_engines: number;
-    active_metadata_providers: number;
-    log_paths: number;
+    active_engines: MonitoringInteger;
+    active_metadata_providers: MonitoringInteger;
+    log_base_paths: MonitoringInteger;
+    identity_version?: string | null;
   };
+  log_admission?: MonitoringLogAdmission | null;
   health: {
     status: string;
     label: string;
@@ -1158,13 +1118,13 @@ export interface MonitoringReport {
     latest_job_log_at?: string | null;
     latest_dataflow_log_at?: string | null;
     latest_log_age_days?: number | null;
-    failed_jobs_last_3_days?: number;
-    failed_jobs_last_7_days?: number;
-    failed_dataflows_last_3_days?: number;
-    failed_dataflows_last_7_days?: number;
-    maintenance_failed_last_7_days?: number;
-    maintenance_failed_last_14_days?: number;
-    maintenance_skipped_last_7_days?: number;
+    failed_jobs_last_3_days?: MonitoringInteger;
+    failed_jobs_last_7_days?: MonitoringInteger;
+    failed_dataflows_last_3_days?: MonitoringInteger;
+    failed_dataflows_last_7_days?: MonitoringInteger;
+    maintenance_failed_last_7_days?: MonitoringInteger;
+    maintenance_failed_last_14_days?: MonitoringInteger;
+    maintenance_skipped_last_7_days?: MonitoringInteger;
   };
   attention: Array<{
     severity: "good" | "info" | "warning" | "bad" | string;
@@ -1177,26 +1137,60 @@ export interface MonitoringReport {
   coverage: Record<string, string | number | null>;
   reconciliation: {
     status: string;
-    mismatch_count: number;
-    checks: Array<Record<string, string | number>>;
+    scope_coverage?: string | null;
+    mismatch_count: MonitoringInteger;
+    checks: Array<Record<string, string | number | null>>;
+    summary?: {
+      total_checks_count: MonitoringInteger;
+      total_jobs_count: MonitoringInteger;
+      comparable_checks_count: MonitoringInteger;
+      comparable_jobs_count: MonitoringInteger;
+      mismatch_checks_count: MonitoringInteger;
+      mismatch_jobs_count: MonitoringInteger;
+      unassessed_checks_count: MonitoringInteger;
+      unassessed_jobs_count: MonitoringInteger;
+      scope_coverage?: string | null;
+      unassessed_reason?: string | null;
+      [key: string]: unknown;
+    } | null;
   };
   diagnostics: {
     kpis: Record<string, string | number | null>;
+    assessment?: {
+      status: string;
+      reasons: Array<{ code: string; severity: string; count: MonitoringInteger; scope_coverage?: string | null }>;
+      coverage?: string | null;
+      [key: string]: unknown;
+    } | null;
+    registry_summary?: {
+      total_issues: MonitoringInteger;
+      loaded_issues: MonitoringInteger;
+      limit: number;
+      truncated: boolean;
+      [key: string]: unknown;
+    } | null;
+    diagnostic_capture?: {
+      summary: Record<string, string | number | boolean | null>;
+      by_reason: Array<Record<string, string | number | null>>;
+      evidence: Array<Record<string, string | number | null>>;
+    } | null;
     record_evidence_by_date?: Array<Record<string, string | number | null>>;
     job_linkage_summary?: Array<Record<string, string | number | null>>;
     reconciliation_by_metric?: Array<Record<string, string | number | null>>;
-    field_completeness?: Array<Record<string, string | number | null>>;
+    field_completeness?: Array<Record<string, string | number | boolean | null>>;
     source_coverage?: Array<Record<string, string | number | boolean | null>>;
     investigation_queue?: Array<Record<string, unknown>>;
+    finding_groups?: DiagnosticsFindingGroup[];
+    findings_summary?: DiagnosticsFindingsSummary | null;
+    scope_notices?: DiagnosticsScopeNotice[];
     job_id_evidence: Array<Record<string, string | number | null>>;
     read_errors: Array<Record<string, unknown>>;
   };
-  metric_definitions: Record<string, { label: string; formula: string }>;
   operations: {
-    kpis: Record<string, number>;
-    windows?: Record<string, Record<string, number>>;
-    job_duration_stats?: Record<string, number>;
-    job_status_distribution: Array<{ status: string; count: number }>;
+    kpis: Record<string, MonitoringMetric>;
+    windows?: Record<string, Record<string, MonitoringMetric>>;
+    job_duration_stats?: Record<string, MonitoringMetric>;
+    job_status_distribution: Array<{ status: string; count: MonitoringInteger }>;
     job_runs_by_operation_type?: Array<Record<string, string | number>>;
     job_runs_by_dataflow_operation_type?: Array<Record<string, string | number>>;
     job_duration_by_operation_types?: Array<Record<string, unknown>>;
@@ -1211,12 +1205,12 @@ export interface MonitoringReport {
     job_attention?: Array<Record<string, string | number | null>>;
     dataflows_by_date_status: Array<Record<string, string | number | null>>;
     failed_jobs: JobRecord[];
-    dataflow_kpis: Record<string, number>;
-    dataflow_duration_stats?: Record<string, number>;
+    dataflow_kpis: Record<string, MonitoringMetric>;
+    dataflow_duration_stats?: Record<string, MonitoringMetric>;
     dataflow_runs_by_operation_type?: Array<Record<string, string | number>>;
     dataflow_runs_by_destination_operation_type?: Array<Record<string, string | number>>;
-    phase_health?: Array<Record<string, string | number>>;
-    phase_health_by_stage?: Array<Record<string, string | number>>;
+    phase_health?: Array<Record<string, string | number | null>>;
+    phase_health_by_stage?: Array<Record<string, string | number | null>>;
     dataflow_endpoint_health?: Array<Record<string, string | number | null>>;
     dataflow_name_status_health?: Array<Record<string, string | number | null>>;
     dataflow_watermark_summary?: Array<Record<string, string | number | null>>;
@@ -1226,7 +1220,7 @@ export interface MonitoringReport {
   };
   failures: {
     kpis?: Record<string, string | number | null>;
-    latest_queue?: MonitoringRecord[];
+    latest_queue?: MonitoringFailureActivity[];
     repeated_signatures?: Array<Record<string, string | number | null>>;
     failure_by_phase?: NamedCount[];
     failure_category_phase_matrix?: Array<Record<string, string | number>>;
@@ -1234,34 +1228,37 @@ export interface MonitoringReport {
     failed_by_stage: NamedCount[];
     failed_by_source_connection_type: NamedCount[];
     top_failing_dataflows: Array<Record<string, string | number | null>>;
-    error_categories: Array<{ category: string; count: number }>;
-    failure_trend_by_date: Array<{ date: string; failed: number }>;
+    error_categories: Array<{ category: string; count: MonitoringInteger }>;
+    failure_trend_by_date: Array<{ date: string; failed: MonitoringInteger }>;
     failed_records: MonitoringRecord[];
+    recovered_attempts?: Array<Record<string, string | number | null>>;
   };
   performance: {
     kpis?: Record<string, string | number | null>;
     duration_distribution_by_stage?: Array<Record<string, unknown>>;
-    phase_contribution_by_stage_operation?: Array<Record<string, string | number>>;
+    phase_contribution_by_stage_operation?: Array<Record<string, string | number | null>>;
     workload_efficiency_points?: Array<Record<string, string | number | null> | Array<string | number | null>>;
     slowest_dataflow_profiles?: Array<Record<string, string | number | null>>;
     runtime_context_profiles?: Array<Record<string, string | number | null>>;
     performance_trend?: Array<Record<string, string | number | null>>;
   };
   volume: {
-    kpis: Record<string, number>;
+    kpis: Record<string, MonitoringMetric>;
     rows_by_date: Array<Record<string, string | number | null>>;
     bytes_by_date: Array<Record<string, string | number | null>>;
     volume_by_load_type: Array<Record<string, string | number>>;
     volume_by_workload_type?: Array<Record<string, string | number | null>>;
     route_volume?: Array<Record<string, string | number | null>>;
     top_dataflows_by_rows_read?: Array<Record<string, string | number | null>>;
-    top_dataflows_by_est_rows_written?: Array<Record<string, string | number | null>>;
-    top_dataflows_by_rows_written: Array<Record<string, string | number>>;
+    top_dataflows_by_rows_written: Array<Record<string, string | number | null>>;
+    top_dataflows_by_lakehouse_rows_written?: Array<Record<string, string | number | null>>;
     top_dataflows_by_bytes_added?: Array<Record<string, string | number>>;
     top_dataflows_by_net_bytes?: Array<Record<string, string | number | null>>;
   };
   maintenance: {
     kpis: Record<string, string | number | null>;
+    operation_type_counts?: Array<Record<string, string | number | null>>;
+    maintenance_status_counts?: Array<Record<string, string | number | null>>;
     status_by_date?: Array<Record<string, string | number | null>>;
     reclaim_by_date?: Array<Record<string, string | number | null>>;
     table_efficiency_points?: Array<Record<string, string | number | boolean | null>>;
@@ -1270,26 +1267,23 @@ export interface MonitoringReport {
     bytes_reclaimed_by_date: Array<Record<string, string | number>>;
   };
   freshness: {
-    kpis: Record<string, number>;
+    kpis: Record<string, MonitoringMetric>;
     age_by_dataflow?: Array<Record<string, string | number | null>>;
     watermark_movement_by_date?: Array<Record<string, string | number | null>>;
     age_distribution?: Array<Record<string, string | number | null>>;
     watermark_coverage_by_stage?: Array<Record<string, string | number | null>>;
     skipped_streak_distribution?: Array<Record<string, string | number | null>>;
+    read_boundary_adjustment_by_dataflow?: Array<Record<string, string | number | null>>;
   };
   errors: Array<Record<string, unknown>>;
 }
 
-export type MonitoringPageResponse = {
-  schema_version: "monitoring-page.v9";
-  page: "environment-overview" | "overview" | "jobs" | "dataflows" | "failures" | "diagnostics" | "performance" | "volume" | "maintenance" | "freshness";
-  summary: MonitoringReport["summary"];
-} & Partial<Omit<MonitoringReport, "summary" | "metric_definitions">>;
+export type MonitoringPageResponse = MonitoringPageResponseTransport;
 
 export interface MonitoringFilterOption {
   value: string;
   label: string;
-  count?: number;
+  count?: MonitoringInteger;
 }
 
 export interface MonitoringFilterOptionsResponse {
@@ -1301,33 +1295,98 @@ export interface MonitoringFilterOptionsResponse {
   errors: Array<Record<string, unknown>>;
 }
 
-export interface MonitoringOverview {
-  summary: {
-    records?: number;
-    succeeded?: number;
-    failed?: number;
-    skipped?: number;
-    success_rate?: number;
-    log_paths?: number;
-  };
-  failed_dataflows: MonitoringRecord[];
-  slowest_dataflows: MonitoringRecord[];
-  duration_by_stage: Array<{
-    stage: string;
-    count: number;
-    avg_duration_seconds: number;
-    max_duration_seconds: number;
-  }>;
-  status_by_stage: Array<Record<string, string | number>>;
-  errors: Array<Record<string, unknown>>;
-}
-
 export interface LatestStatusResponse {
     latest_by_id: Record<string, MonitoringRecord>;
     latest_by_name: Record<string, MonitoringRecord>;
     ambiguous_names: string[];
     errors: Array<Record<string, unknown>>;
   }
+
+export type DiagnosticsFindingKind = "issue" | "warning" | "limitation" | "notice";
+export type DiagnosticsFindingSubject = "job" | "dataflow_record" | "field_group";
+
+/** One structural finding group; counts use the unit named by `subject_kind`. */
+export interface DiagnosticsFindingGroup {
+  group_key: string;
+  kind: DiagnosticsFindingKind;
+  rule: string;
+  reason: string;
+  section: string;
+  subject_kind: DiagnosticsFindingSubject;
+  affected_objects: string;
+  checks?: string | null;
+  occurrences?: string | null;
+  latest_time?: string | null;
+}
+
+export interface DiagnosticsFindingMetric {
+  metric: string;
+  expected?: string | null;
+  observed?: string | null;
+  difference?: string | null;
+}
+
+/** One affected object with exact nullable identity for drill-in. */
+export interface DiagnosticsFindingObject {
+  group_key: string;
+  rule: string;
+  reason: string;
+  section: string;
+  subject_kind: DiagnosticsFindingSubject;
+  source_id?: number | null;
+  log_session_id?: string | null;
+  job_id?: string | null;
+  dataflow_id?: string | null;
+  dataflow_run_id?: string | null;
+  dataflow_name?: string | null;
+  file_uri?: string | null;
+  file_kind?: string | null;
+  record_line?: string | null;
+  latest_time?: string | null;
+  checks?: string | null;
+  occurrences?: string | null;
+  job_status?: string | null;
+  job_total_dataflows?: string | null;
+  filtered_dataflow_records?: string | null;
+  recorded_dataflow_records?: string | null;
+  excluded_dataflow_records?: string | null;
+  observed_at?: string | null;
+  records_dropped?: string | null;
+  bytes_dropped?: string | null;
+  metrics?: DiagnosticsFindingMetric[];
+  field_group?: Record<string, unknown> | null;
+}
+
+export interface DiagnosticsFindingsSummary {
+  analytics_generation?: string | null;
+  as_of?: string | null;
+  scope: "full" | "subset" | "none";
+  issue_groups: string;
+  warning_groups: string;
+  limitation_groups: string;
+  groups_total: string;
+  groups_loaded: string;
+  group_limit: number;
+  affected_objects: Array<{ kind: DiagnosticsFindingKind; subject_kind: DiagnosticsFindingSubject; count: string }>;
+  restrictions: string[];
+}
+
+export interface DiagnosticsScopeNotice {
+  code: string;
+  group_key: string;
+  jobs: string;
+  checks: string;
+  restrictions: string[];
+}
+
+export interface DiagnosticsEvidenceResponse {
+  mode: "registry" | "detail";
+  group: DiagnosticsFindingGroup | null;
+  groups: DiagnosticsFindingGroup[];
+  objects: DiagnosticsFindingObject[];
+  errors: Array<Record<string, unknown>>;
+  summary: MonitoringRecordsResponse<Record<string, unknown>>["summary"];
+}
 
 export interface MonitoringRecordsResponse<T extends Record<string, unknown>> {
   records: T[];
@@ -1338,5 +1397,8 @@ export interface MonitoringRecordsResponse<T extends Record<string, unknown>> {
     limit: number;
     offset?: number;
     cache?: string;
+    analytics_generation?: string | null;
+    as_of?: string | null;
+    identity_version?: string | null;
   };
 }

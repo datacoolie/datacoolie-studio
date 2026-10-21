@@ -1,6 +1,9 @@
-import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import type { MonitoringMetric, MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";import { DataflowEndpointHealthPanel, DataflowNameStatusHealthPanel, DataflowRunsTable } from "./DataflowsPageSupport";
-import { CompactNumberValue, LifecycleStatusValues, DetailMetric, DurationDistributionBoxPlot, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, formatBytes, formatPercent, monitoringTimezone, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPrimitives";
+import { DurationDistributionBoxPlot } from "../components/monitoringDurationPresentation";
+import { ObservedNumberValue } from "../components/monitoringPresentation";
+import { rowObservation } from "../components/monitoringObservation";
+import { CompactBytesValue, CompactNumberValue, LifecycleStatusValues, DetailMetric, DurationHeadline, HealthStripCard, ReportChart, ReportPanel, RuntimePhaseContribution, RuntimePhaseLegend, StatusHealthLegend, StatusTrendLegend, type TableSort, TablePager, WindowPairDetail, dataflowStatusTrendOption, durationIntent, durationPercentilesDetail, durationStatsTitle, formatPercent, metricNumber, metricValue, monitoringTimezone, runtimePhaseContributionTooltip, successRateIntent } from "../components/monitoringPresentation";
 
 export function DataflowsPage({
   report,
@@ -31,15 +34,16 @@ export function DataflowsPage({
 }) {
   const kpis = report.operations.dataflow_kpis;
   const volumeKpis = report.volume.kpis;
-  const durationStats = (report.operations.dataflow_duration_stats ?? {}) as Record<string, number>;
+  const durationStats = (report.operations.dataflow_duration_stats ?? {}) as Record<string, MonitoringMetric>;
   const timezoneName = monitoringTimezone(report);
-  const last24Window = (report.operations.windows?.last_24_hours ?? {}) as Record<string, number>;
-  const last7Window = (report.operations.windows?.last_7_days ?? {}) as Record<string, number>;
-  const avgDuration = durationStats.avg_duration_seconds ?? kpis.avg_duration_seconds ?? 0;
-  const p50Duration = durationStats.p50_duration_seconds ?? avgDuration;
-  const executableRuns = (kpis.succeeded ?? 0) + (kpis.failed ?? 0);
-  const rateIntent = successRateIntent(kpis.success_rate ?? 0, kpis.failure_rate ?? 0, executableRuns);
-  const durationHealthIntent = durationIntent(durationStats, kpis.avg_duration_seconds ?? 0, kpis.p95_duration_seconds ?? 0);
+  const last24Window = (report.operations.windows?.last_24_hours ?? {}) as Record<string, unknown>;
+  const last7Window = (report.operations.windows?.last_7_days ?? {}) as Record<string, unknown>;
+  const metricOr = (row: Record<string, MonitoringMetric>, key: string, fallback: MonitoringMetric | undefined): MonitoringMetric | undefined => row[key] === undefined ? fallback : row[key];
+  const avgDuration = metricOr(durationStats, "avg_duration_seconds", kpis.avg_duration_seconds);
+  const p50Duration = metricOr(durationStats, "p50_duration_seconds", avgDuration);
+  const executableRuns = metricNumber(kpis.succeeded) + metricNumber(kpis.failed);
+  const rateIntent = successRateIntent(metricNumber(kpis.success_rate), metricNumber(kpis.failure_rate), executableRuns);
+  const durationHealthIntent = durationIntent(durationStats, metricNumber(kpis.avg_duration_seconds), metricNumber(kpis.p95_duration_seconds));
   const phaseStageRows = report.operations.phase_health_by_stage ?? [];
   const endpointRows = report.operations.dataflow_endpoint_health ?? [];
   const dataflowNameStatusRows = report.operations.dataflow_name_status_health ?? [];
@@ -48,14 +52,14 @@ export function DataflowsPage({
       <section className="overview-health-strip monitoring-dataflow-health-strip">
         <HealthStripCard
           label="Dataflow runs"
-          value={<CompactNumberValue value={kpis.total_dataflows ?? 0} />}
+          value={<CompactNumberValue value={metricValue(kpis, "total_dataflows")} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={<CompactNumberValue value={last24Window.dataflow_runs ?? 0} />}
+              firstValue={<CompactNumberValue value={metricValue(last24Window, "dataflow_runs")} />}
               firstTone="headline"
               secondLabel="7d"
-              secondValue={<CompactNumberValue value={last7Window.dataflow_runs ?? 0} />}
+              secondValue={<CompactNumberValue value={metricValue(last7Window, "dataflow_runs")} />}
               secondTone="headline"
             />
           }
@@ -64,14 +68,14 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Execution rate"
-          value={`${formatPercent(kpis.success_rate ?? 0)} success`}
+          value={`${formatPercent(metricValue(kpis, "success_rate"))} success`}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={formatPercent(last24Window.dataflow_success_rate ?? 0)}
+              firstValue={formatPercent(metricValue(last24Window, "dataflow_success_rate"))}
               firstTone={rateIntent}
               secondLabel="7d"
-              secondValue={formatPercent(last7Window.dataflow_success_rate ?? 0)}
+              secondValue={formatPercent(metricValue(last7Window, "dataflow_success_rate"))}
               secondTone={rateIntent}
             />
           }
@@ -81,18 +85,18 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Failed runs"
-          value={<CompactNumberValue value={kpis.failed ?? 0} />}
+          value={<CompactNumberValue value={metricValue(kpis, "failed")} />}
           detail={
             <WindowPairDetail
               firstLabel="24h"
-              firstValue={<CompactNumberValue value={last24Window.dataflow_failed ?? 0} />}
-              firstTone={(last24Window.dataflow_failed ?? 0) ? "bad" : "neutral"}
+              firstValue={<CompactNumberValue value={metricValue(last24Window, "dataflow_failed")} />}
+              firstTone={metricNumber(metricValue(last24Window, "dataflow_failed")) ? "bad" : "neutral"}
               secondLabel="7d"
-              secondValue={<CompactNumberValue value={last7Window.dataflow_failed ?? 0} />}
-              secondTone={(last7Window.dataflow_failed ?? 0) ? "bad" : "neutral"}
+              secondValue={<CompactNumberValue value={metricValue(last7Window, "dataflow_failed")} />}
+              secondTone={metricNumber(metricValue(last7Window, "dataflow_failed")) ? "bad" : "neutral"}
             />
           }
-          intent={(kpis.failed ?? 0) ? "bad" : "neutral"}
+          intent={metricNumber(metricValue(kpis, "failed")) ? "bad" : "neutral"}
           accent="intent"
           title="Failed dataflow run records in the current filters."
         />
@@ -100,9 +104,9 @@ export function DataflowsPage({
           label="Skipped / Running / Pending"
           value={
             <LifecycleStatusValues
-              skipped={kpis.skipped ?? 0}
-              running={kpis.running ?? 0}
-              pending={kpis.pending ?? 0}
+              skipped={metricValue(kpis, "skipped")}
+              running={metricValue(kpis, "running")}
+              pending={metricValue(kpis, "pending")}
             />
           }
           detail={
@@ -110,24 +114,24 @@ export function DataflowsPage({
               firstLabel="24h"
               firstValue={
                 <LifecycleStatusValues
-                  skipped={last24Window.dataflow_skipped ?? 0}
-                  running={last24Window.dataflow_running ?? 0}
-                  pending={last24Window.dataflow_pending ?? 0}
+                  skipped={metricValue(last24Window, "dataflow_skipped")}
+                  running={metricValue(last24Window, "dataflow_running")}
+                  pending={metricValue(last24Window, "dataflow_pending")}
                 />
               }
               firstTone="neutral"
               secondLabel="7d"
               secondValue={
                 <LifecycleStatusValues
-                  skipped={last7Window.dataflow_skipped ?? 0}
-                  running={last7Window.dataflow_running ?? 0}
-                  pending={last7Window.dataflow_pending ?? 0}
+                  skipped={metricValue(last7Window, "dataflow_skipped")}
+                  running={metricValue(last7Window, "dataflow_running")}
+                  pending={metricValue(last7Window, "dataflow_pending")}
                 />
               }
               secondTone="neutral"
             />
           }
-          intent={(kpis.running ?? 0) || (kpis.pending ?? 0) ? "warning" : "neutral"}
+          intent={metricNumber(metricValue(kpis, "running")) || metricNumber(metricValue(kpis, "pending")) ? "warning" : "neutral"}
           accent="intent"
           title="Skipped means no new data or no processing needed. It is tracked separately from failed."
         />
@@ -142,14 +146,14 @@ export function DataflowsPage({
         />
         <HealthStripCard
           label="Workload"
-          value={<><CompactNumberValue value={volumeKpis.total_rows_read ?? 0} /> / <CompactNumberValue value={volumeKpis.total_rows_written ?? 0} /></>}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label="net lakehouse bytes" value={formatBytes(volumeKpis.net_bytes_change ?? 0)} tone="blue" />
-            </span>
-          }
+          value={<><ObservedNumberValue row={volumeKpis} field="rows_read" totalField="total_rows_read" /> / <ObservedNumberValue row={volumeKpis} field="rows_written" totalField="total_rows_written" /></>}
+          detail={<DetailMetric label="net lakehouse bytes" value={<CompactBytesValue value={metricValue(volumeKpis, "net_bytes_change")} />} tone="blue" />}
           intent="neutral"
-          title="Rows read / rows written. Byte metrics are lakehouse destination signals where available."
+          title={[
+            "Rows read / rows written. Byte metrics are lakehouse destination signals where available.",
+            `Read: ${rowObservation(volumeKpis, "rows_read").coverage ?? "Measurement coverage unavailable"}`,
+            `Written: ${rowObservation(volumeKpis, "rows_written").coverage ?? "Measurement coverage unavailable"}`
+          ].join("\n")}
         />
       </section>
 
@@ -200,8 +204,9 @@ export function DataflowsPage({
             <DataflowEndpointHealthPanel rows={endpointRows} />
           </ReportPanel>
           <ReportPanel
-            title="Dataflow name x status health"
-            titleTooltip="Groups dataflow runs by dataflow_name and splits them by status. Sort prioritizes failed, active, slow, and high-volume dataflows."
+            title="Dataflow x status"
+            className="monitoring-dataflow-name-status-panel"
+            titleTooltip="Groups dataflow runs by name and splits run counts by status. Sort prioritizes failed, active, slow, and high-volume dataflows."
             headerAction={<StatusHealthLegend />}
           >
             <DataflowNameStatusHealthPanel rows={dataflowNameStatusRows} />

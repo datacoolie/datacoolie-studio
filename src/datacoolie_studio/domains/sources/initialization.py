@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 def queue_source_initializations(
     session: Session,
     sources: Iterable[EnvironmentSource],
+    *,
+    commit: bool = True,
 ) -> list[int]:
     """Persist initial refresh requests before an API response is returned."""
     job_ids: list[int] = []
@@ -70,13 +72,16 @@ def queue_source_initializations(
         session.add(job)
         session.flush()
         job_ids.append(job.id)
-    session.commit()
+    if commit:
+        session.commit()
     return job_ids
 
 
 def queue_source_initialization_ids(
     session: Session,
     source_ids: Iterable[int],
+    *,
+    commit: bool = True,
 ) -> list[int]:
     ids = list(dict.fromkeys(source_ids))
     if not ids:
@@ -88,7 +93,7 @@ def queue_source_initialization_ids(
             .order_by(EnvironmentSource.id)
         )
     )
-    return queue_source_initializations(session, sources)
+    return queue_source_initializations(session, sources, commit=commit)
 
 
 def run_source_initialization_jobs(job_ids: Iterable[int]) -> int:
@@ -230,6 +235,10 @@ def _validate_source(session: Session, source: EnvironmentSource) -> dict[str, A
         return source_validation.validate_log_source(
             session, source, secret_store=secret_store
         )
+    if source.source_kind == "sql":
+        return source_validation.validate_sql_source(
+            session, source, secret_store=secret_store
+        )
     if source.source_kind == "code":
         return validate_code_artifact(
             session, source, secret_store=secret_store
@@ -256,6 +265,12 @@ def _sync_source(session: Session, source: EnvironmentSource) -> None:
                 str(error.get("message") or "Initial cache sync failed")
             )
         return
+    elif source.source_kind == "sql":
+        # SQL roots are read live by metadata SQL references; there is no
+        # separate materialization cache to build after validation.
+        source.last_successful_sync_at = utc_now()
+        session.commit()
+        return
     elif source.source_kind == "code":
         status = refresh_code_artifact(
             session,
@@ -276,7 +291,7 @@ def _sync_source(session: Session, source: EnvironmentSource) -> None:
 
 
 def _initialization_requires_validation(source: EnvironmentSource) -> bool:
-    if source.source_kind == "logs":
+    if source.source_kind in {"logs", "sql"}:
         return True
     if source.source_kind != "code":
         return False
@@ -292,8 +307,8 @@ def _initialization_requires_validation(source: EnvironmentSource) -> bool:
 
 
 def _raise_for_failed_sync(status: dict[str, Any]) -> None:
-    latest_job = status.get("latest_job") or {}
-    if latest_job.get("status") == "failed" or status.get("status") == "error":
+    sync_execution = status.get("sync_execution") or {}
+    if sync_execution.get("state") == "failed" or status.get("status") == "error":
         raise RuntimeError(str(status.get("message") or "Initial cache sync failed"))
 
 

@@ -1,23 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from tests.support.paths import REPOSITORY_ROOT
-
-
-pa = pytest.importorskip("pyarrow")
-pq = pytest.importorskip("pyarrow.parquet")
-
-
-SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "audit_or_repair_log_schema.py"
-SPEC = importlib.util.spec_from_file_location("log_schema_audit", SCRIPT_PATH)
-assert SPEC is not None and SPEC.loader is not None
-AUDIT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(AUDIT)
+from datacoolie_studio.domains.analytics import log_schema_audit, log_schema_repair
 
 
 def _write_legacy_file(path: Path, value: float = 2.0) -> None:
@@ -47,7 +37,7 @@ def test_audit_scans_analytics_streams_and_finds_all_integer_drift(tmp_path):
         encoding="utf-8",
     )
 
-    report = AUDIT.audit_log_root(root)
+    report = log_schema_audit.audit_log_root(root)
 
     assert report["scan_root"] == str(root / "etl_logs" / "analyst")
     assert report["parquet_files"] == 1
@@ -65,11 +55,11 @@ def test_apply_repairs_is_reversible_and_idempotent(tmp_path):
     root = tmp_path / "logs"
     legacy = root / "etl_logs" / "analyst" / "dataflow_run_log" / "legacy.parquet"
     _write_legacy_file(legacy)
-    report = AUDIT.audit_log_root(root)
+    report = log_schema_audit.audit_log_root(root)
     backup = tmp_path / "backup"
 
-    applied = AUDIT.apply_repairs(report, backup_dir=backup)
-    after = AUDIT.audit_log_root(root)
+    applied = log_schema_repair.apply_repairs(report, backup_dir=backup)
+    after = log_schema_audit.audit_log_root(root)
 
     assert len(applied) == 1
     assert Path(applied[0]["backup"]).exists()
@@ -86,8 +76,8 @@ def test_apply_repairs_rolls_back_when_a_later_file_fails(tmp_path, monkeypatch)
     second = root / "etl_logs" / "analyst" / "dataflow_run_log" / "second.parquet"
     _write_legacy_file(first)
     _write_legacy_file(second)
-    report = AUDIT.audit_log_root(root)
-    real_repair = AUDIT._repair_parquet_file
+    report = log_schema_audit.audit_log_root(root)
+    real_repair = log_schema_repair._repair_parquet_file
     calls = 0
 
     def fail_on_second(*args, **kwargs):
@@ -97,9 +87,9 @@ def test_apply_repairs_rolls_back_when_a_later_file_fails(tmp_path, monkeypatch)
             raise RuntimeError("simulated repair failure")
         return real_repair(*args, **kwargs)
 
-    monkeypatch.setattr(AUDIT, "_repair_parquet_file", fail_on_second)
+    monkeypatch.setattr(log_schema_repair, "_repair_parquet_file", fail_on_second)
     with pytest.raises(RuntimeError, match="simulated repair failure"):
-        AUDIT.apply_repairs(report, backup_dir=tmp_path / "backup")
+        log_schema_repair.apply_repairs(report, backup_dir=tmp_path / "backup")
 
     for path in (first, second):
         schema = pq.ParquetFile(path).schema_arrow
@@ -112,12 +102,12 @@ def test_audit_rejects_fractional_integer_drift(tmp_path):
     legacy = root / "etl_logs" / "analyst" / "dataflow_run_log" / "bad.parquet"
     _write_legacy_file(legacy, value=2.5)
 
-    report = AUDIT.audit_log_root(root)
+    report = log_schema_audit.audit_log_root(root)
 
     assert report["incompatible_count"] == 1
     assert report["repair_plan"][0]["columns"] == ["execution_order"]
     with pytest.raises(ValueError, match="incompatible findings"):
-        AUDIT.apply_repairs(report, backup_dir=tmp_path / "backup")
+        log_schema_repair.apply_repairs(report, backup_dir=tmp_path / "backup")
 
 
 def test_audit_counts_malformed_analyst_job_lines_as_incompatible(tmp_path):
@@ -126,7 +116,7 @@ def test_audit_counts_malformed_analyst_job_lines_as_incompatible(tmp_path):
     job_file.parent.mkdir(parents=True)
     job_file.write_text("not-json\n", encoding="utf-8")
 
-    report = AUDIT.audit_log_root(root)
+    report = log_schema_audit.audit_log_root(root)
 
     assert report["malformed_job_lines"] == 1
     assert report["incompatible_count"] == 1

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import Literal
+
+from datacoolie_studio.domains.metadata.errors import MetadataConflictError
+from datacoolie_studio.domains.metadata.write_operations import ActiveWriteOperationError
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
@@ -11,6 +16,7 @@ from datacoolie_studio.api.v1.contracts.sources import (
     LogSourceRead,
     MetadataSourceImportRequest,
     MetadataSourceRead,
+    SqlSourceRead,
     SourceCreate,
     SourceImportResponse,
     SourcesWorkspaceResponse,
@@ -38,16 +44,17 @@ from datacoolie_studio.api.v1.contracts.workspace import (
     StudioWorkspaceDatabaseMaintenanceRequest,
 )
 from datacoolie_studio.db.session import get_session
-from datacoolie_studio.api.v1.routes.credentials import (
+from datacoolie_studio.api.v1.dependencies import (
     get_credential_secret_store,
     require_loopback_client,
 )
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.freshness.service import environment_context, environment_freshness
+from datacoolie_studio.domains.sources import application as source_application
 from datacoolie_studio.domains.sources.initialization import (
-    queue_source_initialization_ids,
     run_source_initialization_jobs,
 )
+from datacoolie_studio.domains.sources.serialization import source_to_dict
 from datacoolie_studio.domains.cache_admin import service as cache_admin
 from datacoolie_studio.domains.analytics_upgrade.service import (
     request_analytics_upgrade_retry,
@@ -304,8 +311,14 @@ def get_environment_context(environment_id: int, session: Session = Depends(get_
     "/environments/{environment_id}/sources/workspace",
     response_model=SourcesWorkspaceResponse,
 )
-def get_sources_workspace(environment_id: int, session: Session = Depends(get_session)):
+def get_sources_workspace(
+    environment_id: int,
+    view: Literal["full", "logs-summary"] = "full",
+    session: Session = Depends(get_session),
+):
     try:
+        if view == "logs-summary":
+            return workspace.sources_workspace_log_summary(session, environment_id)
         return workspace.sources_workspace(session, environment_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -313,7 +326,7 @@ def get_sources_workspace(environment_id: int, session: Session = Depends(get_se
 
 @router.get("/environments/{environment_id}/metadata-sources", response_model=list[MetadataSourceRead])
 def get_metadata_sources(environment_id: int, session: Session = Depends(get_session)):
-    return workspace.list_metadata_sources_with_validation(session, environment_id)
+    return workspace.list_metadata_sources(session, environment_id)
 
 
 @router.post("/environments/{environment_id}/metadata-sources", response_model=MetadataSourceRead)
@@ -326,21 +339,24 @@ def post_metadata_source(
 ):
     _guard_profile_mutation(request, payload.storage)
     try:
-        source = workspace.add_metadata_source(
+        creation = source_application.create_metadata_source(
             session,
             environment_id,
-            payload.uri,
-            payload.label,
-            payload.enabled,
-            payload.source_config,
-            _storage_payload(payload.storage),
+            uri=payload.uri,
+            label=payload.label,
+            enabled=payload.enabled,
+            source_config=payload.source_config,
+            storage=_storage_payload(payload.storage),
         )
-        job_ids = queue_source_initialization_ids(session, [source.id])
+        source = creation.source
+        job_ids = creation.initialization_job_ids
         if job_ids:
             background_tasks.add_task(run_source_initialization_jobs, job_ids)
-        return workspace.source_to_dict(source)
+        return source_to_dict(source)
     except StorageError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/environments/{environment_id}/metadata-sources/import", response_model=SourceImportResponse)
@@ -353,7 +369,7 @@ def import_metadata_sources(
 ):
     _guard_profile_mutation(request, payload.storage)
     try:
-        result = workspace.import_metadata_sources(
+        result = source_application.import_metadata_sources(
             session,
             environment_id,
             uri=payload.uri,
@@ -361,17 +377,49 @@ def import_metadata_sources(
             enabled=payload.enabled,
             storage=_storage_payload(payload.storage),
         )
-        source_ids = [
-            int(item["id"])
-            for item in [*result["created"], *result["existing"]]
-        ]
-        job_ids = queue_source_initialization_ids(session, source_ids)
-        result["summary"]["initialization_queued"] = len(job_ids)
+        job_ids = result.pop("initialization_job_ids", [])
         if job_ids:
             background_tasks.add_task(run_source_initialization_jobs, job_ids)
         return result
     except StorageConfigurationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/environments/{environment_id}/sql-sources", response_model=list[SqlSourceRead])
+def get_sql_sources(environment_id: int, session: Session = Depends(get_session)):
+    return workspace.list_sql_sources(session, environment_id)
+
+
+@router.post("/environments/{environment_id}/sql-sources", response_model=SqlSourceRead)
+def post_sql_source(
+    environment_id: int,
+    payload: SourceCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    _guard_profile_mutation(request, payload.storage)
+    try:
+        creation = source_application.create_sql_source(
+            session,
+            environment_id,
+            uri=payload.uri,
+            label=payload.label,
+            enabled=payload.enabled,
+            source_config=payload.source_config,
+            storage=_storage_payload(payload.storage),
+        )
+        source = creation.source
+        job_ids = creation.initialization_job_ids
+        if job_ids:
+            background_tasks.add_task(run_source_initialization_jobs, job_ids)
+        return source_to_dict(source)
+    except StorageConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/environments/{environment_id}/datacoolie-project-sources", response_model=SourceImportResponse)
@@ -385,26 +433,21 @@ def import_datacoolie_project_sources(
 ):
     _guard_profile_mutation(request, payload.storage)
     try:
-        result = workspace.import_datacoolie_project_sources(
+        result = source_application.import_datacoolie_project_sources(
             session,
             environment_id,
             project_uri=payload.project_uri,
             metadata_subpath=payload.metadata_subpath,
-            code_subpath=payload.code_subpath,
+            sql_subpaths=payload.sql_subpaths,
+            code_subpaths=payload.code_subpaths,
             code_discovery_mode=payload.code_discovery_mode,
             metadata_uri=payload.metadata_uri,
             code_uri=payload.code_uri,
-            include_metadata=payload.include_metadata,
-            include_code=payload.include_code,
             enabled=payload.enabled,
             storage=_storage_payload(payload.storage),
             secret_store=secret_store,
         )
-        source_ids = [
-            int(item["id"])
-            for item in [*result["created"], *result["existing"]]
-        ]
-        job_ids = queue_source_initialization_ids(session, source_ids)
+        job_ids = result.pop("initialization_job_ids", [])
         result["summary"].pop("auto_validated", None)
         result["summary"].pop("auto_synced", None)
         result["summary"]["initialization_queued"] = len(job_ids)
@@ -413,11 +456,13 @@ def import_datacoolie_project_sources(
         return result
     except StorageError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/log-sources", response_model=list[LogSourceRead])
 def get_log_sources(environment_id: int, session: Session = Depends(get_session)):
-    return workspace.list_log_sources_with_validation(session, environment_id)
+    return workspace.list_log_sources(session, environment_id)
 
 
 @router.post("/environments/{environment_id}/log-sources", response_model=LogSourceRead)
@@ -427,31 +472,32 @@ def post_log_source(
     request: Request,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
-    secret_store: CredentialSecretStore = Depends(get_credential_secret_store),
 ):
     _guard_profile_mutation(request, payload.storage)
     try:
-        source = workspace.add_log_source(
+        creation = source_application.create_log_source(
             session,
             environment_id,
-            payload.uri,
-            payload.label,
-            payload.enabled,
-            payload.source_config,
-            _storage_payload(payload.storage),
-            secret_store=secret_store,
+            uri=payload.uri,
+            label=payload.label,
+            enabled=payload.enabled,
+            source_config=payload.source_config,
+            storage=_storage_payload(payload.storage),
         )
-        job_ids = queue_source_initialization_ids(session, [source.id])
+        source = creation.source
+        job_ids = creation.initialization_job_ids
         if job_ids:
             background_tasks.add_task(run_source_initialization_jobs, job_ids)
-        return workspace.source_to_dict(source)
+        return source_to_dict(source)
     except StorageConfigurationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/environments/{environment_id}/code-artifacts", response_model=list[CodeArtifactRead])
 def get_code_artifacts(environment_id: int, session: Session = Depends(get_session)):
-    return workspace.list_code_artifacts_with_validation(session, environment_id)
+    return workspace.list_code_artifacts(session, environment_id)
 
 
 @router.post("/environments/{environment_id}/code-artifacts", response_model=CodeArtifactRead)
@@ -464,21 +510,24 @@ def post_code_artifact(
 ):
     _guard_profile_mutation(request, payload.storage)
     try:
-        artifact = workspace.add_code_artifact(
+        creation = source_application.create_code_artifact(
             session,
             environment_id,
-            payload.uri,
-            payload.label,
-            payload.enabled,
-            payload.source_config,
-            _storage_payload(payload.storage),
+            uri=payload.uri,
+            label=payload.label,
+            enabled=payload.enabled,
+            source_config=payload.source_config,
+            storage=_storage_payload(payload.storage),
         )
-        job_ids = queue_source_initialization_ids(session, [artifact.id])
+        artifact = creation.source
+        job_ids = creation.initialization_job_ids
         if job_ids:
             background_tasks.add_task(run_source_initialization_jobs, job_ids)
-        return workspace.source_to_dict(artifact)
+        return source_to_dict(artifact)
     except StorageConfigurationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ActiveWriteOperationError, MetadataConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _storage_payload(storage) -> dict | None:

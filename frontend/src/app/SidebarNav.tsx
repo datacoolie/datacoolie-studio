@@ -14,7 +14,7 @@ interface SidebarNavProps {
 }
 
 export function SidebarNav({ activeModule, hasProject, hasEnvironment, collapsed, enabledCapabilities, onToggleCollapsed, onNavigate }: SidebarNavProps) {
-  const primaryGroups = moduleGroups.filter((group) => group !== "Studio");
+  const primaryGroups = moduleGroups.filter((group) => group !== "Studio" && (group !== "Environment" || hasEnvironment));
   const studioGroups = moduleGroups.filter((group) => group === "Studio");
   const navigateFromMenu = (module: ModuleKey) => {
     onNavigate(module);

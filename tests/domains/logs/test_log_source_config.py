@@ -14,37 +14,49 @@ def _source(uri: Path, source_config_json: str | None = None) -> EnvironmentSour
     )
 
 
-def test_base_log_path_resolves_only_analyst_etl_and_system_logs(tmp_path: Path):
+def test_log_base_path_resolves_execution_and_system_logs(tmp_path: Path):
     base = tmp_path / "logs"
-    analyst = base / "etl_logs" / "analyst"
-    debug = base / "etl_logs" / "debug_json"
+    execution = base / "execution_logs"
     system = base / "system_logs"
-    analyst.mkdir(parents=True)
-    debug.mkdir()
+    execution.mkdir(parents=True)
     system.mkdir()
 
     paths = resolve_log_source_paths(_source(base))
 
-    assert Path(paths.base_log_uri or "") == base
-    assert Path(paths.etl_logs_uri or "") == analyst
+    assert Path(paths.log_base_path or "") == base
+    assert Path(paths.execution_logs_uri or "") == execution
     assert Path(paths.system_logs_uri or "") == system
-    assert "debug_json" not in (paths.etl_logs_uri or "")
+    assert paths.mode == "log_base_path"
 
 
-def test_explicit_etl_root_is_scoped_to_analyst(tmp_path: Path):
-    etl_root = tmp_path / "logs" / "etl_logs"
-    analyst = etl_root / "analyst"
-    analyst.mkdir(parents=True)
+def test_explicit_execution_root_is_scoped_to_execution_logs(tmp_path: Path):
+    execution_root = tmp_path / "logs" / "execution_logs"
+    execution_root.mkdir(parents=True)
 
-    paths = resolve_log_source_paths(_source(etl_root))
+    paths = resolve_log_source_paths(_source(execution_root))
 
-    assert Path(paths.etl_logs_uri or "") == analyst
+    assert Path(paths.execution_logs_uri or "") == execution_root
+    assert Path(paths.log_base_path or "") == execution_root.parent
 
 
-def test_explicit_analyst_path_remains_supported(tmp_path: Path):
-    analyst = tmp_path / "logs" / "etl_logs" / "analyst"
-    (analyst / "dataflow_run_log").mkdir(parents=True)
+def test_explicit_system_root_remains_supported(tmp_path: Path):
+    system = tmp_path / "logs" / "system_logs"
+    system.mkdir(parents=True)
 
-    paths = resolve_log_source_paths(_source(analyst))
+    paths = resolve_log_source_paths(_source(system))
 
-    assert Path(paths.etl_logs_uri or "") == analyst
+    assert Path(paths.system_logs_uri or "") == system
+
+
+def test_log_base_path_is_the_canonical_source_setting(tmp_path: Path):
+    base = tmp_path / "logs"
+    paths = resolve_log_source_paths(
+        _source(base, '{"mode":"log_base_path","log_base_path":"%s"}' % base)
+    )
+
+    from datacoolie_studio.domains.logs.source_config import normalized_log_source_config
+
+    assert paths.log_base_path == base.as_posix()
+    assert normalized_log_source_config(
+        _source(base, '{"log_base_path":"%s"}' % base)
+    )["log_base_path"] == base.as_posix()

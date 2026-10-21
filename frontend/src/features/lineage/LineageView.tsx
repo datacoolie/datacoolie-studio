@@ -1,19 +1,14 @@
 import { Activity, Check, ChevronDown, FilterX, GitBranch, LocateFixed, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument, MonitoringRecord } from "../../shared/api/domainTypes";
+import type { AssetInventoryItem, LineageDataflow, LineageResponse, MetadataEditorDocument, MetadataWriteOperation, MonitoringRecord } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
+import type { MetadataDataflowSelection } from "../../shared/metadata/metadataDataflowModel";
+import { useMetadataDataflowEditor } from "../../shared/metadata/useMetadataDataflowEditor";
 import type { MetadataNavigationTarget } from "../../shared/metadataNavigation";
 import { lineageDataflowFocusFromSearch, type LineageDataflowFocusTarget } from "../../shared/lineageNavigation";
 import { MetadataDataflowDrawer } from "../dataflows/MetadataDataflowDrawer";
-import {
-  buildMetadataDataflowRecords,
-  findMetadataDataflowRecord,
-  isEditableMetadataDataflowRecord,
-  type MetadataDataflowSelection,
-  updateMetadataDataflowRow,
-} from "../dataflows/metadataDataflowModel";
-import { metadataSaveConfirmation } from "../metadata-explorer/metadataSaveConfirmation";
-import { MetadataSourceSaveConfirmationDialog } from "../metadata-explorer/MetadataSourceSaveConfirmationDialog";
+import { MetadataEditorLoadingDrawer } from "../dataflows/MetadataEditorLoadingDrawer";
+import { MetadataSourceSaveConfirmationDialog } from "../../shared/metadata/MetadataSourceSaveConfirmationDialog";
 import { LineageCanvas } from "./components/LineageCanvas";
 import { LineageDetailsDrawer } from "./components/LineageDetailsDrawer";
 import { LineageSearch } from "./components/LineageSearch";
@@ -25,7 +20,7 @@ import {
   searchLineage,
   selectVisibleLineage
 } from "./model/graphIndex";
-import { presentLineageAsset } from "./model/presentation";
+import { presentLineageAsset } from "../../shared/assetPresentation";
 import { isLineageAsset, type LineageFilters, type LineageFocus, type LineageSearchResult, type LineageSelection, type TraceDirection } from "./model/types";
 import { toggleFilterValue } from "./model/filterSelection";
 import type { ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
@@ -36,14 +31,16 @@ const MonitoringDataflowRunDrawer = lazy(() => import("../monitoring/MonitoringD
 interface LineageViewProps {
   environmentId: number;
   lineage: LineageResponse;
+  draftPreview?: boolean;
   onRefreshLineage: () => Promise<unknown>;
   metadataEditorDocument: MetadataEditorDocument | null;
   metadataEditorDraft: MetadataEditorDocument | null;
   onEnsureMetadataEditor: () => Promise<void>;
   busy: boolean;
-  onValidateMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   onSaveMetadataDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
-  onSaveMetadata: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  onPrepareMetadataWrite: (document: MetadataEditorDocument) => Promise<MetadataWriteOperation>;
+  onApplyMetadataWrite: (operation: MetadataWriteOperation) => Promise<MetadataEditorDocument>;
+  onAbandonMetadataWrite: (operation: MetadataWriteOperation) => Promise<MetadataWriteOperation>;
   timezoneName?: string | null;
   routeSearch?: string;
   onOpenMetadata: (target: MetadataNavigationTarget) => void;
@@ -61,7 +58,7 @@ function hasLineageMonitoringDrawerHistory(state: unknown) {
   return (state as Record<string, unknown>)[LINEAGE_MONITORING_DRAWER_HISTORY_KEY] === true;
 }
 
-export function LineageView({ environmentId, lineage, onRefreshLineage, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onValidateMetadata, onSaveMetadataDraft, onSaveMetadata, timezoneName, routeSearch, onOpenMetadata, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping }: LineageViewProps) {
+export function LineageView({ environmentId, lineage, draftPreview = false, onRefreshLineage, metadataEditorDocument, metadataEditorDraft, onEnsureMetadataEditor, busy, onSaveMetadataDraft, onPrepareMetadataWrite, onApplyMetadataWrite, onAbandonMetadataWrite, timezoneName, routeSearch, onOpenMetadata, onCreateReferenceMapping, onUpdateReferenceMapping, onDeleteReferenceMapping }: LineageViewProps) {
   const [query, setQuery] = useState("");
   const [focuses, setFocuses] = useState<LineageFocus[]>([]);
   const [direction, setDirection] = useState<TraceDirection>("both");
@@ -73,35 +70,41 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
   const [selectedMetadataDataflow, setSelectedMetadataDataflow] = useState<MetadataDataflowSelection | null>(null);
   const [selectedMonitoringDataflowRun, setSelectedMonitoringDataflowRun] = useState<MonitoringRecord | null>(null);
   const monitoringDrawerHistoryRef = useRef(false);
-  const [pendingMetadataSave, setPendingMetadataSave] = useState<MetadataEditorDocument | null>(null);
   const latestStatusQuery = useLineageLatestStatus(environmentId, statusOverlay || selection?.kind === "dataflow");
   const latestStatus = latestStatusQuery.data ?? null;
   const index = useMemo(() => createLineageGraphIndex(lineage), [lineage]);
-  const activeMetadataDocument = metadataEditorDraft ?? metadataEditorDocument;
-  const metadataDataflowRecords = useMemo(
-    () => selectedMetadataDataflow ? buildMetadataDataflowRecords(activeMetadataDocument) : [],
-    [activeMetadataDocument, selectedMetadataDataflow],
-  );
+  const {
+    activeDocument: activeMetadataDocument,
+    selectedRecord: selectedMetadataDataflowRecord,
+    selectedEditable: selectedMetadataDataflowEditable,
+    pendingDocument: pendingMetadataSave,
+    cancelSave: cancelMetadataSave,
+    saveConfirmation: sourceSaveConfirmation,
+    saveDraft: saveSelectedDataflowDraft,
+    save: saveSelectedDataflow,
+    confirmSave: confirmMetadataSave,
+    loading: editorLoading,
+    loadError: editorLoadError,
+    retryEditor,
+  } = useMetadataDataflowEditor({
+    environmentId,
+    sourceDocument: metadataEditorDocument,
+    draftDocument: metadataEditorDraft,
+    selection: selectedMetadataDataflow,
+    onEnsureEditor: onEnsureMetadataEditor,
+    onSaveDraft: onSaveMetadataDraft,
+    onPrepareSave: onPrepareMetadataWrite,
+    onApplySave: onApplyMetadataWrite,
+    onAbandonSave: onAbandonMetadataWrite,
+    onSaved: closeMetadataDataflow,
+  });
   const metadataDataflowIds = useMemo(
     () => new Set(index.dataflows.map((dataflow) => dataflow.id)),
     [index.dataflows],
   );
-  const selectedMetadataDataflowRecord = useMemo(
-    () => findMetadataDataflowRecord(metadataDataflowRecords, selectedMetadataDataflow),
-    [metadataDataflowRecords, selectedMetadataDataflow],
-  );
-  const selectedMetadataDataflowEditable = isEditableMetadataDataflowRecord(activeMetadataDocument, selectedMetadataDataflowRecord);
-  const sourceSaveConfirmation = pendingMetadataSave ? metadataSaveConfirmation(metadataEditorDocument, pendingMetadataSave) : null;
 
   useEffect(() => () => disposeLineageLayoutWorker(), []);
 
-  useEffect(() => {
-    if (!selectedMetadataDataflow || activeMetadataDocument) return;
-    void onEnsureMetadataEditor();
-    // The workspace callback is intentionally excluded: drawer identity, not
-    // parent renders, controls this action-driven resource load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environmentId, selectedMetadataDataflow?.metadataSourceId, selectedMetadataDataflow?.rowIndex, selectedMetadataDataflow?.dataflowId, selectedMetadataDataflow?.name, activeMetadataDocument]);
   const options = useMemo(() => lineageFilterOptions(index), [index]);
   const searchResults = useMemo(() => searchLineage(index, query), [index, query]);
   const visible = useMemo(
@@ -148,10 +151,6 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
       setSelection(null);
     }
   }, [selection, visible]);
-
-  useEffect(() => {
-    if (selectedMetadataDataflow && !selectedMetadataDataflowRecord) setSelectedMetadataDataflow(null);
-  }, [selectedMetadataDataflow, selectedMetadataDataflowRecord]);
 
   useEffect(() => {
     function handlePopState(event: PopStateEvent) {
@@ -251,51 +250,6 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
     setDirection("both");
     setSelection({ kind: "dataflow", id: dataflow.id });
     closeMetadataDataflow();
-  }
-
-  function selectedDataflowDocument(nextRow: Record<string, unknown>) {
-    if (!activeMetadataDocument || !selectedMetadataDataflowRecord || !selectedMetadataDataflowEditable) return null;
-    return updateMetadataDataflowRow(activeMetadataDocument, selectedMetadataDataflowRecord.rowIndex, nextRow);
-  }
-
-  async function validateSelectedDataflow(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    try {
-      return await onValidateMetadata(nextDocument);
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function saveSelectedDataflowDraft(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    try {
-      return await onSaveMetadataDraft(nextDocument);
-    } catch {
-      return undefined;
-    }
-  }
-
-  function saveSelectedDataflow(nextRow: Record<string, unknown>) {
-    const nextDocument = selectedDataflowDocument(nextRow);
-    if (!nextDocument) return;
-    setPendingMetadataSave(nextDocument);
-  }
-
-  async function confirmMetadataSave() {
-    if (!pendingMetadataSave) return;
-    try {
-      const saved = await onSaveMetadata(pendingMetadataSave);
-      if (saved) {
-        setPendingMetadataSave(null);
-        closeMetadataDataflow();
-      }
-      return saved;
-    } catch {
-      return undefined;
-    }
   }
 
   function resetView() {
@@ -411,7 +365,7 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
             <span className={`lineage-result-stat${unresolvedCount ? " is-attention" : ""}`}>· {unresolvedCount} unresolved</span>
             {focuses.length ? <span className="lineage-result-context">· {direction} trace</span> : null}
           </div>
-          <span>{lineage.summary.diagnostics ? `${lineage.summary.diagnostics} diagnostics` : "Resolved lineage graph"}</span>
+          <span>{draftPreview ? "Draft preview · source files unchanged" : lineage.summary.diagnostics ? `${lineage.summary.diagnostics} diagnostics` : "Resolved lineage graph"}</span>
         </div>
         <div className={`lineage-canvas${selection ? " has-details" : ""}`}>
           <LineageCanvas
@@ -437,7 +391,7 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
             onUpdateReferenceMapping={onUpdateReferenceMapping}
             onDeleteReferenceMapping={onDeleteReferenceMapping}
             onRefreshReferenceMappings={async () => { await onRefreshLineage(); }}
-            suspended={Boolean(selectedMetadataDataflowRecord)}
+            suspended={Boolean(selectedMetadataDataflow)}
             onOpenDataflowDetails={openMetadataDataflow}
             onOpenMonitoringDataflowRun={openMonitoringDataflowRun}
             onClose={() => setSelection(null)}
@@ -449,17 +403,19 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
           />
         </div>
       </section>
+      {selectedMetadataDataflow && !selectedMetadataDataflowRecord ? <MetadataEditorLoadingDrawer loading={editorLoading} error={editorLoadError ?? (!editorLoading ? "The selected dataflow is no longer available." : null)} onRetry={retryEditor} onClose={closeMetadataDataflow} /> : null}
       {selectedMetadataDataflowRecord ? (
         <MetadataDataflowDrawer
           record={selectedMetadataDataflowRecord}
+          environmentId={environmentId}
+          pendingSqlFiles={activeMetadataDocument?.sql_files ?? []}
           editable={selectedMetadataDataflowEditable}
-          readOnly={Boolean(activeMetadataDocument?.source.read_only)}
+          readOnly={Boolean(activeMetadataDocument?.source.read_only) || Boolean(selectedMetadataDataflowRecord?.readOnly)}
           busy={busy}
           connectionRows={activeMetadataDocument?.sheets.connections?.rows ?? []}
           connectionColumns={activeMetadataDocument?.sheets.connections?.columns ?? []}
           onSave={saveSelectedDataflow}
           onSaveDraft={saveSelectedDataflowDraft}
-          onValidate={validateSelectedDataflow}
           onBack={closeMetadataDataflow}
           onClose={closeMetadataDataflow}
           onFocusInLineage={focusMetadataDataflow}
@@ -482,7 +438,7 @@ export function LineageView({ environmentId, lineage, onRefreshLineage, metadata
         <MetadataSourceSaveConfirmationDialog
           busy={busy}
           confirmation={sourceSaveConfirmation}
-          onCancel={() => setPendingMetadataSave(null)}
+          onCancel={() => void cancelMetadataSave()}
           onConfirm={() => void confirmMetadataSave()}
         />
       ) : null}

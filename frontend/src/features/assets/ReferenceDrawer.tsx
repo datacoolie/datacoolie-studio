@@ -6,8 +6,8 @@ import type { AssetBrief, AssetInventoryItem, AssetReferenceGroupItem, AssetRefe
 import { presentReferenceResolution, type ReferenceResolutionPresentation } from "../../shared/referenceResolutionPresentation";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
-import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
+import { LineageFormatIcon } from "../../shared/components/FormatIcon";
+import { assetIconKind, assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../../shared/assetPresentation";
 import { ReferenceMappingDrawer } from "../reference-mappings/ReferenceMappingDrawer";
 import { referenceMappingAction, referenceMappingActionLabel, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import {
@@ -20,7 +20,7 @@ import {
   shouldShowNormalizedValue,
 } from "./referenceDrawerModel";
 import { referenceResolutionPresentation } from "./assetsPresentation";
-import { SourceCodeViewer } from "./SourceCodeViewer";
+import { SourceCodeViewer } from "../../shared/components/SourceCodeViewer";
 
 interface ReferenceDrawerProps {
   environmentId: number;

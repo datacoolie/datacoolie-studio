@@ -20,6 +20,7 @@ from datacoolie_studio.domains.credentials.store import (
 from datacoolie_studio.domains.credentials.health import (
     record_credential_secret_state,
 )
+from datacoolie_studio.domains.storage.identity import scope_from_config
 from datacoolie_studio.domains.storage.adapters import (
     LocalStorageAdapter,
     StorageAdapter,
@@ -331,6 +332,23 @@ def create_storage_writer(
         credentials.clear()
 
 
+def effective_storage_scope(
+    binding: StorageBinding,
+    *,
+    uri: str,
+    session: Session,
+    secret_store: CredentialSecretStore | None,
+) -> dict[str, object]:
+    """Resolve only publication identity; never retain credential material."""
+    auth_type, credentials = _resolve_credentials(
+        binding, session=session, secret_store=secret_store
+    )
+    try:
+        return scope_from_config(binding, uri=uri, auth_type=auth_type, config=credentials)
+    finally:
+        credentials.clear()
+
+
 def _resolve_credentials(
     binding: StorageBinding,
     *,
@@ -354,6 +372,8 @@ def _resolve_credentials(
         raise StorageConfigurationError(
             "Credential profile provider does not match storage provider"
         )
+    if profile not in session.dirty:
+        session.refresh(profile)
     auth_type = profile.auth_type
     credentials.update(_load_object(profile.config_json))
     if profile.secret_ref:

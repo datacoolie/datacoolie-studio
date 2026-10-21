@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from datacoolie_studio.api.v1.contracts.monitoring_values import IntegerMetric
 
 class OverviewSourceGroupResponse(BaseModel):
     configured: int
@@ -56,11 +57,11 @@ class OverviewLineageResponse(BaseModel):
 
 
 class OverviewMonitoringResponse(BaseModel):
-    job_records: int
-    total_failures: int
+    job_records: IntegerMetric
+    total_failures: IntegerMetric
     dataflow_success_rate: float
-    failed_job_windows: dict[str, int]
-    active_engines: int
+    failed_job_windows: dict[str, IntegerMetric]
+    active_engines: IntegerMetric
     latest_log_at: str | None = None
     date_range: dict[str, str | None]
     errors: list[dict[str, Any]]

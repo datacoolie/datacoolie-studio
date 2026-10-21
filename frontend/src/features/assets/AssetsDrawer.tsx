@@ -35,11 +35,11 @@ import type {
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
 import { displayStorageUri } from "../../shared/lib/storage";
 import { metadataNavigationTarget, type MetadataNavigationTarget } from "../../shared/metadataNavigation";
-import { LineageFormatIcon } from "../lineage/components/LineageFormatIcon";
-import { assetIconKind, assetTypeTone, type AssetIconKind } from "../lineage/model/presentation";
+import { LineageFormatIcon } from "../../shared/components/FormatIcon";
+import { assetIconKind, assetTypeTone, type AssetIconKind } from "../../shared/assetPresentation";
 import { assetRelationshipGroups, type AssetRelationshipGroup, type AssetRelationshipVia } from "./assetRelationshipModel";
 import { attentionContextLine, metadataQueryForAsset, presentAsset } from "./assetsPresentation";
-import { highlightedSourceCode, sourceCodeLanguage } from "./sourceCode";
+import { highlightedSourceCode, sourceCodeLanguage } from "../../shared/components/sourceCode";
 
 
 interface AssetsDrawerProps {

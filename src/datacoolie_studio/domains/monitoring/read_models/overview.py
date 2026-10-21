@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from datacoolie_studio.domains.monitoring.dimensions import known_dimension_sql
+
 from datetime import datetime
 from typing import Any
+from datacoolie_studio.domains.monitoring.dimensions import dimension_key_sql
 
 from datacoolie_studio.db.models import EnvironmentSource
+from datacoolie_studio.domains.monitoring.log_repository import monitoring_has_dataflow_scope
 from datacoolie_studio.domains.monitoring.metrics.failure import (
     failure_category_sql,
     failure_message_sql,
 )
-from datacoolie_studio.domains.monitoring.metrics.volume import estimated_rows_written_sql
 from datacoolie_studio.domains.monitoring.read_models.common import (
     AnalyticsContext,
-    discrete_percentile,
+    nullable_discrete_percentile,
     filtered_ctes,
     one,
     reader_context,
@@ -23,17 +26,20 @@ from datacoolie_studio.domains.monitoring.read_models.operation_windows import (
     operation_windows,
 )
 from datacoolie_studio.domains.monitoring.read_models.freshness import freshness_attention_sql
+from datacoolie_studio.domains.monitoring.metrics.v6_semantics import register_freshness_functions
 from datacoolie_studio.domains.monitoring.read_models.maintenance import maintenance_attention_sql
 from datacoolie_studio.domains.monitoring.read_models.performance import performance_attention_sql
 from datacoolie_studio.domains.monitoring.read_models.runtime_phase import runtime_phase_summary
 
 
 _DATAFLOW_COLUMNS = (
-    "_source_id", "job_id", "dataflow_id", "dataflow_run_id", "dataflow_name",
-    "stage", "status", "start_time", "end_time", "duration_seconds", "operation_type",
+    "destination_catalog", "destination_database", "destination_schema",
+    "_source_id", "_ingested_at", "_record_line", "_file_uri", "_file_kind",
+    "log_schema_version", "attempts", "read_request", "raw_record_json", "job_id", "dataflow_id", "dataflow_run_id", "dataflow_name",
+    "stage", "status", "message", "start_time", "end_time", "duration_seconds", "operation_type",
     "source_name", "source_connection_type", "source_format", "source_status",
     "source_error_message", "source_duration_seconds", "source_rows_read",
-    "source_watermark_before", "source_watermark_after", "source_watermark_effective",
+    "source_configure",
     "source_watermark_columns", "transform_status", "transform_error_message",
     "transform_duration_seconds", "destination_name", "destination_path",
     "destination_table", "destination_full_table", "destination_load_type",
@@ -48,8 +54,47 @@ _JOB_COLUMNS = (
     "_source_id", "job_id", "status", "start_time", "end_time", "duration_seconds",
     "engine_name", "metadata_provider_name", "platform_name", "operation_types",
     "total_dataflows", "total_succeeded", "total_failed", "total_skipped",
-    "total_running", "total_pending", "total_rows_read", "total_rows_written",
+    "total_running", "total_pending", "total_rows_read", "total_rows_written", "observed_at", "log_records_dropped",
 )
+
+
+def _metric_total(column: str, eligible: str) -> str:
+    population = f"COUNT(*) FILTER (WHERE {eligible})"
+    measured = f"COUNT({column}) FILTER (WHERE {eligible})"
+    observed = f"SUM({column}) FILTER (WHERE {eligible})"
+    return (
+        f"CASE WHEN EXISTS (SELECT 1 FROM all_log_versions WHERE log_schema_version >= 7) "
+        f"THEN CASE WHEN {measured} = 0 THEN NULL ELSE {observed} END "
+        f"WHEN {population} = 0 THEN CASE WHEN COUNT(*) = 0 THEN 0 ELSE NULL END "
+        f"WHEN {measured} = {population} THEN {observed} END"
+    )
+
+
+def _metric_observed(column: str, eligible: str) -> str:
+    return f"COALESCE(SUM({column}) FILTER (WHERE {eligible}), 0)"
+
+
+def _metric_measured(column: str, eligible: str) -> str:
+    return f"COUNT({column}) FILTER (WHERE {eligible})"
+
+
+def _metric_eligible(eligible: str) -> str:
+    return f"COUNT(*) FILTER (WHERE {eligible})"
+
+
+def _metric_difference(left: str, left_eligible: str, right: str, right_eligible: str) -> str:
+    left_population = _metric_eligible(left_eligible)
+    right_population = _metric_eligible(right_eligible)
+    left_measured = _metric_measured(left, left_eligible)
+    right_measured = _metric_measured(right, right_eligible)
+    return (
+        f"CASE WHEN {left_population} = 0 OR {right_population} = 0 THEN NULL "
+        f"WHEN EXISTS (SELECT 1 FROM all_log_versions WHERE log_schema_version >= 7) "
+        f"THEN CASE WHEN {left_measured} = 0 OR {right_measured} = 0 THEN NULL "
+        f"ELSE {_metric_observed(left, left_eligible)} - {_metric_observed(right, right_eligible)} END "
+        f"WHEN {left_measured} = {left_population} AND {right_measured} = {right_population} "
+        f"THEN {_metric_observed(left, left_eligible)} - {_metric_observed(right, right_eligible)} END"
+    )
 
 
 def overview_read_model(
@@ -65,6 +110,7 @@ def overview_read_model(
     with reader_context(paths, analytics_context) as (conn, source_ids, generation):
         if conn is None or not source_ids:
             return _empty_read_model(generation)
+        register_freshness_functions(conn)
         ctes, params = filtered_ctes(
             source_ids,
             filters,
@@ -84,6 +130,8 @@ def overview_read_model(
         categories = rows(conn.execute(f"{ctes} {_FAILURE_CATEGORY_SQL}", params))
         top_failures = rows(conn.execute(f"{ctes} {_TOP_FAILURES_SQL}", params))
         health = one(conn.execute(f"{ctes} {_HEALTH_SQL}", params))
+        if monitoring_has_dataflow_scope(filters):
+            health["mismatch_count"] = None
         attention = one(conn.execute(f"{ctes} {_ATTENTION_BUNDLE_SQL}", params))
         windows = operation_windows(
             conn, ctes, params, timezone_name=timezone_name, now=now,
@@ -122,8 +170,9 @@ def _workload_row(row: dict[str, Any], grain: str, kind: str) -> dict[str, Any]:
     }
     if kind == "rows":
         keys = (
-            "rows_read", "rows_written", "est_rows_written", "rows_output",
-            "rows_output_estimated", "rows_inserted", "rows_updated", "rows_deleted",
+            "rows_read", "observed_rows_read", "rows_read_measured", "TRUE",
+            "rows_written", "observed_rows_written", "rows_written_measured", "TRUE",
+            "rows_output", "rows_inserted", "rows_updated", "rows_deleted",
             "dataflow_runs",
         )
     else:
@@ -131,7 +180,7 @@ def _workload_row(row: dict[str, Any], grain: str, kind: str) -> dict[str, Any]:
             "bytes_added", "bytes_removed", "bytes_saved", "net_bytes",
             "files_added", "files_removed",
         )
-    return {**shared, **{key: row.get(key) or 0 for key in keys}}
+    return {**shared, **{key: row.get(key) for key in keys}}
 
 
 def _empty_read_model(generation: str) -> dict[str, Any]:
@@ -156,23 +205,23 @@ def _empty_read_model(generation: str) -> dict[str, Any]:
 
 _JOB_DURATION_FIELDS = f"""
   COUNT(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')) AS job_duration_count,
-  COALESCE(ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3), 0) AS job_avg_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.25, "normalized_status IN ('succeeded','failed')")} AS job_q1_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.50, "normalized_status IN ('succeeded','failed')")} AS job_p50_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.75, "normalized_status IN ('succeeded','failed')")} AS job_q3_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS job_p95_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.99, "normalized_status IN ('succeeded','failed')")} AS job_p99_duration_seconds,
-  COALESCE(ROUND(MAX(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3), 0) AS job_max_duration_seconds
+  ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3) AS job_avg_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.25, "normalized_status IN ('succeeded','failed')")} AS job_q1_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.50, "normalized_status IN ('succeeded','failed')")} AS job_p50_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.75, "normalized_status IN ('succeeded','failed')")} AS job_q3_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS job_p95_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.99, "normalized_status IN ('succeeded','failed')")} AS job_p99_duration_seconds,
+  ROUND(MAX(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3) AS job_max_duration_seconds
 """
 _DATAFLOW_DURATION_FIELDS = f"""
   COUNT(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')) AS dataflow_duration_count,
-  COALESCE(ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3), 0) AS dataflow_avg_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.25, "normalized_status IN ('succeeded','failed')")} AS dataflow_q1_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.50, "normalized_status IN ('succeeded','failed')")} AS dataflow_p50_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.75, "normalized_status IN ('succeeded','failed')")} AS dataflow_q3_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS dataflow_p95_duration_seconds,
-  {discrete_percentile('duration_seconds', 0.99, "normalized_status IN ('succeeded','failed')")} AS dataflow_p99_duration_seconds,
-  COALESCE(ROUND(MAX(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3), 0) AS dataflow_max_duration_seconds
+  ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3) AS dataflow_avg_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.25, "normalized_status IN ('succeeded','failed')")} AS dataflow_q1_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.50, "normalized_status IN ('succeeded','failed')")} AS dataflow_p50_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.75, "normalized_status IN ('succeeded','failed')")} AS dataflow_q3_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS dataflow_p95_duration_seconds,
+  {nullable_discrete_percentile('duration_seconds', 0.99, "normalized_status IN ('succeeded','failed')")} AS dataflow_p99_duration_seconds,
+  ROUND(MAX(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3) AS dataflow_max_duration_seconds
 """
 
 _SUMMARY_SQL = f"""
@@ -181,12 +230,31 @@ _SUMMARY_SQL = f"""
          COUNT(*) FILTER (WHERE normalized_status = 'succeeded') AS job_succeeded,
          COUNT(*) FILTER (WHERE normalized_status = 'failed') AS job_failed,
          COUNT(*) FILTER (WHERE normalized_status = 'skipped') AS job_skipped,
-         SUM(COALESCE(total_running, 0)) AS job_running,
-         SUM(COALESCE(total_pending, 0)) AS job_pending,
-         SUM(COALESCE(total_skipped, 0)) AS job_child_skipped,
-         SUM(COALESCE(total_rows_read, 0)) + SUM(COALESCE(total_rows_written, 0)) AS total_rows_processed,
-         COUNT(DISTINCT NULLIF(engine_name, '')) AS active_engines,
-         COUNT(DISTINCT NULLIF(metadata_provider_name, '')) AS active_metadata_providers,
+         CASE
+           WHEN COUNT(*) = 0 THEN 0
+           WHEN COUNT(total_running) = COUNT(*) THEN SUM(total_running)
+           ELSE NULL
+         END AS job_running,
+         CASE
+           WHEN COUNT(*) = 0 THEN 0
+           WHEN COUNT(total_pending) = COUNT(*) THEN SUM(total_pending)
+           ELSE NULL
+         END AS job_pending,
+         CASE WHEN COUNT(*) = 0 THEN 0 WHEN COUNT(total_skipped) = COUNT(*) THEN SUM(total_skipped) END AS job_child_skipped,
+         CASE WHEN EXISTS (SELECT 1 FROM all_log_versions WHERE log_schema_version >= 7) THEN
+                CASE WHEN COUNT(total_rows_read) + COUNT(total_rows_written) = 0 THEN NULL
+                     ELSE COALESCE(SUM(total_rows_read), 0) + COALESCE(SUM(total_rows_written), 0) END
+              WHEN COUNT(*) = 0 THEN 0
+              WHEN COUNT(total_rows_read) = COUNT(*) AND COUNT(total_rows_written) = COUNT(*)
+              THEN SUM(total_rows_read) + SUM(total_rows_written) END AS total_rows_processed,
+         COALESCE(SUM(total_rows_read), 0) AS observed_job_rows_read,
+         COUNT(total_rows_read) AS job_rows_read_measured,
+         COUNT(*) AS job_rows_read_eligible,
+         COALESCE(SUM(total_rows_written), 0) AS observed_job_rows_written,
+         COUNT(total_rows_written) AS job_rows_written_measured,
+         COUNT(*) AS job_rows_written_eligible,
+         COUNT(DISTINCT {known_dimension_sql('engine_name')}) AS active_engines,
+         COUNT(DISTINCT {known_dimension_sql('metadata_provider_name')}) AS active_metadata_providers,
          MAX(event_time) AS latest_job_log_at,
          {_JOB_DURATION_FIELDS}
   FROM filtered_jobs
@@ -197,8 +265,19 @@ _SUMMARY_SQL = f"""
          COUNT(*) FILTER (WHERE normalized_status = 'skipped') AS dataflow_skipped,
          COUNT(*) FILTER (WHERE normalized_status = 'running') AS dataflow_running,
          COUNT(*) FILTER (WHERE normalized_status = 'pending') AS dataflow_pending,
-         SUM(COALESCE(destination_bytes_added, 0)) AS total_bytes_written,
-         COUNT(DISTINCT NULLIF(engine_name, 'unknown')) AS dataflow_active_engines,
+          {_metric_total('destination_bytes_added', 'TRUE')} AS total_bytes_written,
+          {_metric_observed('destination_bytes_added', 'TRUE')} AS observed_bytes_written,
+          {_metric_measured('destination_bytes_added', 'TRUE')} AS bytes_written_measured,
+          {_metric_eligible('TRUE')} AS bytes_written_eligible,
+          {_metric_total('source_rows_read', 'TRUE')} AS total_rows_read,
+          {_metric_observed('source_rows_read', 'TRUE')} AS observed_rows_read,
+          {_metric_measured('source_rows_read', 'TRUE')} AS rows_read_measured,
+          {_metric_eligible('TRUE')} AS rows_read_eligible,
+          {_metric_total('destination_rows_written', 'TRUE')} AS total_rows_written,
+          {_metric_observed('destination_rows_written', 'TRUE')} AS observed_rows_written,
+          {_metric_measured('destination_rows_written', 'TRUE')} AS rows_written_measured,
+          {_metric_eligible('TRUE')} AS rows_written_eligible,
+         COUNT(DISTINCT {known_dimension_sql('engine_name')}) AS dataflow_active_engines,
          MAX(event_time) AS latest_dataflow_log_at,
          {_DATAFLOW_DURATION_FIELDS}
   FROM filtered_dataflows
@@ -239,18 +318,18 @@ SELECT COALESCE(NULLIF(engine_name, ''), 'unknown') AS engine_name,
        COUNT(*) FILTER (WHERE normalized_status = 'pending') AS pending,
        ROUND(100.0 * COUNT(*) FILTER (WHERE normalized_status = 'succeeded') /
          NULLIF(COUNT(*) FILTER (WHERE normalized_status IN ('succeeded','failed')), 0), 2) AS success_rate,
-       COALESCE(ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3), 0) AS avg_duration_seconds,
-       {discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS p95_duration_seconds
+       ROUND(AVG(duration_seconds) FILTER (WHERE normalized_status IN ('succeeded','failed')), 3) AS avg_duration_seconds,
+       {nullable_discrete_percentile('duration_seconds', 0.95, "normalized_status IN ('succeeded','failed')")} AS p95_duration_seconds
 FROM filtered_jobs
 GROUP BY engine_name, metadata_provider_name, platform_name
 ORDER BY failed DESC, jobs DESC, engine_name, metadata_provider_name
 LIMIT 30
 """
 
-_OPERATION_HEALTH_SQL = """
+_OPERATION_HEALTH_SQL = f"""
 , job_operations AS (
-  SELECT DISTINCT _source_id, job_id, normalized_status,
-         COALESCE(NULLIF(TRIM(value), ''), 'unknown') AS operation_type
+  SELECT DISTINCT _source_id, log_session_id, job_id, normalized_status,
+         {dimension_key_sql('value')} AS operation_type
   FROM filtered_jobs,
   UNNEST(regexp_split_to_array(
     regexp_replace(COALESCE(CAST(operation_types AS VARCHAR), ''), '[\\[\\]\"'']', '', 'g'),
@@ -274,37 +353,33 @@ GROUP BY record_type, operation_type
 ORDER BY record_type, count DESC, operation_type
 """
 
-_ESTIMATED_ROWS_SQL = estimated_rows_written_sql()
 
 _WORKLOAD_SQL = f"""
 SELECT date_trunc(?, timezone(?, event_time)) AS bucket_start,
-       NULL::TIMESTAMP AS bucket_end,
-       SUM(COALESCE(source_rows_read, 0)) AS rows_read,
-       SUM(COALESCE(destination_rows_written, 0)) AS rows_written,
-       SUM({_ESTIMATED_ROWS_SQL}) AS est_rows_written,
-       SUM(CASE WHEN destination_rows_written > 0 THEN destination_rows_written
-                WHEN normalized_status = 'succeeded' AND NOT ({_ESTIMATED_ROWS_SQL} = COALESCE(destination_rows_written, 0)) THEN source_rows_read
-                ELSE COALESCE(destination_rows_written, 0) END) AS rows_output,
-       SUM(CASE WHEN COALESCE(destination_rows_written, 0) <= 0 AND normalized_status = 'succeeded'
-                 AND {_ESTIMATED_ROWS_SQL} <> COALESCE(destination_rows_written, 0)
-                THEN COALESCE(source_rows_read, 0) ELSE 0 END) AS rows_output_estimated,
-       SUM(COALESCE(destination_rows_inserted, 0)) AS rows_inserted,
-       SUM(COALESCE(destination_rows_updated, 0)) AS rows_updated,
-       SUM(COALESCE(destination_rows_deleted, 0)) AS rows_deleted,
+       {_metric_total('source_rows_read', 'TRUE')} AS rows_read,
+       {_metric_observed('source_rows_read', 'TRUE')} AS observed_rows_read,
+       {_metric_measured('source_rows_read', 'TRUE')} AS rows_read_measured,
+       {_metric_eligible('TRUE')} AS rows_read_eligible,
+       {_metric_total('destination_rows_written', 'TRUE')} AS rows_written,
+       {_metric_observed('destination_rows_written', 'TRUE')} AS observed_rows_written,
+       {_metric_measured('destination_rows_written', 'TRUE')} AS rows_written_measured,
+       {_metric_eligible('TRUE')} AS rows_written_eligible,
+       {_metric_total('destination_rows_inserted', 'TRUE')} AS rows_inserted,
+       {_metric_total('destination_rows_updated', 'TRUE')} AS rows_updated,
+       {_metric_total('destination_rows_deleted', 'TRUE')} AS rows_deleted,
+       {_metric_total('destination_bytes_added', 'TRUE')} AS bytes_added,
+       {_metric_total('destination_bytes_removed', 'TRUE')} AS bytes_removed,
+       {_metric_total('destination_bytes_saved', 'TRUE')} AS bytes_saved,
+       {_metric_total('destination_files_added', 'TRUE')} AS files_added,
+       {_metric_total('destination_files_removed', 'TRUE')} AS files_removed,
+       {_metric_total('destination_rows_written', 'TRUE')} AS rows_output,
        COUNT(*) AS dataflow_runs,
-       SUM(COALESCE(destination_bytes_added, 0)) AS bytes_added,
-       SUM(COALESCE(destination_bytes_removed, 0)) AS bytes_removed,
-       SUM(COALESCE(destination_bytes_saved, 0)) AS bytes_saved,
-       SUM(COALESCE(destination_bytes_added, 0) - COALESCE(destination_bytes_removed, 0)) AS net_bytes,
-       SUM(COALESCE(destination_files_added, 0)) AS files_added,
-       SUM(COALESCE(destination_files_removed, 0)) AS files_removed
-FROM filtered_dataflows
-WHERE event_time IS NOT NULL
-GROUP BY bucket_start
-ORDER BY bucket_start
+       {_metric_difference('destination_bytes_added', 'TRUE', 'destination_bytes_removed', 'TRUE')} AS net_bytes
+FROM filtered_dataflows WHERE event_time IS NOT NULL
+GROUP BY bucket_start ORDER BY bucket_start
 """
 
-_FAILURE_MESSAGE_SQL = failure_message_sql("filtered_dataflows")
+_FAILURE_MESSAGE_SQL = failure_message_sql("filtered_dataflows", native=True)
 _FAILURE_CATEGORY_SQL = f"""
 SELECT {failure_category_sql(_FAILURE_MESSAGE_SQL)} AS category, COUNT(*) AS count
 FROM filtered_dataflows
@@ -325,27 +400,29 @@ LIMIT 1
 
 _HEALTH_SQL = """
 , child_counts AS (
-  SELECT _source_id, job_id, COUNT(*) AS total_dataflows,
+  SELECT _source_id, log_session_id, job_id, COUNT(*) AS total_dataflows,
          COUNT(*) FILTER (WHERE normalized_status = 'failed') AS total_failed,
          COUNT(*) FILTER (WHERE normalized_status = 'skipped') AS total_skipped,
          COUNT(*) FILTER (WHERE normalized_status = 'succeeded') AS total_succeeded
-  FROM filtered_dataflows WHERE job_id IS NOT NULL GROUP BY _source_id, job_id
+  FROM filtered_dataflows WHERE job_id IS NOT NULL GROUP BY _source_id, log_session_id, job_id
 ), mismatch AS (
   SELECT COUNT(*) AS mismatch_count
-  FROM filtered_jobs j LEFT JOIN child_counts c USING (_source_id, job_id)
-  WHERE (j.total_dataflows IS NOT NULL AND j.total_dataflows <> COALESCE(c.total_dataflows, 0))
+  FROM filtered_jobs j LEFT JOIN child_counts c ON c._source_id = j._source_id AND c.job_id = j.job_id AND c.log_session_id IS NOT DISTINCT FROM j.log_session_id
+  WHERE (j.observed_at IS NULL OR j.observed_at >= (SELECT MAX(d.event_time) FROM filtered_dataflows d WHERE d._source_id=j._source_id AND d.job_id=j.job_id AND d.log_session_id IS NOT DISTINCT FROM j.log_session_id))
+    AND j.log_records_dropped = 0
+    AND ((j.total_dataflows IS NOT NULL AND j.total_dataflows <> COALESCE(c.total_dataflows, 0))
      OR (j.total_failed IS NOT NULL AND j.total_failed <> COALESCE(c.total_failed, 0))
      OR (j.total_skipped IS NOT NULL AND j.total_skipped <> COALESCE(c.total_skipped, 0))
-     OR (j.total_succeeded IS NOT NULL AND j.total_succeeded <> COALESCE(c.total_succeeded, 0))
+     OR (j.total_succeeded IS NOT NULL AND j.total_succeeded <> COALESCE(c.total_succeeded, 0)))
 ), ids AS (
   SELECT
-    (SELECT COUNT(DISTINCT d.job_id) FROM filtered_dataflows d
+    (SELECT COUNT(DISTINCT (d._source_id, d.log_session_id, d.job_id)) FROM filtered_dataflows d
       WHERE d.job_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM filtered_jobs j WHERE j._source_id = d._source_id AND j.job_id = d.job_id
+        SELECT 1 FROM filtered_jobs j WHERE j._source_id = d._source_id AND j.job_id = d.job_id AND j.log_session_id IS NOT DISTINCT FROM d.log_session_id
       )) AS orphan_dataflow_job_ids,
-    (SELECT COUNT(DISTINCT j.job_id) FROM filtered_jobs j
+    (SELECT COUNT(DISTINCT (j._source_id, j.log_session_id, j.job_id)) FROM filtered_jobs j
       WHERE j.job_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM filtered_dataflows d WHERE d._source_id = j._source_id AND d.job_id = j.job_id
+        SELECT 1 FROM filtered_dataflows d WHERE d._source_id = j._source_id AND d.job_id = j.job_id AND d.log_session_id IS NOT DISTINCT FROM j.log_session_id
       )) AS jobs_without_dataflow_records
 )
 SELECT

@@ -140,7 +140,7 @@ class _FunctionVisitor(cst.CSTVisitor):
         call_name = _call_name(node)
         receiver_name = _call_receiver_name(node)
         sql_expression = _call_argument(node, keyword_names=("sql", "query", "statement"))
-        if _is_sql_call(call_name, receiver_name, self.spark_session_symbols, self.sql_executor_symbols) and sql_expression is not None:
+        if _is_sql_call(call_name, receiver_name, self.sql_executor_symbols) and sql_expression is not None:
             self._record_sql(node, sql_expression)
             return
         if call_name == "createOrReplaceTempView" and node.args:
@@ -409,7 +409,6 @@ def _call_argument(
 def _is_sql_call(
     call_name: str | None,
     receiver_name: str | None,
-    spark_session_symbols: set[str],
     sql_executor_symbols: set[str],
 ) -> bool:
     if call_name not in SQL_CALL_NAMES:

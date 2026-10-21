@@ -1,0 +1,2 @@
+{"log_schema_version":4,"_type":"system_log","datacoolie_version":"0.2.0","log_session_id":"fixture-session-A","job_id":"ABCDEFAB-0000-0000-0000-000000000001","job_num":7,"job_index":0,"ts":"2026-09-11T00:00:30+00:00","level":"ERROR","logger":"datacoolie.fixture","msg":"source unavailable","dataflow_id":"01234567-89AB-CDEF-0123-456789ABCDEF","dataflow_run_id":"66666666-7777-8888-9999-AAAAAAAAAAAA","event_name":"dataflow.failed","exc_info":"TimeoutError: source timed out"}
+

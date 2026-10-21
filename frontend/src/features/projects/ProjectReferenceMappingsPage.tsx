@@ -3,7 +3,7 @@ import { Icon } from "@iconify/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ProjectReferenceRegistryFailure, ProjectReferenceRegistryResponse } from "../../shared/api/domainTypes";
 import { EmptyState } from "../../shared/components/EmptyState";
-import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
+import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../../shared/assetPresentation";
 import { buildReferenceMappingPayload, type ReferenceMappingPayload } from "../reference-mappings/referenceMappingModel";
 import { ProjectReferenceMappingDrawer } from "./ProjectReferenceMappingDrawer";
 import { ProjectReferenceMappingTargetPicker } from "./ProjectReferenceMappingTargetPicker";

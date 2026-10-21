@@ -1,12 +1,11 @@
 import { MarkerType, Position } from "@xyflow/react";
 import type {
   LatestStatusResponse,
-  LineageAsset,
   LineageDependency,
   LineageReference
 } from "../../../shared/api/domainTypes";
 import { connectionStageFamily } from "../../../shared/connectionOrder";
-import { assetIconKind, presentLineageAsset, referenceTypeAssetType } from "./presentation";
+import { assetIconKind, presentLineageAsset, referenceTypeAssetType } from "../../../shared/assetPresentation";
 import type {
   LineageAssetFlowNode,
   LineageFlow,

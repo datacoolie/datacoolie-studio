@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MetadataSourceSaveConfirmationDialog } from "./MetadataSourceSaveConfirmationDialog";
+import { MetadataSourceSaveConfirmationDialog } from "../../shared/metadata/MetadataSourceSaveConfirmationDialog";
 
 const confirmation = {
   title: "Save 1 source file?",
@@ -12,7 +12,8 @@ const confirmation = {
       label: "metadata/orders.json",
       sheets: ["Dataflows"]
     }
-  ]
+  ],
+  sqlImpacts: []
 };
 
 describe("MetadataSourceSaveConfirmationDialog", () => {
@@ -36,7 +37,7 @@ describe("MetadataSourceSaveConfirmationDialog", () => {
       onConfirm: () => undefined
     });
 
-    expect(dialog.props.confirmLabel).toBe("Save");
+    expect(dialog.props.confirmLabel).toBe("Save to source");
     expect(dialog.props.confirmIcon.props.className).toBeUndefined();
   });
 });

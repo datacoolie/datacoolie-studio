@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { QueryClient } from "@tanstack/react-query";
 
 import { api } from "../../shared/api/client";
-import type { SourceReadCheckResult } from "../../shared/api/domainTypes";
+import type { SourceReadCheckResult } from "../../shared/api/contractTypes";
 import { createEnvironmentSourceMutations } from "./sourceMutations";
 
 function validationError(): SourceReadCheckResult {
@@ -10,6 +11,8 @@ function validationError(): SourceReadCheckResult {
     source_kind: "metadata",
     status: "error",
     message: "Azure credential belongs to a different tenant",
+    record_counts: {},
+    records_scanned: 0,
     errors: [{ message: "Azure credential belongs to a different tenant" }],
   };
 }
@@ -19,9 +22,9 @@ function createContext() {
     environmentId: 6,
     module: "sources" as const,
     activeEnvironmentIdRef: { current: 6 },
+    queryClient: new QueryClient(),
     setBusy: vi.fn(),
     setError: vi.fn(),
-    setSourceSyncStatuses: vi.fn(),
     setSourceOperations: vi.fn(),
     invalidateProjectSummaries: vi.fn(),
     refreshEnvironment: vi.fn(async () => undefined),

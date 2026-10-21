@@ -6,7 +6,8 @@ from pathlib import Path
 import duckdb
 
 from datacoolie_studio.domains.analytics import schema as analytics_schema
-from datacoolie_studio.domains.analytics import store as analytics_store
+from datacoolie_studio.domains.analytics import publication as analytics_publication
+from datacoolie_studio.domains.analytics import schema_tables as analytics_schema_tables
 
 
 def build_analytics_fixture(
@@ -15,7 +16,7 @@ def build_analytics_fixture(
     source_ids: list[int],
     dataflow_rows: int,
 ) -> dict[str, int]:
-    """Create a published typed analytics generation using set-based SQL."""
+    """Create a published native analytics generation from deterministic scenario rows."""
     if not source_ids:
         raise ValueError("At least one source id is required")
     if dataflow_rows < 0:
@@ -27,14 +28,20 @@ def build_analytics_fixture(
     source_values = ", ".join(f"({int(source_id)})" for source_id in source_ids)
     connection = duckdb.connect(str(path))
     try:
-        analytics_store.ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
-        analytics_store.ensure_typed_table(connection, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
+        analytics_schema_tables.ensure_typed_table(connection, analytics_schema.DATAFLOW_TABLE, analytics_schema.DATAFLOW_COLUMN_TYPES)
+        analytics_schema_tables.ensure_typed_table(connection, analytics_schema.JOB_TABLE, analytics_schema.JOB_COLUMN_TYPES)
         analytics_schema.ensure_filter_values_table(connection)
         analytics_schema.ensure_cache_sources_table(connection)
         analytics_schema.ensure_analytics_meta_table(connection)
+        from datacoolie_studio.domains.analytics import store
+        from tests.support.v6_records import native_record
+        from datacoolie_studio.domains.analytics.sql import quote_identifier
+        for table, types in (("fixture_jobs", analytics_schema.HISTORICAL_JOB_COLUMN_TYPES), ("fixture_dataflows", analytics_schema.HISTORICAL_DATAFLOW_COLUMN_TYPES)):
+            columns = analytics_schema.cache_table_column_types(types)
+            connection.execute(f"CREATE TEMP TABLE {table} ({', '.join(quote_identifier(k) + ' ' + v for k, v in columns.items())})")
         connection.execute(
             f"""
-            INSERT INTO {analytics_schema.JOB_TABLE} (
+            INSERT INTO fixture_jobs (
               _source_id, _file_uri, _file_kind, _file_date, _source_size,
               _source_mtime_ns, _ingested_at, _type, job_id, platform_name,
               engine_name, metadata_provider_name, start_time, end_time,
@@ -68,10 +75,10 @@ def build_analytics_fixture(
         )
         connection.execute(
             f"""
-            INSERT INTO {analytics_schema.DATAFLOW_TABLE} (
+            INSERT INTO fixture_dataflows (
               _source_id, _file_uri, _file_kind, _file_date, _source_size,
-              _source_mtime_ns, _ingested_at, _type, job_id, dataflow_id,
-              dataflow_run_id, dataflow_name, stage, operation_type, status,
+              _source_mtime_ns, _ingested_at, _type, job_id, job_num, job_index,
+              dataflow_id, dataflow_run_id, dataflow_name, stage, operation_type, status,
               start_time, end_time, duration_seconds, source_name,
               source_connection_type, source_format, source_table,
               source_status, source_duration_seconds, source_rows_read,
@@ -90,8 +97,8 @@ def build_analytics_fixture(
               CONCAT('benchmark://dataflow/', index), 'dataflow',
               CAST(TIMESTAMPTZ '2026-07-21 00:00:00+00' - index * INTERVAL 12 SECOND AS DATE),
               2048, index, TIMESTAMPTZ '2026-07-21 00:00:00+00', 'dataflow',
-              CONCAT('job-', index // 5), CONCAT('dataflow-', index % 130),
-              CONCAT('run-', index), CONCAT('dataflow-', index % 130),
+              CONCAT('job-', index // 5), index // 5, index,
+              CONCAT('dataflow-', index % 130), CONCAT('run-', index), CONCAT('dataflow-', index % 130),
               CASE index % 5 WHEN 0 THEN 'extract' WHEN 1 THEN 'transform' WHEN 2 THEN 'load' WHEN 3 THEN 'quality' ELSE 'publish' END,
               CASE index % 20 WHEN 0 THEN 'maintenance' ELSE 'etl' END,
               CASE index % 20 WHEN 0 THEN 'failed' WHEN 1 THEN 'skipped' ELSE 'succeeded' END,
@@ -119,6 +126,21 @@ def build_analytics_fixture(
             CROSS JOIN (SELECT list(source_id ORDER BY source_id) AS source_ids FROM (VALUES {source_values}) sources(source_id)) ids
             """
         )
+        for fixture, table, kind in (("fixture_jobs", analytics_schema.JOB_TABLE, "job_run_log"), ("fixture_dataflows", analytics_schema.DATAFLOW_TABLE, "dataflow_run_log")):
+            cursor = connection.execute(f"SELECT * FROM {fixture}")
+            names = [column[0] for column in cursor.description]
+            scenario_rows = [dict(zip(names, values)) for values in cursor.fetchall()]
+            grouped = {}
+            for values in scenario_rows:
+                source_id = values.pop("_source_id")
+                uri = values.pop("_file_uri")
+                values.pop("_file_kind")
+                values = {key: value.isoformat() if isinstance(value, datetime) else value for key, value in values.items() if key not in analytics_schema.STUDIO_CACHE_COLUMNS and value is not None}
+                values['_type'] = kind
+                record = native_record(values)
+                grouped.setdefault(source_id, []).append((uri, kind, '{}', record))
+            for source_id, rows in grouped.items():
+                store.insert_typed_rows(connection, table, source_id, rows, analytics_schema.DATAFLOW_COLUMN_TYPES if kind == 'dataflow_run_log' else analytics_schema.JOB_COLUMN_TYPES)
         now = "2026-07-21T00:00:00+00:00"
         connection.execute(
             f"INSERT INTO {analytics_schema.CACHE_SOURCES_TABLE} "
@@ -126,8 +148,8 @@ def build_analytics_fixture(
             [now],
         )
         for source_id in source_ids:
-            analytics_store.refresh_filter_values(connection, source_id)
-        analytics_store.publish_generation(
+            analytics_publication.refresh_filter_values(connection, source_id)
+        analytics_publication.publish_generation(
             connection,
             dataflow_column_types=analytics_schema.DATAFLOW_COLUMN_TYPES,
             job_column_types=analytics_schema.JOB_COLUMN_TYPES,

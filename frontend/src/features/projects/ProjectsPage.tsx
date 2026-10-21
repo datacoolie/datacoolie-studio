@@ -64,6 +64,7 @@ export function ProjectsPage({
               <span>New project</span>
               <input
                 id="new-project-name"
+                className="project-name-input"
                 value={projectName}
                 onChange={(event) => setProjectName(event.target.value)}
                 placeholder="Project name"
@@ -173,7 +174,7 @@ function ProjectDirectoryRow({
         <span className="project-directory-label">Coverage</span>
         <div>
           <span><Database size={13} />{project.metadata_source_count} sources</span>
-          <span><FolderOpen size={13} />{project.etl_log_path_count} logs</span>
+          <span><FolderOpen size={13} />{project.log_source_count} logs</span>
           <span><Code2 size={13} />{codeArtifactCount} code</span>
         </div>
       </div>

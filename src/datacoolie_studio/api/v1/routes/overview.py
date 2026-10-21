@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.api.v1.contracts.overview import EnvironmentOverviewResponse
-from datacoolie_studio.api.v1.routes.credentials import get_credential_secret_store
+from datacoolie_studio.api.v1.dependencies import get_credential_secret_store
 from datacoolie_studio.db.session import get_session
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
 from datacoolie_studio.domains.code_artifacts.service import CodeArtifactSourceUnavailableError

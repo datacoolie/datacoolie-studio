@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
+from datacoolie_studio.domains.assets.endpoint_identity import (
+    asset_seed_sort_key,
+    primary_asset_identifier,
+)
 from datacoolie_studio.domains.assets.identifiers import canonical_asset_id, database_resolution_scope
 
 
@@ -23,8 +27,44 @@ class AssetRegistry:
         self.environment_id = environment_id
         self._groups: dict[str, _AssetGroup] = {}
         self._identifier_to_group: dict[tuple[str, str], str] = {}
-        self._candidate_to_group: dict[str, str] = {}
+        self._candidate_to_groups: dict[str, set[str]] = {}
         self.diagnostics: list[dict[str, Any]] = []
+
+    def add_metadata_assets(
+        self,
+        nodes: list[dict[str, Any]],
+        source_id: int,
+        source_uri: str,
+    ) -> list[str]:
+        """Seed a batch in stable identifier order.
+
+        Lineage historically fed nodes in document/source order.  The shared
+        identity contract needs the same aliases to produce the same group
+        regardless of that order, so callers with a batch should use this
+        entrypoint instead of repeatedly choosing a first seed themselves.
+        """
+        return [
+            self.add_metadata_asset(node, source_id, source_uri)
+            for node in sorted(nodes, key=asset_seed_sort_key)
+        ]
+
+    def add_metadata_observations(
+        self,
+        observations: Iterable[tuple[dict[str, Any], int, str]],
+    ) -> list[str]:
+        """Seed metadata from all documents in one deterministic order."""
+        ordered = sorted(
+            observations,
+            key=lambda item: (
+                asset_seed_sort_key(item[0]),
+                int(item[1]),
+                str(item[2]),
+            ),
+        )
+        return [
+            self.add_metadata_asset(node, int(source_id), str(source_uri))
+            for node, source_id, source_uri in ordered
+        ]
 
     def add_metadata_asset(self, node: dict[str, Any], source_id: int, source_uri: str) -> str:
         identifiers = _identifier_map(node.get("identifiers", []))
@@ -43,7 +83,7 @@ class AssetRegistry:
             return self._record_conflict(node, source_id, source_uri, {group.id}, "asset identifiers conflict")
 
         if group is None:
-            primary = _primary_identifier(node, identifiers)
+            primary = primary_asset_identifier(node, identifiers)
             group_id = canonical_asset_id(self.environment_id, primary)
             group = _AssetGroup(id=group_id, node={**node, "id": group_id, "identity": group_id})
             self._groups[group_id] = group
@@ -68,11 +108,15 @@ class AssetRegistry:
             "role": role,
         })
         _merge_node_fields(group.node, node)
-        self._candidate_to_group[candidate_id] = group.id
+        self._candidate_to_groups.setdefault(candidate_id, set()).add(group.id)
         return group.id
 
     def resolve_candidate_id(self, candidate_id: str) -> str:
-        return self._candidate_to_group.get(candidate_id, candidate_id)
+        candidates = self._candidate_to_groups.get(candidate_id, set())
+        return next(iter(candidates)) if len(candidates) == 1 else candidate_id
+
+    def resolve_candidate_ids(self, candidate_id: str) -> list[str]:
+        return sorted(self._candidate_to_groups.get(candidate_id, {candidate_id}))
 
     def resolve_identifier(self, kind: str, normalized_value: str) -> str | None:
         return self._identifier_to_group.get((kind, normalized_value))
@@ -117,10 +161,24 @@ class AssetRegistry:
                 "metadata_source_ids": sorted(group.metadata_source_ids),
                 "roles": sorted(group.roles),
                 "connection_names": sorted(group.connection_names),
-                "observations": group.observations,
+                "observations": sorted(
+                    group.observations,
+                    key=lambda item: (
+                        str(item.get("source_type") or ""),
+                        int(item.get("metadata_source_id") or 0),
+                        str(item.get("metadata_source_uri") or ""),
+                        str(item.get("role") or ""),
+                    ),
+                ),
             }
             nodes.append(node)
-        return sorted(nodes, key=lambda item: str(item.get("label") or ""))
+        return sorted(
+            nodes,
+            key=lambda item: (
+                str(item.get("label") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
 
     def _record_conflict(
         self,
@@ -131,7 +189,7 @@ class AssetRegistry:
         reason: str,
     ) -> str:
         identifiers = _identifier_map(node.get("identifiers", []))
-        primary = _primary_identifier(node, identifiers)
+        primary = primary_asset_identifier(node, identifiers)
         conflict_id = canonical_asset_id(self.environment_id, {
             **primary,
             "normalized_value": f"conflict:{source_id}:{node['id']}:{primary['normalized_value']}",
@@ -153,7 +211,7 @@ class AssetRegistry:
             "role": node.get("role"),
         })
         self._groups[conflict_id] = group
-        self._candidate_to_group[str(node["id"])] = conflict_id
+        self._candidate_to_groups.setdefault(str(node["id"]), set()).add(conflict_id)
         self.diagnostics.append({
             "type": "asset_identity_conflict",
             "message": reason,
@@ -173,21 +231,8 @@ def _identifier_map(identifiers: list[dict[str, str]]) -> dict[tuple[str, str], 
 
 
 def _primary_identifier(node: dict[str, Any], identifiers: dict[tuple[str, str], dict[str, str]]) -> dict[str, str]:
-    preferred_kind = str(node.get("identity_type") or "")
-    for (identifier_kind, _), identifier in identifiers.items():
-        if identifier_kind == preferred_kind:
-            return identifier
-    for kind in ("api_endpoint", "logical_table", "physical_path"):
-        for (identifier_kind, _), identifier in identifiers.items():
-            if identifier_kind == kind:
-                return identifier
-    return {
-        "kind": str(node.get("identity_type") or "unresolved"),
-        "normalized_value": str(node.get("identity") or node["id"]),
-        "display_value": str(node.get("label") or node["id"]),
-        "namespace": "",
-        "source": "metadata",
-    }
+    """Compatibility wrapper; Assets owns primary-selection semantics."""
+    return primary_asset_identifier(node, identifiers)
 
 
 def _has_identity_conflict(
@@ -197,7 +242,10 @@ def _has_identity_conflict(
     for kind in ("api_endpoint", "logical_table", "physical_path"):
         existing_values = {value for (item_kind, value) in existing if item_kind == kind}
         incoming_values = {value for (item_kind, value) in incoming if item_kind == kind}
-        if existing_values and incoming_values and existing_values.isdisjoint(incoming_values):
+        if existing_values and incoming_values and (
+            existing_values.isdisjoint(incoming_values)
+            or bool(incoming_values - existing_values)
+        ):
             return True
     return False
 
@@ -209,3 +257,11 @@ def _merge_node_fields(target: dict[str, Any], incoming: dict[str, Any]) -> None
         current = target.get(key)
         if (current is None or current == "") and value is not None and value != "":
             target[key] = value
+            continue
+        if current in (None, "", value) or value in (None, ""):
+            continue
+        # Display metadata can be repeated with different source order.  Keep
+        # a stable representative for scalar conflicts while preserving the
+        # explicit identifier conflict diagnostics above.
+        if isinstance(current, (str, int, float, bool)) and isinstance(value, (str, int, float, bool)):
+            target[key] = min(str(current), str(value))

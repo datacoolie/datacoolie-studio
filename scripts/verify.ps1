@@ -1,52 +1,26 @@
 param(
-    [ValidateSet("Fast", "Full")]
+    [ValidateSet("Fast", "Backend", "Full", "Release")]
     [string]$Mode = "Fast"
 )
 
 $ErrorActionPreference = "Stop"
 $studioRoot = Split-Path -Parent $PSScriptRoot
-$frontendRoot = Join-Path $studioRoot "frontend"
+$workspaceRoot = Split-Path -Parent $studioRoot
+$pythonExecutable = Join-Path $workspaceRoot ".venv\Scripts\python.exe"
+$verifyScript = Join-Path $studioRoot "scripts\verify.py"
 
-function Invoke-Checked {
-    param(
-        [Parameter(Mandatory)]
-        [scriptblock]$Command,
-        [Parameter(Mandatory)]
-        [string]$Label
-    )
-
-    Write-Host "`n==> $Label"
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE"
-    }
+if (-not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf)) {
+    throw "Expected workspace Python interpreter was not found: $pythonExecutable"
 }
+
+$resolvedPythonExecutable = (Resolve-Path -LiteralPath $pythonExecutable).Path
+Write-Host "Using workspace Python: $resolvedPythonExecutable"
 
 Push-Location $studioRoot
 try {
-    if ($Mode -eq "Full") {
-        Invoke-Checked { python -m pytest } "Backend full suite"
-    } else {
-        Invoke-Checked {
-            python -m pytest `
-                tests/architecture/test_architecture_boundaries.py `
-                tests/test_main.py `
-                tests/test_openapi_export.py
-        } "Backend fast regression"
-    }
-
-    Invoke-Checked {
-        python -m datacoolie_studio.openapi_export --check
-    } "OpenAPI contract"
-
-    Push-Location $frontendRoot
-    try {
-        Invoke-Checked { npm run api:check } "Generated API types"
-        Invoke-Checked { npm test } "Frontend suite"
-        Invoke-Checked { npm run build } "Frontend production build"
-        Invoke-Checked { npm audit --audit-level=high } "Frontend dependency audit"
-    } finally {
-        Pop-Location
+    & $resolvedPythonExecutable $verifyScript $Mode.ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Studio verification group '$Mode' failed with exit code $LASTEXITCODE"
     }
 } finally {
     Pop-Location

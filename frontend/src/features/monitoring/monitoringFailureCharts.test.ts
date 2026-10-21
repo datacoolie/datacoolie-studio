@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";import { failureCategoryPhaseMatrixOption, failureHorizontalBarOption, failureTrendOption } from "./components/monitoringPrimitives";
+import { DEFAULT_MONITORING_FILTERS } from "./monitoringFilters";import { failureCategoryPhaseMatrixOption, failureHorizontalBarOption, failureTrendOption } from "./pages/FailurePagePresentation";
 
 type ChartSeries = {
   name: string;
@@ -67,5 +67,22 @@ describe("Monitoring failure chart semantics", () => {
     expect(jobs?.lineStyle?.color).toBe("#7c3aed");
     expect(jobs?.itemStyle?.color).toBe("#7c3aed");
     expect(jobs?.areaStyle).toBeUndefined();
+  });
+
+  it("keeps unsafe source failure counts exact in the tooltip", () => {
+    const option = failureTrendOption(
+      [{ date: "2026-07-15", failed_dataflows: "9007199254740993", failed_jobs: "9007199254740995" }],
+      { ...DEFAULT_MONITORING_FILTERS, range: "custom", grain: "day", startTime: "2026-07-15", endTime: "2026-07-15" },
+      { min: "2026-07-15", max: "2026-07-15" },
+      "UTC",
+      "day"
+    ) as { tooltip?: { formatter?: (params: unknown) => string } };
+    const html = option.tooltip?.formatter?.([
+      { dataIndex: 0, seriesName: "Dataflows", value: 0 },
+      { dataIndex: 0, seriesName: "Jobs", value: 0 },
+    ]) ?? "";
+
+    expect(html).toContain("Dataflows: 9,007,199,254,740,993");
+    expect(html).toContain("Jobs: 9,007,199,254,740,995");
   });
 });

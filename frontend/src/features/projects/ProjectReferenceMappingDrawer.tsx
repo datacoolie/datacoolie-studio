@@ -2,7 +2,7 @@ import { AlertTriangle, X } from "lucide-react";
 import { Icon } from "@iconify/react";
 import { useEffect, useId, useRef, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
-import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../lineage/model/presentation";
+import { assetTypeIconId, assetTypeTone, referenceTypeAssetType } from "../../shared/assetPresentation";
 import {
   projectEnvironmentResolutionLabel,
   projectMappingResolutionSummary,

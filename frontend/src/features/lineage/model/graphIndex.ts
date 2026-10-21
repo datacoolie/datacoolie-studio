@@ -5,7 +5,7 @@ import type {
   LineageReference,
   LineageResponse
 } from "../../../shared/api/domainTypes";
-import { lineageNodeSearchValues, presentLineageAsset } from "./presentation";
+import { lineageNodeSearchValues, presentLineageAsset } from "../../../shared/assetPresentation";
 import type {
   LineageEntity,
   LineageFilters,
@@ -465,19 +465,6 @@ function relationMatchesFilters(index: LineageGraphIndex, relation: Relation, fi
     || (relation.dependency?.resolution.state && filters.resolutions.includes(relation.dependency.resolution.state))
     || (source?.entity_type === "reference" && filters.resolutions.includes(source.resolution.state));
   return matchesConnection && matchesStage && matchesFormat && matchesResolution;
-}
-
-function emptyVisible(filtersActive: boolean, traceActive: boolean): VisibleLineage {
-  return {
-    entities: [],
-    dataflows: [],
-    dependencies: [],
-    focusNodeIds: new Set(),
-    focusEdgeIds: new Set(),
-    issueCountByAsset: new Map(),
-    filtersActive,
-    traceActive
-  };
 }
 
 function append(map: Map<string, Relation[]>, key: string, relation: Relation) {

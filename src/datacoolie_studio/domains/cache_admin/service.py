@@ -10,9 +10,11 @@ from datacoolie_studio.db.models import Environment, EnvironmentSource
 from datacoolie_studio.core.config import source_materialization_cache_dir
 from datacoolie_studio.domains.analytics import maintenance as analytics_maintenance
 from datacoolie_studio.domains.analytics_upgrade.service import current_upgrade_status
-from datacoolie_studio.domains.logs import ingestion as log_ingestion
+from datacoolie_studio.domains.logs import pending as log_pending
 from datacoolie_studio.domains.read_models.keys import (
     ASSETS_CATALOG,
+    ASSETS_IDENTITY_CATALOG,
+    ASSETS_IDENTITY_MAP,
     LINEAGE_GRAPH,
     LINEAGE_LATEST_RUNS,
     OVERVIEW,
@@ -23,11 +25,11 @@ from datacoolie_studio.domains.sync.service import sync_job_retention_diagnostic
 
 FEATURE_NAMESPACES = {
     "overview": {OVERVIEW},
-    "assets": {ASSETS_CATALOG},
+    "assets": {ASSETS_CATALOG, ASSETS_IDENTITY_CATALOG, ASSETS_IDENTITY_MAP, "monitoring.page.any"},
     "lineage": {LINEAGE_GRAPH, LINEAGE_LATEST_RUNS},
-    "monitoring": {"monitoring.page.any", LINEAGE_LATEST_RUNS},
+    "monitoring": {"monitoring.page.any", LINEAGE_LATEST_RUNS, ASSETS_IDENTITY_MAP},
 }
-ANALYTICS_DEPENDENT_NAMESPACES = {"monitoring.page.any", LINEAGE_LATEST_RUNS, OVERVIEW}
+ANALYTICS_DEPENDENT_NAMESPACES = {"monitoring.page.any", LINEAGE_LATEST_RUNS, OVERVIEW, ASSETS_IDENTITY_MAP}
 
 
 def cache_status(session: Session) -> dict[str, Any]:
@@ -118,7 +120,7 @@ def _clear_analytics(session: Session, environment_id: int | None) -> dict[str, 
     )
     normalized_source_ids = [int(source_id) for source_id in source_ids]
     for source_id in normalized_source_ids:
-        log_ingestion.invalidate_pending_changes(source_id)
+        log_pending.invalidate_pending_changes(source_id)
     deleted = analytics_maintenance.purge_source_ids(normalized_source_ids)
     return {
         "deleted_files": 0,

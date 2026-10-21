@@ -1,6 +1,21 @@
-import type { TableSort } from "./MonitoringCharts";
+import type { TableSort } from "../../shared/components/DataTable";
 
-export type PerformanceEfficiencyScope = "etl" | "maintenance" | "all";
+export type PerformanceEfficiencyScope = "etl" | "maintenance";
+
+export interface PerformanceEfficiencyCoverage {
+  eligible: number;
+  measured: number;
+}
+
+export function performanceEfficiencyCoverage(
+  kpis: Record<string, unknown>,
+  scope: PerformanceEfficiencyScope,
+): PerformanceEfficiencyCoverage | null {
+  const pipeline = readEfficiencyCoverage(kpis, "pipeline");
+  const maintenance = readEfficiencyCoverage(kpis, "maintenance");
+  if (scope === "etl") return pipeline;
+  return maintenance;
+}
 
 export function sortPerformanceRows<T extends Record<string, unknown>>(rows: T[], sort?: TableSort): T[] {
   if (!sort) return rows;
@@ -22,7 +37,6 @@ export function filterPerformanceEfficiencyRows<T extends Record<string, unknown
   rows: T[],
   scope: PerformanceEfficiencyScope
 ): T[] {
-  if (scope === "all") return rows;
   return rows.filter((row) => {
     const operationType = String(row.operation_type ?? "unknown").trim().toLowerCase();
     return scope === "maintenance" ? operationType === "maintenance" : operationType !== "maintenance";
@@ -32,8 +46,8 @@ export function filterPerformanceEfficiencyRows<T extends Record<string, unknown
 export function defaultPerformanceEfficiencyScope(rows: Array<Record<string, unknown>>): PerformanceEfficiencyScope {
   const hasPipelineRuns = rows.some((row) => String(row.operation_type ?? "").toLowerCase() !== "maintenance");
   const hasMaintenanceRuns = rows.some((row) => String(row.operation_type ?? "").toLowerCase() === "maintenance");
-  if (hasPipelineRuns && hasMaintenanceRuns) return "etl";
-  return hasMaintenanceRuns ? "maintenance" : "all";
+  if (!hasPipelineRuns && hasMaintenanceRuns) return "maintenance";
+  return "etl";
 }
 
 export function performancePressureIntent(ratio: number, p95: number): "neutral" | "good" | "warning" | "bad" {
@@ -48,4 +62,17 @@ function comparePerformanceValues(left: unknown, right: unknown) {
   if (left == null && right == null) return 0;
   if (typeof left === "number" && typeof right === "number") return left - right;
   return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function readEfficiencyCoverage(kpis: Record<string, unknown>, scope: "pipeline" | "maintenance") {
+  const eligible = finiteCount(kpis[`workload_efficiency_${scope}_eligible`]);
+  const measured = finiteCount(kpis[`workload_efficiency_${scope}_measured`]);
+  return eligible == null || measured == null ? null : { eligible, measured };
+}
+
+function finiteCount(value: unknown) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }

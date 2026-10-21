@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { MaintenanceSourceCell } from "./details/MaintenanceDetails";
 import { DataflowRouteEndpoint } from "./details/detailPrimitives";
 import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
-import { EndpointRouteNode } from "./components/monitoringPrimitives";
+import { EndpointRouteNode } from "./pages/DataflowsPagePresentation";
 import { FailureRouteCell } from "./pages/FailurePageSupport";
 
 describe("Monitoring connection stage presentation", () => {
@@ -66,7 +66,7 @@ describe("Monitoring connection stage presentation", () => {
 
   it("colors only the source cell in the Destination table drawer", () => {
     const markup = renderToStaticMarkup(createElement(MaintenanceSourceCell, {
-      row: { source: "wwi_gold_source · catalog.schema.orders" },
+      row: { source_name: "wwi_gold_source", source_full_table: "catalog.schema.orders" },
     }));
 
     expect(markup).toContain("maintenance-source-cell monitor-stage-gold");

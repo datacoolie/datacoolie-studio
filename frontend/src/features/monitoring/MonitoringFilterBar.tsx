@@ -7,8 +7,9 @@ import { api } from "../../shared/api/client";
 import type { JobRecord, MonitoringFilterOptionsResponse, MonitoringRecord } from "../../shared/api/domainTypes";
 import type { FilterOption, MonitoringFilters } from "./monitoringFilters";
 import { DEFAULT_MONITORING_FILTERS, hasActiveFilters } from "./monitoringFilters";
-import { CompactNumberValue } from "./CompactNumberValue";
+import { presentNumber } from "../../shared/lib/numberFormat";
 import { monitoringConnectionStageClass } from "./monitoringStagePresentation";
+import { monitoringDimensionLabel } from "./monitoringDimensions";
 
 interface MonitoringFilterBarProps {
   environmentId: number;
@@ -16,6 +17,7 @@ interface MonitoringFilterBarProps {
   filters: MonitoringFilters;
   searchOptions: MonitoringSearchOption[];
   grainWarning?: string;
+  countState?: "ready" | "loading" | "error";
   onChange: (filters: MonitoringFilters) => void;
 }
 
@@ -26,11 +28,11 @@ export interface MonitoringSearchOption {
   label: string;
   detail: string;
   value: string;
-  investigateKind: "job_id" | "dataflow" | "dataflow_run_id" | "destination_table";
+  investigateKind: "job_id" | "dataflow" | "dataflow_id" | "dataflow_run_id" | "destination_table" | "declared_destination";
   kind: "job" | "dataflow" | "dataflow run" | "table";
 }
 
-export function MonitoringFilterBar({ environmentId, options, filters, searchOptions, grainWarning = "", onChange }: MonitoringFilterBarProps) {
+export function MonitoringFilterBar({ environmentId, options, filters, searchOptions, grainWarning = "", countState = "ready", onChange }: MonitoringFilterBarProps) {
   const [customOpen, setCustomOpen] = useState(false);
   const [rangeDraft, setRangeDraft] = useState<MonitoringFilters["range"]>(filters.range);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -202,12 +204,12 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
 
         <label
           className={`monitoring-filter-field compact monitoring-grain-filter${grainWarning ? " filter-warning" : ""}`}
-          title={grainWarning || undefined}
         >
           <span>Grain</span>
           <select
             value={filters.grain}
             aria-invalid={grainWarning ? "true" : undefined}
+            aria-description={grainWarning || undefined}
             onChange={(event) => setFilter("grain", event.target.value as never)}
           >
             <option value="auto">Auto</option>
@@ -222,6 +224,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           label="Status"
           value={filters.status}
           options={statusOptions}
+          countState={countState}
           open={openFilter === "status"}
           onOpen={() => setOpenFilter(openFilter === "status" ? null : "status")}
           onChange={(value) => setFilter("status", value as never)}
@@ -231,6 +234,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           label="Operation"
           value={filters.operationType}
           options={operationOptions}
+          countState={countState}
           open={openFilter === "operationType"}
           onOpen={() => setOpenFilter(openFilter === "operationType" ? null : "operationType")}
           onChange={(value) => setFilter("operationType", value as never)}
@@ -240,6 +244,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           label="Stage"
           value={filters.stage}
           options={stageOptions}
+          countState={countState}
           open={openFilter === "stage"}
           onOpen={() => setOpenFilter(openFilter === "stage" ? null : "stage")}
           onChange={(value) => setFilter("stage", value as never)}
@@ -249,6 +254,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           label="Connection"
           value={filters.connection}
           options={connectionOptions}
+          countState={countState}
           stageAware
           open={openFilter === "connection"}
           onOpen={() => setOpenFilter(openFilter === "connection" ? null : "connection")}
@@ -284,7 +290,6 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           {searchDraft ? (
             <MonitoringClearButton
               className="monitoring-search-clear"
-              title="Clear search"
               ariaLabel="Clear search"
               onClick={() => {
                 setSearchDraft("");
@@ -306,11 +311,10 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
                       applyInvestigation(option);
                       setSearchOpen(false);
                     }}
-                    title={`${option.label}${option.detail ? ` - ${option.detail}` : ""}`}
                   >
                     <span>{option.kind}</span>
-                    <strong title={option.label}>{option.label}</strong>
-                    <small title={option.detail}>{option.detail}</small>
+                    <strong>{option.label}</strong>
+                    <small>{option.detail}</small>
                   </button>
                 ))
               ) : !searchLoading ? (
@@ -320,7 +324,7 @@ export function MonitoringFilterBar({ environmentId, options, filters, searchOpt
           ) : null}
         </label>
 
-        <button className="secondary icon-button" disabled={!hasActiveFilters(filters)} onClick={() => onChange(DEFAULT_MONITORING_FILTERS)} title="Clear filters">
+        <button type="button" className="secondary icon-button" disabled={!hasActiveFilters(filters)} onClick={() => onChange(DEFAULT_MONITORING_FILTERS)} aria-label="Clear filters">
           <FilterX size={15} />
         </button>
       </div>
@@ -362,12 +366,12 @@ function searchOptionRank(option: MonitoringSearchOption, query: string) {
   const label = normalizeSearchText(option.label);
   const value = normalizeSearchText(option.value);
   if (normalized && (label === normalized || value === normalized)) {
-    return option.investigateKind === "destination_table" ? 0 : option.investigateKind === "dataflow" ? 1 : 2;
+    return option.investigateKind === "destination_table" ? 0 : ["dataflow", "dataflow_id"].includes(option.investigateKind) ? 1 : 2;
   }
   if (normalized && (label.startsWith(normalized) || value.startsWith(normalized))) {
-    return option.investigateKind === "destination_table" ? 10 : option.investigateKind === "dataflow" ? 11 : 12;
+    return option.investigateKind === "destination_table" ? 10 : ["dataflow", "dataflow_id"].includes(option.investigateKind) ? 11 : 12;
   }
-  const kindRank = option.investigateKind === "destination_table" ? 20 : option.investigateKind === "dataflow" ? 21 : option.investigateKind === "dataflow_run_id" ? 22 : 23;
+  const kindRank = option.investigateKind === "destination_table" ? 20 : option.investigateKind === "dataflow" ? 21 : option.investigateKind === "dataflow_id" ? 22 : option.investigateKind === "dataflow_run_id" ? 23 : 24;
   return kindRank;
 }
 
@@ -428,25 +432,26 @@ function buildRemoteSearchOptions(jobs: JobRecord[], dataflows: MonitoringRecord
 function dataflowSearchOptions(row: MonitoringRecord) {
   const options: MonitoringSearchOption[] = [];
   const runId = String(row.dataflow_run_id ?? "").trim();
-  const dataflowId = String(row.dataflow_id ?? "").trim();
+  const dataflowId = String(row.dataflow_id ?? "");
+  const dataflowIdLabel = dataflowId.trim();
   const dataflowName = String(row.dataflow_name ?? "").trim();
-  if (dataflowName || dataflowId) {
+  if (dataflowName || dataflowIdLabel) {
     options.push({
-      key: `dataflow-name:${dataflowName || dataflowId}`,
+      key: `dataflow-name:${dataflowName || dataflowIdLabel}`,
       kind: "dataflow",
-      label: dataflowName || dataflowId,
+      label: dataflowName || dataflowIdLabel,
       detail: connectionFlowDetail(row),
-      investigateKind: "dataflow",
-      value: dataflowName || dataflowId
+        investigateKind: "dataflow",
+      value: dataflowName || dataflowIdLabel
     });
   }
-  if (dataflowId && dataflowName) {
+  if (dataflowIdLabel && dataflowName) {
     options.push({
       key: `dataflow-id:${dataflowId}`,
       kind: "dataflow",
       label: dataflowId,
       detail: dataflowName,
-      investigateKind: "dataflow",
+      investigateKind: "dataflow_id",
       value: dataflowId
     });
   }
@@ -515,7 +520,8 @@ function FilterDropdown({
   onOpen,
   onChange,
   onClose,
-  stageAware = false
+  stageAware = false,
+  countState = "ready",
 }: {
   label: string;
   value: string;
@@ -525,11 +531,13 @@ function FilterDropdown({
   onChange: (value: string) => void;
   onClose: () => void;
   stageAware?: boolean;
+  countState?: "ready" | "loading" | "error";
 }) {
   const selected = splitFilterValues(value);
   const selectedSet = new Set(selected);
   const isDefault = selected.length === 0;
-  const labelText = isDefault ? "All" : selected.length === 1 ? selected[0] : `${selected.length} selected`;
+  const selectedLabels = selected.map((key) => options.find((option) => option.value === key)?.label ?? monitoringDimensionLabel(key));
+  const labelText = isDefault ? "All" : selected.length === 1 ? selectedLabels[0] : `${selected.length} selected`;
 
   function chooseOption(optionValue: string, event: MouseEvent<HTMLButtonElement>) {
     if (optionValue === "all") {
@@ -555,20 +563,20 @@ function FilterDropdown({
     <div className="monitoring-filter-field monitoring-filter-dropdown">
       <span>{label}</span>
       <div className="monitoring-filter-dropdown-control">
-        <button type="button" className="monitoring-filter-trigger" onClick={onOpen} title={selected.join(", ") || "All"}>
+        <button type="button" className="monitoring-filter-trigger" onClick={onOpen} aria-label={`${label}: ${selectedLabels.join(", ") || "All"}`} aria-expanded={open}>
           <span>{labelText}</span>
           <ChevronDown size={13} />
         </button>
         {!isDefault ? (
           <MonitoringClearButton
             className="monitoring-filter-clear"
-            title={`Clear ${label}`}
             ariaLabel={`Clear ${label}`}
             onClick={() => onChange("all")}
           />
         ) : null}
         {open ? (
           <div className="monitoring-filter-menu">
+            {countState !== "ready" ? <div className="monitoring-search-empty">{countState === "loading" ? "Loading counts for selected Range…" : "Counts unavailable for selected Range."}</div> : null}
             {options.map((option) => {
               const active = option.value === "all" ? isDefault : selectedSet.has(option.value);
               const stageClass = stageAware ? monitoringConnectionStageClass(option.value) : "";
@@ -580,7 +588,7 @@ function FilterDropdown({
                   onClick={(event) => chooseOption(option.value, event)}
                 >
                   <span>{option.label}</span>
-                  {option.count !== undefined ? <small><CompactNumberValue value={option.count} /></small> : null}
+                  {option.count !== undefined ? <small aria-label={presentNumber(option.count).exact}>{presentNumber(option.count, { compactStyle: "infix" }).display}</small> : null}
                   {active ? <strong>Selected</strong> : null}
                 </button>
               );
@@ -594,17 +602,15 @@ function FilterDropdown({
 
 function MonitoringClearButton({
   className,
-  title,
   ariaLabel,
   onClick
 }: {
   className: string;
-  title: string;
   ariaLabel: string;
   onClick: () => void;
 }) {
   return (
-    <button type="button" className={`monitoring-clear-button ${className}`} title={title} aria-label={ariaLabel} onClick={onClick}>
+    <button type="button" className={`monitoring-clear-button ${className}`} aria-label={ariaLabel} onClick={onClick}>
       <Icon className="monitoring-clear-button-icon" icon={cleanIcon} />
     </button>
   );

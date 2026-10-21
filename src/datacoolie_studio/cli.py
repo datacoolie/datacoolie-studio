@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--database-url",
         default=None,
-        help="Workspace SQLAlchemy database URL. Defaults to DATACOOLIE_STUDIO_DATABASE_URL or a SQLite file under --data-dir.",
+        help="Workspace SQLite database URL. Defaults to DATACOOLIE_STUDIO_DATABASE_URL or a SQLite file under --data-dir.",
     )
     parser.add_argument(
         "--result-cache-url",

@@ -1,26 +1,21 @@
-import type { JobRecord, MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { createPortal } from "react-dom";
-import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";
+import { Help } from "../../../shared/components/Help";
+import { monitoringRawDimensionLabel } from "../monitoringDimensions";
+import type { JobRecord } from "../../../shared/api/domainTypes";
 import {
-  BarList,
   DataTable,
-  MetricGrid,
-  Panel,
-  ScatterPlot,
   StatusCell,
   type TableSort,
-  formatBytes,
-  formatNumber,
   formatSeconds,
   num
-} from "../MonitoringCharts";
-import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart";
+} from "../../../shared/components/DataTable";
+import { ReportChart } from "../ReportChart";
 import { formatTimestampForDisplay } from "../../../shared/time";
-import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import { assetIconKind } from "../../lineage/model/presentation";
-import { CompactNumberValue, CopyableText, DurationDistributionBoxPlot, IssuePreview, MonitoringChartLegend, TableDateTimeValue, childFanoutDistributionOption, compactRunId, formatCompactNumber, humanize, jobStageHealthOption, jobWorkloadEfficiencyOption, operationColor, stageTotal, workloadEfficiencyOperationTypes } from "../components/monitoringPrimitives";
+import { DurationDistributionBoxPlot } from "../components/monitoringDurationPresentation";
+import { childFanoutDistributionOption, jobStageHealthOption, jobWorkloadEfficiencyOption, workloadEfficiencyOperationTypes } from "./JobsPagePresentation";
+import { CompactBytesValue, CompactNumberValue, CopyableText, IssuePreview, MonitoringChartLegend, TableDateTimeValue, formatCompact, formatTooltipBytes, formatTooltipNumber, humanize, metricNumber, metricValue, operationColor, stageTotal } from "../components/monitoringPresentation";
+import { formatConfigValue, isMeaningfulConfigValue } from "../monitoringConfigPresentation";
+import { metricDifference, toApproximateNumber, type MetricValue } from "../../../shared/lib/numberFormat";
+import { jobReconciliationStatus } from "../details/jobStoryModel";
 
 export function JobStageHealthPanel({ rows }: { rows: Array<Record<string, string | number>> }) {
   const visible = rows
@@ -43,17 +38,15 @@ export function JobDurationByOperationBoxPlot({ rows }: { rows: Array<Record<str
 }
 
 export function JobWorkloadEfficiencyScatter({
-  rows,
-  onInspect
+  rows
 }: {
   rows: Array<Record<string, string | number | null>>;
-  onInspect?: (row: JobRecord) => void;
 }) {
-  const visible = rows.filter((row) => num(row, "duration_seconds") > 0).slice(0, 500);
+  const visible = rows.filter((row) => num(row, "duration_seconds") > 0);
   if (!visible.length) return <div className="table-empty">No workload efficiency points in current filters.</div>;
   return (
     <div className="monitoring-job-chart-fill">
-      <ReportChart option={jobWorkloadEfficiencyOption(visible, onInspect)} height="100%" />
+      <ReportChart option={jobWorkloadEfficiencyOption(visible)} height="100%" />
     </div>
   );
 }
@@ -155,16 +148,6 @@ export function niceHistogramBinSize(maxValue: number, targetBins: number) {
   return Math.max(1, nice * magnitude);
 }
 
-export function isMeaningfulConfigValue(value: unknown) {
-  return value !== null && value !== undefined && value !== "";
-}
-
-export function formatConfigValue(value: unknown, key: string) {
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (key === "retention_hours" && typeof value === "number") return `${formatNumber(value)}h`;
-  return String(value);
-}
-
 export function JobRunsTable({
   rows,
   sort,
@@ -182,8 +165,9 @@ export function JobRunsTable({
     <DataTable<JobRecord>
       rows={rows}
       compactNumbers
+      compactNumberStyle="infix"
       columns={[
-        { key: "job_id", label: "Job", sortable: true, width: 132, className: "job-run-col-job", render: (row) => <CopyableText value={row.job_id} displayValue={compactRunId(row.job_id)} /> },
+        { key: "job_id", label: "Job", sortable: true, width: 132, className: "job-run-col-job", render: (row) => <JobRunIdentityCell row={row} /> },
         { key: "job_config", label: "Config", autoFit: true, minWidth: 72, maxWidth: 128, className: "job-run-col-config", render: (row) => <JobConfigCell row={row} />, measureValue: (row) => jobConfigLines(row) },
         { key: "runtime_context", label: "Runtime", autoFit: true, minWidth: 72, maxWidth: 170, className: "job-run-col-runtime", render: (row) => <RuntimeContextCell row={row} />, measureValue: (row) => runtimeContextLines(row) },
         { key: "stages", label: "Stages", sortable: true, autoFit: true, minWidth: 110, maxWidth: 160, fillPriority: "last", className: "job-run-col-stages", render: (row) => <JobListValue value={row.stages} multiline />, measureValue: (row) => parseListValue(row.stages).join(", ") || "-" },
@@ -194,8 +178,8 @@ export function JobRunsTable({
         { key: "status", label: "Status", sortable: true, autoFit: true, minWidth: 88, maxWidth: 112, className: "job-run-col-status", render: (row) => <StatusCell row={row} />, measureValue: (row) => String(row.status || "unknown") },
         { key: "child_dataflow_count", label: "Child flows", autoFit: true, minWidth: 92, maxWidth: 132, className: "job-run-col-child", render: (row) => <ChildFlowSummary row={row} />, measureValue: (row) => childFlowSummaryCompactLines(row) },
         { key: "volume", label: "Volume", autoFit: true, minWidth: 96, maxWidth: 142, className: "job-run-col-volume", render: (row) => <JobVolumeCell row={row} />, measureValue: (row) => jobVolumeCompactLines(row) },
-        { key: "reconciliation_status", label: "Reconcile", autoFit: true, minWidth: 94, maxWidth: 128, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={row.reconciliation_status} />, measureValue: (row) => humanize(String(row.reconciliation_status || "not_available")) },
-        { key: "error_preview", label: "Issue", minWidth: 140, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
+        { key: "reconciliation_status", label: "Reconcile", autoFit: true, minWidth: 94, maxWidth: 128, className: "job-run-col-reconcile", render: (row) => <ReconciliationBadge value={jobReconciliationStatus(row)} />, measureValue: (row) => humanize(jobReconciliationStatus(row)) },
+        { key: "message", label: "Message", sortable: true, minWidth: 140, fillPriority: "last", className: "job-run-col-issue", render: (row) => <IssuePreview row={row} /> }
       ]}
       maxRows={rows.length}
       sort={sort}
@@ -207,13 +191,35 @@ export function JobRunsTable({
   );
 }
 
+function JobRunIdentityCell({ row }: { row: JobRecord }) {
+  const jobNumber = jobOrdinalValue(row.job_num);
+  const jobIndex = jobOrdinalValue(row.job_index);
+  const ordinalSuffix = `:${jobNumber}|${jobIndex}`;
+  return <span className="job-run-identity-cell">
+    <CopyableText value={row.job_id} displayValue={compactJobRunId(row.job_id, ordinalSuffix)} />
+    <Help as="span" className="job-run-ordinal-suffix" title={`Job number: ${jobNumber}\nJob index: ${jobIndex}`}>{ordinalSuffix}</Help>
+  </span>;
+}
+
+function compactJobRunId(value: unknown, suffix: string) {
+  const text = value === null || value === undefined || value === "" ? "-" : String(value);
+  const maxCharacters = Math.max(7, 19 - suffix.length);
+  if (text.length <= maxCharacters) return text;
+  const edgeCharacters = Math.floor((maxCharacters - 5) / 2);
+  return `${text.slice(0, edgeCharacters)}-...-${text.slice(-edgeCharacters)}`;
+}
+
+function jobOrdinalValue(value: unknown) {
+  return value === null || value === undefined || value === "" || typeof value === "object" ? "unk" : String(value);
+}
+
 export function JobListValue({ value, multiline = false }: { value: unknown; multiline?: boolean }) {
   const values = parseListValue(value);
-  const label = values.length ? values.join(", ") : "-";
+  const label = values.length ? values.map(monitoringRawDimensionLabel).join(", ") : "Unknown";
   return (
-    <span className={`monitor-compact-value job-run-list-value${multiline ? " is-multiline" : ""}`} title={label}>
+    <Help as="span" className={`monitor-compact-value job-run-list-value${multiline ? " is-multiline" : ""}`} title={label}>
       {label}
-    </span>
+    </Help>
   );
 }
 
@@ -236,10 +242,10 @@ export function JobConfigCell({ row }: { row: JobRecord }) {
   const [mainLabel, stopValue] = jobConfigLines(row);
   const title = `${mainLabel === "-" ? "Workers / Retry: -" : mainLabel.replace(/^w /u, "Workers: ").replace(/ · r /u, " · Retry: ")}\nStop on error: ${stopValue === "-" ? "-" : stopValue.replace(/^stop /u, "")}`;
   return (
-    <span className="monitor-stack-cell" title={title}>
+    <Help as="span" className="monitor-stack-cell" title={title}>
       <strong>{mainLabel}</strong>
       <small>{stopValue}</small>
-    </span>
+    </Help>
   );
 }
 
@@ -256,26 +262,25 @@ export function jobConfigLines(row: JobRecord) {
 export function RuntimeContextCell({ row }: { row: JobRecord }) {
   const [mainLabel, provider] = runtimeContextLines(row);
   const [platform, engine] = mainLabel.split(" · ");
-  const title = `Platform: ${platform} · Engine: ${engine}\nProvider: ${provider}`;
+  const title = `Platform: ${platform} · Engine: ${engine}\nProvider: ${provider}\nLog schema version: ${row.log_schema_version ?? "-"}`;
   return (
-    <span className="monitor-stack-cell" title={title}>
+    <Help as="span" className="monitor-stack-cell" title={title}>
       <strong>{mainLabel}</strong>
       <small>{provider}</small>
-    </span>
+    </Help>
   );
 }
 
 export function runtimeContextLines(row: JobRecord) {
   const engine = shortRuntimeName(row.engine_name, "engine");
   const platform = shortRuntimeName(row.platform_name, "platform");
-  const provider = String(row.metadata_provider_name || "unknown");
+  const provider = monitoringRawDimensionLabel(row.metadata_provider_name);
   const mainLabel = `${platform} · ${engine}`;
   return [mainLabel, provider];
 }
 
-export function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
-  const fallback = kind === "engine" ? "unknown" : "unknown";
-  const textValue = value === null || value === undefined || value === "" ? fallback : String(value);
+export function shortRuntimeName(value: unknown, _kind: "engine" | "platform") {
+  const textValue = monitoringRawDimensionLabel(value);
   const stripped = textValue
     .replace(/\b(engine|platform)\b/giu, "")
     .replace(/(engine|platform)$/iu, "")
@@ -286,81 +291,77 @@ export function shortRuntimeName(value: unknown, kind: "engine" | "platform") {
 }
 
 export function JobVolumeCell({ row }: { row: JobRecord }) {
-  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
-  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
-  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
-  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  const netBytesLabel = formatBytes(bytesAdded - bytesRemoved);
+  const rowsRead = firstMetric(row, "total_rows_read", "child_total_rows_read");
+  const rowsWritten = firstMetric(row, "total_rows_written", "child_total_rows_written");
+  const bytesAdded = firstMetric(row, "total_bytes_added", "child_total_bytes_added");
+  const bytesRemoved = firstMetric(row, "total_bytes_removed", "child_total_bytes_removed");
+  const netBytes = metricDifference(bytesAdded, bytesRemoved);
   return (
-    <span
+    <Help as="span"
       className="monitor-stack-cell"
-      title={`Rows read / written: ${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}\nBytes added: ${formatBytes(bytesAdded)} · Bytes removed: ${formatBytes(bytesRemoved)} · Net bytes: ${netBytesLabel}`}
+      title={`Rows read / written: ${formatTooltipNumber(rowsRead)} / ${formatTooltipNumber(rowsWritten)}\nBytes added: ${formatTooltipBytes(bytesAdded)} · Bytes removed: ${formatTooltipBytes(bytesRemoved)} · Net bytes: ${formatTooltipBytes(netBytes)}`}
     >
       <strong><CompactNumberValue value={rowsRead} /> / <CompactNumberValue value={rowsWritten} /></strong>
-      <small>{netBytesLabel}</small>
-    </span>
+      <small><CompactBytesValue value={netBytes} /></small>
+    </Help>
   );
-}
-
-export function jobVolumeLines(row: JobRecord) {
-  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
-  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
-  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
-  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  const netBytes = bytesAdded - bytesRemoved;
-  const mainLabel = `${formatNumber(rowsRead)} / ${formatNumber(rowsWritten)}`;
-  const netBytesLabel = formatBytes(netBytes);
-  return [mainLabel, netBytesLabel];
 }
 
 function jobVolumeCompactLines(row: JobRecord) {
-  const rowsRead = num(row, "total_rows_read") || num(row, "child_total_rows_read");
-  const rowsWritten = num(row, "total_rows_written") || num(row, "child_total_rows_written");
-  const bytesAdded = num(row, "total_bytes_added") || num(row, "child_total_bytes_added");
-  const bytesRemoved = num(row, "total_bytes_removed") || num(row, "child_total_bytes_removed");
-  return [`${formatCompactNumber(rowsRead)} / ${formatCompactNumber(rowsWritten)}`, formatBytes(bytesAdded - bytesRemoved)];
+  const rowsRead = firstMetric(row, "total_rows_read", "child_total_rows_read");
+  const rowsWritten = firstMetric(row, "total_rows_written", "child_total_rows_written");
+  const bytesAdded = firstMetric(row, "total_bytes_added", "child_total_bytes_added");
+  const bytesRemoved = firstMetric(row, "total_bytes_removed", "child_total_bytes_removed");
+  const netBytes = metricDifference(bytesAdded, bytesRemoved);
+  return [`${formatCompactMetric(rowsRead)} / ${formatCompactMetric(rowsWritten)}`, formatTooltipBytes(netBytes)];
+}
+
+function firstMetric(row: Record<string, unknown>, ...keys: string[]): MetricValue {
+  for (const key of keys) {
+    const value = metricValue(row, key);
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+function formatCompactMetric(value: MetricValue) {
+  const approximate = toApproximateNumber(value);
+  return approximate === null ? "-" : formatCompact(approximate);
 }
 
 export function ChildFlowSummary({ row }: { row: JobRecord }) {
-  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
-  const succeeded = num(row, "child_succeeded_count");
-  const failed = num(row, "child_failed_count");
-  const skipped = num(row, "child_skipped_count");
+  const total = firstMetric(row, "child_dataflow_count", "total_dataflows");
+  const succeeded = metricValue(row, "child_succeeded_count");
+  const failed = metricValue(row, "child_failed_count");
+  const skipped = metricValue(row, "child_skipped_count");
+  const succeededNumber = metricNumber(succeeded);
+  const failedNumber = metricNumber(failed);
+  const skippedNumber = metricNumber(skipped);
   return (
-    <span
+    <Help as="span"
       className="monitor-stack-cell monitor-child-summary"
-      title={`Total child flows: ${formatNumber(total)}\nSucceeded: ${formatNumber(succeeded)} / Failed: ${formatNumber(failed)} / Skipped: ${formatNumber(skipped)}`}
+      title={`Total child flows: ${formatTooltipNumber(total)}\nSucceeded: ${formatTooltipNumber(succeeded)} / Failed: ${formatTooltipNumber(failed)} / Skipped: ${formatTooltipNumber(skipped)}`}
     >
       <strong><CompactNumberValue value={total} /></strong>
       <small>
-        <span className={succeeded > 0 ? "monitor-child-value is-success" : "monitor-child-value"}><CompactNumberValue value={succeeded} /></span>
+        <span className={succeededNumber > 0 ? "monitor-child-value is-success" : "monitor-child-value"}><CompactNumberValue value={succeeded} /></span>
         <span> / </span>
-        <span className={failed > 0 ? "monitor-child-value is-failed" : "monitor-child-value"}><CompactNumberValue value={failed} /></span>
+        <span className={failedNumber > 0 ? "monitor-child-value is-failed" : "monitor-child-value"}><CompactNumberValue value={failed} /></span>
         <span> / </span>
-        <span className={skipped > 0 ? "monitor-child-value is-skipped" : "monitor-child-value"}><CompactNumberValue value={skipped} /></span>
+        <span className={skippedNumber > 0 ? "monitor-child-value is-skipped" : "monitor-child-value"}><CompactNumberValue value={skipped} /></span>
       </small>
-    </span>
+    </Help>
   );
 }
 
-export function childFlowSummaryLines(row: JobRecord) {
-  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
-  const succeeded = num(row, "child_succeeded_count");
-  const failed = num(row, "child_failed_count");
-  const skipped = num(row, "child_skipped_count");
-  const mainLabel = formatNumber(total);
-  const statusLabel = `${formatNumber(succeeded)} / ${formatNumber(failed)} / ${formatNumber(skipped)}`;
-  return [mainLabel, statusLabel];
-}
-
 function childFlowSummaryCompactLines(row: JobRecord) {
-  const total = num(row, "child_dataflow_count") || num(row, "total_dataflows");
-  const succeeded = num(row, "child_succeeded_count");
-  const failed = num(row, "child_failed_count");
-  const skipped = num(row, "child_skipped_count");
+  const total = firstMetric(row, "child_dataflow_count", "total_dataflows");
+  const succeeded = metricValue(row, "child_succeeded_count");
+  const failed = metricValue(row, "child_failed_count");
+  const skipped = metricValue(row, "child_skipped_count");
   return [
-    formatCompactNumber(total),
-    `${formatCompactNumber(succeeded)} / ${formatCompactNumber(failed)} / ${formatCompactNumber(skipped)}`
+    formatCompactMetric(total),
+    `${formatCompactMetric(succeeded)} / ${formatCompactMetric(failed)} / ${formatCompactMetric(skipped)}`
   ];
 }
 

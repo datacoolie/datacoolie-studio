@@ -90,7 +90,7 @@ export function replaceRoute(next: StudioRoute) {
   const path = routePath(next);
   if (!path) return;
   if (`${window.location.pathname}${window.location.search}` !== path) {
-    window.history.replaceState({}, "", path);
+    window.history.replaceState(window.history.state, "", path);
   }
 }
 

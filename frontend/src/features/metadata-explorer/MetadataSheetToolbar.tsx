@@ -31,7 +31,6 @@ interface MetadataSheetToolbarProps {
   onClearColumnFilters?: () => void;
   onSave: () => void;
   onSaveDraft: () => void;
-  onValidate: () => void;
 }
 
 const sheets = [
@@ -66,8 +65,7 @@ export function MetadataSheetToolbar({
   onStageFilterClear,
   onClearColumnFilters,
   onSave,
-  onSaveDraft,
-  onValidate
+  onSaveDraft
 }: MetadataSheetToolbarProps) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const hasQuery = Boolean(query.trim());
@@ -121,25 +119,20 @@ export function MetadataSheetToolbar({
           {mode === "edit" ? (
             <div className="metadata-edit-actions">
               {!readOnly ? (
-                <>
-                  <button className="text-action primary" type="button" onClick={() => onSave()} disabled={!hasSourceChanges || busy}>
-                    <Save size={14} />
-                    Save to source
-                  </button>
-                  <button
-                    aria-busy={savingDraft}
-                    className="text-action"
-                    type="button"
-                    onClick={() => onSaveDraft()}
-                    disabled={!hasLocalChanges || busy}
-                  >
-                    {savingDraft ? <Loader2 className="is-spinning" size={14} /> : null}
-                    {savingDraft ? "Saving draft…" : "Save draft"}
-                  </button>
-                </>
+                <button className="text-action primary" type="button" onClick={() => onSave()} disabled={!hasSourceChanges || busy}>
+                  <Save size={14} />
+                  Save to source
+                </button>
               ) : null}
-              <button className="text-action" type="button" onClick={() => onValidate()} disabled={busy}>
-                Validate
+              <button
+                aria-busy={savingDraft}
+                className="text-action"
+                type="button"
+                onClick={() => onSaveDraft()}
+                disabled={!hasLocalChanges || busy}
+              >
+                {savingDraft ? <Loader2 className="is-spinning" size={14} /> : null}
+                {savingDraft ? "Saving draft…" : "Save draft"}
               </button>
               <button className="text-action" type="button" onClick={onDiscard} disabled={!hasLocalChanges || busy}>
                 Discard

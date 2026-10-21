@@ -1,28 +1,20 @@
-import type { JobRecord, MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
+import { Help } from "../../../shared/components/Help";
+import { monitoringDimensionLabel } from "../monitoringDimensions";
+import type { MonitoringReport } from "../../../shared/api/domainTypes";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { createPortal } from "react-dom";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { MonitoringFilters, MonitoringTabKey } from "../monitoringFilters";
 import {
-  BarList,
-  DataTable,
-  MetricGrid,
-  Panel,
-  ScatterPlot,
-  StatusCell,
-  type TableSort,
-  formatBytes,
   formatNumber,
   formatSeconds,
   num
-} from "../MonitoringCharts";
+} from "../../../shared/components/DataTable";
 import { ReportChart, baseChartOption, reportChartPalette } from "../ReportChart";
-import { formatTimestampForDisplay } from "../../../shared/time";
-import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import { assetIconKind } from "../../lineage/model/presentation";
-import { CompactNumberValue, DetailMetric, MonitoringChartLegend, OVERVIEW_STATUSES, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatPercent, horizontalBarDataZoom, horizontalBarSeriesSizing, statusColor, workloadVolumeTrendOption } from "../components/monitoringPrimitives";
+import { CompactNumberValue, DetailMetric, MonitoringChartLegend, OVERVIEW_STATUSES, bottomAnchoredValueXAxis, fixedHorizontalBarGrid, fixedHorizontalCategoryAxis, formatCompact, formatPercent, horizontalBarDataZoom, horizontalBarSeriesSizing, statusColor, workloadVolumeTrendOption } from "../components/monitoringPresentation";
+import { formatTooltipNumber, type MetricValue } from "../../../shared/lib/numberFormat";
+import { chartMetric, chartTooltip, firstChartParam } from "../components/chartTooltip";
 
-export function FailureBreakdownDetail({ jobFailed, flowFailed }: { jobFailed: number; flowFailed: number }) {
+export function FailureBreakdownDetail({ jobFailed, flowFailed }: { jobFailed: MetricValue; flowFailed: MetricValue }) {
   return (
     <span className="health-failure-detail">
       <DetailMetric label="job failed" value={<CompactNumberValue value={jobFailed} />} tone="bad" />
@@ -32,7 +24,7 @@ export function FailureBreakdownDetail({ jobFailed, flowFailed }: { jobFailed: n
   );
 }
 
-export function RateBreakdownDetail({ failedRate, windowFailedRate }: { failedRate: number; windowFailedRate: number }) {
+export function RateBreakdownDetail({ failedRate, windowFailedRate }: { failedRate: MetricValue; windowFailedRate: MetricValue }) {
   return (
     <span className="health-rate-detail">
       <DetailMetric label="failed" value={formatPercent(failedRate)} tone="bad" />
@@ -62,22 +54,6 @@ export function healthReasonsTooltip(reasons: string[]) {
   return items.map((reason, index) => `${index + 1}. ${reason}`).join("\n");
 }
 
-export function attentionQueueRuleTooltip() {
-  return [
-    "Value source:",
-    "- Signals roll up actionable current-filter health evidence from Jobs, Dataflows, Failures, Performance, Maintenance, Freshness, and Diagnostics.",
-    "Display condition:",
-    "- Recent failed jobs/dataflows: last 3d => bad, else last 7d => warning.",
-    "- Repeated failure: top failing dataflow has >= 3 failed runs.",
-    "- No log evidence: warning when no monitoring logs are found in current filters.",
-    "- Stale logs: warning when latest log age > 7 days.",
-    "- Performance pressure uses the same P95/P50 thresholds as Performance; optimization candidates and a slow stage can also produce signals.",
-    "- Maintenance coverage/lag, freshness, runtime context, active runs, linkage, cache, and reconciliation evidence reuse their page metrics.",
-    "- High volume alone is not treated as an issue without anomaly evidence.",
-    "- Queue is deduplicated, then ranked by severity and impact; it shows up to 8 signals."
-  ].join("\n");
-}
-
 export function OperationHealthPanel({
   jobRows,
   dataflowRows
@@ -103,8 +79,8 @@ export function operationHealthCombinedBarOption(
 ) {
   const hasJobRows = jobRows.length > 0;
   const hasDataflowRows = dataflowRows.length > 0;
-  const jobLabels = jobRows.map((row) => String(row.operation_type ?? "unknown"));
-  const dataflowLabels = dataflowRows.map((row) => String(row.operation_type ?? "unknown"));
+  const jobLabels = jobRows.map((row) => monitoringDimensionLabel(row.operation_type));
+  const dataflowLabels = dataflowRows.map((row) => monitoringDimensionLabel(row.operation_type));
   const hasBothGroups = hasJobRows && hasDataflowRows;
   const jobTop = hasBothGroups ? 14 : 8;
   const jobHeight = hasBothGroups ? "43%" : "86%";
@@ -133,21 +109,15 @@ export function operationHealthCombinedBarOption(
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
-      confine: false,
-      appendToBody: true,
-      extraCssText: "max-width: 260px; white-space: normal; line-height: 1.35; z-index: 9999;",
-      formatter: (params: any) => {
-        const first = Array.isArray(params) ? params[0] : params;
+      formatter: chartTooltip((params) => {
+        const first = firstChartParam(params);
         const seriesName = String(first?.seriesName ?? "");
         const isDataflow = seriesName.startsWith("Dataflow ");
         const title = isDataflow ? "Dataflow runs" : "Job runs";
         const sourceRows = isDataflow ? dataflowRows : jobRows;
         const row = sourceRows[Number(first?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${title}</strong>`,
-          ...operationHealthTooltip(row).split("\n")
-        ].join("<br/>");
-      }
+        return operationHealthHelpContent(row, title);
+      })
     },
     legend: { show: false },
     grid: grids,
@@ -210,8 +180,18 @@ export function operationHealthStatusSeries(
     itemStyle: { color: statusColor(status), borderRadius: 2 },
     xAxisIndex: axisIndex,
     yAxisIndex: axisIndex,
-    data: rows.map((row) => num(row, status))
+    data: rows.map((row) => operationStatusCount(row, status))
   };
+}
+
+function operationStatusCount(row: Record<string, unknown>, status: string) {
+  if (status !== "unknown") return num(row, status);
+  if (row.unknown !== null && row.unknown !== undefined) return num(row, "unknown");
+  const total = num(row, "count");
+  const knownTotal = OVERVIEW_STATUSES
+    .filter((candidate) => candidate !== "unknown")
+    .reduce((sum, candidate) => sum + num(row, candidate), 0);
+  return Math.max(0, total - knownTotal);
 }
 
 export function operationHealthGroupLabel(text: string, top: number | string) {
@@ -222,7 +202,7 @@ export function operationHealthGroupLabel(text: string, top: number | string) {
     style: {
       text,
       fill: reportChartPalette.muted,
-      font: "800 10px Inter, ui-sans-serif, system-ui",
+      font: "600 10px IBM Plex Sans, ui-sans-serif, system-ui",
       align: "left",
       backgroundColor: "#ffffff",
       padding: [1, 4, 1, 0],
@@ -249,7 +229,7 @@ export function operationHealthDivider() {
 export function WorkloadVolumeLegend() {
   return <MonitoringChartLegend label="Input and output workload legend" items={[
     ["Rows read", reportChartPalette.read],
-    ["Est rows written", reportChartPalette.written],
+    ["Rows written", reportChartPalette.written],
     ["Bytes added", reportChartPalette.teal],
     ["Bytes removed", reportChartPalette.failed]
   ]} />;
@@ -312,7 +292,7 @@ export function filterOperationRows(rows: Array<Record<string, string | number>>
 }
 
 export function operationTotal(row: Record<string, unknown>) {
-  return num(row, "count") || OVERVIEW_STATUSES.reduce((sum, status) => sum + num(row, status), 0);
+  return num(row, "count") || OVERVIEW_STATUSES.reduce((sum, status) => sum + operationStatusCount(row, status), 0);
 }
 
 export function operationHealthTooltip(row: Record<string, unknown>) {
@@ -323,8 +303,24 @@ export function operationHealthTooltip(row: Record<string, unknown>) {
     `Failed: ${formatNumber(num(row, "failed"))}`,
     `Skipped: ${formatNumber(num(row, "skipped"))}`,
     `Running: ${formatNumber(num(row, "running"))}`,
-    `Pending: ${formatNumber(num(row, "pending"))}`
+    `Pending: ${formatNumber(num(row, "pending"))}`,
+    `Unknown: ${formatNumber(operationStatusCount(row, "unknown"))}`
   ].join("\n");
+}
+
+export function operationHealthHelpContent(row: Record<string, unknown>, title = "Operation runs") {
+  return {
+    title: `${title}\n${String(row.operation_type ?? "unknown")}`,
+    metrics: [
+      chartMetric("Total", formatTooltipNumber(row.count as MetricValue ?? operationTotal(row))),
+      chartMetric("Succeeded", formatTooltipNumber(row.succeeded as MetricValue), "success"),
+      chartMetric("Failed", formatTooltipNumber(row.failed as MetricValue), "failed"),
+      chartMetric("Skipped", formatTooltipNumber(row.skipped as MetricValue), "warning"),
+      chartMetric("Running", formatTooltipNumber(row.running as MetricValue), "info"),
+      chartMetric("Pending", formatTooltipNumber(row.pending as MetricValue), "info"),
+      chartMetric("Unknown", formatTooltipNumber(row.unknown as MetricValue ?? operationStatusCount(row, "unknown"))),
+    ]
+  };
 }
 
 export function failureCategoryOption(rows: Array<Record<string, string | number>>) {
@@ -342,7 +338,18 @@ export function failureCategoryOption(rows: Array<Record<string, string | number
     animation: false,
     animationDurationUpdate: 0,
     grid: fixedHorizontalBarGrid(110, hasZoom, { top: 12 }),
-    tooltip: { trigger: "item", triggerOn: "mousemove", confine: true, axisPointer: { type: "none" } },
+    tooltip: {
+      trigger: "item",
+      triggerOn: "mousemove",
+      axisPointer: { type: "none" },
+      formatter: chartTooltip((params) => {
+        const row = visible[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+        return {
+          title: String(row.category ?? "unknown"),
+          metrics: [chartMetric("Failures", formatTooltipNumber(row.count as MetricValue), "failed")],
+        };
+      }),
+    },
     xAxis: bottomAnchoredValueXAxis(),
     yAxis: fixedHorizontalCategoryAxis(visible.map((row) => String(row.category ?? "unknown")), 110),
     dataZoom: zoomConfig,
@@ -492,18 +499,17 @@ export function EngineProviderHealth({ rows }: { rows: Array<Record<string, stri
         />
       </div>
       {visible.map((row, index) => {
-        const failed = num(row, "failed");
         const successRate = num(row, "success_rate");
         return (
           <div key={`${row.engine_name}-${row.metadata_provider_name}-${index}`} className="monitoring-compact-matrix-row" style={gridStyle}>
-            <span className="monitoring-stack-cell" title={`${row.engine_name ?? "unknown"} / ${row.metadata_provider_name ?? "unknown"} / ${row.platform_name ?? "unknown"}`}>
-              <strong>{row.engine_name ?? "unknown"}</strong>
+            <span className="monitoring-stack-cell">
+              <strong>{monitoringDimensionLabel(row.engine_name)}</strong>
             </span>
-            <span title={String(row.metadata_provider_name ?? "unknown")}>{row.metadata_provider_name ?? "unknown"}</span>
-            <span title={String(row.platform_name ?? "unknown")}>{row.platform_name ?? "unknown"}</span>
+            <span>{monitoringDimensionLabel(row.metadata_provider_name)}</span>
+            <span>{monitoringDimensionLabel(row.platform_name)}</span>
             <span>
-              <CompactNumberValue value={num(row, "jobs")} />
-              <small><span className="status-bad"><CompactNumberValue value={failed} /></span> failed</small>
+              <span className="monitor-compact-value" aria-label={formatTooltipNumber(row.jobs)}>{formatCompact(row.jobs)}</span>
+              <small><span className="status-bad"><span className="monitor-compact-value" aria-label={formatTooltipNumber(row.failed)}>{formatCompact(row.failed)}</span></span> failed</small>
             </span>
             <span className={successRate < 95 ? "status-bad" : "status-good"}>{formatPercent(successRate)}</span>
             <span>
@@ -532,10 +538,10 @@ export function RuntimeContextHeaderCell({
 }) {
   return (
     <span className="monitoring-resizable-header-cell">
-      <button type="button" onClick={onSort} title={title}>
+      <Help as="button" type="button" onClick={onSort} title={title}>
         {label}
-      </button>
-      <span
+      </Help>
+      <Help as="span"
         className="monitoring-column-resizer"
         role="separator"
         aria-orientation="vertical"
@@ -605,7 +611,7 @@ export function measureRuntimeContextText(value: string) {
   runtimeContextMeasureCanvas ??= document.createElement("canvas");
   const context = runtimeContextMeasureCanvas.getContext("2d");
   if (!context) return value.length * 7;
-  context.font = "750 12px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  context.font = "600 12px IBM Plex Sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   return context.measureText(value).width;
 }
 

@@ -33,11 +33,11 @@ class StorageBindingResponse(StorageBindingRequest):
 
 class ConfiguredSourceLocationResponse(BaseModel):
     registration_id: int
-    purpose: Literal["project", "metadata", "code", "logs"]
+    purpose: Literal["project", "metadata", "sql", "code", "logs"]
     input_uri: str
     canonical_uri: str
-    input_locations: dict[str, str] = Field(default_factory=dict)
-    canonical_locations: dict[str, str] = Field(default_factory=dict)
+    input_locations: dict[str, str | list[str]] = Field(default_factory=dict)
+    canonical_locations: dict[str, str | list[str]] = Field(default_factory=dict)
 
 
 class MetadataSourceImportRequest(BaseModel):
@@ -48,14 +48,15 @@ class MetadataSourceImportRequest(BaseModel):
 
 
 class DatacoolieProjectSourceImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     project_uri: str
-    metadata_subpath: str = "metadata"
-    code_subpath: str = "functions"
+    metadata_subpath: str | None = None
+    sql_subpaths: list[str] | None = None
+    code_subpaths: list[str] | None = None
     code_discovery_mode: Literal["auto", "explicit"] = "auto"
     metadata_uri: str | None = None
     code_uri: str | None = None
-    include_metadata: bool = True
-    include_code: bool = True
     enabled: bool = True
     storage: StorageBindingRequest | None = None
 
@@ -80,6 +81,8 @@ class SourceImportResponse(BaseModel):
 
 
 class SourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     uri: str | None = None
     label: str | None = None
     enabled: bool | None = None
@@ -87,6 +90,12 @@ class SourceUpdate(BaseModel):
     sync_interval_minutes: int | None = None
     source_config: dict[str, Any] | None = None
     storage: StorageBindingRequest | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_source_config(self) -> SourceUpdate:
+        if "source_config" in self.model_fields_set and self.source_config is None:
+            raise ValueError("source_config must be an object when provided")
+        return self
 
     @field_validator("sync_interval_minutes")
     @classmethod
@@ -103,23 +112,11 @@ class SourceValidationResponse(BaseModel):
     message: str
     detected_provider: str | None = None
     detected_format: str | None = None
+    metadata_write_back_supported: bool | None = None
     record_counts: dict[str, int] = {}
     records_scanned: int = 0
     validated_at: datetime | None = None
     errors: list[dict[str, Any]] = []
-
-
-class SourceSyncJobResponse(BaseModel):
-    id: int
-    environment_id: int
-    source_id: int
-    source_kind: str
-    job_type: str
-    status: str
-    message: str | None = None
-    result: dict[str, Any] | None = None
-    started_at: datetime
-    completed_at: datetime | None = None
 
 
 class SourceFreshnessStatusResponse(BaseModel):
@@ -149,11 +146,13 @@ class SourceObservationStatusResponse(BaseModel):
 class SourceSyncExecutionStatusResponse(BaseModel):
     state: str
     trigger: str | None = None
+    job_id: int | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     last_successful_at: datetime | None = None
     summary: str | None = None
     error: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
 
 
 class SourceSyncStatusResponse(BaseModel):
@@ -161,21 +160,10 @@ class SourceSyncStatusResponse(BaseModel):
     source_kind: str
     status: str
     message: str
-    revision: dict[str, Any] | None = None
-    error: dict[str, Any] | None = None
-    checked_at: datetime | None = None
-    last_observed_at: datetime | None = None
-    next_check_at: datetime | None = None
-    pending_changes: bool | None = None
-    observation_state: Literal["active", "retrying", "paused"] = "active"
-    observation_failure_count: int = 0
-    observation_paused_at: datetime | None = None
-    active_operation: Literal["validate", "sync"] | None = None
-    latest_job: SourceSyncJobResponse | None = None
     freshness: SourceFreshnessStatusResponse | None = None
-    validation: SourceValidationStatusResponse | None = None
-    observation: SourceObservationStatusResponse | None = None
-    sync_execution: SourceSyncExecutionStatusResponse | None = None
+    validation: SourceValidationStatusResponse
+    observation: SourceObservationStatusResponse
+    sync_execution: SourceSyncExecutionStatusResponse
 
 
 class SourceObservationOutcomeResponse(BaseModel):
@@ -266,11 +254,11 @@ class EnvironmentFreshnessResponse(BaseModel):
     message: str
     max_source_modified_at: datetime | None = None
     metadata_source_count: int
-    etl_log_path_count: int
+    log_source_count: int
     source_cache_version: str
     structural_cache_version: str
     metadata: FreshnessGroupResponse
-    etl_logs: FreshnessGroupResponse
+    logs: FreshnessGroupResponse
     items: list[FreshnessSourceItemResponse]
 
 
@@ -294,7 +282,7 @@ class EnvironmentContextFreshnessResponse(BaseModel):
     message: str
     max_source_modified_at: datetime | None = None
     metadata: FreshnessGroupResponse
-    etl_logs: FreshnessGroupResponse
+    logs: FreshnessGroupResponse
 
 
 class EnvironmentContextResponse(BaseModel):
@@ -352,10 +340,15 @@ class CodeArtifactRead(MetadataSourceRead):
     pass
 
 
+class SqlSourceRead(MetadataSourceRead):
+    pass
+
+
 class SourcesWorkspaceResponse(BaseModel):
     schema_version: Literal["sources-workspace.v1"]
     environment_id: int
     metadata_sources: list[MetadataSourceRead]
+    sql_sources: list[SqlSourceRead]
     log_sources: list[LogSourceRead]
     code_artifacts: list[CodeArtifactRead]
     statuses: list[SourceSyncStatusResponse]

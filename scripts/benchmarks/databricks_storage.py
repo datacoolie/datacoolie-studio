@@ -4,6 +4,7 @@ import argparse
 import json
 import statistics
 import time
+from typing import Sequence
 
 from databricks.sdk import WorkspaceClient
 
@@ -15,8 +16,8 @@ from datacoolie_studio.domains.storage.inventory import (
 )
 
 
-def main() -> None:
-    arguments = _arguments()
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _arguments(argv)
     adapter = _adapter(arguments.profile)
     operations: dict[str, list[float]] = {
         "list_ms": [],
@@ -62,9 +63,10 @@ def main() -> None:
             sort_keys=True,
         )
     )
+    return 0
 
 
-def _arguments() -> argparse.Namespace:
+def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read-only Databricks Volume storage benchmark."
     )
@@ -72,7 +74,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--file-uri", required=True)
     parser.add_argument("--profile")
     parser.add_argument("--runs", type=int, default=5)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     if arguments.runs < 2:
         parser.error("--runs must be at least 2")
     return arguments
@@ -96,4 +98,4 @@ def _read_all(adapter: DbfsStorageAdapter, uri: str) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

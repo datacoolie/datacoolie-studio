@@ -1,0 +1,2 @@
+{"log_schema_version":3,"_type":"system_log","ts":"2026-05-08T02:27:28Z","level":"INFO","message":"job started","job_id":"job-001","dataflow_id":"flow-001","dataflow_run_id":"run-001","event_name":"job.started"}
+{"log_schema_version":3,"_type":"system_log","ts":"2026-05-08T03:27:29Z","level":"ERROR","message":"dataflow failed","job_id":"job-002","dataflow_id":"flow-002","dataflow_run_id":"run-002","event_name":"dataflow.failed"}

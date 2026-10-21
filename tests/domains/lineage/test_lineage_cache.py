@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -108,7 +107,6 @@ def read_orders(engine, source):
         with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 0
 
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: Path, monkeypatch):
@@ -193,4 +191,107 @@ def test_lineage_graph_cache_fingerprint_includes_reference_mappings(tmp_path: P
         with sqlite3.connect(tmp_path / "cache" / "read-models.sqlite3") as connection:
             assert connection.execute("select count(*) from result_cache_entries where namespace = 'lineage.graph'").fetchone()[0] == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
+
+
+def test_draft_lineage_overlays_metadata_and_sql_without_publishing(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "studio.db"
+    project_root = tmp_path / "project"
+    metadata_path = project_root / "metadata" / "flows.json"
+    sql_path = project_root / "sql" / "orders.sql"
+    metadata_path.parent.mkdir(parents=True)
+    sql_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps({
+            "connections": [{
+                "name": "lake",
+                "connection_type": "lakehouse",
+                "format": "delta",
+                "catalog": "main",
+                "database": "warehouse",
+            }],
+            "dataflows": [
+                {
+                    "name": "seed_orders",
+                    "source": {"connection_name": "lake", "schema_name": "raw", "table": "orders"},
+                    "destination": {"connection_name": "lake", "schema_name": "raw", "table": "orders"},
+                },
+                {
+                    "name": "seed_new_orders",
+                    "source": {"connection_name": "lake", "schema_name": "raw", "table": "new_orders"},
+                    "destination": {"connection_name": "lake", "schema_name": "raw", "table": "new_orders"},
+                },
+                {
+                    "name": "query_orders",
+                    "source": {"connection_name": "lake", "query": "orders.sql"},
+                    "destination": {"connection_name": "lake", "schema_name": "curated", "table": "orders"},
+                },
+            ],
+            "schema_hints": [],
+        }),
+        encoding="utf-8",
+    )
+    sql_path.write_text("SELECT * FROM raw.orders\n", encoding="utf-8")
+    original_sql = sql_path.read_bytes()
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATA_DIR", str(db_path.parent))
+    monkeypatch.setenv("DATACOOLIE_STUDIO_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+
+    from fastapi.testclient import TestClient
+
+    from datacoolie_studio.main import app
+
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "draft-lineage"}).json()
+        environment = client.post(
+            f"/api/v1/projects/{project['id']}/environments",
+            json={"name": "dev"},
+        ).json()
+        source = client.post(
+            f"/api/v1/environments/{environment['id']}/metadata-sources",
+            json={
+                "uri": str(metadata_path),
+                "source_config": {
+                    "project_uri": str(project_root),
+                    "metadata_root_uri": str(project_root / "metadata"),
+                    "sql_root_uri": str(project_root / "sql"),
+                },
+            },
+        ).json()
+        document = client.get(
+            f"/api/v1/environments/{environment['id']}/metadata-editor-workspace"
+        ).json()["document"]
+        sql_reference = client.post(
+            f"/api/v1/environments/{environment['id']}/sql-reference",
+            json={"source_id": source["id"], "query": "orders.sql"},
+        ).json()
+        query_row = next(
+            row
+            for row in document["sheets"]["dataflows"]["rows"]
+            if row["name"] == "query_orders"
+        )
+        draft = {
+            **document,
+            "sql_files": [{
+                "source_id": source["id"],
+                "query": "orders.sql",
+                "content": "SELECT * FROM raw.new_orders\n",
+                "base_revision": sql_reference["revision"],
+            }],
+        }
+        draft_response = client.put(
+            f"/api/v1/environments/{environment['id']}/metadata-editor-document/draft",
+            json=draft,
+        )
+        assert draft_response.status_code == 200, draft_response.text
+
+        draft_lineage = client.get(
+            f"/api/v1/environments/{environment['id']}/lineage?draft=true"
+        )
+        assert draft_lineage.status_code == 200, draft_lineage.text
+        assert "raw.new_orders" in {
+            item["normalized_value"] for item in draft_lineage.json()["references"]
+        }
+        assert query_row["source_query"] == "orders.sql"
+        assert sql_path.read_bytes() == original_sql
+        assert client.get(
+            f"/api/v1/environments/{environment['id']}/lineage"
+        ).json()["references"][0]["normalized_value"] == "raw.orders"

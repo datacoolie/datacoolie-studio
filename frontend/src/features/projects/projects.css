@@ -73,10 +73,11 @@
   justify-content: center;
   gap: 6px;
   min-height: 36px;
-  border: 1px solid var(--color-accent-strong);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--color-accent);
-  color: var(--color-text-inverse);
+  background: var(--gradient-brand);
+  color: var(--color-accent-ink);
+  box-shadow: var(--shadow-accent);
   padding: 0 11px;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
@@ -88,9 +89,11 @@
 }
 
 .projects-directory-create-form button:disabled {
-  border-color: var(--color-border);
-  background: var(--color-surface-sunken);
-  color: var(--color-text-subtle);
+  border-color: transparent;
+  background: var(--gradient-brand);
+  color: var(--color-accent-ink);
+  box-shadow: var(--shadow-accent);
+  opacity: 1;
 }
 
 .projects-directory-search {

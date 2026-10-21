@@ -8,6 +8,10 @@ from datacoolie_studio.domains.monitoring.metrics.failure_taxonomy import (
     categorize_failure,
     classify_failure,
 )
+from datacoolie_studio.domains.monitoring.metrics.v6_semantics import (
+    final_attempt,
+    is_supported_log_row,
+)
 
 __all__ = [
     "FailureClassification",
@@ -36,13 +40,22 @@ def dataflow_failed_phases(row: dict[str, Any]) -> tuple[str, ...]:
     """Return every failed phase; overhead is the failed-run fallback."""
     if _overall_status(row) != "failed":
         return ()
+    native_selected = is_supported_log_row(row) and "attempts" in row
+    attempt = final_attempt(row) if native_selected else None
     explicit = tuple(
         phase
         for phase in DATAFLOW_EXECUTION_PHASES
-        if _normalized_status(row.get(f"{phase}_status")) == "failed"
+        if _normalized_status(
+            _attempt_phase_value(attempt, phase, "status")
+            if native_selected else row.get(f"{phase}_status")
+        ) == "failed"
     )
     if explicit:
         return explicit
+    if is_supported_log_row(row):
+        # A v6 failure with no phase evidence occurred before pipeline entry
+        # (or omitted causal detail).  It is not an invented overhead phase.
+        return ("unknown",)
     return ("overhead",)
 
 
@@ -52,71 +65,91 @@ def dataflow_failure_phase_and_message(row: dict[str, Any]) -> tuple[str, str]:
     if not failed_phases:
         return "unknown", ""
     phase = failed_phases[0]
-    phase_message = row.get(f"{phase}_error_message") if phase != "overhead" else None
+    native_selected = is_supported_log_row(row) and "attempts" in row
+    attempt = final_attempt(row) if native_selected else None
+    if phase == "overhead":
+        phase_message = None
+    elif native_selected:
+        phase_message = _attempt_phase_value(attempt, phase, "message")
+    else:
+        phase_message = row.get(f"{phase}_error_message")
     if _has_message(phase_message):
         return phase, str(phase_message)
-    for key in ("error_messages", "error_message"):
+    root_keys = ("message",) if native_selected else ("error_messages", "message", "error_message")
+    for key in root_keys:
         if _has_message(row.get(key)):
             return phase, str(row[key])
     return phase, ""
 
 
-def dataflow_phase_status_sql(alias: str, phase: str) -> str:
+def dataflow_phase_status_sql(alias: str, phase: str, *, native: bool = False) -> str:
     """Generate the SQL status for one phase from the same failure-phase contract."""
     prefix = f"{alias}." if alias else ""
     if phase in DATAFLOW_EXECUTION_PHASES:
-        return f"LOWER(NULLIF(TRIM(CAST({prefix}{phase}_status AS VARCHAR)), ''))"
+        scalar = f"LOWER(NULLIF(TRIM(CAST({prefix}{phase}_status AS VARCHAR)), ''))"
+        if not native:
+            return scalar
+        typed = f"LOWER(NULLIF(TRIM(CAST(({prefix}attempts[-1].{phase}).status AS VARCHAR)), ''))"
+        # Serving keeps scalar aliases for compatibility, but native attempt
+        # status is the source of truth for v6 report queries.
+        return f"CASE WHEN CAST({prefix}log_schema_version AS INTEGER) IN (6, 7) THEN {typed} ELSE {scalar} END"
     if phase != "overhead":
         raise ValueError(f"Unsupported dataflow failure phase: {phase}")
     explicit_failed = " OR ".join(
-        f"COALESCE({dataflow_phase_status_sql(alias, item)}, '') = 'failed'"
+        f"COALESCE({dataflow_phase_status_sql(alias, item, native=native)}, '') = 'failed'"
         for item in DATAFLOW_EXECUTION_PHASES
     )
+    # v6 failures without a failed execution phase are preflight/omitted
+    # causal detail.  The version marker is sufficient here and keeps this
+    # scalar compatibility helper usable by callers that do not project the
+    # native attempts list.
+    v6_without_phase = f" AND COALESCE(TRY_CAST({prefix}log_schema_version AS INTEGER), 0) NOT IN (6, 7)"
     return (
         f"CASE WHEN {_normalized_status_sql(f'{prefix}normalized_status')} = 'failed' "
-        f"AND NOT ({explicit_failed}) THEN 'failed' END"
+        f"AND NOT ({explicit_failed}){v6_without_phase} THEN 'failed' END"
     )
 
 
-def dataflow_phase_failed_sql(alias: str, phase: str) -> str:
+def dataflow_phase_failed_sql(alias: str, phase: str, *, native: bool = False) -> str:
     prefix = f"{alias}." if alias else ""
     return (
         f"{_normalized_status_sql(f'{prefix}normalized_status')} = 'failed' AND "
-        f"COALESCE({dataflow_phase_status_sql(alias, phase)}, '') = 'failed'"
+        f"COALESCE({dataflow_phase_status_sql(alias, phase, native=native)}, '') = 'failed'"
     )
 
 
-def failure_message_sql(alias: str) -> str:
-    source = _message_sql(alias, "source")
-    transform = _message_sql(alias, "transform")
-    destination = _message_sql(alias, "destination")
-    root = f"NULLIF(TRIM(CAST({alias}.error_message AS VARCHAR)), '')"
-    source_failed = dataflow_phase_failed_sql(alias, "source")
-    transform_failed = dataflow_phase_failed_sql(alias, "transform")
-    destination_failed = dataflow_phase_failed_sql(alias, "destination")
+def failure_message_sql(alias: str, *, native: bool = False) -> str:
+    source = _message_sql(alias, "source", native=native)
+    transform = _message_sql(alias, "transform", native=native)
+    destination = _message_sql(alias, "destination", native=native)
+    root = _root_message_sql(alias, native=native)
+    source_failed = dataflow_phase_failed_sql(alias, "source", native=native)
+    transform_failed = dataflow_phase_failed_sql(alias, "transform", native=native)
+    destination_failed = dataflow_phase_failed_sql(alias, "destination", native=native)
     return f"""CASE
       WHEN {source_failed} THEN COALESCE({source}, {root}, '')
       WHEN {transform_failed} THEN COALESCE({transform}, {root}, '')
       WHEN {destination_failed} THEN COALESCE({destination}, {root}, '')
-      WHEN {dataflow_phase_status_sql(alias, "overhead")} = 'failed' THEN COALESCE({root}, '')
+      WHEN {dataflow_phase_status_sql(alias, "overhead", native=native)} = 'failed' THEN COALESCE({root}, '')
+      WHEN {_normalized_status_sql(f'{alias}.normalized_status')} = 'failed' THEN COALESCE({root}, '')
       ELSE '' END"""
 
 
-def failure_all_messages_sql(alias: str) -> str:
+def failure_all_messages_sql(alias: str, *, native: bool = False) -> str:
     return (
         "CONCAT_WS('\n', "
-        f"{_message_sql(alias, 'source')}, {_message_sql(alias, 'transform')}, "
-        f"{_message_sql(alias, 'destination')}, "
-        f"NULLIF(TRIM(CAST({alias}.error_message AS VARCHAR)), ''))"
+        f"{_message_sql(alias, 'source', native=native)}, {_message_sql(alias, 'transform', native=native)}, "
+        f"{_message_sql(alias, 'destination', native=native)}, "
+        f"{_root_message_sql(alias, native=native)})"
     )
 
 
-def failure_phase_sql(alias: str) -> str:
+def failure_phase_sql(alias: str, *, native: bool = False) -> str:
     return f"""CASE
-      WHEN {dataflow_phase_failed_sql(alias, "source")} THEN 'source'
-      WHEN {dataflow_phase_failed_sql(alias, "transform")} THEN 'transform'
-      WHEN {dataflow_phase_failed_sql(alias, "destination")} THEN 'destination'
-      WHEN {dataflow_phase_status_sql(alias, "overhead")} = 'failed' THEN 'overhead'
+      WHEN {dataflow_phase_failed_sql(alias, "source", native=native)} THEN 'source'
+      WHEN {dataflow_phase_failed_sql(alias, "transform", native=native)} THEN 'transform'
+      WHEN {dataflow_phase_failed_sql(alias, "destination", native=native)} THEN 'destination'
+      WHEN {dataflow_phase_status_sql(alias, "overhead", native=native)} = 'failed' THEN 'overhead'
       ELSE 'unknown'
     END"""
 
@@ -189,12 +222,33 @@ def _failure_rule_value_sql(message_expression: str, field: str) -> str:
     return "CASE " + " ".join(cases) + " ELSE NULL END"
 
 
-def _message_sql(alias: str, phase: str) -> str:
-    return f"NULLIF(TRIM(CAST({alias}.{phase}_error_message AS VARCHAR)), '')"
+def _message_sql(alias: str, phase: str, *, native: bool = False) -> str:
+    prefix = f"{alias}." if alias else ""
+    scalar = f"NULLIF(TRIM(CAST({prefix}{phase}_error_message AS VARCHAR)), '')"
+    if not native:
+        return scalar
+    typed = f"NULLIF(TRIM(CAST(({prefix}attempts[-1].{phase}).message AS VARCHAR)), '')"
+    return f"CASE WHEN TRY_CAST({prefix}log_schema_version AS INTEGER) IN (6, 7) THEN {typed} ELSE {scalar} END"
+
+
+def _root_message_sql(alias: str, *, native: bool) -> str:
+    prefix = f"{alias}." if alias else ""
+    error = f"NULLIF(TRIM(CAST({prefix}error_message AS VARCHAR)), '')"
+    if not native:
+        return error
+    message = f"NULLIF(TRIM(CAST({prefix}message AS VARCHAR)), '')"
+    return f"CASE WHEN TRY_CAST({prefix}log_schema_version AS INTEGER) IN (6, 7) THEN {message} ELSE {error} END"
 
 
 def _normalized_status(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _attempt_phase_value(attempt: dict[str, Any] | None, phase: str, field: str) -> Any:
+    if not attempt:
+        return None
+    member = attempt.get(phase)
+    return member.get(field) if isinstance(member, dict) else None
 
 
 def _normalized_status_sql(expression: str) -> str:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from tests.support.monitoring_fixture import build_analytics_fixture
 from tests.support.monitoring_performance import _nearest_rank, _summarize, benchmark_call
@@ -14,6 +15,9 @@ from datacoolie_studio.domains.analytics.serving_facts import (
 )
 from datacoolie_studio.domains.logs import ingestion as log_ingestion
 from datacoolie_studio.domains.monitoring.context import materialization_token
+
+
+pytestmark = pytest.mark.benchmark
 
 
 def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monkeypatch):

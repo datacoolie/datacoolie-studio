@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";import { healthCardAccentClass, runtimePhaseContributionTooltip } from "./components/monitoringPrimitives";
+import { describe, expect, it } from "vitest";import { healthCardAccentClass, runtimePhaseContributionTooltip } from "./components/monitoringPresentation";
 
 describe("Monitoring KPI accent contract", () => {
   it("keeps neutral cards structurally accented", () => {
@@ -20,11 +20,11 @@ describe("Monitoring KPI accent contract", () => {
     expect(healthCardAccentClass("overhead", "neutral")).toBe("health-card-accent-overhead");
   });
 
-  it("documents the runtime phase contribution population and failure fallback", () => {
+  it("explains runtime phase contribution briefly", () => {
     const tooltip = runtimePhaseContributionTooltip("stage");
 
-    expect(tooltip).toContain("exclude pending and running");
-    expect(tooltip).toContain("eligible statuses are succeeded, failed, and skipped");
-    expect(tooltip).toContain("attributed to Overhead");
+    expect(tooltip).toContain("by stage for all runs in the current filters");
+    expect(tooltip).toContain("Missing values stay unavailable");
+    expect(tooltip).toContain("Overhead is attempt time outside the recorded phases");
   });
 });

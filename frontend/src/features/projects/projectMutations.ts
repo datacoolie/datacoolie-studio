@@ -1,52 +1,49 @@
+import type { QueryClient } from "@tanstack/react-query";
 import type { Dispatch, SetStateAction } from "react";
 
 import { projectDefaultSection } from "../../app/moduleRegistry";
 import type { StudioRouter } from "../../app/useStudioRouter";
-import {
-  addProjectSummary,
-  changeProjectReferenceMappingCount,
-  renameProjectSummary,
-} from "../../app/projectSummaryMutations";
+import { invalidateProjectRegistry, projectQueryKeys } from "./projectQueries";
 import { api } from "../../shared/api/client";
-import type { Environment, Project, ProjectSummary, ReferenceType, TargetIdentifierKind } from "../../shared/api/domainTypes";
+import type { ReferenceType, TargetIdentifierKind } from "../../shared/api/domainTypes";
 import { toErrorMessage } from "../../shared/lib/errors";
 
 type ProjectMutationContext = {
   projectId: number | null;
   environmentId: number | null;
+  queryClient: QueryClient;
   setStudioRoute: StudioRouter["setStudioRoute"];
-  setProjects: Dispatch<SetStateAction<Project[]>>;
-  setEnvironments: Dispatch<SetStateAction<Environment[]>>;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
-  updateProjectSummaries: (updater: (items: ProjectSummary[]) => ProjectSummary[]) => void;
   clearEnvironmentSources: () => void;
   onEnvironmentChanged?: (environmentId: number) => Promise<void> | void;
+  isActiveProject?: (projectId: number) => boolean;
 };
 
 export function createProjectMutations(context: ProjectMutationContext) {
   const {
     projectId,
     environmentId,
+    queryClient,
     setStudioRoute,
-    setProjects,
-    setEnvironments,
     setBusy,
     setError,
-    updateProjectSummaries,
     clearEnvironmentSources,
     onEnvironmentChanged,
   } = context;
   const route = { projectId, environmentId };
   const options = { onEnvironmentChanged };
 
+  function invalidateProjectSummaries() {
+    return queryClient.invalidateQueries({ queryKey: projectQueryKeys.summaries() });
+  }
+
   async function createProject(name: string) {
     setBusy(true);
     setError(null);
     try {
       const project = await api.createProject({ name });
-      setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name)));
-      updateProjectSummaries((current) => addProjectSummary(current, project));
+      await invalidateProjectSummaries();
       setStudioRoute({ projectId: project.id, environmentId: null, module: "projects", projectSection: projectDefaultSection });
     } catch (err) {
       setError(toErrorMessage(err));
@@ -61,12 +58,15 @@ export function createProjectMutations(context: ProjectMutationContext) {
     setError(null);
     try {
       await api.deleteProject(projectId);
+      const summaries = queryClient.getQueryData<Array<{ id: number; environments: Array<{ id: number }> }>>(projectQueryKeys.summaries());
+      for (const environment of summaries?.find(project => project.id === projectId)?.environments ?? []) {
+        queryClient.removeQueries({ queryKey: ["environments", environment.id] });
+      }
+      queryClient.removeQueries({ queryKey: ["projects", projectId] });
       if (route.projectId === projectId) {
         setStudioRoute({ projectId: null, environmentId: null, module: "projects" });
       }
-      setProjects((current) => current.filter((project) => project.id !== projectId));
-      updateProjectSummaries((current) => current.filter((project) => project.id !== projectId));
-      setEnvironments([]);
+      await invalidateProjectSummaries();
       clearEnvironmentSources();
     } catch (err) {
       setError(toErrorMessage(err));
@@ -80,11 +80,8 @@ export function createProjectMutations(context: ProjectMutationContext) {
     setBusy(true);
     setError(null);
     try {
-      const project = await api.renameProject(projectId, { name });
-      setProjects((current) => current
-        .map((item) => item.id === project.id ? project : item)
-        .sort((left, right) => left.name.localeCompare(right.name)));
-      updateProjectSummaries((current) => renameProjectSummary(current, project));
+      await api.renameProject(projectId, { name });
+      await invalidateProjectSummaries();
       if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
     } catch (err) {
       setError(toErrorMessage(err));
@@ -108,14 +105,15 @@ export function createProjectMutations(context: ProjectMutationContext) {
     setError(null);
     try {
       const mapping = await api.createProjectReferenceMapping(projectId, payload);
+      await invalidateProjectRegistry(queryClient, projectId);
       if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
-      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, 1));
+      await invalidateProjectSummaries();
       return mapping;
     } catch (err) {
-      setError(toErrorMessage(err));
+      if (context.isActiveProject?.(projectId) ?? true) setError(toErrorMessage(err));
       throw err;
     } finally {
-      setBusy(false);
+      if (context.isActiveProject?.(projectId) ?? true) setBusy(false);
     }
   }
 
@@ -136,13 +134,14 @@ export function createProjectMutations(context: ProjectMutationContext) {
     setError(null);
     try {
       const mapping = await api.updateProjectReferenceMapping(projectId, mappingId, payload);
+      await invalidateProjectRegistry(queryClient, projectId);
       if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
       return mapping;
     } catch (err) {
-      setError(toErrorMessage(err));
+      if (context.isActiveProject?.(projectId) ?? true) setError(toErrorMessage(err));
       throw err;
     } finally {
-      setBusy(false);
+      if (context.isActiveProject?.(projectId) ?? true) setBusy(false);
     }
   }
 
@@ -153,13 +152,14 @@ export function createProjectMutations(context: ProjectMutationContext) {
     setError(null);
     try {
       await api.deleteProjectReferenceMapping(projectId, mappingId);
+      await invalidateProjectRegistry(queryClient, projectId);
       if (route.environmentId) await options?.onEnvironmentChanged?.(route.environmentId);
-      updateProjectSummaries((current) => changeProjectReferenceMappingCount(current, projectId, -1));
+      await invalidateProjectSummaries();
     } catch (err) {
-      setError(toErrorMessage(err));
+      if (context.isActiveProject?.(projectId) ?? true) setError(toErrorMessage(err));
       throw err;
     } finally {
-      setBusy(false);
+      if (context.isActiveProject?.(projectId) ?? true) setBusy(false);
     }
   }
 

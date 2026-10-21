@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Protocol
+from contextlib import contextmanager, ExitStack
+
+from datacoolie_studio.core.process_lock import reentrant_process_lock
+from datacoolie_studio.db.session import workspace_lock_path
 
 
 KEYRING_SERVICE_NAME = "datacoolie-studio"
@@ -14,6 +18,17 @@ class SecretStoreUnavailable(RuntimeError):
 
 class SecretNotFound(KeyError):
     pass
+
+
+@contextmanager
+def credential_profile_guards(session, profile_ids):
+    """Protect profile resolution and membership through caller-owned commit."""
+    with ExitStack() as stack:
+        for profile_id in sorted(set(str(value) for value in profile_ids if value)):
+            stack.enter_context(reentrant_process_lock(
+                workspace_lock_path(session, f"profile-{profile_id}"), owner_label="credential profile"
+            ))
+        yield
 
 
 class CredentialSecretStore(Protocol):

@@ -12,7 +12,7 @@ from datacoolie_studio.domains.read_models.sqlite_store import SqliteResultCache
 from tests.support.paths import FIXTURE_ROOT
 
 
-SAMPLE_LOGS = FIXTURE_ROOT / "usecase-sim" / "logs" / "etl_logs" / "analyst"
+SAMPLE_LOGS = FIXTURE_ROOT / "usecase-sim" / "logs" / "v6"
 
 
 def _key(environment_id: int, namespace: str) -> ResultCacheKey:
@@ -67,9 +67,12 @@ def test_cache_admin_is_scoped_and_preserves_core_state(tmp_path: Path, monkeypa
             },
         )
         assert cleared.status_code == 200
-        assert cleared.json()["read_models"]["deleted_entries"] == 1
+        # Asset identity maps are consumed by monitoring, so clearing the
+        # assets feature invalidates the shared monitoring page family too.
+        assert cleared.json()["read_models"]["deleted_entries"] == 2
         assert store.get(_key(environment["id"], "assets.catalog")) is None
         assert store.get(_key(environment["id"], "environment-overview")) is not None
+        assert store.get(_key(environment["id"], "monitoring.page.health")) is None
 
         cleared_all = client.post(
             "/api/v1/studio/cache/clear",
@@ -171,7 +174,7 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
         )
         assert overview.status_code == 200
         assert filter_options.status_code == 200
-        assert overview.json()["monitoring"]["job_records"] == 0
+        assert overview.json()["monitoring"]["job_records"] == "0"
         assert overview.json()["monitoring"]["errors"] == []
         assert filter_options.json()["options"] == {}
 
@@ -216,8 +219,8 @@ def test_cleared_analytics_rebuilds_from_unchanged_manifest(tmp_path: Path, monk
             f"/api/v1/environments/{environment['id']}/monitoring/pages/overview"
         )
         assert unavailable.status_code == 200
-        assert unavailable.json()["summary"]["job_records"] == 0
-        assert unavailable.json()["summary"]["dataflow_records"] == 0
+        assert unavailable.json()["summary"]["job_records"] == "0"
+        assert unavailable.json()["summary"]["dataflow_records"] == "0"
 
         second_refresh = client.post(
             f"/api/v1/environments/{environment['id']}/log-sources/{source['id']}/refresh",
@@ -281,8 +284,8 @@ def test_reenabled_log_source_requires_fresh_analytics_publish(tmp_path: Path, m
 
         unavailable = client.get(overview_url)
         assert unavailable.status_code == 200
-        assert unavailable.json()["summary"]["job_records"] == 0
-        assert unavailable.json()["summary"]["dataflow_records"] == 0
+        assert unavailable.json()["summary"]["job_records"] == "0"
+        assert unavailable.json()["summary"]["dataflow_records"] == "0"
 
         assert client.post(refresh_url, json={"mode": "incremental"}).status_code == 200
         assert client.get(overview_url).status_code == 200

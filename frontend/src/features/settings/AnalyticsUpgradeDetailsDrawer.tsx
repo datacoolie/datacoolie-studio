@@ -209,6 +209,8 @@ function attemptLabel(upgrade: AnalyticsUpgradeStatus): string {
 
 function upgradeStateLabel(state: string): string {
   if (state === "repairing") return "Repairing source cache";
+  if (state === "staging") return "Staging analytics candidate";
+  if (state === "finalizing") return "Finalizing analytics candidate";
   if (state === "completed_with_warnings") return "Current with warnings";
   return state.replace(/_/gu, " ");
 }

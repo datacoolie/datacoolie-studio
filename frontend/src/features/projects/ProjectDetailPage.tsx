@@ -237,7 +237,7 @@ export function ProjectDetailPage({
           </span>
           <span><Layers3 size={14} />{project.environment_count} environments</span>
           <span><Database size={14} />{project.metadata_source_count} metadata sources</span>
-          <span><FolderOpen size={14} />{project.etl_log_path_count} log paths <em>optional</em></span>
+          <span><FolderOpen size={14} />{project.log_source_count} log sources <em>optional</em></span>
         </div>
 
         <div className="project-local-tabs" role="tablist" aria-label="Project sections">

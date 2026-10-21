@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { fetchEnvironmentSources } from "../../app/environmentSourcesResource";
+import { fetchEnvironmentSources } from "./environmentSourcesResource";
 import { api } from "../../shared/api/client";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";

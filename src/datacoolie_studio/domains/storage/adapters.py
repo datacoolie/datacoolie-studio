@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Literal, Mapping, Protocol
 from uuid import uuid4
 
 from datacoolie_studio.domains.storage.errors import StorageConflictError
@@ -66,6 +66,23 @@ class StorageRevision:
         )
 
 
+WriteVerification = Literal["content_readback", "provider_receipt"]
+
+
+@dataclass(frozen=True)
+class StorageWriteReceipt:
+    """Typed outcome of a conditional storage publication."""
+
+    revision: Mapping[str, object]
+    content_hash: str
+    size: int
+    provider_revision: str | None
+    verification: WriteVerification
+
+    def revision_dict(self) -> dict[str, object]:
+        return dict(self.revision)
+
+
 class StorageAdapter(Protocol):
     def inventory(self, request: StorageInventoryRequest) -> StorageInventory: ...
 
@@ -97,8 +114,8 @@ class LocalStorageAdapter:
             return StorageInventory(
                 objects=(),
                 completeness="complete",
-                requests=0,
-                pages=0,
+                requests=1,
+                pages=1,
                 directories_visited=0,
                 objects_inspected=0,
                 matching_objects=0,
@@ -168,8 +185,8 @@ class LocalStorageAdapter:
         return StorageInventory(
             objects=tuple(result),
             completeness="partial" if partial else "complete",
-            requests=0,
-            pages=0,
+            requests=1,
+            pages=1,
             directories_visited=directories_visited,
             objects_inspected=objects_inspected,
             matching_objects=matching_objects,
@@ -210,13 +227,18 @@ class LocalStorageAdapter:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
         digest = hashlib.sha256()
+        bytes_written = 0
         try:
             with self.open_read(uri) as source, temporary.open("wb") as output:
                 while chunk := source.read(1024 * 1024):
                     digest.update(chunk)
                     output.write(chunk)
+                    bytes_written += len(chunk)
             after = self.stat(uri)
-            if not before.same_content_as(after):
+            if (
+                (after.size > 0 and after.size != bytes_written)
+                or not before.same_content_as(after)
+            ):
                 raise StorageConflictError(uri, "Source revision changed during materialization")
             os.replace(temporary, target)
         finally:

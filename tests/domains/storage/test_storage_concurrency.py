@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import date, datetime, timezone
 
 from datacoolie_studio.domains.logs.discovery import (
@@ -25,17 +24,19 @@ from datacoolie_studio.domains.storage.concurrency import (
 class _ConcurrentDbfsAdapter:
     provider = "dbfs"
 
-    def __init__(self) -> None:
+    def __init__(self, *, barrier: threading.Barrier | None = None) -> None:
         self._lock = threading.Lock()
         self.active = 0
         self.max_active = 0
+        self._barrier = barrier
 
     def inventory(self, request) -> StorageInventory:
         with self._lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
         try:
-            time.sleep(0.01)
+            if self._barrier is not None:
+                self._barrier.wait(timeout=2)
             index = int(request.uri.rsplit("-", 1)[-1])
             objects = [
                 StorageObject(
@@ -78,7 +79,7 @@ def test_storage_io_map_preserves_input_order() -> None:
 
 
 def test_partition_file_discovery_uses_bounded_concurrency_and_sorts_results() -> None:
-    adapter = _ConcurrentDbfsAdapter()
+    adapter = _ConcurrentDbfsAdapter(barrier=threading.Barrier(2))
     partitions = [
         DiscoveredPartition(
             uri=f"dbfs:/partition-{index}",

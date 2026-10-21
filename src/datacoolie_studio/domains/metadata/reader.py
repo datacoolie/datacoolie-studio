@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -14,28 +15,73 @@ class MetadataReadError(RuntimeError):
     pass
 
 
-def read_metadata_file(uri: str) -> dict[str, Any]:
+MetadataFragmentShape = Literal["document", "list", "record"]
+
+
+@dataclass(frozen=True)
+class MetadataDocumentRead:
+    """Decoded metadata plus source-shape information needed for round trips."""
+
+    payload: dict[str, Any]
+    wrapper: str | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+    envelope_extras: dict[str, Any] = field(default_factory=dict)
+    fragment_section: str | None = None
+    fragment_shape: MetadataFragmentShape = "document"
+
+
+def read_metadata_file(
+    uri: str,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    return read_metadata_document_file(uri, strict=strict).payload
+
+
+def read_metadata_document_file(
+    uri: str,
+    *,
+    strict: bool = False,
+) -> MetadataDocumentRead:
     try:
         path = require_local_path(uri)
     except StorageProviderNotEnabled as exc:
         raise MetadataReadError(str(exc)) from exc
     if not path.exists():
         raise MetadataReadError(f"Metadata file not found: {uri}")
+    if path.is_symlink():
+        raise MetadataReadError(f"Metadata file must not be a symlink: {uri}")
     try:
-        return read_metadata_bytes(uri, path.read_bytes())
+        return read_metadata_document_bytes(uri, path.read_bytes(), strict=strict)
     except MetadataReadError:
         raise
     except Exception as exc:
         raise MetadataReadError(f"Cannot parse metadata file: {uri}") from exc
 
 
-def read_metadata_bytes(uri: str, content: bytes) -> dict[str, Any]:
+def read_metadata_bytes(
+    uri: str,
+    content: bytes,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    return read_metadata_document_bytes(uri, content, strict=strict).payload
+
+
+def read_metadata_document_bytes(
+    uri: str,
+    content: bytes,
+    *,
+    strict: bool = False,
+) -> MetadataDocumentRead:
     suffix = Path(uri.split("?", 1)[0]).suffix.lower()
     try:
         if suffix in {".yaml", ".yml"}:
             data = yaml.safe_load(content.decode("utf-8")) or {}
-        elif suffix in {".xlsx", ".xls"}:
-            return _read_excel_bytes(content)
+        elif suffix == ".xlsx":
+            data = _read_excel_bytes(content, uri)
+        elif suffix == ".xls":
+            data = _read_excel_bytes(content, uri)
         else:
             data = json.loads(content.decode("utf-8"))
     except MetadataReadError:
@@ -46,19 +92,43 @@ def read_metadata_bytes(uri: str, content: bytes) -> dict[str, Any]:
         section = _metadata_fragment_section(uri)
         if section is None:
             raise MetadataReadError("Metadata root must be an object")
-        return {section: data}
+        return MetadataDocumentRead(
+            {section: data},
+            fragment_section=section,
+            fragment_shape="list",
+        )
     if not isinstance(data, dict):
         raise MetadataReadError("Metadata root must be an object")
 
+    wrapper: str | None = None
+    envelope_extras: dict[str, Any] = {}
+    if "metadata" in data:
+        envelope_extras = {key: value for key, value in data.items() if key != "metadata"}
+        wrapper = "metadata"
+        data = data["metadata"]
+        if not isinstance(data, dict):
+            raise MetadataReadError("Metadata wrapper must contain a mapping")
+
+    known_sections = {"connections", "dataflows", "schema_hints"}
+    present_sections = known_sections.intersection(data)
     # Canonical modular projects allow a fragment to contain one dataflow
     # object instead of wrapping it in a ``dataflows`` list.  Preserve the
     # existing full-document contract while normalizing that fragment shape
     # at the storage boundary.
-    if not {"connections", "dataflows", "schema_hints"}.intersection(data):
+    if not wrapper and not present_sections:
         section = _metadata_fragment_section(uri)
         if section is not None:
-            return {section: [data]}
-    return data
+            return MetadataDocumentRead(
+                {section: [data]},
+                fragment_section=section,
+                fragment_shape="record",
+            )
+    extras = {
+        key: value
+        for key, value in data.items()
+        if key not in known_sections
+    }
+    return MetadataDocumentRead(data, wrapper=wrapper, extras=extras, envelope_extras=envelope_extras)
 
 
 def _metadata_fragment_section(uri: str) -> str | None:
@@ -75,43 +145,20 @@ def _metadata_fragment_section(uri: str) -> str | None:
     return None
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise MetadataReadError("JSON metadata root must be an object")
-    return data
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise MetadataReadError("YAML metadata root must be an object")
-    return data
 
 
-def _read_excel(path: Path) -> dict[str, Any]:
-    import openpyxl
-
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        return {
-            "connections": _sheet_rows(workbook, "connections"),
-            "dataflows": _excel_dataflows(workbook),
-            "schema_hints": _excel_schema_hints(workbook),
-        }
-    finally:
-        workbook.close()
 
 
-def _read_excel_bytes(content: bytes) -> dict[str, Any]:
+def _read_excel_bytes(content: bytes, uri: str) -> dict[str, Any]:
     import openpyxl
 
     workbook = openpyxl.load_workbook(
         BytesIO(content), read_only=True, data_only=True
     )
     try:
+        _assert_supported_excel_workbook(workbook, uri)
         return {
             "connections": _sheet_rows(workbook, "connections"),
             "dataflows": _excel_dataflows(workbook),
@@ -119,6 +166,15 @@ def _read_excel_bytes(content: bytes) -> dict[str, Any]:
         }
     finally:
         workbook.close()
+
+
+def _assert_supported_excel_workbook(workbook: Any, uri: str) -> None:
+    supported = {"connections", "dataflows", "schema_hints"}
+    if not supported.intersection(workbook.sheetnames):
+        raise MetadataReadError(
+            "Excel metadata file contains none of the supported sheets: "
+            f"{uri}"
+        )
 
 
 def _sheet_rows(workbook: Any, sheet_name: str) -> list[dict[str, Any]]:
@@ -183,16 +239,39 @@ def _excel_dataflows(workbook: Any) -> list[dict[str, Any]]:
 def _excel_schema_hints(workbook: Any) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str | None], dict[str, Any]] = {}
     for row in _sheet_rows(workbook, "schema_hints"):
-        conn = row.get("connection_name")
+        connection_name = row.get("connection_name")
+        connection_id = row.get("connection_id")
+        conn = connection_name or connection_id
         table = row.get("table_name")
         schema = row.get("schema_name")
         if not conn or not table:
             continue
-        key = (str(conn), str(table), str(schema) if schema else None)
-        group = grouped.setdefault(key, {"connection_name": conn, "table_name": table, "hints": []})
+        reference_key = (
+            f"id:{connection_id}"
+            if connection_id
+            else f"name:{connection_name}"
+        )
+        key = (reference_key, str(table), str(schema) if schema else None)
+        group = grouped.setdefault(
+            key,
+            {
+                "table_name": table,
+                "hints": [],
+                **({"connection_name": connection_name} if connection_name else {}),
+                **({"connection_id": connection_id} if connection_id else {}),
+            },
+        )
+        if connection_name:
+            group.setdefault("connection_name", connection_name)
+        if connection_id:
+            group.setdefault("connection_id", connection_id)
         if schema:
             group["schema_name"] = schema
-        hint = {k: v for k, v in row.items() if k not in {"connection_name", "table_name", "schema_name"}}
+        hint = {
+            k: v
+            for k, v in row.items()
+            if k not in {"connection_name", "connection_id", "table_name", "schema_name"}
+        }
         if hint:
             group["hints"].append(hint)
     return list(grouped.values())

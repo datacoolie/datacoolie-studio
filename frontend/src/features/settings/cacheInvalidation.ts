@@ -12,7 +12,7 @@ export function cacheInvalidationBranches(
   if (scope === "all_disposable") return ALL_DERIVED_BRANCHES;
   if (scope === "analytics") return ["overview", "monitoring"];
   if (features.length === 0) return ALL_DERIVED_BRANCHES;
-  return [...new Set(features)];
+  return [...new Set<DerivedQueryBranch>([...features, ...(features.includes("assets") ? ["monitoring" as const] : [])])];
 }
 
 export function matchesDerivedQuery(

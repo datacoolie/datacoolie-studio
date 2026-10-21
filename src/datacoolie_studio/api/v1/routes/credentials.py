@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ipaddress
-
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from datacoolie_studio.api.v1.contracts.credentials import (
@@ -13,33 +11,17 @@ from datacoolie_studio.api.v1.contracts.credentials import (
     CredentialProfileUpdateRequest,
 )
 from datacoolie_studio.db.session import get_session
+from datacoolie_studio.api.v1.dependencies import (
+    get_credential_secret_store,
+    require_loopback_client,
+)
 from datacoolie_studio.domains.credentials import service as credentials
 from datacoolie_studio.domains.credentials.store import (
     CredentialSecretStore,
-    KeyringCredentialSecretStore,
     SecretStoreUnavailable,
 )
 
 router = APIRouter(prefix="/credential-profiles", tags=["credential-profiles"])
-
-
-def get_credential_secret_store() -> CredentialSecretStore:
-    return KeyringCredentialSecretStore()
-
-
-def require_loopback_client(request: Request) -> None:
-    host = request.client.host if request.client else ""
-    if host == "testclient":
-        return
-    try:
-        is_loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        is_loopback = False
-    if not is_loopback:
-        raise HTTPException(
-            status_code=403,
-            detail="Credential mutations are available only to loopback clients",
-        )
 
 
 @router.get("/capabilities", response_model=CredentialCapabilities)

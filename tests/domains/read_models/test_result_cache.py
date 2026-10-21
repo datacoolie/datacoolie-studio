@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -26,7 +25,7 @@ from datacoolie_studio.domains.read_models.sqlite_store import (
     SqliteResultCacheStore,
     clear_memory_cache,
 )
-from datacoolie_studio.domains.monitoring.page_service import _canonical_parameters
+from datacoolie_studio.domains.monitoring.page_cache import canonical_parameters
 
 
 class _MemoryStore:
@@ -77,16 +76,25 @@ def test_get_or_compute_coalesces_concurrent_misses():
     coordinator = InProcessResultBuildCoordinator()
     calls = 0
     calls_lock = Lock()
+    producer_started = Event()
+    release_producer = Event()
 
     def producer() -> dict:
         nonlocal calls
         with calls_lock:
             calls += 1
-        time.sleep(0.03)
+        producer_started.set()
+        assert release_producer.wait(timeout=2)
         return {"value": 7}
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        results = list(executor.map(lambda _: get_or_compute(store, coordinator, _key(), producer), range(5)))
+        futures = [
+            executor.submit(get_or_compute, store, coordinator, _key(), producer)
+            for _ in range(5)
+        ]
+        assert producer_started.wait(timeout=2)
+        release_producer.set()
+        results = [future.result(timeout=2) for future in futures]
 
     assert calls == 1
     assert [result.payload for result, _ in results] == [{"value": 7}] * 5
@@ -104,6 +112,8 @@ def test_sqlite_store_coalesces_concurrent_requests(tmp_path: Path, monkeypatch)
     coordinator = InProcessResultBuildCoordinator()
     calls = 0
     calls_lock = Lock()
+    producer_started = Event()
+    release_producer = Event()
 
     def request() -> dict:
         nonlocal calls
@@ -113,14 +123,18 @@ def test_sqlite_store_coalesces_concurrent_requests(tmp_path: Path, monkeypatch)
             nonlocal calls
             with calls_lock:
                 calls += 1
-            time.sleep(0.03)
+            producer_started.set()
+            assert release_producer.wait(timeout=2)
             return {"value": 9}
 
         result, _ = get_or_compute(store, coordinator, _key(), producer)
         return result.payload
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        results = list(executor.map(lambda _: request(), range(5)))
+        futures = [executor.submit(request) for _ in range(5)]
+        assert producer_started.wait(timeout=2)
+        release_producer.set()
+        results = [future.result(timeout=2) for future in futures]
 
     assert results == [{"value": 9}] * 5
     assert calls == 1
@@ -175,8 +189,8 @@ def test_clear_during_build_prevents_stale_repopulation(monkeypatch):
 def test_relative_window_anchor_uses_studio_timezone():
     now = datetime(2026, 7, 18, 18, 0, tzinfo=timezone.utc)
 
-    utc = _canonical_parameters("overview", {"range": "30d"}, "UTC", now=now)
-    saigon = _canonical_parameters("overview", {"range": "30d"}, "Asia/Saigon", now=now)
+    utc = canonical_parameters("overview", {"range": "30d"}, "UTC", now=now)
+    saigon = canonical_parameters("overview", {"range": "30d"}, "Asia/Saigon", now=now)
 
     assert utc["window_anchor"] == "2026-07-18"
     assert saigon["window_anchor"] == "2026-07-19"
@@ -185,7 +199,7 @@ def test_relative_window_anchor_uses_studio_timezone():
 def test_freshness_window_anchor_tracks_the_current_minute():
     now = datetime(2026, 7, 18, 18, 23, 45, tzinfo=timezone.utc)
 
-    freshness = _canonical_parameters("freshness", {"range": "all"}, "Asia/Saigon", now=now)
+    freshness = canonical_parameters("freshness", {"range": "all"}, "Asia/Saigon", now=now)
 
     assert freshness["window_anchor"] == "2026-07-19T01:23:00+07:00"
 

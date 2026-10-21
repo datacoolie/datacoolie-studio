@@ -60,7 +60,7 @@ class ProjectEnvironmentSummaryResponse(BaseModel):
     id: int
     name: str
     metadata_source_count: int
-    etl_log_path_count: int
+    log_source_count: int
     code_artifact_count: int
     created_at: datetime
     updated_at: datetime
@@ -72,7 +72,7 @@ class ProjectSummaryResponse(BaseModel):
     description: str | None = None
     environment_count: int
     metadata_source_count: int
-    etl_log_path_count: int
+    log_source_count: int
     reference_mapping_count: int
     environments: list[ProjectEnvironmentSummaryResponse]
     created_at: datetime
@@ -181,7 +181,7 @@ class StudioAnalyticsCacheInfo(BaseModel):
     size_bytes: int | None = None
     schema_version: int | None = None
     generation: int | None = None
-    build_state: Literal["ready", "rebuild_required"] = "rebuild_required"
+    build_state: Literal["ready", "building", "rebuild_required"] = "rebuild_required"
     published_at: datetime | None = None
     dataflow_row_count: int = 0
     job_row_count: int = 0
@@ -190,6 +190,7 @@ class StudioAnalyticsCacheInfo(BaseModel):
     active_source_count: int = 0
     orphan_source_count: int = 0
     orphan_source_ids: list[int] = Field(default_factory=list)
+    resource_limits: dict[str, Any] = Field(default_factory=dict)
 
 
 class StudioDiagnosticsResponse(BaseModel):

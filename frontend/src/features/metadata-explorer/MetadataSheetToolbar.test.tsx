@@ -26,7 +26,6 @@ function renderToolbar(overrides: Partial<Parameters<typeof MetadataSheetToolbar
       onQueryChange={noop}
       onSave={noop}
       onSaveDraft={noop}
-      onValidate={noop}
       {...overrides}
     />,
   );
@@ -55,5 +54,12 @@ describe("MetadataSheetToolbar", () => {
     expect(markup).toContain("2 column filters");
     expect(markup).toContain("Clear column filters");
     expect(markup).toContain("1 of 1 rows");
+  });
+
+  it("keeps draft saving available when source writes are disabled", () => {
+    const markup = renderToolbar({ readOnly: true });
+
+    expect(markup).toContain("Save draft");
+    expect(markup).not.toContain("Save to source");
   });
 });

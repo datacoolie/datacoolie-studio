@@ -7,6 +7,16 @@ from typing import Any, Iterator
 
 import duckdb
 
+from datacoolie_studio.core.config import (
+    analytics_duckdb_memory_limit,
+    analytics_duckdb_temp_directory,
+    analytics_duckdb_threads,
+)
+
+
+def _duckdb_string_literal(value: str) -> str:
+    return value.replace("'", "''")
+
 
 class ManagedDuckDBConnection:
     def __init__(self, manager: AnalyticsConnectionManager, connection: Any) -> None:
@@ -50,6 +60,22 @@ class AnalyticsConnectionManager:
         try:
             connection = duckdb.connect(database=str(path), read_only=read_only)
             connection.execute("SET enable_progress_bar = false")
+            temp_directory = analytics_duckdb_temp_directory()
+            temp_directory.mkdir(parents=True, exist_ok=True)
+            connection.execute(f"SET threads = {analytics_duckdb_threads()}")
+            connection.execute(
+                "SET memory_limit = "
+                f"'{_duckdb_string_literal(analytics_duckdb_memory_limit())}'"
+            )
+            connection.execute(
+                "SET temp_directory = "
+                f"'{_duckdb_string_literal(str(temp_directory))}'"
+            )
+            # DataCoolie timestamps are emitted with UTC offsets. DuckDB's JSON
+            # reader may infer those values as naive TIMESTAMPs, so every
+            # analytics connection must use UTC when normalising them to
+            # TIMESTAMPTZ instead of inheriting the host timezone.
+            connection.execute("SET TimeZone = 'UTC'")
         except Exception:
             if connection is not None:
                 connection.close()

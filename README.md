@@ -11,7 +11,25 @@ DataCoolie Studio is a local web app for exploring DataCoolie projects. Use it t
 - Connect to Local, S3, MinIO, ADLS, OneLake, GCS, and Databricks storage
 - Store cloud credentials in the operating system credential store
 
-Studio keeps source files as the source of truth. Metadata saves validate the document and create a backup before replacing the original file. Lineage combines evidence for display without creating a merged metadata file.
+Published source files remain the source of truth. Draft changes are kept in Studio until **Save to
+Source** conditionally writes the source. Studio reads, displays, edits, and saves metadata; DataCoolie
+validates metadata and SQL when preparing or running a pipeline. Studio checks file formats, source
+revisions, write permissions, and backup integrity. Lineage combines evidence for display without
+creating a merged metadata file.
+
+See [release notes](docs/release-notes.md) for the DataCoolie 0.2 compatibility
+update and the removed metadata-validation API.
+
+Studio 0.2.0 supports DataCoolie log schemas v6 and v7 for Monitoring. Older log records
+are excluded with a warning; source files remain intact. Existing analytics
+caches from schema17 upgrade from stored data. Optional new log fields migrate
+without historical backfill; previously loaded rows receive null for those fields.
+Older or incomplete caches may still require logs to rebuild.
+
+V7 retains observed numbers, including zero, and leaves unentered or unmeasured
+metrics null. Monitoring sums observed values for v7 and mixed v6/v7 populations,
+with null when no measurement exists. Coverage shows measured runs against the
+report population. Historical v6 values and v6-only aggregate behavior are preserved.
 
 ## Screenshots
 
@@ -115,7 +133,7 @@ The startup introduction looks like this:
 |____/ \__,_|\__\__,_|\____\___/ \___/|_|_|\___|
 
 Studio v<version>
-Explore DataCoolie metadata, lineage, and ETL logs.
+Explore DataCoolie metadata, lineage, and execution/system logs.
 
 DataCoolie - Metadata-driven ETL framework
   https://github.com/datacoolie/datacoolie
@@ -150,11 +168,35 @@ pip install "datacoolie-studio[all]"
 1. Create a **Project**
 2. Add an **Environment** such as `dev`, `test`, or `prod`
 3. Add a metadata file or scan a DataCoolie project
-4. Add ETL logs for Monitoring
+4. Add execution and system logs for Monitoring
 5. Add Python code artifacts when metadata references Python functions
 6. Open **Metadata**, **Assets**, **Lineage**, or **Monitoring**
 
 Metadata is required. Logs and code artifacts are optional.
+
+## Source roots and editing
+
+When you scan a source, provide the project or environment root that already
+contains the relevant `metadata`, `sql`, and `functions` folders. Studio uses
+`datacoolie.yml` first, then an environment `manifest.json`; each declared
+component path overrides its default independently. If neither marker exists,
+the configured defaults (`metadata`, `sql`, `functions`) are used. A build
+manifest is not an environment root, so pass `<artifact>/<environment>/`
+instead.
+
+SQL references can be inline or backed by a `.sql` file. Leave **File path**
+empty for inline SQL; enter a path under a configured SQL root (or an
+`artifact:/...` path) when the query should be saved as a file. **Save Draft**
+updates Studio's workspace only. **Save to Source** creates or overwrites the
+physical SQL file; it does not automatically delete or move an older file.
+
+Logs use `log_base_path` with separate `execution_logs` and `system_logs`
+streams. Dataflow and job records are shown in execution monitoring; system
+records can additionally show `event_name` and `dataflow_run_id` context. The
+`log_schema_version` field is preserved as ordinary record metadata; Studio
+does not require a fixed numeric value for discovery or ingestion. DataCoolie
+and Studio should stay in the same `0.2.x` compatibility family, while their
+patch versions may differ.
 
 ## Configure Studio
 
@@ -178,7 +220,7 @@ Common launcher options:
 datacoolie-studio --port 8765
 datacoolie-studio --host 127.0.0.1
 datacoolie-studio --data-dir .\.scratch\datacoolie-studio
-datacoolie-studio --database-url "postgresql+psycopg://user:password@host:5432/datacoolie_studio"
+datacoolie-studio --database-url "sqlite:///D:/data/datacoolie-studio/db/studio.db"
 datacoolie-studio --result-cache-url "sqlite:///D:/data/datacoolie-studio/cache/read-models.sqlite3"
 datacoolie-studio --no-open
 ```
@@ -188,14 +230,27 @@ You can also configure storage with environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATACOOLIE_STUDIO_DATA_DIR` | Persistent local root for the workspace database, result cache, analytics cache, backups, logs, and source materializations |
-| `DATACOOLIE_STUDIO_DATABASE_URL` | Workspace SQLAlchemy database URL; defaults to SQLite under `DATA_DIR` |
+| `DATACOOLIE_STUDIO_DATABASE_URL` | Workspace SQLite database URL; defaults to SQLite under `DATA_DIR` |
 | `DATACOOLIE_STUDIO_RESULT_CACHE_URL` | Result-cache URL; currently SQLite or `memory://`, defaulting to SQLite under `DATA_DIR` |
 | `DATACOOLIE_STUDIO_HOST` | Bind host; defaults to `127.0.0.1` |
 | `DATACOOLIE_STUDIO_PORT` | Bind port; defaults to `8765` |
+| `DATACOOLIE_STUDIO_ANALYTICS_DUCKDB_THREADS` | `auto` (default): `min(detected CPU allocation, 4)`, including affinity and visible Linux container quotas; or an explicit positive thread count |
+| `DATACOOLIE_STUDIO_ANALYTICS_DUCKDB_MEMORY_LIMIT` | `auto` (default): 70% of detected physical RAM, bounded by visible Linux container limits; or an explicit size such as `4GiB` |
+| `DATACOOLIE_STUDIO_ANALYTICS_DUCKDB_TEMP_DIRECTORY` | Disk spill directory; defaults to `cache/analytics-tmp` under `DATA_DIR` |
 
-CLI values take precedence over environment variables. The workspace URL accepts
-SQLite URLs such as `sqlite:///D:/data/datacoolie-studio/db/studio.db` and other
-SQLAlchemy URLs supported by the installed drivers. The result-cache provider
+The **DuckDB budget** in Settings shows these effective limits. Auto uses at most
+4 query threads and has no fixed 8GB memory cap. It reserves memory headroom for Studio and other work;
+the memory limit controls DuckDB's buffer manager, rather than total process
+memory, and does not allocate that RAM immediately. If memory detection is
+unavailable, auto falls back to `1GB`. Explicit overrides take precedence over
+auto detection. Restart Studio after changing environment variables. Log-loading
+worker concurrency is configured separately from DuckDB query threads.
+
+CLI values take precedence over environment variables. The Studio workspace
+database currently supports synchronous SQLite URLs only, such as
+`sqlite:///D:/data/datacoolie-studio/db/studio.db`. PostgreSQL, MySQL, and other
+database types remain available as user-configured source systems; they are not
+storage engines for Studio's own workspace state. The result-cache provider
 currently accepts SQLite URLs and `memory://`; remote Redis/PostgreSQL result
 cache backends are not enabled.
 
@@ -205,7 +260,10 @@ contract. Configure a local deployment with `--data-dir` or
 `DATACOOLIE_STUDIO_DATABASE_URL` only when an explicit workspace database URL
 is required.
 
-Studio binds to `127.0.0.1` by default. Choose a shared database and review network access before hosting it for multiple users.
+Studio is a local application without built-in authentication. Keep the default
+`127.0.0.1` bind address. Binding to a network interface exposes the workspace
+and its APIs to anyone who can reach that address; shared multi-user hosting
+is not supported.
 
 ## Develop from source
 
@@ -241,6 +299,12 @@ Run repository checks:
 ```powershell
 .\scripts\verify.ps1
 .\scripts\verify.ps1 -Mode Full
+.\scripts\verify.ps1 -Mode Release
 ```
 
-The default check covers architecture, packaged static assets, security, API contracts, frontend tests, and the production build. Full mode also runs the complete backend test suite.
+The default Fast check runs backend lint, focused architecture and startup tests,
+and OpenAPI/generated API checks. Full mode runs the complete local backend and
+frontend suites, builds the frontend, and audits frontend dependencies. Release
+mode also checks the Python lockfile and audits its dependencies, builds and
+checks the distributions, and smoke-tests the installed wheel. Install the
+`dev` or `all` extra to provide the verification tools.

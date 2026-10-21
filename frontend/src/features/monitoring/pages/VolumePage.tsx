@@ -1,8 +1,19 @@
+import { Help } from "../../../shared/components/Help";
+import { monitoringDimensionLabel } from "../monitoringDimensions";
+import { memo } from "react";
 import type { EChartsOption } from "echarts";
 import type { MonitoringRecord, MonitoringReport } from "../../../shared/api/domainTypes";
 import type { MonitoringFilters } from "../monitoringFilters";
-import type { TableSort } from "../MonitoringCharts";import { CompactNumberValue, CompactValue, DataTable, DataflowContextCell, DataflowNameCell, DetailMetric, EndpointCell, EndpointRouteNode, HealthStripCard, ReportChart, ReportPanel, TablePager, baseChartOption, bottomAnchoredValueXAxis, createEmptyVolumeTrendRow, formatBytes, formatBytesShort, formatCompact, formatCompactNumber, formatNumber, horizontalBarDataZoom, mergeVolumeTrendRows, monitoringTimezone, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption } from "../components/monitoringPrimitives";
+import type { TableSort } from "../../../shared/components/DataTable";import { CompactBytesValue, CompactNumberValue, DetailMetric, HealthStripCard, ReportChart, ReportPanel, TablePager, baseChartOption, bottomAnchoredValueXAxis, createEmptyVolumeTrendRow, formatBytesShort, formatCompact, formatTooltipBytes, formatNumber, horizontalBarDataZoom, mergeVolumeTrendRows, metricDifference, metricNumber, metricValue, monitoringTimezone, num, reportChartPalette, reportChartGrid, resolveTrendBucketKeys, toApproximateNumber, workloadVolumeTrendOption as sharedWorkloadVolumeTrendOption, type MetricValue } from "../components/monitoringPresentation";
+import { EndpointRouteNode } from "./DataflowsPagePresentation";
 import { alignedVolumeAxisBounds } from "../volumePageModel";
+import { MeasurementCoverage, ObservedNumberValue } from "../components/monitoringPresentation";
+import { rowObservation } from "../components/monitoringObservation";
+import { formatTooltipNumber } from "../../../shared/lib/numberFormat";
+import { VolumeRegistryTable } from "./VolumeRegistryTable";
+import { chartMetric, chartObservationMetric, chartTooltip, firstChartParam } from "../components/chartTooltip";
+
+type ReportState = { loading: boolean; error: string | null; retry: () => void };
 
 export function VolumePage({
   report,
@@ -16,9 +27,14 @@ export function VolumePage({
   offset,
   onPageChange,
   onPageSizeChange,
-  onInspect
+  onInspect,
+  timezoneName,
+  reportState,
+  scrollResetKey,
+  tablePending = false,
+  tableError = null,
 }: {
-  report: MonitoringReport;
+  report: MonitoringReport | null;
   filters: MonitoringFilters;
   rows: MonitoringRecord[];
   totalRows: number;
@@ -30,106 +46,157 @@ export function VolumePage({
   onPageChange: (offset: number) => void;
   onPageSizeChange: (limit: number) => void;
   onInspect?: (row: MonitoringRecord) => void;
+  timezoneName?: string | null;
+  reportState?: ReportState;
+  scrollResetKey?: string;
+  tablePending?: boolean;
+  tableError?: string | null;
 }) {
-  const kpis = report.volume.kpis ?? {};
-  const timezoneName = monitoringTimezone(report);
-  const registryRows = rows;
-  const netBytes = Number(kpis.net_bytes_change ?? 0);
-  const highVolumeCount = Number(kpis.high_volume_dataflow_count ?? 0);
-  const candidateRunCount = Number(kpis.high_volume_candidate_run_count ?? kpis.high_volume_run_count ?? 0);
-
+  const resolvedTimezoneName = timezoneName !== undefined ? timezoneName : report ? monitoringTimezone(report) : null;
+  const hasTableResponse = !tablePending && !tableError;
+  const registryState = tableError ? "Dataflows unavailable" : tablePending ? "Loading dataflows…" : null;
   return (
     <div className="monitoring-page monitoring-volume-report">
+      {report ? (
+        <VolumeReportContent
+          part="health"
+          report={report}
+          filters={filters}
+          timezoneName={resolvedTimezoneName ?? "UTC"}
+        />
+      ) : (
+        <VolumeReportPlaceholder part="health" reportState={reportState} />
+      )}
+      <div className="monitoring-volume-content monitoring-equal-rows-3">
+        {report ? <VolumeReportContent part="charts" report={report} filters={filters} timezoneName={resolvedTimezoneName ?? "UTC"} /> : <VolumeReportPlaceholder part="charts" reportState={reportState} />}
+        <ReportPanel title="Dataflow volume registry" subtitle={hasTableResponse ? <><CompactNumberValue value={totalRows} /> dataflows · totals in current filters</> : undefined} className="monitoring-volume-runs-panel" titleTooltip="One row per dataflow in the current filters. Totals are aggregated across related runs; click a row to inspect volume evidence and individual runs." headerAction={hasTableResponse ? <TablePager limit={limit} offset={offset} loadedRows={rows.length} totalRows={totalRows} loading={loading} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} /> : undefined}>
+          {registryState ? <div className="monitoring-registry-table-state" role="status">{registryState}</div> : <VolumeRegistryTable rows={rows} sort={sort} onSort={onSort} onInspect={onInspect} timezoneName={resolvedTimezoneName} scrollResetKey={scrollResetKey} />}
+        </ReportPanel>
+      </div>
+    </div>
+  );
+}
+
+function volumeKpiTooltip(label: string, row: Record<string, unknown>, field: string, totalField = field, bytes = false) {
+  const observation = rowObservation(row, field, totalField);
+  const value = bytes ? formatTooltipBytes(observation.value) : formatTooltipNumber(observation.value);
+  return `${label}${observation.partial && observation.value != null ? " (observed subtotal)" : ""}: ${value}; ${observation.coverage ?? "Coverage unavailable"}`;
+}
+
+const VolumeReportContent = memo(function VolumeReportContent({
+  part,
+  report,
+  filters,
+  timezoneName
+}: {
+  part: "health" | "charts";
+  report: MonitoringReport;
+  filters: MonitoringFilters;
+  timezoneName: string;
+}) {
+  const kpis = report.volume.kpis ?? {};
+  const net = rowObservation(kpis, "net_bytes_change");
+  const highVolumeCount = kpis.high_volume_dataflow_count;
+  const candidateRunCount = kpis.high_volume_candidate_run_count === undefined ? kpis.high_volume_run_count : kpis.high_volume_candidate_run_count;
+  const inserted = rowObservation(kpis, "rows_inserted", "total_rows_inserted");
+  const updated = rowObservation(kpis, "rows_updated", "total_rows_updated");
+  const deleted = rowObservation(kpis, "rows_deleted", "total_rows_deleted");
+  const addedFiles = rowObservation(kpis, "files_added");
+  const removedFiles = rowObservation(kpis, "files_removed");
+  const average = metricValue(kpis, "avg_bytes_per_file_added");
+  const averageCoverage = rowObservation(kpis, "bytes_per_file", "avg_bytes_per_file_added");
+  const averageLabel = average != null && averageCoverage.partial ? "Avg added file (observed)" : "Avg added file";
+  const rowChangesPartial = [inserted, updated, deleted].some((value) => value.partial && value.value != null);
+  const filesPartial = [addedFiles, removedFiles].some((value) => value.partial && value.value != null);
+
+  const healthContent = (
       <section className="overview-health-strip monitoring-volume-health-strip">
         <HealthStripCard
           label="Rows read"
-          value={<CompactNumberValue value={kpis.total_rows_read ?? 0} />}
-          detail={<DetailMetric label="runs" value={<CompactNumberValue value={report.summary.dataflow_records ?? 0} />} tone="neutral" />}
+          value={<ObservedNumberValue row={kpis} field="rows_read" totalField="total_rows_read" />}
+          detail={<MeasurementCoverage row={kpis} field="rows_read" />}
           intent="neutral"
           accent="source"
           className="volume-kpi volume-kpi-rows-read"
-          title="Universal workload signal. source_rows_read is collected for all dataflow runs."
+          title={`Total rows read in the current filters. Missing measurements remain unknown.\n${volumeKpiTooltip("Rows read", kpis, "rows_read", "total_rows_read")}`}
         />
         <HealthStripCard
-          label="Est rows written"
-          value={<CompactNumberValue value={kpis.total_est_rows_written ?? 0} />}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label="lakehouse obs" value={<CompactNumberValue value={kpis.total_rows_written ?? 0} />} tone="written" labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="non-lh est" value={<CompactNumberValue value={kpis.total_est_rows_written_non_lakehouse ?? 0} />} tone="written" labelFirst />
-            </span>
-          }
+          label="Rows written"
+          value={<ObservedNumberValue row={kpis} field="rows_written" totalField="total_rows_written" />}
+          detail={<MeasurementCoverage row={kpis} field="rows_written" />}
           intent="neutral"
           accent="destination"
-          className="volume-kpi volume-kpi-estimated-write"
-          title="Estimated rows written keeps destination_rows_written intact. Lakehouse destinations use observed destination_rows_written. Non-lakehouse succeeded runs estimate rows written from source_rows_read."
+          className="volume-kpi volume-kpi-written"
+          title={`Total recorded rows written in the current filters.\n${volumeKpiTooltip("Rows written", kpis, "rows_written", "total_rows_written")}\n${volumeKpiTooltip("Lakehouse rows written", kpis, "lakehouse_rows_written", "total_lakehouse_rows_written")}`}
         />
         <HealthStripCard
           label="Row changes"
           value={
-            <span className="volume-kpi-triple-value" aria-label="inserted / updated / deleted">
-              <b className="is-insert"><CompactNumberValue value={kpis.total_rows_inserted ?? 0} /></b>
-              <span>/</span>
-              <b className="is-update"><CompactNumberValue value={kpis.total_rows_updated ?? 0} /></b>
-              <span>/</span>
-              <b className="is-delete"><CompactNumberValue value={kpis.total_rows_deleted ?? 0} /></b>
+            <span className="monitor-observed-value">
+              <span className="volume-kpi-triple-value" aria-label="inserted / updated / deleted">
+                <Help as="b" className="is-insert" title={volumeKpiTooltip("Inserted", kpis, "rows_inserted", "total_rows_inserted")}><CompactNumberValue value={inserted.value} /></Help>
+                <span>/</span>
+                <Help as="b" className="is-update" title={volumeKpiTooltip("Updated", kpis, "rows_updated", "total_rows_updated")}><CompactNumberValue value={updated.value} /></Help>
+                <span>/</span>
+                <Help as="b" className="is-delete" title={volumeKpiTooltip("Deleted", kpis, "rows_deleted", "total_rows_deleted")}><CompactNumberValue value={deleted.value} /></Help>
+              </span>
+              {rowChangesPartial ? <span className="monitor-observed-label">observed</span> : null}
             </span>
           }
-          detail={<DetailMetric label="insert / update / delete" value="lakehouse" tone="neutral" />}
+          detail="insert / update / delete"
           intent="neutral"
           accent="destination"
           className="volume-kpi volume-kpi-row-changes"
-          title="Lakehouse destination row changes: inserted / updated / deleted. Non-lakehouse destinations do not collect these write-side metrics."
+          title={`Recorded destination row changes in the current filters. Coverage is separate for each metric across all filtered runs; missing does not establish destination applicability.\n${volumeKpiTooltip("Inserted", kpis, "rows_inserted", "total_rows_inserted")}\n${volumeKpiTooltip("Updated", kpis, "rows_updated", "total_rows_updated")}\n${volumeKpiTooltip("Deleted", kpis, "rows_deleted", "total_rows_deleted")}`}
         />
         <HealthStripCard
-          label="Lakehouse bytes"
-          value={formatBytes(netBytes)}
-          detail={
-            <span className="health-rate-detail">
-              <DetailMetric label="added" value={formatBytes(kpis.total_bytes_added ?? 0)} tone="good" labelFirst />
-              <span className="separator"> · </span>
-              <DetailMetric label="removed" value={formatBytes(kpis.total_bytes_removed ?? 0)} tone="bad" labelFirst />
-            </span>
-          }
+          label="Net bytes change"
+          value={<span className="monitor-observed-value">
+            <Help as="span" title={formatSignedBytes(net.value)} aria-label={formatSignedBytes(net.value)}>{metricNumber(net.value) > 0 ? "+" : ""}<CompactBytesValue value={net.value} /></Help>
+            {net.partial && net.value != null ? <span className="monitor-observed-label">observed</span> : null}
+          </span>}
+          detail={<MeasurementCoverage row={kpis} field="net_bytes_change" />}
           intent="neutral"
           accent="storage"
           className="volume-kpi volume-kpi-lakehouse-bytes"
-          title="Net lakehouse bytes = destination_bytes_added - destination_bytes_removed. Growth is context, not automatically a problem."
+          title={`Signed sum of added minus removed bytes on runs recording both values in the current filters. Growth or removal is storage context.\n${volumeKpiTooltip("Net bytes change", kpis, "net_bytes_change", "net_bytes_change", true)}\nIndependent observed totals below may cover different runs and need not subtract to the paired net value.\n${volumeKpiTooltip("Bytes added", kpis, "bytes_added", "total_bytes_added", true)}\n${volumeKpiTooltip("Bytes removed", kpis, "bytes_removed", "total_bytes_removed", true)}`}
         />
         <HealthStripCard
           label="Files changed"
           value={
-            <span className="volume-kpi-dual-value" aria-label="files added / files removed">
-              <b className="is-added"><CompactNumberValue value={kpis.files_added ?? 0} /></b>
-              <span>/</span>
-              <b className="is-removed"><CompactNumberValue value={kpis.files_removed ?? 0} /></b>
+            <span className="monitor-observed-value">
+              <span className="volume-kpi-dual-value" aria-label="files added / files removed">
+                <Help as="b" className="is-added" title={volumeKpiTooltip("Files added", kpis, "files_added")}><CompactNumberValue value={addedFiles.value} /></Help>
+                <span>/</span>
+                <Help as="b" className="is-removed" title={volumeKpiTooltip("Files removed", kpis, "files_removed")}><CompactNumberValue value={removedFiles.value} /></Help>
+              </span>
+              {filesPartial ? <span className="monitor-observed-label">observed</span> : null}
             </span>
           }
-          detail={<DetailMetric label="avg added file" value={formatBytes(kpis.avg_bytes_per_file_added ?? 0)} tone="neutral" />}
+          detail={<Help as="span" title={`${averageLabel}: ${formatTooltipBytes(average)}; ${averageCoverage.coverage ?? "Coverage unavailable"}. Sum of bytes / sum of files on the same paired runs.`}><DetailMetric label="avg added file" value={<span className="monitor-observed-value"><CompactBytesValue value={average} />{average != null && averageCoverage.partial ? <span className="monitor-observed-label">observed</span> : null}</span>} tone="neutral" /></Help>}
           intent="neutral"
           accent="neutral"
           className="volume-kpi volume-kpi-files-changed"
-          title="Lakehouse destination file churn: files added / files removed. Useful for spotting small-file or maintenance patterns."
+          title={`Recorded destination files added / removed in the current filters. Coverage is separate for each metric.\n${volumeKpiTooltip("Files added", kpis, "files_added")}\n${volumeKpiTooltip("Files removed", kpis, "files_removed")}\n${averageLabel}: ${formatTooltipBytes(average)}; ${averageCoverage.coverage ?? "Coverage unavailable"}. Sum of bytes / sum of files on paired runs; this is an average per file, not per run.`}
         />
         <HealthStripCard
-          label="High-volume candidates"
+          label="Dataflows with volume signals"
           value={<CompactNumberValue value={highVolumeCount} />}
-          detail={
-            <DetailMetric label="candidate runs" value={<CompactNumberValue value={candidateRunCount} />} tone="amber" labelFirst />
-          }
+          detail="P95 of dataflow totals"
           intent="neutral"
-          accent={highVolumeCount ? "warning" : "neutral"}
+          accent="neutral"
           className="volume-kpi volume-kpi-candidates"
-          title="Distinct dataflows matching a P95 aggregate workload rule in the current filters. Candidate runs remain available as drill-down evidence."
+          title={`Dataflows matching a P95 aggregate workload rule in the current filters: ${formatTooltipNumber(highVolumeCount)}. Large volume is context for investigation.\nRuns with volume signals: ${formatTooltipNumber(candidateRunCount)}, assessed using separate run-level P95 thresholds across the filtered runs. This is not the run count belonging to the dataflows above.`}
         />
       </section>
+  );
 
-      <div className="monitoring-volume-content report-layout-table-heavy-3">
+  const chartContent = (
+      <>
         <section className="monitoring-volume-primary-grid">
           <ReportPanel
             title="Workload volume trend"
-            titleTooltip="Rows read is universal. Estimated rows written uses observed lakehouse writes and estimates non-lakehouse succeeded writes from rows read. Lakehouse bytes added and removed provide storage context on the secondary axis."
+            titleTooltip="Rows read is universal. Rows written preserves the transported write metric. Lakehouse bytes added and removed provide storage context on the secondary axis; chart geometry is approximate for decimal-string metrics and hover tooltips show exact values."
             className="monitoring-volume-trend-panel"
             headerAction={<WorkloadVolumeTrendLegend />}
           >
@@ -150,7 +217,7 @@ export function VolumePage({
           </ReportPanel>
           <ReportPanel
             title="Lakehouse storage delta trend"
-            titleTooltip="Signed bars show net lakehouse byte movement by time bucket. Tooltips include added/removed bytes and files."
+            titleTooltip="Signed bars show net lakehouse byte movement by time bucket. Chart geometry is approximate for decimal-string metrics; tooltips include exact added/removed bytes and files."
             className="monitoring-volume-storage-trend-panel"
             headerAction={<StorageDeltaTrendLegend />}
           >
@@ -164,7 +231,7 @@ export function VolumePage({
         <section className="monitoring-volume-secondary-grid">
           <ReportPanel
             title="Workload mix"
-            titleTooltip="Groups non-maintenance dataflow runs by operation_type and destination load/operation type. Rows read and estimated rows written are grouped for comparison and are not stacked into one total."
+            titleTooltip="Groups non-maintenance dataflow runs by operation_type and destination load/operation type. Rows read and rows written are grouped for comparison and are not stacked into one total; chart geometry is approximate for decimal-string metrics and hover tooltips show exact values."
             className="monitoring-volume-workload-mix-panel"
             headerAction={<WorkloadMixLegend />}
           >
@@ -194,39 +261,38 @@ export function VolumePage({
           </ReportPanel>
         </section>
 
-        <ReportPanel
-          title="Dataflow volume registry"
-          subtitle={<><CompactNumberValue value={totalRows} /> dataflows · totals in current filters</>}
-          className="monitoring-volume-runs-panel"
-          titleTooltip="One row per dataflow in the current filters. Totals are aggregated across related runs; click a row to inspect volume evidence and individual runs."
-          headerAction={
-            <TablePager
-              limit={limit}
-              offset={offset}
-              loadedRows={registryRows.length}
-              totalRows={totalRows}
-              loading={loading}
-              onPageChange={onPageChange}
-              onPageSizeChange={onPageSizeChange}
-            />
-          }
-        >
-          <DataflowVolumeRegistryTable
-            rows={registryRows}
-            sort={sort}
-            onSort={onSort}
-            onInspect={onInspect}
-          />
-        </ReportPanel>
-      </div>
-    </div>
+      </>
   );
+  return part === "health" ? healthContent : chartContent;
+});
+
+function VolumeReportPlaceholder({ part, reportState }: { part: "health" | "charts"; reportState?: ReportState }) {
+  const error = reportState?.error;
+  if (part === "health") {
+    return <>
+      <section className="overview-health-strip monitoring-volume-health-strip monitoring-report-placeholder-strip" aria-busy={!error}>
+        {Array.from({ length: 6 }, (_, index) => <div className="monitoring-report-health-placeholder" key={index}><span>{error ? "Unavailable" : "Loading…"}</span></div>)}
+      </section>
+      {error ? <div className="monitoring-report-state is-error" role="alert"><span>Could not load volume report: {error}</span>{reportState?.retry ? <button type="button" onClick={reportState.retry}>Retry</button> : null}</div> : null}
+    </>;
+  }
+  const chartTitles = [
+    "Workload volume trend",
+    "Lakehouse storage delta trend",
+    "Workload mix",
+    "Source to destination volume",
+    "Top dataflows by workload"
+  ];
+  return <>
+    <section className="monitoring-volume-primary-grid">{chartTitles.slice(0, 2).map((title) => <ReportPanel key={title} title={title}><div className="monitoring-report-chart-placeholder" aria-hidden="true" /></ReportPanel>)}</section>
+    <section className="monitoring-volume-secondary-grid">{chartTitles.slice(2).map((title) => <ReportPanel key={title} title={title}><div className="monitoring-report-chart-placeholder" aria-hidden="true" /></ReportPanel>)}</section>
+  </>;
 }
 
 function WorkloadVolumeTrendLegend() {
   return <VolumeChartLegend label="Workload volume trend legend" items={[
     ["Rows read", reportChartPalette.read],
-    ["Est rows written", reportChartPalette.written],
+    ["Rows written", reportChartPalette.written],
     ["Bytes added", reportChartPalette.teal],
     ["Bytes removed", reportChartPalette.failed]
   ]} />;
@@ -243,7 +309,7 @@ function StorageDeltaTrendLegend() {
 function WorkloadMixLegend() {
   return <VolumeChartLegend label="Workload mix legend" items={[
     ["Rows read", reportChartPalette.read],
-    ["Est rows written", reportChartPalette.written]
+    ["Rows written", reportChartPalette.written]
   ]} />;
 }
 
@@ -260,77 +326,7 @@ function VolumeChartLegend({ label, items }: { label: string; items: ReadonlyArr
   );
 }
 
-function DataflowVolumeRegistryTable({
-  rows,
-  sort,
-  onSort,
-  onInspect
-}: {
-  rows: MonitoringRecord[];
-  sort?: TableSort;
-  onSort?: (sort: TableSort) => void;
-  onInspect?: (row: MonitoringRecord) => void;
-}) {
-  return (
-    <DataTable<MonitoringRecord>
-      rows={rows}
-      compactNumbers
-      columns={[
-        { key: "dataflow_name", label: "Dataflow", sortable: true, minWidth: 150, fillPriority: "normal", render: (row) => <DataflowNameCell row={row} /> },
-        { key: "context", label: "Context", sortable: true, sortKey: "stage", minWidth: 108, maxWidth: 150, fillPriority: "normal", render: (row) => <DataflowContextCell row={row} /> },
-        { key: "source", label: "Source", minWidth: 142, maxWidth: 220, fillPriority: "normal", render: (row) => <EndpointCell row={row} direction="source" /> },
-        { key: "destination", label: "Destination", minWidth: 142, maxWidth: 220, fillPriority: "normal", render: (row) => <EndpointCell row={row} direction="destination" /> },
-        { key: "run_count", label: "Runs", sortable: true, autoFit: true, minWidth: 54, maxWidth: 82, render: (row) => <CompactNumberValue value={num(row, "run_count")} /> },
-        { key: "volume_rows_read", label: "Rows read", sortable: true, autoFit: true, minWidth: 82, maxWidth: 124, render: (row) => <CompactNumberValue value={num(row, "volume_rows_read")} /> },
-        { key: "volume_est_rows_written", label: "Est rows written", sortable: true, autoFit: true, minWidth: 104, maxWidth: 148, render: (row) => <CompactNumberValue value={num(row, "volume_est_rows_written")} /> },
-        { key: "volume_rows_inserted", label: "Row changes", sortable: true, minWidth: 118, maxWidth: 154, render: (row) => <VolumeRowChangesCell row={row} /> },
-        { key: "volume_files_changed", label: "Files", sortable: true, autoFit: true, minWidth: 82, maxWidth: 112, render: (row) => <VolumeFilesCell row={row} /> },
-        { key: "volume_net_bytes", label: "Net bytes", sortable: true, autoFit: true, minWidth: 86, maxWidth: 124, render: (row) => <CompactValue value={formatBytes(num(row, "volume_net_bytes"))} /> },
-        { key: "volume_candidate_reason", label: "Volume signal", minWidth: 124, fillPriority: "last", render: (row) => <VolumeReasonCell row={row} /> }
-      ]}
-      maxRows={rows.length}
-      sort={sort}
-      onSort={onSort}
-      onRowClick={onInspect}
-      className="monitoring-volume-table"
-      fixedLayout
-    />
-  );
-}
-
-function VolumeRowChangesCell({ row }: { row: MonitoringRecord }) {
-  const inserted = num(row, "volume_rows_inserted");
-  const updated = num(row, "volume_rows_updated");
-  const deleted = num(row, "volume_rows_deleted");
-  const title = `Inserted / updated / deleted: ${formatNumber(inserted)} / ${formatNumber(updated)} / ${formatNumber(deleted)}`;
-  return (
-      <span className="volume-row-changes-inline" title={title}>
-      <span className="is-insert"><CompactNumberValue value={inserted} /></span><i>/</i>
-      <span className="is-update"><CompactNumberValue value={updated} /></span><i>/</i>
-      <span className="is-delete"><CompactNumberValue value={deleted} /></span>
-    </span>
-  );
-}
-
-function VolumeFilesCell({ row }: { row: MonitoringRecord }) {
-  const added = num(row, "volume_files_added");
-  const removed = num(row, "volume_files_removed");
-  const title = `Files added / removed: ${formatNumber(added)} / ${formatNumber(removed)}`;
-  return (
-      <span className="volume-files-changed-inline" title={title}>
-      <span className="is-added"><CompactNumberValue value={added} /></span><i>/</i>
-      <span className="is-removed"><CompactNumberValue value={removed} /></span>
-    </span>
-  );
-}
-
-function VolumeReasonCell({ row }: { row: MonitoringRecord }) {
-  const reason = String(row.volume_candidate_reason ?? "");
-  if (!reason) return <span className="performance-reason" title="No high-volume rule matched.">-</span>;
-  return <span className="performance-reason performance-reason-warning" title={reason}>{reason}</span>;
-}
-
-function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
+export function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number | null>> }) {
   const visible = rows.filter(hasVolumeRouteSignal);
   if (!visible.length) return <div className="table-empty">No route volume signals in current filters.</div>;
   return (
@@ -338,72 +334,57 @@ function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number
       {visible.map((row, index) => {
         const source = routeEndpoint(row, "source");
         const destination = routeEndpoint(row, "destination");
-        const rowsRead = num(row, "rows_read");
-        const estRowsWritten = num(row, "est_rows_written");
-        const rowsWritten = num(row, "rows_written");
+        const readObservation = rowObservation(row, "rows_read");
+        const writeObservation = rowObservation(row, "rows_written");
+        const rowsWrittenValue = writeObservation.value;
+        const lakehouseRowsWrittenValue = metricValue(row, "lakehouse_rows_written");
+        const bytesAddedValue = metricValue(row, "bytes_added");
+        const bytesRemovedValue = metricValue(row, "bytes_removed");
+        const filesAddedValue = metricValue(row, "files_added");
+        const filesRemovedValue = metricValue(row, "files_removed");
+        const hasWrittenRows = rowsWrittenValue != null;
         const bytesAdded = num(row, "bytes_added");
         const bytesRemoved = num(row, "bytes_removed");
-        const filesChanged = num(row, "files_added") + num(row, "files_removed");
-        const netBytes = bytesAdded - bytesRemoved;
+        const filesChangedValue = metricSum(filesAddedValue, filesRemovedValue);
+        const filesChanged = toApproximateNumber(filesChangedValue) ?? 0;
+        const totalStorageBytesValue = metricSum(bytesAddedValue, bytesRemovedValue);
+        const netBytes = metricDifference(bytesAddedValue, bytesRemovedValue);
         const hasStorageBytes = bytesAdded > 0 || bytesRemoved > 0;
-        const destinationTone = estRowsWritten > 0
-          ? "estimate"
-          : rowsWritten > 0
+        const destinationTone = hasWrittenRows
             ? "observed"
             : hasStorageBytes
               ? "bytes"
               : filesChanged > 0
                 ? "files"
                 : "neutral";
-        const destinationValue = estRowsWritten > 0
-          ? formatCompactNumber(estRowsWritten)
-          : rowsWritten > 0
-            ? formatCompactNumber(rowsWritten)
+        const destinationValue = hasWrittenRows
+            ? formatCompact(rowsWrittenValue)
             : hasStorageBytes
-              ? formatBytesShort(bytesAdded + bytesRemoved)
+              ? formatBytesShort(totalStorageBytesValue)
               : filesChanged > 0
-                ? formatCompactNumber(filesChanged)
+                ? formatCompact(filesChangedValue)
                 : "—";
-        const destinationExactValue = estRowsWritten > 0
-          ? formatNumber(estRowsWritten)
-          : rowsWritten > 0
-            ? formatNumber(rowsWritten)
-            : hasStorageBytes
-              ? formatBytes(bytesAdded + bytesRemoved)
-              : filesChanged > 0
-                ? formatNumber(filesChanged)
-                : "—";
-        const destinationLabel = estRowsWritten > 0
-          ? "Est rows written"
-          : rowsWritten > 0
-            ? "LH rows written"
-            : hasStorageBytes
-              ? "Bytes changed"
-              : filesChanged > 0
-                ? "Files changed"
-                : "No destination volume";
-        const destinationTitle = [
-          `${destinationLabel}: ${destinationExactValue}`,
-          estRowsWritten > 0 && rowsWritten > 0 ? `Observed lakehouse rows written: ${formatNumber(rowsWritten)}` : "",
-          hasStorageBytes ? `Net bytes: ${formatSignedBytes(netBytes)}` : "",
-          filesChanged > 0 ? `Files changed: ${formatNumber(filesChanged)}` : ""
-        ].filter(Boolean).join(" · ");
-        const storageContext = netBytes === 0 ? formatBytes(0) : `Δ ${formatSignedBytes(netBytes)}`;
+        const storageContext = netBytes === null ? "-" : `Δ ${formatSignedBytesShort(netBytes)}`;
+        const routeMetrics = [
+          { label: "Runs", value: formatNumber(metricValue(row, "runs")) },
+          { label: "Skipped", value: formatNumber(metricValue(row, "skipped")) },
+          ...(readObservation.value == null ? [] : [{ label: "Rows read", value: formatNumber(readObservation.value), valueColor: reportChartPalette.read }]),
+          ...(rowsWrittenValue == null ? [] : [{ label: "Rows written", value: formatNumber(rowsWrittenValue), valueColor: reportChartPalette.written }]),
+          ...(lakehouseRowsWrittenValue == null ? [] : [{ label: "Lakehouse rows written", value: formatNumber(lakehouseRowsWrittenValue), valueColor: reportChartPalette.written }]),
+          ...(bytesAddedValue == null ? [] : [{ label: "Bytes added", value: formatTooltipBytes(bytesAddedValue), valueColor: reportChartPalette.teal }]),
+          ...(bytesRemovedValue == null ? [] : [{ label: "Bytes removed", value: formatTooltipBytes(bytesRemovedValue), valueColor: reportChartPalette.failed }]),
+          ...(filesAddedValue == null && filesRemovedValue == null ? [] : [{ label: "Files added / removed", value: `${formatNumber(filesAddedValue)} / ${formatNumber(filesRemovedValue)}`, valueColor: reportChartPalette.blue }]),
+          ...(netBytes == null ? [] : [{ label: "Net bytes", value: formatSignedBytes(netBytes), valueColor: metricNumber(netBytes) >= 0 ? reportChartPalette.teal : reportChartPalette.failed }]),
+        ];
         return (
-          <div
+          <Help as="div"
             key={`${source.connection}-${destination.connection}-${index}`}
             className="dataflow-signal-row dataflow-endpoint-route-row"
-            title={[
-              `Source connection: ${source.connection}`,
-              `Destination connection: ${destination.connection}`,
-              `Runs: ${formatNumber(num(row, "runs"))}`,
-              `Skipped: ${formatNumber(num(row, "skipped"))}`,
-              `Rows read: ${formatNumber(rowsRead)}`,
-              `Estimated rows written: ${formatNumber(estRowsWritten)}`,
-              `Observed lakehouse rows written: ${formatNumber(rowsWritten)}`,
-              `Lakehouse bytes added / removed: ${formatBytes(bytesAdded)} / ${formatBytes(bytesRemoved)}`,
-              `Lakehouse files added / removed: ${formatNumber(num(row, "files_added"))} / ${formatNumber(num(row, "files_removed"))}`
-            ].join("\n")}
+            content={{
+              title: "Route volume",
+              context: `${source.connection} → ${destination.connection}`,
+              metrics: routeMetrics,
+            }}
           >
             <div className="dataflow-route-flow">
               <div className="dataflow-route-line">
@@ -413,25 +394,38 @@ function VolumeRoutePanel({ rows }: { rows: Array<Record<string, string | number
               </div>
             </div>
             <div className="dataflow-route-health">
-              <strong className="volume-route-read-value" title={`Rows read: ${formatNumber(rowsRead)}`}><CompactNumberValue value={rowsRead} /></strong>
-              <small title={`Rows read: ${formatNumber(rowsRead)} · Runs: ${formatNumber(num(row, "runs"))}`}><CompactNumberValue value={num(row, "runs")} /> runs</small>
+              <strong className="volume-route-read-value"><CompactNumberValue value={readObservation.value} /></strong>
+              <small><CompactNumberValue value={metricValue(row, "runs")} /> runs</small>
             </div>
             <div className="dataflow-route-volume">
-              <strong className={`volume-route-destination-value volume-route-value-${destinationTone}`} title={destinationTitle}>{destinationValue}</strong>
-              <small title={destinationTitle} className="volume-route-context">{storageContext}</small>
+              <strong className={`volume-route-destination-value volume-route-value-${destinationTone}`}>{hasWrittenRows ? <CompactNumberValue value={rowsWrittenValue} /> : destinationValue}</strong>
+              <small className="volume-route-context">{storageContext}</small>
             </div>
-          </div>
+          </Help>
         );
       })}
     </div>
   );
 }
 
+function metricSum(left: MetricValue, right: MetricValue): MetricValue {
+  if (left === null || left === undefined || right === null || right === undefined) return null;
+  if (typeof left === "string" && /^-?\d+$/u.test(left.trim()) && typeof right === "string" && /^-?\d+$/u.test(right.trim())) {
+    return (BigInt(left) + BigInt(right)).toString();
+  }
+  if (typeof left === "number" && Number.isSafeInteger(left) && typeof right === "number" && Number.isSafeInteger(right)) {
+    return (BigInt(left) + BigInt(right)).toString();
+  }
+  const leftNumber = toApproximateNumber(left);
+  const rightNumber = toApproximateNumber(right);
+  return leftNumber === null || rightNumber === null ? null : leftNumber + rightNumber;
+}
+
 function hasVolumeRouteSignal(row: Record<string, string | number | null>) {
   return (
-    num(row, "rows_read") > 0 ||
-    num(row, "est_rows_written") > 0 ||
-    num(row, "rows_written") > 0 ||
+    (toApproximateNumber(rowObservation(row, "rows_read").value) ?? 0) > 0 ||
+    (toApproximateNumber(rowObservation(row, "rows_written").value) ?? 0) > 0 ||
+    num(row, "lakehouse_rows_written") > 0 ||
     num(row, "bytes_added") > 0 ||
     num(row, "bytes_removed") > 0 ||
     num(row, "files_added") > 0 ||
@@ -439,39 +433,55 @@ function hasVolumeRouteSignal(row: Record<string, string | number | null>) {
   );
 }
 
-function formatSignedBytes(value: number) {
-  const formatted = formatBytes(value);
-  return value > 0 ? `+${formatted}` : formatted;
+function formatSignedBytes(value: MetricValue) {
+  const formatted = formatTooltipBytes(value);
+  if (formatted === "-") return formatted;
+  const text = String(value);
+  return /^-?0(?:\.0*)?$/u.test(text) || text.startsWith("-") ? formatted : `+${formatted}`;
+}
+
+function formatSignedBytesShort(value: MetricValue) {
+  const formatted = formatBytesShort(value);
+  if (formatted === "-") return formatted;
+  return metricNumber(value) > 0 ? `+${formatted}` : formatted;
 }
 
 function routeEndpoint(row: Record<string, unknown>, direction: "source" | "destination") {
-  const connection = String(row[`${direction}_name`] ?? "unknown");
-  const format = String(row[`${direction}_format`] ?? row[`${direction}_connection_type`] ?? "");
-  const connectionType = String(row[`${direction}_connection_type`] ?? "unknown");
+  const connection = monitoringDimensionLabel(row[`${direction}_name`]);
+  const format = monitoringDimensionLabel(row[`${direction}_format`] ?? row[`${direction}_connection_type`]);
+  const connectionType = monitoringDimensionLabel(row[`${direction}_connection_type`]);
   return { locator: connection, connection, format, connectionType };
 }
 
-function storageDeltaTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string, showLegend = true): EChartsOption {
+export function storageDeltaTrendOption(report: MonitoringReport, filters: MonitoringFilters, timezoneName: string, showLegend = true): EChartsOption {
   const visible = volumeTrendRows(report, filters, timezoneName);
   if (!visible.length) return emptyChartOption("No lakehouse storage delta in current filters.");
-  const netByteValues = visible.map((row) => num(row, "net_bytes"));
-  const fileChangeValues = visible.map((row) => num(row, "files_added") + num(row, "files_removed"));
-  const axisBounds = alignedVolumeAxisBounds(netByteValues, fileChangeValues);
+  const netByteValues = visible.map((row) => toApproximateNumber(metricValue(row, "net_bytes")));
+  const fileChangeValues = visible.map((row) => {
+    const added = toApproximateNumber(metricValue(row, "files_added"));
+    const removed = toApproximateNumber(metricValue(row, "files_removed"));
+    return added === null || removed === null ? null : added + removed;
+  });
+  const axisBounds = alignedVolumeAxisBounds(
+    netByteValues.filter((value): value is number => value !== null),
+    fileChangeValues.filter((value): value is number => value !== null),
+  );
   return baseChartOption({
     tooltip: {
       trigger: "axis",
-      formatter: (params: any) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const row = visible[Number(first?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${row.bucket || row.date || ""}</strong>`,
-          timezoneName ? `Timezone: ${timezoneName}` : "",
-          `Net bytes: ${formatBytes(num(row, "net_bytes"))}`,
-          `Bytes added: ${formatBytes(num(row, "bytes_added"))}`,
-          `Bytes removed: ${formatBytes(num(row, "bytes_removed"))}`,
-          `Files added / removed: ${formatNumber(row.files_added)} / ${formatNumber(row.files_removed)}`
-        ].filter(Boolean).join("<br/>");
-      }
+      formatter: chartTooltip((params) => {
+        const row = visible[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+        return {
+          title: String(row.bucket || row.date || ""),
+          context: timezoneName ? `Timezone: ${timezoneName}` : undefined,
+          metrics: [
+            { ...chartMetric("Net bytes", formatTooltipBytes(metricValue(row, "net_bytes"))), valueColor: row.net_bytes == null ? undefined : metricNumber(row.net_bytes) >= 0 ? reportChartPalette.teal : reportChartPalette.failed },
+            { ...chartMetric("Bytes added", formatTooltipBytes(metricValue(row, "bytes_added"))), valueColor: row.bytes_added != null ? reportChartPalette.teal : undefined },
+            { ...chartMetric("Bytes removed", formatTooltipBytes(metricValue(row, "bytes_removed"))), valueColor: row.bytes_removed != null ? reportChartPalette.failed : undefined },
+            { ...chartMetric("Files added / removed", `${formatNumber(metricValue(row, "files_added"))} / ${formatNumber(metricValue(row, "files_removed"))}`), valueColor: row.files_added != null || row.files_removed != null ? reportChartPalette.blue : undefined },
+          ]
+        };
+      })
     },
     legend: showLegend ? { top: 0, left: "center", itemWidth: 9, itemHeight: 9, textStyle: { fontSize: 10 } } : { show: false },
     grid: reportChartGrid({ left: 42, right: 38, top: showLegend ? 28 : 5, containLabel: false }),
@@ -490,31 +500,33 @@ function storageDeltaTrendOption(report: MonitoringReport, filters: MonitoringFi
         },
         data: netByteValues
       },
-      lineSeries("Files changed", fileChangeValues, reportChartPalette.blue, 1)
+      { ...lineSeries("Files changed", fileChangeValues, reportChartPalette.blue, 1), showSymbol: fileChangeValues.filter((value) => value !== null).length === 1 }
     ]
   });
 }
 
-function workloadMixOption(rows: Array<Record<string, string | number | null>>, showLegend = true): EChartsOption {
+export function workloadMixOption(rows: Array<Record<string, string | number | null>>, showLegend = true): EChartsOption {
   const visible = rows
     .filter((row) => !isMaintenanceWorkload(row))
     .slice()
-    .sort((left, right) => num(right, "rows_read") - num(left, "rows_read"));
+    .sort((left, right) => (toApproximateNumber(rowObservation(right, "rows_read").value) ?? 0) - (toApproximateNumber(rowObservation(left, "rows_read").value) ?? 0));
   if (!visible.length) return emptyChartOption("No workload mix in current filters.");
-  const labels = visible.map((row) => String(row.workload_type ?? row.load_type ?? "unknown"));
+  const labels = visible.map((row) => monitoringDimensionLabel(row.workload_type ?? row.load_type));
   const dataZoom = horizontalBarDataZoom(visible.length);
   return baseChartOption({
     tooltip: {
       trigger: "item",
-      formatter: (params: any) => {
-        const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${labels[Number(params?.dataIndex ?? 0)] ?? "unknown"}</strong>`,
-          `Runs: ${formatNumber(num(row, "runs") || num(row, "count"))}`,
-          `Rows read: ${formatNumber(num(row, "rows_read"))}`,
-          `Estimated rows written: ${formatNumber(num(row, "est_rows_written"))}`
-        ].join("<br/>");
-      }
+      formatter: chartTooltip((params) => {
+        const row = visible[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+        return {
+          title: labels[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? "unknown",
+          metrics: [
+            chartMetric("Runs", formatNumber(metricValue(row, "runs") ?? metricValue(row, "count"))),
+            chartObservationMetric("Rows read", row, "rows_read", reportChartPalette.read),
+            chartObservationMetric("Rows written", row, "rows_written", reportChartPalette.written),
+          ]
+        };
+      })
     },
     legend: showLegend ? { top: 0, left: "center", itemWidth: 9, itemHeight: 9, textStyle: { fontSize: 10 } } : { show: false },
     grid: reportChartGrid({ left: 110, right: dataZoom ? 24 : 10, top: showLegend ? 28 : 8, containLabel: false }),
@@ -528,8 +540,8 @@ function workloadMixOption(rows: Array<Record<string, string | number | null>>, 
     },
     dataZoom,
     series: [
-      { name: "Rows read", type: "bar", barGap: "20%", itemStyle: { color: reportChartPalette.read, borderRadius: 2 }, data: visible.map((row) => num(row, "rows_read")) },
-      { name: "Est rows written", type: "bar", itemStyle: { color: reportChartPalette.written, borderRadius: 2 }, data: visible.map((row) => num(row, "est_rows_written")) }
+      { name: "Rows read", type: "bar", barGap: "20%", itemStyle: { color: reportChartPalette.read, borderRadius: 2 }, data: visible.map((row) => plotMetric(rowObservation(row, "rows_read").value)) },
+      { name: "Rows written", type: "bar", itemStyle: { color: reportChartPalette.written, borderRadius: 2 }, data: visible.map((row) => plotMetric(rowObservation(row, "rows_written").value)) }
     ]
   });
 }
@@ -539,7 +551,7 @@ function isMaintenanceWorkload(row: Record<string, string | number | null>) {
   return workloadType.includes("maintenance");
 }
 
-function topDataflowsByWorkloadOption(rows: Array<Record<string, string | number | null>>): EChartsOption {
+export function topDataflowsByWorkloadOption(rows: Array<Record<string, string | number | null>>): EChartsOption {
   const visible = rows.slice().sort((left, right) => num(right, "value") - num(left, "value"));
   if (!visible.length) return emptyChartOption("No top dataflow workload in current filters.");
   const labels = visible.map((row) => String(row.name ?? row.dataflow_id ?? "unknown"));
@@ -547,15 +559,17 @@ function topDataflowsByWorkloadOption(rows: Array<Record<string, string | number
   return baseChartOption({
     tooltip: {
       trigger: "item",
-      formatter: (params: any) => {
-        const row = visible[Number(params?.dataIndex ?? 0)] ?? {};
-        return [
-          `<strong>${row.name ?? "unknown"}</strong>`,
-          `Dataflow id: ${row.dataflow_id ?? "-"}`,
-          `Rows read: ${formatNumber(num(row, "value"))}`,
-          `Runs: ${formatNumber(num(row, "count"))}`
-        ].join("<br/>");
-      }
+      formatter: chartTooltip((params) => {
+        const row = visible[Number(firstChartParam(params)?.dataIndex ?? 0)] ?? {};
+        return {
+          title: String(row.name ?? "unknown"),
+          context: `Dataflow ID: ${String(row.dataflow_id ?? "-")}`,
+          metrics: [
+            { ...chartMetric("Rows read", formatNumber(metricValue(row, "value"))), valueColor: reportChartPalette.read },
+            chartMetric("Runs", formatNumber(metricValue(row, "count"))),
+          ]
+        };
+      })
     },
     grid: reportChartGrid({ left: 138, right: dataZoom ? 24 : 10, top: 8, containLabel: false }),
     xAxis: bottomAnchoredValueXAxis({ formatter: (value) => formatCompact(value) }),
@@ -583,7 +597,7 @@ function topDataflowsByWorkloadOption(rows: Array<Record<string, string | number
             return value > 0 ? formatCompact(value) : "";
           }
         },
-        data: visible.map((row) => num(row, "value"))
+        data: visible.map((row) => plotMetric(metricValue(row, "value")))
       }
     ]
   });
@@ -600,22 +614,23 @@ function volumeTrendRows(report: MonitoringReport, filters: MonitoringFilters, t
     : merged;
   return visible.map((row) => ({
     ...row,
-    est_rows_written: num(row, "est_rows_written"),
-    rows_inserted: num(row, "rows_inserted"),
-    rows_updated: num(row, "rows_updated"),
-    rows_deleted: num(row, "rows_deleted"),
-    files_added: num(row, "files_added"),
-    files_removed: num(row, "files_removed"),
-    net_bytes: num(row, "net_bytes") || num(row, "bytes_added") - num(row, "bytes_removed")
+    rows_written: metricValue(row, "rows_written"),
+    lakehouse_rows_written: metricValue(row, "lakehouse_rows_written"),
+    rows_inserted: metricValue(row, "rows_inserted"),
+    rows_updated: metricValue(row, "rows_updated"),
+    rows_deleted: metricValue(row, "rows_deleted"),
+    files_added: metricValue(row, "files_added"),
+    files_removed: metricValue(row, "files_removed"),
+    net_bytes: metricValue(row, "net_bytes") ?? metricDifference(metricValue(row, "bytes_added"), metricValue(row, "bytes_removed"))
   }));
 }
 
-function lineSeries(name: string, data: number[], color: string, yAxisIndex = 0) {
+function lineSeries(name: string, data: Array<number | null>, color: string, yAxisIndex = 0) {
   return {
     name,
     type: "line" as const,
     yAxisIndex,
-    connectNulls: true,
+    connectNulls: false,
     showSymbol: false,
     showAllSymbol: false,
     symbol: "circle",
@@ -627,6 +642,10 @@ function lineSeries(name: string, data: number[], color: string, yAxisIndex = 0)
     itemStyle: { color: "#ffffff", borderColor: color, borderWidth: 1.3 },
     data
   };
+}
+
+function plotMetric(value: MetricValue) {
+  return value === null || value === undefined || value === "" ? null : toApproximateNumber(value);
 }
 
 function emptyChartOption(text: string): EChartsOption {

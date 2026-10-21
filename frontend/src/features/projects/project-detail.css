@@ -134,7 +134,7 @@
 }
 
 
-/* Project setup workspace: metadata is required; log paths are optional context. */
+/* Project setup workspace: metadata is required; log base paths are optional context. */
 .project-detail-summary {
   display: flex;
   flex-wrap: wrap;

@@ -1,9 +1,20 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 
-import type { LogSyncRequest, SourceDeleteImpact, SourceImportResponse, SourceReadCheckResult, SourceSyncStatus, StorageBinding } from "../../shared/api/domainTypes";
+import type { QueryClient } from "@tanstack/react-query";
+import type { StorageBinding } from "../../shared/api/domainTypes";
+import type {
+  LogSyncRequest,
+  SourceDeleteImpact,
+  SourceImportResponse,
+  SourceReadCheckResult,
+  SourceSyncStatus,
+} from "../../shared/api/contractTypes";
 import { api } from "../../shared/api/client";
+import { environmentQueryKeys } from "../environments/environmentQueries";
+import type { EnvironmentSourcesData } from "./environmentSourcesResource";
 import { toErrorMessage } from "../../shared/lib/errors";
 import { sourceKey, type SourceKind } from "../../shared/lib/sources";
+import type { DatacoolieProjectSourceImportInput, DatacoolieProjectSourceImportRequest } from "../../shared/api/contractTypes";
 import type { ModuleKey } from "../../app/moduleRegistry";
 import {
   beginSourceOperations,
@@ -14,13 +25,116 @@ import {
   type SourceOperations,
 } from "./sourceWorkspaceModel";
 
+type SourceUpdatePayload = Parameters<typeof api.updateMetadataSource>[2];
+
+type SourceOperationAdapter = {
+  update: (environmentId: number, sourceId: number, payload: SourceUpdatePayload) => Promise<unknown>;
+  remove: (environmentId: number, sourceId: number) => Promise<void>;
+  deleteImpact: (environmentId: number, sourceId: number) => Promise<SourceDeleteImpact>;
+  validate: (environmentId: number, sourceId: number) => Promise<SourceReadCheckResult>;
+  refresh: (
+    environmentId: number,
+    sourceId: number,
+    logSyncRequest?: LogSyncRequest,
+  ) => Promise<SourceSyncStatus>;
+  retry: (environmentId: number, sourceId: number) => Promise<SourceSyncStatus>;
+};
+
+const sourceOperationAdapters: Record<SourceKind, SourceOperationAdapter> = {
+  metadata: {
+    update: (environmentId, sourceId, payload) =>
+      api.updateMetadataSource(environmentId, sourceId, payload),
+    remove: (environmentId, sourceId) => api.deleteMetadataSource(environmentId, sourceId),
+    deleteImpact: (environmentId, sourceId) =>
+      api.getMetadataSourceDeleteImpact(environmentId, sourceId),
+    validate: (environmentId, sourceId) => api.validateMetadataSource(environmentId, sourceId),
+    refresh: (environmentId, sourceId) => api.refreshMetadataSource(environmentId, sourceId),
+    retry: (environmentId, sourceId) =>
+      api.retryMetadataSourceObservation(environmentId, sourceId),
+  },
+  sql: {
+    update: (environmentId, sourceId, payload) =>
+      api.updateSqlSource(environmentId, sourceId, payload),
+    remove: (environmentId, sourceId) => api.deleteSqlSource(environmentId, sourceId),
+    deleteImpact: (environmentId, sourceId) =>
+      api.getSqlSourceDeleteImpact(environmentId, sourceId),
+    validate: (environmentId, sourceId) => api.validateSqlSource(environmentId, sourceId),
+    refresh: (environmentId, sourceId) => api.refreshSqlSource(environmentId, sourceId),
+    retry: (environmentId, sourceId) =>
+      api.retrySqlSourceObservation(environmentId, sourceId),
+  },
+  logs: {
+    update: (environmentId, sourceId, payload) =>
+      api.updateLogSource(environmentId, sourceId, payload),
+    remove: (environmentId, sourceId) => api.deleteLogSource(environmentId, sourceId),
+    deleteImpact: (environmentId, sourceId) =>
+      api.getLogSourceDeleteImpact(environmentId, sourceId),
+    validate: (environmentId, sourceId) => api.validateLogSource(environmentId, sourceId),
+    refresh: (environmentId, sourceId, logSyncRequest) =>
+      api.refreshLogSource(environmentId, sourceId, logSyncRequest ?? { mode: "incremental" }),
+    retry: (environmentId, sourceId) =>
+      api.retryLogSourceObservation(environmentId, sourceId),
+  },
+  code: {
+    update: (environmentId, sourceId, payload) =>
+      api.updateCodeArtifact(environmentId, sourceId, payload),
+    remove: (environmentId, sourceId) => api.deleteCodeArtifact(environmentId, sourceId),
+    deleteImpact: (environmentId, sourceId) =>
+      api.getCodeArtifactDeleteImpact(environmentId, sourceId),
+    validate: (environmentId, sourceId) => api.validateCodeArtifact(environmentId, sourceId),
+    refresh: (environmentId, sourceId) => api.refreshCodeArtifact(environmentId, sourceId),
+    retry: (environmentId, sourceId) =>
+      api.retryCodeArtifactObservation(environmentId, sourceId),
+  },
+};
+
+function sourceSyncFailureStatus(
+  sourceId: number,
+  sourceKind: SourceKind,
+  message: string,
+): SourceSyncStatus {
+  const now = new Date().toISOString();
+  const error = { message };
+  return {
+    source_id: sourceId,
+    source_kind: sourceKind,
+    status: "error",
+    message,
+    validation: {
+      state: "not_validated",
+      completed_at: null,
+      summary: null,
+      error: null,
+    },
+    observation: {
+      state: "error",
+      checked_at: now,
+      pending_changes: null,
+      next_check_at: null,
+      failure_count: 0,
+      error,
+    },
+    sync_execution: {
+      state: "failed",
+      trigger: "manual",
+      job_id: null,
+      started_at: now,
+      completed_at: now,
+      last_successful_at: null,
+      summary: message,
+      error,
+      result: { status: "error", message, error },
+    },
+  };
+}
+
 type SourceMutationContext = {
   environmentId: number | null;
   module: ModuleKey;
   activeEnvironmentIdRef: MutableRefObject<number | null>;
+  queryClient: QueryClient;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
-  setSourceSyncStatuses: Dispatch<SetStateAction<Record<string, SourceSyncStatus>>>;
   setSourceOperations: Dispatch<SetStateAction<SourceOperations>>;
   invalidateProjectSummaries: () => void;
   refreshEnvironment: (environmentId: number, module: ModuleKey, options: { forceHeader: boolean; forceModule: boolean }) => Promise<void>;
@@ -31,14 +145,29 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     environmentId,
     module,
     activeEnvironmentIdRef,
+    queryClient,
     setBusy,
     setError,
-    setSourceSyncStatuses,
     setSourceOperations,
     invalidateProjectSummaries,
     refreshEnvironment,
   } = context;
   const route = { environmentId, module };
+
+  function setSourceStatus(environmentId: number, status: SourceSyncStatus) {
+    queryClient.setQueryData<EnvironmentSourcesData>(
+      environmentQueryKeys.sources(environmentId),
+      (current) => current
+        ? {
+            ...current,
+            statuses: {
+              ...current.statuses,
+              [sourceKey(status.source_kind as SourceKind, status.source_id)]: status,
+            },
+          }
+        : current,
+    );
+  }
 
   async function refreshEnvironmentAfterHeaderMutation(
     targetEnvironmentId = route.environmentId,
@@ -80,22 +209,35 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
   }
 
-  async function importDatacoolieProjectSources(payload: {
-    project_uri: string;
-    metadata_subpath?: string;
-    code_subpath?: string;
-    code_discovery_mode?: "auto" | "explicit";
-    metadata_uri?: string | null;
-    code_uri?: string | null;
-    include_metadata?: boolean;
-    include_code?: boolean;
-    storage?: StorageBinding;
-  }): Promise<SourceImportResponse | null> {
+  async function addSqlSource(uri: string, label?: string, storage?: StorageBinding) {
+    if (!route.environmentId) throw new Error("Select an environment before adding an SQL source");
+    setBusy(true);
+    setError(null);
+    try {
+      await api.addSqlSource(route.environmentId, { uri, label, enabled: true, storage });
+      invalidateProjectSummaries();
+      await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
+    } catch (err) {
+      setError(toErrorMessage(err));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importDatacoolieProjectSources(
+    payload: DatacoolieProjectSourceImportInput,
+  ): Promise<SourceImportResponse | null> {
     if (!route.environmentId) return null;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.importDatacoolieProjectSources(route.environmentId, { ...payload, enabled: true });
+      const requestPayload: DatacoolieProjectSourceImportRequest = {
+        ...payload,
+        code_discovery_mode: payload.code_discovery_mode ?? "auto",
+        enabled: payload.enabled ?? true,
+      };
+      const result = await api.importDatacoolieProjectSources(route.environmentId, requestPayload);
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(route.environmentId, "sources");
       return result;
@@ -107,7 +249,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     }
   }
 
-  async function addLogPath(uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) {
+  async function addLogBasePath(uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) {
     if (!route.environmentId) throw new Error("Select an environment before adding a log source");
     setBusy(true);
     setError(null);
@@ -157,13 +299,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     setBusy(true);
     setError(null);
     try {
-      if (kind === "metadata") {
-        await api.updateMetadataSource(environmentId, id, payload);
-      } else if (kind === "logs") {
-        await api.updateLogSource(environmentId, id, payload);
-      } else {
-        await api.updateCodeArtifact(environmentId, id, payload);
-      }
+      await sourceOperationAdapters[kind].update(environmentId, id, payload);
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
     } catch (err) {
@@ -182,13 +318,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     );
     setError(null);
     try {
-      if (kind === "metadata") {
-        await api.deleteMetadataSource(environmentId, id);
-      } else if (kind === "logs") {
-        await api.deleteLogSource(environmentId, id);
-      } else {
-        await api.deleteCodeArtifact(environmentId, id);
-      }
+      await sourceOperationAdapters[kind].remove(environmentId, id);
       invalidateProjectSummaries();
       await refreshEnvironmentAfterHeaderMutation(environmentId, route.module);
     } catch (err) {
@@ -205,7 +335,15 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     if (!environmentId) {
       const message = "Select an environment before validating a source";
       setError(message);
-      return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
+      return {
+        source_id: id,
+        source_kind: kind,
+        status: "error",
+        message,
+        record_counts: {},
+        records_scanned: 0,
+        errors: [{ message }],
+      };
     }
     const entry = { kind, id };
     setSourceOperations((current) =>
@@ -213,12 +351,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     );
     setError(null);
     try {
-      const result =
-        kind === "metadata"
-          ? await api.validateMetadataSource(environmentId, id)
-          : kind === "logs"
-            ? await api.validateLogSource(environmentId, id)
-            : await api.validateCodeArtifact(environmentId, id);
+      const result = await sourceOperationAdapters[kind].validate(environmentId, id);
       await refreshEnvironment(environmentId, "sources", { forceHeader: true, forceModule: true });
       if (result.status === "error" && activeEnvironmentIdRef.current === environmentId) {
         setError(result.message || "Source validation failed");
@@ -227,7 +360,15 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     } catch (err) {
       const message = toErrorMessage(err);
       setError(message);
-      return { source_id: id, source_kind: kind, status: "error", message, errors: [{ message }] };
+      return {
+        source_id: id,
+        source_kind: kind,
+        status: "error",
+        message,
+        record_counts: {},
+        records_scanned: 0,
+        errors: [{ message }],
+      };
     } finally {
       setSourceOperations((current) =>
         finishSourceOperations(current, environmentId, [entry])
@@ -240,17 +381,7 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     if (!environmentId) {
       const message = "Select an environment before syncing a source";
       setError(message);
-      return {
-        source_id: id,
-        source_kind: kind,
-        status: "error",
-        message,
-        error: { message },
-        checked_at: new Date().toISOString(),
-        observation_state: "active",
-        observation_failure_count: 0,
-        latest_job: null
-      };
+      return sourceSyncFailureStatus(id, kind, message);
     }
     const entry = { kind, id };
     setSourceOperations((current) =>
@@ -258,33 +389,22 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     );
     setError(null);
     try {
-      const result =
-        kind === "metadata"
-          ? await api.refreshMetadataSource(environmentId, id)
-          : kind === "logs"
-            ? await api.refreshLogSource(environmentId, id, logSyncRequest ?? { mode: "incremental" })
-            : await api.refreshCodeArtifact(environmentId, id);
+      const result = await sourceOperationAdapters[kind].refresh(
+        environmentId,
+        id,
+        logSyncRequest,
+      );
       if (activeEnvironmentIdRef.current === environmentId) {
-        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
+        setSourceStatus(environmentId, result);
         await refreshEnvironment(environmentId, route.module, { forceHeader: true, forceModule: true });
       }
       return result;
     } catch (err) {
       const message = toErrorMessage(err);
       if (activeEnvironmentIdRef.current === environmentId) setError(message);
-      const result: SourceSyncStatus = {
-        source_id: id,
-        source_kind: kind,
-        status: "error",
-        message,
-        error: { message },
-        checked_at: new Date().toISOString(),
-        observation_state: "active",
-        observation_failure_count: 0,
-        latest_job: null
-      };
+      const result = sourceSyncFailureStatus(id, kind, message);
       if (activeEnvironmentIdRef.current === environmentId) {
-        setSourceSyncStatuses((current) => ({ ...current, [sourceKey(kind, id)]: result }));
+        setSourceStatus(environmentId, result);
       }
       return result;
     } finally {
@@ -305,17 +425,9 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
     );
     setError(null);
     try {
-      const result =
-        kind === "metadata"
-          ? await api.retryMetadataSourceObservation(environmentId, id)
-          : kind === "logs"
-            ? await api.retryLogSourceObservation(environmentId, id)
-            : await api.retryCodeArtifactObservation(environmentId, id);
+      const result = await sourceOperationAdapters[kind].retry(environmentId, id);
       if (activeEnvironmentIdRef.current === environmentId) {
-        setSourceSyncStatuses((current) => ({
-          ...current,
-          [sourceKey(kind, id)]: result,
-        }));
+        setSourceStatus(environmentId, result);
         await refreshEnvironment(
           environmentId,
           "sources",
@@ -361,24 +473,18 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
       for (const entry of uniqueEntries) {
         try {
           if (action === "delete") {
-            if (entry.kind === "metadata") await api.deleteMetadataSource(environmentId, entry.id);
-            else if (entry.kind === "logs") await api.deleteLogSource(environmentId, entry.id);
-            else await api.deleteCodeArtifact(environmentId, entry.id);
+            await sourceOperationAdapters[entry.kind].remove(environmentId, entry.id);
             result.succeeded += 1;
             continue;
           }
 
           const operationResult = action === "validate"
-            ? entry.kind === "metadata"
-              ? await api.validateMetadataSource(environmentId, entry.id)
-              : entry.kind === "logs"
-                ? await api.validateLogSource(environmentId, entry.id)
-                : await api.validateCodeArtifact(environmentId, entry.id)
-            : entry.kind === "metadata"
-              ? await api.refreshMetadataSource(environmentId, entry.id)
-              : entry.kind === "logs"
-                ? await api.refreshLogSource(environmentId, entry.id, logSyncRequest ?? { mode: "incremental" })
-                : await api.refreshCodeArtifact(environmentId, entry.id);
+            ? await sourceOperationAdapters[entry.kind].validate(environmentId, entry.id)
+            : await sourceOperationAdapters[entry.kind].refresh(
+                environmentId,
+                entry.id,
+                logSyncRequest,
+              );
 
           if (operationResult.status === "error") {
             result.failed += 1;
@@ -410,16 +516,15 @@ export function createEnvironmentSourceMutations(context: SourceMutationContext)
   async function getSourceDeleteImpact(kind: SourceKind, id: number): Promise<SourceDeleteImpact> {
     const environmentId = route.environmentId;
     if (!environmentId) throw new Error("Select an environment before viewing source delete impact");
-    if (kind === "metadata") return api.getMetadataSourceDeleteImpact(environmentId, id);
-    if (kind === "logs") return api.getLogSourceDeleteImpact(environmentId, id);
-    return api.getCodeArtifactDeleteImpact(environmentId, id);
+    return sourceOperationAdapters[kind].deleteImpact(environmentId, id);
   }
 
   return {
     addMetadataSource,
     importMetadataSources,
+    addSqlSource,
     importDatacoolieProjectSources,
-    addLogPath,
+    addLogBasePath,
     addCodeArtifact,
     updateSource,
     deleteSource,

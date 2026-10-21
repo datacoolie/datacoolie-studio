@@ -80,9 +80,9 @@ describe("Assets query ownership", () => {
     await queryClient.ensureQueryData(assetReferencesOptions(7, { resolution_state: "unresolved" }));
 
     expect(inventoryRequest).toHaveBeenCalledTimes(1);
-    expect(inventoryRequest).toHaveBeenCalledWith(7, { q: "orders" });
+    expect(inventoryRequest).toHaveBeenCalledWith(7, { q: "orders" }, expect.any(AbortSignal));
     expect(referenceRequest).toHaveBeenCalledTimes(1);
-    expect(referenceRequest).toHaveBeenCalledWith(7, { resolution_state: "unresolved" });
+    expect(referenceRequest).toHaveBeenCalledWith(7, { resolution_state: "unresolved" }, expect.any(AbortSignal));
   });
 
   it("deduplicates asset and reference detail reads without sharing their cache entries", async () => {
@@ -106,7 +106,7 @@ describe("Assets query ownership", () => {
 
     await expect(queryClient.ensureQueryData(assetSourceOptions(7, "asset-1"))).resolves.toEqual(assetSource.definition);
 
-    expect(sourceRequest).toHaveBeenCalledWith(7, "asset-1");
+    expect(sourceRequest).toHaveBeenCalledWith(7, "asset-1", expect.any(AbortSignal));
     expect(detailRequest).not.toHaveBeenCalled();
   });
 

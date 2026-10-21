@@ -14,7 +14,7 @@ from datacoolie_studio.db.models import (
     SourceObservation,
     SyncJob,
 )
-from datacoolie_studio.db.session import (
+from datacoolie_studio.db.legacy_operations import (
     _ensure_source_observation_pause_column,
     _ensure_sync_job_running_index,
 )
@@ -42,6 +42,7 @@ from datacoolie_studio.domains.sync.service import (
 from datacoolie_studio.domains.sources.initialization import (
     queue_source_initializations,
 )
+from datacoolie_studio.domains.sources import application as source_application
 from datacoolie_studio.domains.studio_settings.service import (
     update_studio_settings,
 )
@@ -75,8 +76,8 @@ def test_queued_initialization_exposes_persisted_operation_phase():
 
         validating = source_sync_status(session, source)
         assert validating["status"] == "running"
-        assert validating["active_operation"] == "validate"
-        assert validating["latest_job"]["id"] == job_id
+        assert validating["validation"]["state"] == "validating"
+        assert validating["sync_execution"]["state"] == "never"
 
         job = session.get(SyncJob, job_id)
         assert job is not None
@@ -86,7 +87,9 @@ def test_queued_initialization_exposes_persisted_operation_phase():
 
         syncing = source_sync_status(session, source)
         assert syncing["status"] == "running"
-        assert syncing["active_operation"] == "sync"
+        assert syncing["validation"]["state"] == "not_validated"
+        assert syncing["sync_execution"]["state"] == "running"
+        assert syncing["sync_execution"]["job_id"] == job_id
     finally:
         session.close()
 
@@ -98,9 +101,9 @@ def test_metadata_initialization_starts_as_sync_without_validation_phase():
 
         status = source_sync_status(session, source)
         assert status["status"] == "running"
-        assert status["active_operation"] == "sync"
-        assert status["latest_job"]["id"] == job_id
-        assert status["latest_job"]["message"] == "Waiting to sync discovered source"
+        assert status["sync_execution"]["state"] == "running"
+        assert status["sync_execution"]["job_id"] == job_id
+        assert status["sync_execution"]["summary"] == "Waiting to sync discovered source"
     finally:
         session.close()
 
@@ -485,7 +488,7 @@ def test_disabling_preserves_pause_and_reenabling_resumes():
         state.next_observation_at = None
         session.commit()
 
-        workspace.update_metadata_source(
+        source_application.update_metadata_source(
             session,
             source.environment_id,
             source.id,
@@ -497,7 +500,7 @@ def test_disabling_preserves_pause_and_reenabling_resumes():
             is not None
         )
 
-        workspace.update_metadata_source(
+        source_application.update_metadata_source(
             session,
             source.environment_id,
             source.id,
@@ -565,8 +568,9 @@ def test_environment_local_observation_does_not_touch_cloud_sources(tmp_path):
         assert result["observed"] == 1
         assert result["changed"] == 1
         assert result["failed"] == 0
-        assert source_sync_status(session, source)["last_observed_at"] is not None
-        assert source_sync_status(session, source)["next_check_at"] is None
+        status = source_sync_status(session, source)
+        assert status["observation"]["checked_at"] is not None
+        assert status["observation"]["next_check_at"] is None
         cloud_state = session.get(SourceObservation, cloud.id)
         assert cloud_state is not None
         assert cloud_state.last_attempted_at is None
@@ -629,7 +633,7 @@ def test_sources_workspace_query_count_is_constant_with_source_count():
         many_source_queries = select_count()
 
         assert one_source_queries == many_source_queries
-        assert many_source_queries <= 6
+        assert many_source_queries <= 7  # One bulk admission-summary query for all Log sources.
     finally:
         session.close()
 

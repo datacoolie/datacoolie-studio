@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any
-from datacoolie_studio.domains.monitoring.metrics.common_projections import (
-    _dataflow_id,
-    _status,
-    _sum,
-    _time_value,
+from datacoolie_studio.domains.monitoring.metrics.row_normalization import dataflow_id as _dataflow_id
+from datacoolie_studio.domains.monitoring.metrics.aggregates import (
+    status as _status,
+    sum_observed as _sum,
 )
+from datacoolie_studio.domains.monitoring.metrics.time_buckets import time_value as _time_value
 
 
-def _maintenance_upstream_dataflows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _maintenance_upstream_dataflows(
+    rows: list[dict[str, Any]], *, version_mode: str = "v6"
+) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         key = _dataflow_id(row) or str(row.get("dataflow_name") or "unknown")
@@ -49,7 +51,7 @@ def _maintenance_upstream_dataflows(rows: list[dict[str, Any]]) -> list[dict[str
                 "latest_status": _status(latest),
                 "latest_time": latest.get("end_time") or latest.get("start_time"),
                 "run_count": len(items),
-                "rows_read": _sum(items, "source_rows_read"),
+                "rows_read": _sum(items, "source_rows_read", mode=version_mode),
             }
         )
     return sorted(result, key=lambda item: str(item["dataflow_name"]))

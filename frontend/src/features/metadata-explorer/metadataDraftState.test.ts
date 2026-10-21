@@ -48,6 +48,20 @@ describe("metadataDraftState", () => {
       hasStoredDraft: true
     });
   });
+
+  it("keeps a SQL-only draft publishable after it has been saved", () => {
+    const source = document();
+    const draft = {
+      ...source,
+      sql_files: [{ source_id: 1, query: "orders.sql", content: "select 1" }]
+    };
+
+    expect(metadataDraftState(source, draft, draft)).toEqual({
+      hasLocalChanges: false,
+      hasSourceChanges: true,
+      hasStoredDraft: true
+    });
+  });
 });
 
 describe("metadataServerUpdateConflicts", () => {

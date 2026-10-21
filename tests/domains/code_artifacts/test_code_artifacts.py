@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -726,7 +725,8 @@ def test_remote_project_discovery_includes_package_root_and_nested_archives():
         def open_read(self, uri: str):
             import io
 
-            assert uri == f"{project}/pyproject.toml"
+            if uri != f"{project}/pyproject.toml":
+                raise FileNotFoundError(uri)
             return io.BytesIO(
                 b"[project]\nname = 'distribution-name'\n\n[tool.setuptools.package-dir]\n'' = 'src'\n"
             )
@@ -855,8 +855,8 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
 
         refreshed = client.post(f"/api/v1/environments/{environment['id']}/code-artifacts/{artifact['id']}/refresh").json()
         assert refreshed["status"] == "ok"
-        assert refreshed["revision"]["artifact_type"] == "directory"
-        assert refreshed["revision"]["python_files"] == 2
+        assert refreshed["sync_execution"]["result"]["revision"]["artifact_type"] == "directory"
+        assert refreshed["sync_execution"]["result"]["revision"]["python_files"] == 2
 
         listed = client.get(f"/api/v1/environments/{environment['id']}/code-artifacts").json()
         assert listed[0]["latest_validation"]["status"] == "ok"
@@ -904,5 +904,3 @@ def test_code_artifact_api_lifecycle(tmp_path: Path, monkeypatch):
             assert connection.execute("select count(*) from code_artifact_materializations").fetchone()[0] == 0
             assert connection.execute("select count(*) from source_observations").fetchone()[0] == 0
             assert connection.execute("select count(*) from sync_jobs").fetchone()[0] == 0
-
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

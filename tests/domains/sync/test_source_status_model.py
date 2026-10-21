@@ -14,7 +14,7 @@ from datacoolie_studio.db.models import (
     SourceObservation,
     SyncJob,
 )
-from datacoolie_studio.db.session import _backfill_last_successful_sync_at
+from datacoolie_studio.db.legacy_operations import _backfill_last_successful_sync_at
 from datacoolie_studio.domains.freshness.service import source_freshness_statuses
 from datacoolie_studio.domains.sync.service import (
     finish_sync_job,
@@ -151,6 +151,15 @@ def test_status_contract_keeps_validation_check_and_sync_independent():
 
         status = source_sync_status(session, source)
 
+        assert set(status) == {
+            "source_id",
+            "source_kind",
+            "status",
+            "message",
+            "validation",
+            "observation",
+            "sync_execution",
+        }
         assert status["validation"]["state"] == "ready"
         assert status["validation"]["completed_at"] == checked_at
         assert status["observation"]["state"] == "changed"
@@ -195,6 +204,28 @@ def test_freshness_uses_last_successful_sync_instead_of_observation_time():
         items, _ = source_freshness_statuses(session, [source])
 
         assert items[source.id]["cache_synced_at"] == synced_at
+    finally:
+        session.close()
+
+
+def test_sql_freshness_uses_readability_validation_without_a_materialization_cache():
+    session, source = _status_session()
+    checked_at = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    try:
+        source.source_kind = "sql"
+        source.read_check_status = "ok"
+        source.read_checked_at = checked_at
+        source.read_check_result_json = json.dumps(
+            {"status": "ok", "message": "SQL source is readable"}
+        )
+        session.commit()
+
+        items, _ = source_freshness_statuses(session, [source])
+
+        assert items[source.id]["status"] == "current"
+        assert items[source.id]["message"] == "SQL source is readable"
+        assert items[source.id]["cache_revision"] is None
+        assert items[source.id]["cache_synced_at"] == checked_at
     finally:
         session.close()
 

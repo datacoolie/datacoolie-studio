@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datacoolie_studio.domains.analytics.record_codec import root_column_types
+
 import duckdb
 
 from datacoolie_studio.domains.analytics.serving_facts import (
     monitoring_serving_schema_is_ready,
 )
+from datacoolie_studio.domains.analytics.sql import quote_identifier
 
 
 STUDIO_CACHE_COLUMNS = {
@@ -18,10 +21,19 @@ STUDIO_CACHE_COLUMNS = {
 }
 GENERATED_CACHE_COLUMNS = {"__event_time", "__run_date"}
 IGNORED_DATAFLOW_SOURCE_COLUMNS = {"transform_missing_column_policy"}
+# Historical callers use this tuple as the minimum monitoring contract. Empty
+# caches now provision the complete typed dataflow schema so every read model
+# can query a job-only or system-only source without a BinderException.
+DATAFLOW_REQUIRED_COLUMNS = ("status", "__event_time", "__run_date")
 
-DATAFLOW_COLUMN_TYPES = {
+HISTORICAL_DATAFLOW_COLUMN_TYPES = {
+    "log_schema_version": "BIGINT",
     "_type": "VARCHAR",
+    "datacoolie_version": "VARCHAR",
+    "log_session_id": "VARCHAR",
     "job_id": "VARCHAR",
+    "job_num": "BIGINT",
+    "job_index": "BIGINT",
     "dataflow_id": "VARCHAR",
     "workspace_id": "VARCHAR",
     "dataflow_name": "VARCHAR",
@@ -79,28 +91,30 @@ DATAFLOW_COLUMN_TYPES = {
     "end_time": "TIMESTAMPTZ",
     "duration_seconds": "DOUBLE",
     "status": "VARCHAR",
+    "message": "VARCHAR",
+    "message_truncated": "BOOLEAN",
     "error_message": "VARCHAR",
     "retry_attempts": "BIGINT",
     "source_start_time": "TIMESTAMPTZ",
     "source_end_time": "TIMESTAMPTZ",
     "source_duration_seconds": "DOUBLE",
     "source_status": "VARCHAR",
+    "source_message": "VARCHAR",
     "source_error_message": "VARCHAR",
     "source_rows_read": "BIGINT",
     "source_action": "VARCHAR",
-    "source_watermark_before": "VARCHAR",
-    "source_watermark_after": "VARCHAR",
-    "source_watermark_effective": "VARCHAR",
     "transform_start_time": "TIMESTAMPTZ",
     "transform_end_time": "TIMESTAMPTZ",
     "transform_duration_seconds": "DOUBLE",
     "transform_status": "VARCHAR",
+    "transform_message": "VARCHAR",
     "transform_error_message": "VARCHAR",
     "transformers_applied": "VARCHAR",
     "destination_start_time": "TIMESTAMPTZ",
     "destination_end_time": "TIMESTAMPTZ",
     "destination_duration_seconds": "DOUBLE",
     "destination_status": "VARCHAR",
+    "destination_message": "VARCHAR",
     "destination_error_message": "VARCHAR",
     "destination_operation_type": "VARCHAR",
     "destination_rows_written": "BIGINT",
@@ -114,12 +128,16 @@ DATAFLOW_COLUMN_TYPES = {
     "destination_bytes_saved": "BIGINT",
     "destination_operation_details": "VARCHAR",
     "overhead_duration_seconds": "DOUBLE",
+    "observed_at": "TIMESTAMPTZ",
     "__event_time": "TIMESTAMPTZ",
     "__run_date": "DATE",
 }
 
-JOB_COLUMN_TYPES = {
+HISTORICAL_JOB_COLUMN_TYPES = {
+    "log_schema_version": "BIGINT",
     "_type": "VARCHAR",
+    "datacoolie_version": "VARCHAR",
+    "log_session_id": "VARCHAR",
     "job_id": "VARCHAR",
     "workspace_id": "VARCHAR",
     "job_index": "BIGINT",
@@ -128,11 +146,15 @@ JOB_COLUMN_TYPES = {
     "engine_name": "VARCHAR",
     "metadata_provider_name": "VARCHAR",
     "watermark_manager_name": "VARCHAR",
+    "run_attributes": "VARCHAR",
     "start_time": "VARCHAR",
     "end_time": "VARCHAR",
     "duration_seconds": "DOUBLE",
     "status": "VARCHAR",
+    "message": "VARCHAR",
+    "message_truncated": "BOOLEAN",
     "error_message": "VARCHAR",
+    "observed_at": "TIMESTAMPTZ",
     "dry_run": "BOOLEAN",
     "stop_on_error": "BOOLEAN",
     "max_workers": "BIGINT",
@@ -156,9 +178,49 @@ JOB_COLUMN_TYPES = {
     "total_bytes_added": "BIGINT",
     "total_bytes_removed": "BIGINT",
     "operation_types": "VARCHAR",
+    "log_records_dropped": "BIGINT",
+    "log_bytes_dropped": "BIGINT",
+    "error_message_truncated": "BOOLEAN",
     "__event_time": "TIMESTAMPTZ",
     "__run_date": "DATE",
 }
+
+# Presence is part of the raw contract.  DuckDB's typed NULL cannot distinguish
+# an omitted JSON key from an explicit null, but canonical message precedence
+# requires that distinction when falling back to historical error fields.
+PRESENCE_COLUMN_TYPES = {
+    f"{field}_present": "BOOLEAN"
+    for field in (
+        "message",
+        "source_message",
+        "transform_message",
+        "destination_message",
+        "message_truncated",
+        "error_message",
+        "source_error_message",
+        "transform_error_message",
+        "destination_error_message",
+        "datacoolie_version",
+        "observed_at",
+    )
+}
+# Historical schema15 maps are used only by source-artifact audits and benchmark
+# fixtures. Schema16 persistence is owned by the exhaustive root mapping below.
+for _column in list(HISTORICAL_DATAFLOW_COLUMN_TYPES):
+    if _column in {"source_rows_read"} or _column.startswith(("destination_rows_", "destination_bytes_", "destination_files_")):
+        HISTORICAL_DATAFLOW_COLUMN_TYPES[_column] = "BIGNUM"
+for _column in list(HISTORICAL_JOB_COLUMN_TYPES):
+    if _column.startswith("total_") or _column in {"log_records_dropped", "log_bytes_dropped"}:
+        HISTORICAL_JOB_COLUMN_TYPES[_column] = "BIGNUM"
+HISTORICAL_DATAFLOW_COLUMN_TYPES.update({"raw_record_json": "VARCHAR", "_record_line": "BIGINT"})
+HISTORICAL_JOB_COLUMN_TYPES.update({"raw_record_json": "VARCHAR", "_record_line": "BIGINT"})
+HISTORICAL_DATAFLOW_COLUMN_TYPES = {**HISTORICAL_DATAFLOW_COLUMN_TYPES, **PRESENCE_COLUMN_TYPES}
+HISTORICAL_JOB_COLUMN_TYPES = {**HISTORICAL_JOB_COLUMN_TYPES, **PRESENCE_COLUMN_TYPES}
+
+
+
+DATAFLOW_COLUMN_TYPES = {**root_column_types("dataflow_run_log"), "_record_line": "BIGINT", "__event_time": "TIMESTAMPTZ", "__run_date": "DATE"}
+JOB_COLUMN_TYPES = {**root_column_types("job_run_log"), "_record_line": "BIGINT", "__event_time": "TIMESTAMPTZ", "__run_date": "DATE"}
 
 
 DATAFLOW_TABLE = "etl_dataflow_runs"
@@ -166,7 +228,7 @@ JOB_TABLE = "etl_job_runs"
 FILTER_VALUES_TABLE = "etl_monitoring_filter_values"
 CACHE_SOURCES_TABLE = "etl_cache_sources"
 ANALYTICS_META_TABLE = "etl_analytics_meta"
-ANALYTICS_SCHEMA_VERSION = 10
+ANALYTICS_SCHEMA_VERSION = 18
 LEGACY_DATAFLOW_TABLE = "etl_dataflow_run_cache"
 LEGACY_JOB_TABLE = "etl_job_run_cache"
 
@@ -222,8 +284,8 @@ def table_column_types(conn, table_name: str) -> dict[str, str]:
 
 
 def duckdb_type_matches(actual_type: str, expected_type: str) -> bool:
-    actual = actual_type.upper()
-    expected = expected_type.upper()
+    actual = " ".join(actual_type.replace(chr(34), "").upper().split())
+    expected = " ".join(expected_type.replace(chr(34), "").upper().split())
     if expected == "TIMESTAMPTZ":
         return actual in {"TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"}
     return actual == expected or actual.startswith(f"{expected}(")
@@ -241,7 +303,6 @@ def ensure_filter_values_table(conn) -> None:
         )
         """
     )
-
 
 def ensure_cache_sources_table(conn) -> None:
     conn.execute(
@@ -271,6 +332,10 @@ def ensure_analytics_meta_table(conn) -> None:
         )
         """
     )
+    existing_columns = table_columns(conn, ANALYTICS_META_TABLE)
+    for name in ("contract_fingerprint", "contract_json"):
+        if name not in existing_columns:
+            conn.execute(f"ALTER TABLE {ANALYTICS_META_TABLE} ADD COLUMN {name} VARCHAR")
     if conn.execute(f"SELECT COUNT(*) FROM {ANALYTICS_META_TABLE}").fetchone()[0] == 0:
         conn.execute(
             f"""
@@ -280,6 +345,24 @@ def ensure_analytics_meta_table(conn) -> None:
             """,
             [ANALYTICS_SCHEMA_VERSION],
         )
+        write_contract_metadata(conn)
+
+
+def write_contract_metadata(conn) -> None:
+    import json
+    from datacoolie_studio.domains.analytics.schema_compiler import contract_fingerprint, mapping_document
+    conn.execute(
+        f"UPDATE {ANALYTICS_META_TABLE} SET contract_fingerprint = ?, contract_json = ? WHERE singleton_id = 1",
+        [contract_fingerprint(), json.dumps(mapping_document(), sort_keys=True)],
+    )
+
+
+def contract_metadata_is_current(conn) -> bool:
+    from datacoolie_studio.domains.analytics.schema_compiler import contract_fingerprint
+    if "contract_fingerprint" not in table_columns(conn, ANALYTICS_META_TABLE):
+        return False
+    rows = conn.execute(f"SELECT contract_fingerprint FROM {ANALYTICS_META_TABLE} WHERE singleton_id = 1").fetchall()
+    return rows == [(contract_fingerprint(),)]
 
 
 def expected_column_order(
@@ -297,26 +380,12 @@ def expected_column_order(
     return [*source_columns, *extra_source_columns, *studio_columns]
 
 
-def actual_source_column_types(conn, table_name: str) -> dict[str, str]:
-    actual_types = table_column_types(conn, table_name)
-    return {
-        column: actual_types[column]
-        for column in table_columns(conn, table_name)
-        if column not in STUDIO_CACHE_COLUMNS and column in actual_types
-    }
 
 
 def has_legacy_raw_json_column(columns: list[str]) -> bool:
-    return "_raw_json" in columns
+    return bool({"_raw_json", "raw_record_json"}.intersection(columns))
 
 
-def has_column_order_mismatch(
-    conn,
-    table_name: str,
-    column_types: dict[str, str],
-) -> bool:
-    columns = table_columns(conn, table_name)
-    return bool(columns) and columns != expected_column_order(columns, column_types)
 
 
 def has_incompatible_column_types(
@@ -340,31 +409,13 @@ def typed_table_schema_is_current(
     column_types: dict[str, str],
 ) -> bool:
     columns = table_columns(conn, table_name)
-    if table_name == DATAFLOW_TABLE:
-        actual_source_types = actual_source_column_types(conn, table_name)
-        return (
-            bool(columns)
-            and "_source_id" in columns
-            and not IGNORED_DATAFLOW_SOURCE_COLUMNS.intersection(columns)
-            and not has_legacy_raw_json_column(columns)
-            and not has_incompatible_column_types(
-                conn,
-                table_name,
-                DATAFLOW_COLUMN_TYPES,
-            )
-            and not has_column_order_mismatch(
-                conn,
-                table_name,
-                actual_source_types,
-            )
-        )
     return (
-        bool(columns)
-        and "_source_id" in columns
-        and set(column_types).issubset(columns)
-        and not has_legacy_raw_json_column(columns)
-        and not has_incompatible_column_types(conn, table_name, column_types)
-        and not has_column_order_mismatch(conn, table_name, column_types)
+        conn.execute(
+            "SELECT table_type FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchall() == [("BASE TABLE",)]
+        and set(columns) == set(cache_table_column_types(column_types))
+        and not has_incompatible_column_types(conn, table_name, cache_table_column_types(column_types))
     )
 
 
@@ -389,12 +440,21 @@ def has_empty_generated_job_columns(conn) -> bool:
 
 
 def typed_cache_schema_is_ready(conn) -> bool:
+    """Return whether the cache has the structural typed tables.
+
+    Upgrade and publication builders use this predicate while a candidate is
+    still being assembled. Public readers must additionally require the
+    singleton publication metadata to identify the current, ready generation;
+    see :func:`analytics_publication_is_ready`.
+    """
+
     return (
         table_exists(conn, DATAFLOW_TABLE)
         and table_exists(conn, JOB_TABLE)
         and table_exists(conn, FILTER_VALUES_TABLE)
         and table_exists(conn, CACHE_SOURCES_TABLE)
         and table_exists(conn, ANALYTICS_META_TABLE)
+        and contract_metadata_is_current(conn)
         and "generation" in table_columns(conn, CACHE_SOURCES_TABLE)
         and typed_table_schema_is_current(
             conn,
@@ -409,5 +469,27 @@ def typed_cache_schema_is_ready(conn) -> bool:
     )
 
 
-def quote_identifier(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
+def analytics_publication_is_ready(conn) -> bool:
+    """Return whether the structurally valid cache is the public generation.
+
+    A cache with current columns can still be a partial candidate or carry an
+    old contract version. Keep that state visible to upgrade/build owners while
+    preventing ``cache_is_ready`` from exposing it to public readers.
+    """
+
+    if not table_exists(conn, ANALYTICS_META_TABLE):
+        return False
+    try:
+        row = conn.execute(
+            f"SELECT schema_version, build_state FROM {ANALYTICS_META_TABLE} "
+            "WHERE singleton_id = 1"
+        ).fetchone()
+    except duckdb.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        version = int(row[0])
+    except (TypeError, ValueError):
+        return False
+    return version == ANALYTICS_SCHEMA_VERSION and str(row[1]) == "ready"

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EmptyState } from "../../shared/components/EmptyState";
 import { OperationNotification } from "../../shared/components/OperationNotification";
@@ -6,7 +6,7 @@ import { ApiRequestError } from "../../shared/lib/errors";
 import { api } from "../../shared/api/client";
 import { useNotificationCenter } from "../../shared/notifications/NotificationCenter";
 import { monitoringFilterOptionsOptions, monitoringReportOptions } from "./monitoringQueries";
-import { filtersFromSearch, type MonitoringTabKey, writeFiltersToSearch } from "./monitoringFilters";
+import { filtersFromSearch, filtersToSearch, type MonitoringTabKey } from "./monitoringFilters";
 import { preloadMonitoringPage } from "./monitoringPageModules";
 
 const MonitoringView = lazy(() => import("./MonitoringView").then((module) => ({ default: module.MonitoringView })));
@@ -16,17 +16,34 @@ export function MonitoringRoute({
   activePage,
   onPageChange,
   onOpenSources,
+  routeSearch,
+  onSearchChange,
+  timezoneName,
+  timezoneRevision,
+  identityRevision,
+  timezoneLoading = false,
+  timezoneError = null,
 }: {
   environmentId: number;
   activePage: MonitoringTabKey;
   onPageChange: (page: MonitoringTabKey) => void;
   onOpenSources: () => void;
+  routeSearch?: string;
+  onSearchChange: (search: string) => void;
+  timezoneName?: string | null;
+  timezoneRevision?: string | null;
+  /** Metadata catalog revision fences destination identity fallback reads. */
+  identityRevision?: string | null;
+  timezoneLoading?: boolean;
+  timezoneError?: string | null;
 }) {
   const { publish } = useNotificationCenter();
-  const [filters, setFilters] = useState(() => filtersFromSearch(window.location.search));
-  const reportQuery = useQuery(monitoringReportOptions(environmentId, activePage, filters));
-  const filterOptionsQuery = useQuery(monitoringFilterOptionsOptions(environmentId));
+  const filters = useMemo(() => filtersFromSearch(routeSearch ?? ""), [routeSearch]);
+  const timezoneScope = JSON.stringify([timezoneName ?? null, timezoneRevision ?? null]);
+  const reportQuery = useQuery({ ...monitoringReportOptions(environmentId, activePage, filters, timezoneScope, identityRevision), enabled: !timezoneLoading });
+  const filterOptionsQuery = useQuery(monitoringFilterOptionsOptions(environmentId, filters));
   const [noticeDismissed, setNoticeDismissed] = useState(false);
+  const [registryRefreshVersion, setRegistryRefreshVersion] = useState(0);
   const reportError = reportQuery.error;
   const rebuildRequired = reportError instanceof ApiRequestError
     && reportError.code === "analytics_rebuild_required";
@@ -68,10 +85,6 @@ export function MonitoringRoute({
   }, [activePage, environmentId, publish, rebuildNotice, rebuildReason]);
 
   useEffect(() => {
-    writeFiltersToSearch(filters);
-  }, [filters]);
-
-  useEffect(() => {
     void preloadMonitoringPage(activePage).catch(() => undefined);
   }, [activePage]);
 
@@ -81,11 +94,12 @@ export function MonitoringRoute({
       void refetchReport();
     }, 2_000);
     return () => window.clearTimeout(timer);
-  }, [refetchReport, upgradeInProgress]);
+  }, [refetchReport, upgradeInProgress, reportQuery.errorUpdatedAt]);
 
   const retryUpgrade = async () => {
     await api.retryAnalyticsUpgrade();
     await reportQuery.refetch();
+    setRegistryRefreshVersion(value => value + 1);
   };
 
   return (
@@ -102,16 +116,23 @@ export function MonitoringRoute({
         activePage={activePage}
         onPageChange={onPageChange}
         filters={filters}
-        onFiltersChange={setFilters}
+        timezoneName={timezoneName}
+        timezoneScope={timezoneScope}
+        identityRevision={identityRevision}
+        timezoneLoading={timezoneLoading}
+        timezoneError={timezoneError}
+        onFiltersChange={next => onSearchChange(filtersToSearch(next, routeSearch))}
         reportData={reportQuery.data ?? null}
         reportLoading={reportQuery.isFetching}
         reportError={reportError instanceof Error ? reportError.message : reportError ? String(reportError) : null}
         reportErrorCode={rebuildRequired ? reportError.code ?? null : null}
         reportErrorReason={rebuildReason || null}
-        onRetryReport={() => void reportQuery.refetch()}
+        registryRefreshVersion={registryRefreshVersion}
+        onRetryReport={() => { setRegistryRefreshVersion(value => value + 1); void reportQuery.refetch(); }}
         onRetryUpgrade={() => void retryUpgrade().catch(() => undefined)}
         onOpenSources={onOpenSources}
-        filterOptions={filterOptionsQuery.data ?? null}
+        filterOptions={filterOptionsQuery.isError ? null : filterOptionsQuery.data ?? null}
+        filterCountState={filterOptionsQuery.isError ? "error" : filterOptionsQuery.isPending ? "loading" : "ready"}
       />
       </Suspense>
     </>

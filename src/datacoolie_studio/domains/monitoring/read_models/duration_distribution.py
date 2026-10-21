@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datacoolie_studio.domains.monitoring.dimensions import UNKNOWN_KEY, dimension_label, dimension_key_sql
+
 from typing import Any, Literal
 
 from datacoolie_studio.domains.monitoring.read_models.common import (
@@ -131,9 +133,9 @@ def _sql_values(
         operation_expression = "COALESCE(NULLIF(operation_type, ''), 'unknown')"
         operation_runs_expression = "COALESCE(NULLIF(runs.operation_type, ''), 'unknown')"
         runtime_context_expressions = {
-            "engine_expression": "'unknown'",
-            "provider_expression": "'unknown'",
-            "platform_expression": "'unknown'",
+            "engine_expression": f"'{UNKNOWN_KEY}'",
+            "provider_expression": f"'{UNKNOWN_KEY}'",
+            "platform_expression": f"'{UNKNOWN_KEY}'",
         }
     return {
         "fact_table": fact_table,
@@ -153,10 +155,9 @@ def _sql_values(
 
 
 def _job_operation_types_sql(prefix: str = "") -> str:
-    return (
-        "COALESCE(NULLIF(TRIM(regexp_replace(COALESCE(CAST("
-        f"{prefix}operation_types AS VARCHAR), ''), '[\\[\\]\"'']', '', 'g')), ''), 'unknown')"
-    )
+    bundle = ("TRIM(regexp_replace(COALESCE(CAST("
+              f"{prefix}operation_types AS VARCHAR), ''), '[\\[\\]\"'']', '', 'g'))")
+    return dimension_key_sql(bundle)
 
 
 def _assemble(
@@ -188,7 +189,7 @@ def _assemble(
     for value in operation_mix:
         group = str(value["group_value"])
         mix_by_group.setdefault(group, []).append(
-            f"{value['operation_type']}: {int(value['count'])}"
+            f"{dimension_label(str(value['operation_type']))}: {int(value['count'])}"
         )
     for group in groups:
         group_value = str(group.pop("group_value") or "unknown")

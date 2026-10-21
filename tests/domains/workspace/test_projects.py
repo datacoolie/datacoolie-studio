@@ -66,7 +66,7 @@ def test_project_summaries_use_one_query_and_preserve_empty_projects() -> None:
     assert summaries[0]["environments"] == []
     assert summaries[1]["environment_count"] == 2
     assert summaries[1]["metadata_source_count"] == 2
-    assert summaries[1]["etl_log_path_count"] == 1
+    assert summaries[1]["log_source_count"] == 1
     assert summaries[0]["reference_mapping_count"] == 0
     assert summaries[1]["reference_mapping_count"] == 2
     assert [environment["name"] for environment in summaries[1]["environments"]] == ["dev", "prod"]

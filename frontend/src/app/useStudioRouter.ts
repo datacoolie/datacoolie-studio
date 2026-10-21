@@ -27,6 +27,7 @@ export interface StudioRouter {
   navigateMetadata: (target: MetadataNavigationTarget) => void;
   clearMetadataNavigation: () => void;
   navigateMonitoringPage: (page: MonitoringPageKey) => void;
+  replaceSearch: (search: string) => void;
   navigateProjectSection: (section: ProjectSectionKey) => void;
   selectProject: (projectId: number | null) => void;
   selectEnvironment: (environmentId: number | null) => void;
@@ -106,6 +107,9 @@ export function useStudioRouter(): StudioRouter {
     },
     [route, setStudioRoute]
   );
+  const replaceSearch = useCallback((search: string) => {
+    setStudioRoute({ ...route, search }, true);
+  }, [route, setStudioRoute]);
 
   const navigateMetadata = useCallback(
     (target: MetadataNavigationTarget) => {
@@ -194,6 +198,7 @@ export function useStudioRouter(): StudioRouter {
       navigateMetadata,
       clearMetadataNavigation,
       navigateMonitoringPage,
+      replaceSearch,
       navigateProjectSection,
       selectProject,
       selectEnvironment,
@@ -215,6 +220,7 @@ export function useStudioRouter(): StudioRouter {
       navigateMetadata,
       clearMetadataNavigation,
       navigateMonitoringPage,
+      replaceSearch,
       navigateProjectSection,
       selectProject,
       selectEnvironment,

@@ -42,13 +42,19 @@ export function metadataServerUpdateConflicts(
 }
 
 export function metadataSheetsDiffer(left: MetadataEditorDocument, right: MetadataEditorDocument) {
-  if (left === right || left.sheets === right.sheets) return false;
-  const sheetNames = new Set([...Object.keys(left.sheets), ...Object.keys(right.sheets)]);
-  for (const sheetName of sheetNames) {
-    const leftSheet = left.sheets[sheetName];
-    const rightSheet = right.sheets[sheetName];
-    if (leftSheet === rightSheet) continue;
-    if (JSON.stringify(leftSheet) !== JSON.stringify(rightSheet)) return true;
+  if (left === right) return false;
+  if (left.sheets !== right.sheets) {
+    const sheetNames = new Set([...Object.keys(left.sheets), ...Object.keys(right.sheets)]);
+    for (const sheetName of sheetNames) {
+      const leftSheet = left.sheets[sheetName];
+      const rightSheet = right.sheets[sheetName];
+      if (leftSheet === rightSheet) continue;
+      if (JSON.stringify(leftSheet) !== JSON.stringify(rightSheet)) return true;
+    }
   }
-  return false;
+  // SQL file content is intentionally kept outside the metadata sheets so it
+  // never leaks into source metadata serialization.  It is still part of the
+  // editor document's draft/source boundary: a SQL-only draft must keep
+  // "Save to source" available after the draft has been persisted.
+  return JSON.stringify(left.sql_files ?? []) !== JSON.stringify(right.sql_files ?? []);
 }

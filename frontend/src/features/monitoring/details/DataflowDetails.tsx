@@ -1,264 +1,157 @@
-import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
-import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { createPortal } from "react-dom";
-import type { MonitoringRecord } from "../../../shared/api/domainTypes";
-import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
-import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../../shared/time";
-import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../../shared/statusPresentation";
-import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableSort } from "../MonitoringCharts";
-import {
-  diagnosticsCategoryLabel,
-  diagnosticsEvidenceItems,
-  diagnosticsInvestigationActions,
-  diagnosticsLinkedJobRow,
-  diagnosticsRuleDescription,
-  diagnosticsSeverityPresentation,
-} from "../diagnosticsPresentation";
-import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
-import { SystemLogViewer } from "../SystemLogViewer";
-import { DataflowPhaseContribution, DataflowPhaseKey, DataflowRouteEndpoint, GroupedDetailCard, dataflowEndpointSummary, dataflowPhaseBottleneck, dataflowPhaseSegments, firstValue, hasValue, phaseRuntimeStatusClass } from "./detailPrimitives";
-import { PerformanceDetailSections } from "./PerformanceDetails";
-import { FailureEvidenceSections } from "./FailureDetails";
+import { monitoringAttempts, monitoringDiagnosticIssues, monitoringRawRecord } from "../../../shared/api/monitoringAdapters";
+import { GroupedDetailCard, JsonBlock, hasValue, dataflowPhaseBottleneck, dataflowPhaseSegments, type DataflowPhaseKey } from "./detailPrimitives";
+import { formatPhasePercent } from "../components/monitoringPresentation";
+import { DataflowAttemptMessages } from "./DataflowMessages";
+export { DataflowDetailSections } from "./DataflowStoryDetails";
 
-export function DataflowRunSummary({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
-  const source = dataflowEndpointSummary(row, "source");
-  const destination = dataflowEndpointSummary(row, "destination");
-  const loadType = firstValue(row, ["destination_load_type", "load_type", "destination_operation_type"]);
-  const bytesAdded = num(row, "destination_bytes_added");
-  const bytesRemoved = num(row, "destination_bytes_removed");
-  const bottleneck = dataflowPhaseBottleneck(row);
+/** Render the v6 authored request and native attempt evidence without flattening it into legacy fields. */
+export function V6EvidenceSections({ row }: { row: Record<string, unknown> }) {
+  const raw = monitoringRawRecord(row);
+  const hasV6Evidence = hasOwn(raw, "metrics") || hasOwn(raw, "read_request") || hasOwn(raw, "attempts") || hasOwn(raw, "diagnostic_issues");
+  if (!hasV6Evidence) return null;
+  const attempts = monitoringAttempts(row);
+  const diagnosticIssues = monitoringDiagnosticIssues(row);
   return (
-    <section className="monitoring-detail-section monitoring-dataflow-summary-section">
-      <div className="monitoring-dataflow-route-card">
-        <DataflowRouteEndpoint direction="source" endpoint={source} />
-        <ArrowRight className="monitoring-dataflow-route-arrow" size={18} aria-hidden="true" />
-        <DataflowRouteEndpoint direction="destination" endpoint={destination} />
-        <div className="monitoring-dataflow-route-context">
-          <span>{String(row.stage || "unknown stage")}</span>
-          <span>{String(row.operation_type || "unknown operation")}</span>
-          <span>{String(loadType || "unknown load type")}</span>
-        </div>
+    <section className="monitoring-detail-section monitoring-dataflow-v6-evidence">
+      <h3>Run evidence</h3>
+      <div className="monitoring-dataflow-detail-grid">
+        {hasOwn(raw, "metrics") ? (
+          <EvidenceCard title="Measured metrics" value={raw.metrics} />
+        ) : null}
+        {hasOwn(raw, "read_request") ? (
+          <EvidenceCard title="Authored read request" value={raw.read_request} />
+        ) : null}
+        {hasValue(row.read_boundary_adjustment_state) ? (
+          <GroupedDetailCard
+            title="Read boundary adjustment"
+            rows={[
+              ["State", row.read_boundary_adjustment_state],
+              ["Basis", row.read_boundary_adjustment_basis],
+              ["Reason", row.read_boundary_adjustment_reason],
+              ["Input lower", row.read_boundary_adjustment_input_json, "adjustment_input_json"],
+              ["Resolved lower", row.read_boundary_adjustment_effective_json, "adjustment_effective_json"],
+            ]}
+            showEmpty
+          />
+        ) : null}
       </div>
-      <div className="monitoring-dataflow-summary-grid">
-        <GroupedDetailCard
-          title="Execution"
-          className="monitoring-dataflow-execution-card"
-          rows={[
-            ["Status", <StatusCell row={row} />],
-            ["Run ID", row.dataflow_run_id],
-            ["Start", row.start_time, "start_time"],
-            ["End", row.end_time, "end_time"],
-            ["Duration", row.duration_seconds, "duration_seconds"],
-            ["Retry attempts", row.retry_attempts],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-        <GroupedDetailCard
-          title="Phase health"
-          className={`monitoring-dataflow-phase-card${bottleneck ? ` phase-health-${bottleneck.phase}` : ""}`}
-          rows={[
-            ["Bottleneck", <DataflowPhaseBottleneck row={row} />],
-            ["Contribution", <DataflowPhaseContribution row={row} />, "phase_contribution"],
-            ["Source", row.source_duration_seconds, "source_duration_seconds"],
-            ["Transform", row.transform_duration_seconds, "transform_duration_seconds"],
-            ["Destination", row.destination_duration_seconds, "destination_duration_seconds"],
-            ["Overhead", row.overhead_duration_seconds, "overhead_duration_seconds"],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-        <GroupedDetailCard
-          title="Workload"
-          className="monitoring-dataflow-workload-card"
-          rows={[
-            ["Rows read", row.source_rows_read, "source_rows_read"],
-            ["Rows written", row.destination_rows_written, "destination_rows_written"],
-            ["Bytes added", row.destination_bytes_added, "destination_bytes_added"],
-            ["Bytes removed", row.destination_bytes_removed, "destination_bytes_removed"],
-            ["Net bytes", bytesAdded - bytesRemoved, "net_bytes"],
-            ["Watermark", row.movement_state],
-          ]}
-          showEmpty
-          timezoneName={timezoneName}
-        />
-      </div>
+      {hasOwn(raw, "attempts") ? (
+        <section className="monitoring-detail-subsection monitoring-v6-attempts">
+          <h4>Attempt history</h4>
+          {attempts.length ? attempts.map((attempt, index) => (
+            <V6AttemptCard key={`attempt-${index}`} attempt={attempt} index={index} />
+          )) : <p className="monitor-muted">{noAttemptMessage(row)}</p>}
+        </section>
+      ) : null}
+      {hasOwn(raw, "diagnostic_issues") ? (
+        <section className="monitoring-detail-subsection monitoring-v6-diagnostics">
+          <h4>Diagnostic issues</h4>
+          <JsonBlock value={diagnosticIssues} />
+        </section>
+      ) : null}
     </section>
   );
 }
 
-export function DataflowDetailSections({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
+export function noAttemptMessage(row: Record<string, unknown>) {
+  const status = String(row.status ?? "").trim().toLowerCase();
+  if (status === "skipped") return "No attempts recorded. The run was skipped before pipeline entry.";
+  if (status === "failed") return "No attempts recorded. The run failed before pipeline entry.";
+  if (status === "running" || status === "pending") return "No attempts recorded yet. Pipeline entry has not been reported.";
+  return "No attempts recorded. Pipeline entry is unavailable for this run.";
+}
+
+function V6AttemptCard({ attempt, index }: { attempt: unknown; index: number }) {
+  const record = asRecord(attempt) ?? {};
+  const attemptNumber = record.attempt_number;
+  const source = asRecord(record.source);
+  const transform = asRecord(record.transform);
+  const destination = asRecord(record.destination);
+  const watermark = asRecord(record.watermark);
+  const label = attemptNumber === undefined || attemptNumber === null ? "Attempt (unidentified)" : `Attempt ${String(attemptNumber)}`;
+  const attemptRows = presentRows(record, ["attempt_number", "status", "start_time", "end_time", "duration_seconds"]);
   return (
-    <>
-      <DataflowRunSummary row={row} timezoneName={timezoneName} />
-
-      {hasPerformanceEvidence(row) ? <PerformanceDetailSections row={row} /> : null}
-
-      <FailureEvidenceSections row={row} timezoneName={timezoneName} />
-
-      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-configuration">
-        <h3>Dataflow configuration</h3>
-        <div className="monitoring-dataflow-detail-grid">
-          <GroupedDetailCard
-            title="Identity and configuration"
-            className="monitoring-dataflow-config-card"
-            rows={[
-              ["Dataflow ID", row.dataflow_id],
-              ["Workspace ID", row.workspace_id],
-              ["Name", row.dataflow_name],
-              ["Description", row.dataflow_description],
-              ["Stage", row.stage],
-              ["Group number", row.group_number],
-              ["Execution order", row.execution_order],
-              ["Processing mode", row.processing_mode],
-              ["Active", row.is_active],
-              ["Configure", row.configure, "configure"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-        </div>
-      </section>
-
-      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-source">
-        <h3>Source</h3>
-        <div className="monitoring-dataflow-detail-grid">
-          <GroupedDetailCard
-            title="Master data"
-            rows={[
-              ["Source ID", row.source_id],
-              ["Source name", firstValue(row, ["source_name", "source_connection_name"])],
-              ["Connection type", row.source_connection_type],
-              ["Format", row.source_format],
-              ["Catalog", row.source_catalog],
-              ["Database", row.source_database],
-              ["Schema", row.source_schema],
-              ["Table", row.source_table],
-              ["Full table", row.source_full_table],
-              ["Path", row.source_path],
-              ["Query", row.source_query, "source_query"],
-              ["Python function", row.source_python_function],
-              ["Watermark columns", row.source_watermark_columns, "source_watermark_columns"],
-              ["Filter", row.source_filter_expression, "source_filter_expression"],
-              ["Configure", row.source_configure, "source_configure"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-          <GroupedDetailCard
-            title="Runtime info"
-            className={phaseRuntimeStatusClass(row.source_status)}
-            rows={[
-              ["Start", row.source_start_time, "source_start_time"],
-              ["End", row.source_end_time, "source_end_time"],
-              ["Duration", row.source_duration_seconds, "source_duration_seconds"],
-              ["Status", row.source_status, "source_status"],
-              ["Error", row.source_error_message, "source_error_message"],
-              ["Rows read", row.source_rows_read, "source_rows_read"],
-              ["Action", row.source_action, "source_action"],
-              ["Watermark before", row.source_watermark_before, "source_watermark_before"],
-              ["Watermark after", row.source_watermark_after, "source_watermark_after"],
-              ["Watermark effective", row.source_watermark_effective, "source_watermark_effective"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-        </div>
-      </section>
-
-      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-transform">
-        <h3>Transform</h3>
-        <div className="monitoring-dataflow-detail-grid">
-          <GroupedDetailCard
-            title="Master data"
-            rows={[
-              ["Deduplicate", row.transform_deduplicate_columns, "transform_deduplicate_columns"],
-              ["Latest data", row.transform_latest_data_columns, "transform_latest_data_columns"],
-              ["Filter", row.transform_filter_expression, "transform_filter_expression"],
-              ["Additional columns", row.transform_additional_columns, "transform_additional_columns"],
-              ["Schema hints", row.transform_schema_hints, "transform_schema_hints"],
-              ["Select columns", row.transform_select_columns, "transform_select_columns"],
-              ["Drop columns", row.transform_drop_columns, "transform_drop_columns"],
-              ["Rename columns", row.transform_rename_columns, "transform_rename_columns"],
-              ["Value rules", row.transform_value_rules, "transform_value_rules"],
-              ["Hash columns", row.transform_hash_columns, "transform_hash_columns"],
-              ["Masking rules", row.transform_masking_rules, "transform_masking_rules"],
-              ["Configure", row.transform_configure, "transform_configure"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-          <GroupedDetailCard
-            title="Runtime info"
-            className={phaseRuntimeStatusClass(row.transform_status)}
-            rows={[
-              ["Start", row.transform_start_time, "transform_start_time"],
-              ["End", row.transform_end_time, "transform_end_time"],
-              ["Duration", row.transform_duration_seconds, "transform_duration_seconds"],
-              ["Status", row.transform_status, "transform_status"],
-              ["Error", row.transform_error_message, "transform_error_message"],
-              ["Transformers applied", row.transformers_applied, "transformers_applied"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-        </div>
-      </section>
-
-      <section className="monitoring-detail-section monitoring-dataflow-section monitoring-dataflow-section-destination">
-        <h3>Destination</h3>
-        <div className="monitoring-dataflow-detail-grid">
-          <GroupedDetailCard
-            title="Master data"
-            rows={[
-              ["Destination ID", row.destination_id],
-              ["Destination name", firstValue(row, ["destination_name", "destination_connection_name"])],
-              ["Connection type", row.destination_connection_type],
-              ["Format", row.destination_format],
-              ["Catalog", row.destination_catalog],
-              ["Database", row.destination_database],
-              ["Schema", row.destination_schema],
-              ["Table", row.destination_table],
-              ["Full table", row.destination_full_table],
-              ["Path", row.destination_path],
-              ["Load type", row.destination_load_type],
-              ["Merge keys", row.destination_merge_keys, "destination_merge_keys"],
-              ["Partition columns", row.destination_partition_columns, "destination_partition_columns"],
-              ["Configure", row.destination_configure, "destination_configure"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-          <GroupedDetailCard
-            title="Runtime info"
-            className={phaseRuntimeStatusClass(row.destination_status)}
-            rows={[
-              ["Start", row.destination_start_time, "destination_start_time"],
-              ["End", row.destination_end_time, "destination_end_time"],
-              ["Duration", row.destination_duration_seconds, "destination_duration_seconds"],
-              ["Status", row.destination_status, "destination_status"],
-              ["Error", row.destination_error_message, "destination_error_message"],
-              ["Operation type", row.destination_operation_type],
-              ["Written", row.destination_rows_written, "destination_rows_written"],
-              ["Inserted", row.destination_rows_inserted, "destination_rows_inserted"],
-              ["Updated", row.destination_rows_updated, "destination_rows_updated"],
-              ["Deleted", row.destination_rows_deleted, "destination_rows_deleted"],
-              ["Files added", row.destination_files_added],
-              ["Files removed", row.destination_files_removed],
-              ["Bytes added", row.destination_bytes_added, "destination_bytes_added"],
-              ["Bytes removed", row.destination_bytes_removed, "destination_bytes_removed"],
-              ["Bytes saved", row.destination_bytes_saved, "destination_bytes_saved"],
-              ["Operation details", row.destination_operation_details, "destination_operation_details"],
-            ]}
-            showEmpty
-            timezoneName={timezoneName}
-          />
-        </div>
-      </section>
-    </>
+    <article className="monitoring-v6-attempt-card">
+      <h5>{label}</h5>
+      <DataflowAttemptMessages attempt={record} />
+      {attemptRows.length ? <GroupedDetailCard title="Execution" rows={attemptRows} showEmpty /> : null}
+      <div className="monitoring-dataflow-detail-grid">
+        {source ? <V6PhaseEvidence title="Source" phase={source} selectionLabel="Resolved selection" /> : null}
+        {transform ? <V6PhaseEvidence title="Transform" phase={transform} /> : null}
+        {destination ? <V6PhaseEvidence title="Destination" phase={destination} /> : null}
+        {watermark ? <V6WatermarkEvidence watermark={watermark} /> : null}
+      </div>
+      {!attemptRows.length && !source && !transform && !destination && !watermark && !hasValue(record.message) && record.message_truncated !== true ? (
+        <p className="monitor-muted">Attempt {index + 1} has no typed detail.</p>
+      ) : null}
+    </article>
   );
+}
+
+function V6PhaseEvidence({ title, phase, selectionLabel }: { title: string; phase: Record<string, unknown>; selectionLabel?: string }) {
+  const selection = phase.selection;
+  const sourceAction = phase.source_action;
+  const excluded = new Set(["selection", "source_action", "message", "message_truncated"]);
+  const rows = presentRows(phase, Object.keys(phase).filter((key) => !excluded.has(key)));
+  return (
+    <div className="monitoring-v6-phase-evidence">
+      <GroupedDetailCard title={title} rows={rows} showEmpty />
+      {selection !== undefined ? (
+        <div className="monitoring-v6-evidence-block">
+          <span>{selectionLabel ?? "Selection"}</span>
+          <JsonBlock value={selection} />
+        </div>
+      ) : null}
+      {sourceAction !== undefined ? (
+        <div className="monitoring-v6-evidence-block">
+          <span>Source action</span>
+          <JsonBlock value={sourceAction} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function V6WatermarkEvidence({ watermark }: { watermark: Record<string, unknown> }) {
+  const candidate = asRecord(watermark.candidate);
+  const rows = presentRows(watermark, ["loaded_watermark", "merge_base", "watermark_to_save", "save_status", "saved_watermark", "load_status"]);
+  return (
+    <div className="monitoring-v6-watermark-evidence">
+      <GroupedDetailCard title="Watermark and persistence" rows={rows} showEmpty />
+      {candidate ? (
+        <div className="monitoring-v6-evidence-block">
+          <span>Candidate values</span>
+          <JsonBlock value={candidate.values ?? candidate} />
+          {candidate.kind !== undefined ? <small>Candidate kind: {String(candidate.kind)}</small> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function EvidenceCard({ title, value }: { title: string; value: unknown }) {
+  return (
+    <div className="monitoring-v6-evidence-card">
+      <h4>{title}</h4>
+      <JsonBlock value={value} />
+    </div>
+  );
+}
+
+function presentRows(record: Record<string, unknown>, keys: string[]) {
+  return keys.filter((key) => hasOwn(record, key)).map((key) => [humanize(key), record[key], key] as [string, unknown, string]);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function humanize(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 export function hasPerformanceEvidence(row: Record<string, unknown>) {
@@ -292,7 +185,7 @@ export function PhaseContributionSummary({ row }: { row: Record<string, unknown>
   return (
     <span className="monitoring-phase-bottleneck-summary" aria-label="Phase contribution summary">
       <span className="monitoring-phase-summary-punctuation">(</span>
-      {segments.map((segment, index) => (
+      {segments.map((segment) => (
         <span key={segment.phase} className={`phase-text-${segment.phase}`}>
           {phaseShortLabel(segment.phase)} {formatPhasePercent(segment.percent)}
         </span>

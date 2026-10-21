@@ -1,27 +1,20 @@
-import { ArrowLeft, ArrowRight, Boxes, BriefcaseBusiness, Check, ChevronRight, Clock3, Copy, FileText, SearchCheck, Workflow, X } from "lucide-react";
-import { isValidElement, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { ArrowRight, Check, Copy } from "lucide-react";
+import { isValidElement, useState, type CSSProperties, type ReactNode } from "react";
 import { formatPrettySql, highlightSql } from "../../../shared/components/SqlSyntax";
 import type { MonitoringRecord } from "../../../shared/api/domainTypes";
-import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
 import { formatTimestampForDisplay, hasExplicitTimezone, isTimestampFieldName } from "../../../shared/time";
 import { lifecycleStatusFromField, lifecycleStatusPresentation, type LifecycleStatus } from "../../../shared/statusPresentation";
-import { LineageFormatIcon } from "../../lineage/components/LineageFormatIcon";
-import { DataTable, StatusCell, display, formatBytes, formatNumber, formatSeconds, num, type TableSort } from "../MonitoringCharts";
-import {
-  diagnosticsCategoryLabel,
-  diagnosticsEvidenceItems,
-  diagnosticsInvestigationActions,
-  diagnosticsLinkedJobRow,
-  diagnosticsRuleDescription,
-  diagnosticsSeverityPresentation,
-} from "../diagnosticsPresentation";
-import { formatMaintenanceLag, maintenanceFormatIconKind, maintenanceTableHealthClass, maintenanceTableHealthLabel, maintenanceTableHealthTone } from "../maintenancePresentation";
-import { CompactNumberValue } from "../CompactNumberValue";
-import { formatAgeNumber, formatExactBytes } from "../monitoringNumberFormat";
-import { formatPhasePercent, monitoringEndpointPresentation, TablePager } from "../components/monitoringPrimitives";
+import { display, formatBytes, formatSeconds, num } from "../../../shared/components/DataTable";
+import { maintenanceTableHealthClass, maintenanceTableHealthLabel } from "../maintenancePresentation";
+import { CompactNumberValue, metricValue } from "../components/monitoringPresentation";
+import { formatAgeNumber, formatExactNumber, formatTooltipBytes, formatTooltipNumber, isMetricInteger, toApproximateNumber, type MetricValue } from "../../../shared/lib/numberFormat";
+import { formatRawRecordJson, isLosslessJsonNumber, parseRawRecordJson } from "../../../shared/api/monitoringAdapters";
+import { stringify as losslessStringify } from "lossless-json";
+import { formatPhasePercent, monitoringEndpointPresentation } from "../components/monitoringPresentation";
 import { monitoringConnectionStageClass } from "../monitoringStagePresentation";
-import { SystemLogViewer } from "../SystemLogViewer";
+import { effectiveMonitoringMessage } from "../monitoringMessage";
+import { monitoringDrawerRawDimensionLabel } from "../monitoringDimensions";
+import { Help } from "../../../shared/components/Help";
 
 export type DetailRow = [label: string, value: unknown, field?: string];
 
@@ -31,8 +24,8 @@ export type DataflowPhaseKey = "source" | "transform" | "destination" | "overhea
 
 export type SemanticValueModel =
   | { kind: "status"; value: string }
-  | { kind: "count"; value: number; intent?: SemanticIntent }
-  | { kind: "reconciliation"; status: string; mismatch: number }
+  | { kind: "count"; value: MetricValue; intent?: SemanticIntent }
+  | { kind: "reconciliation"; status: string; mismatch: MetricValue }
   | { kind: "text"; value: string; intent?: SemanticIntent };
 
 export const SQL_BLOCK_FIELDS = new Set([
@@ -50,9 +43,7 @@ export const JSON_BLOCK_FIELDS = new Set([
   "configure",
   "source_action",
   "source_configure",
-  "source_watermark_before",
-  "source_watermark_after",
-  "source_watermark_effective",
+  "run_attributes",
   "transform_deduplicate_columns",
   "transform_latest_data_columns",
   "transform_filter_expression",
@@ -68,6 +59,8 @@ export const JSON_BLOCK_FIELDS = new Set([
   "destination_partition_columns",
   "destination_configure",
   "destination_operation_details",
+  "adjustment_input_json",
+  "adjustment_effective_json",
 ]);
 
 export function firstValue(row: Record<string, unknown>, fields: string[]) {
@@ -94,9 +87,9 @@ export function phaseRuntimeStatusClass(value: unknown) {
 export function dataflowEndpointSummary(row: Record<string, unknown>, direction: "source" | "destination") {
   const endpoint = monitoringEndpointPresentation(row as MonitoringRecord, direction);
   return {
-    asset: endpoint.locator,
-    connection: endpoint.connection,
-    format: endpoint.format || String(firstValue(row, [`${direction}_connection_type`]) || "unknown format"),
+    asset: endpoint.locator === "Unknown asset" ? "unk" : monitoringDrawerRawDimensionLabel(endpoint.locator),
+    connection: monitoringDrawerRawDimensionLabel(endpoint.connection),
+    format: monitoringDrawerRawDimensionLabel(endpoint.format || firstValue(row, [`${direction}_connection_type`])),
   };
 }
 
@@ -119,24 +112,81 @@ export function DataflowRouteEndpoint({
 
 export function MaintenanceHealthChip({ health, reason }: { health: unknown; reason?: unknown }) {
   return (
-    <span className={`maintenance-table-health-chip ${maintenanceTableHealthClass(health)}`} title={String(reason ?? maintenanceTableHealthLabel(health))}>
+    <Help className={`maintenance-table-health-chip ${maintenanceTableHealthClass(health)}`} title={String(reason ?? maintenanceTableHealthLabel(health))}>
       {maintenanceTableHealthLabel(health)}
-    </span>
+    </Help>
   );
 }
 
 export type FreshnessDrawerHealthTone = "success" | "warning" | "failed" | "neutral";
 
+export function freshnessHealthToneForSignals({
+  hasEvidence,
+  failed,
+  needsReview,
+  stale,
+}: {
+  hasEvidence: boolean;
+  failed?: boolean;
+  needsReview?: boolean;
+  stale?: boolean;
+}): FreshnessDrawerHealthTone {
+  if (!hasEvidence) return "neutral";
+  if (failed) return "failed";
+  if (needsReview || stale) return "warning";
+  return "success";
+}
+
+export function freshnessHealthFromCounts({
+  observedDataflows,
+  staleDataflows,
+  latestRunIssues,
+  latestWatermarkIssues,
+  missingChecks,
+  metricsKnown,
+}: {
+  observedDataflows: number;
+  staleDataflows: number;
+  latestRunIssues: number;
+  latestWatermarkIssues: number;
+  missingChecks: number;
+  metricsKnown: boolean;
+}): { label: string; intent: "good" | "warning" | "bad"; tone: FreshnessDrawerHealthTone } {
+  if (!metricsKnown) return { label: "Evidence unknown", intent: "warning", tone: "warning" };
+  if (observedDataflows === 0) return { label: "No execution evidence", intent: "bad", tone: "failed" };
+  const tone = freshnessHealthToneForSignals({
+    hasEvidence: true,
+    needsReview: latestRunIssues > 0 || latestWatermarkIssues > 0 || missingChecks > 0,
+    stale: staleDataflows > 0,
+  });
+  return tone === "success"
+    ? { label: "Current", intent: "good", tone }
+    : { label: "Needs review", intent: "warning", tone };
+}
+
 export function freshnessDrawerHealth(row: Record<string, unknown>): { label: string; tone: FreshnessDrawerHealthTone } {
   const hasEvidence = hasValue(row.latest_freshness_at) || hasValue(row.latest_run_at) || num(row, "run_count") > 0;
   if (!hasEvidence) return { label: "No evidence", tone: "neutral" };
-  const latestStatus = String(firstValue(row, ["latest_run_status", "latest_freshness_status"]) ?? "").trim().toLowerCase();
-  const watermarkState = String(firstValue(row, ["movement_state", "coverage_state"]) ?? "").trim().toLowerCase();
-  if (latestStatus === "failed" || watermarkState === "invalid") return { label: "Needs review", tone: "failed" };
-  if (["running", "pending"].includes(latestStatus) || watermarkState === "incomplete") return { label: "Needs review", tone: "warning" };
-  const ageDays = Number(row.age_days ?? (Number(row.age_seconds) / 86_400));
-  if (Number.isFinite(ageDays) && ageDays > 7) return { label: "Stale", tone: "warning" };
-  return { label: "Current", tone: "success" };
+  const latestStatus = String(row.latest_run_status ?? "unknown").trim().toLowerCase();
+  const ageSeconds = freshnessAgeSeconds(row.age_seconds, row.age_days);
+  const statusIssue = !["succeeded", "skipped"].includes(latestStatus);
+  const issue = String(row.watermark_issue_state ?? "").trim().toLowerCase();
+  const saveStatus = String(firstValue(row, ["save_status", "persistence_state"]) ?? "").trim().toLowerCase();
+  const loadStatus = String(row.load_status ?? "").trim().toLowerCase();
+  const failed = latestStatus === "failed" || latestStatus === "error"
+    || issue === "error" || saveStatus === "save_error"
+    || loadStatus === "load_error";
+  const tone = freshnessHealthToneForSignals({
+    hasEvidence,
+    failed,
+    needsReview: statusIssue || issue === "insufficient_evidence" || ageSeconds === null,
+    stale: ageSeconds !== null && ageSeconds > 7 * 86_400,
+  });
+  if (tone === "failed") return { label: "Needs review", tone };
+  if (tone === "warning") {
+    return { label: ageSeconds !== null && ageSeconds > 7 * 86_400 ? "Stale" : "Needs review", tone };
+  }
+  return { label: "Current", tone };
 }
 
 export function FreshnessIdentitySection({ row }: { row: Record<string, unknown> }) {
@@ -168,7 +218,7 @@ export function FreshnessIdentitySection({ row }: { row: Record<string, unknown>
 export function FreshnessRunTimeCell({ row, timezoneName }: { row: Record<string, unknown>; timezoneName?: string | null }) {
   const [start, end] = freshnessRunTimeLines(row, timezoneName);
   return (
-    <span
+    <Help
       className="freshness-run-stack-cell"
       title={[
         `Start: ${start}`,
@@ -177,7 +227,7 @@ export function FreshnessRunTimeCell({ row, timezoneName }: { row: Record<string
     >
       <strong>{start}</strong>
       <small><span>{end}</span></small>
-    </span>
+    </Help>
   );
 }
 
@@ -188,15 +238,27 @@ export function freshnessRunTimeLines(row: Record<string, unknown>, timezoneName
 }
 
 export function formatFreshnessAge(ageSeconds: unknown, ageDays: unknown) {
-  const seconds = Number(ageSeconds);
-  if (Number.isFinite(seconds)) {
+  const seconds = freshnessAgeSeconds(ageSeconds, ageDays);
+  if (seconds !== null) {
     if (seconds < 60) return `${formatAgeNumber(Math.max(0, seconds))}s`;
     if (seconds < 3600) return `${formatAgeNumber(seconds / 60)}m`;
     if (seconds < 86400) return `${formatAgeNumber(seconds / 3600)}h`;
     return `${formatAgeNumber(seconds / 86400)}d`;
   }
-  const days = Number(ageDays);
-  return Number.isFinite(days) ? `${formatAgeNumber(days)}d` : "-";
+  return "-";
+}
+
+export function freshnessAgeSeconds(ageSeconds: unknown, ageDays: unknown): number | null {
+  const numberValue = (value: unknown) => {
+    if (typeof value !== "number" && typeof value !== "string") return null;
+    if (typeof value === "string" && !value.trim()) return null;
+    const result = Number(value);
+    return Number.isFinite(result) ? result : null;
+  };
+  const seconds = numberValue(ageSeconds);
+  if (seconds !== null) return seconds;
+  const days = numberValue(ageDays);
+  return days === null ? null : days * 86_400;
 }
 
 export function DataflowPhaseContribution({ row }: { row: Record<string, unknown> }) {
@@ -206,13 +268,13 @@ export function DataflowPhaseContribution({ row }: { row: Record<string, unknown
     .map((segment) => `${phaseLabel(segment.phase)}: ${formatSeconds(segment.value)} (${formatPhasePercent(segment.percent)})`)
     .join("\n");
   return (
-    <div className="monitoring-phase-contribution" title={title}>
+    <Help as="div" className="monitoring-phase-contribution" title={title}>
       <div className="monitoring-phase-stack" aria-label="Dataflow phase contribution">
         {segments.map((segment) => (
           <i key={segment.phase} className={`phase-${segment.phase}`} style={{ flex: `0 0 ${segment.percent}%` }} />
         ))}
       </div>
-    </div>
+    </Help>
   );
 }
 
@@ -262,7 +324,7 @@ export function phaseLabel(phase: DataflowPhaseKey) {
 
 export function ErrorMessageBlock({ value }: { value: unknown }) {
   return (
-    <div className="monitoring-error-message-body">
+    <div className="monitoring-error-message-body monitoring-message-scroll">
       {isValidElement(value) ? value : String(value ?? "-")}
     </div>
   );
@@ -313,14 +375,22 @@ export function renderGroupedValue(value: unknown, timezoneName?: string | null,
   if (field && SQL_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="sql" />;
   if (field && LIST_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="list" />;
   if (field && JSON_BLOCK_FIELDS.has(field)) return <CodeBlock value={value} kind="json" />;
-  if (field?.endsWith("duration_seconds")) return formatSeconds(Number(value) || 0);
+  if (isLosslessJsonNumber(value)) return <Help title={formatTooltipNumber(value.value)}>{formatExactNumber(value.value)}</Help>;
+  if (field?.endsWith("duration_seconds")) {
+    const seconds = toApproximateNumber(value as MetricValue);
+    return <Help title={formatTooltipNumber(value as MetricValue)}>{seconds === null ? "-" : formatSeconds(seconds)}</Help>;
+  }
   if (field?.includes("bytes")) {
-    const bytes = Number(value) || 0;
-    return <span title={formatExactBytes(bytes)}>{formatBytes(bytes)}</span>;
+    const bytes = toApproximateNumber(value as MetricValue);
+    return <Help title={formatTooltipBytes(value as MetricValue)}>{bytes === null ? "-" : formatBytes(bytes)}</Help>;
   }
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value) || (value && typeof value === "object")) return <JsonBlock value={value} />;
   if (typeof value === "string" && looksJson(value)) return <JsonBlock value={value} />;
+  if (typeof value === "string" && field && isMetricField(field) && isMetricInteger(value)) {
+    const numeric = toApproximateNumber(value) ?? 0;
+    return <Help title={formatTooltipNumber(value)}><SemanticValue value={semanticNumber(field, numeric)} /></Help>;
+  }
   if (typeof value === "number") return <SemanticValue value={semanticNumber(field, value)} />;
   if (typeof value === "string") return <SemanticValue value={semanticText(field, value)} />;
   return value as ReactNode;
@@ -333,6 +403,7 @@ export function isRuntimeTimestampField(field: string) {
 export function formatRuntimeTimestampForDisplay(value: unknown, timezoneName?: string | null) {
   const rawValue = String(value ?? "").trim();
   if (!rawValue) return "-";
+  if (/^(?:unk|unknown)$/iu.test(rawValue)) return "unk";
   const normalized = hasExplicitTimezone(rawValue) ? rawValue : `${rawValue}Z`;
   return formatTimestampForDisplay(normalized, timezoneName);
 }
@@ -362,10 +433,10 @@ export function semanticNumber(field: string | undefined, value: number): Semant
 export function semanticText(field: string | undefined, value: string): SemanticValueModel {
   const lowerValue = value.toLowerCase();
   const lowerField = String(field ?? "").toLowerCase();
-  if (lowerField === "status" || ["succeeded", "failed", "skipped", "running", "pending"].includes(lowerValue)) {
+  if (lowerField === "status" || lowerField.endsWith("_status")) {
     return { kind: "status", value };
   }
-  if (lowerField.includes("reconciliation") || lowerValue === "matched" || lowerValue === "mismatch") {
+  if (lowerField.includes("reconciliation")) {
     return { kind: "text", value, intent: lowerValue === "matched" ? "success" : lowerValue === "mismatch" ? "failed" : "neutral" };
   }
   return { kind: "text", value };
@@ -374,7 +445,7 @@ export function semanticText(field: string | undefined, value: string): Semantic
 export function SemanticValue({ value }: { value: SemanticValueModel }) {
   if (value.kind === "reconciliation") {
     const statusIntent = value.status.toLowerCase() === "matched" ? "success" : value.status.toLowerCase() === "mismatch" ? "failed" : "neutral";
-    const countIntent = value.mismatch > 0 ? "failed" : "neutral";
+    const countIntent = (toApproximateNumber(value.mismatch) ?? 0) > 0 ? "failed" : "neutral";
     return (
       <span className="monitoring-semantic-pair">
         <span className={`monitoring-semantic-value is-${statusIntent}`} style={semanticIntentStyle(statusIntent)}>{value.status}</span>
@@ -422,7 +493,7 @@ export function CodeBlock({ value, kind }: { value: unknown; kind: "json" | "lis
       : formatCompactJsonBlock(value);
   return (
     <div className={`monitoring-code-box monitoring-code-box-${kind}`}>
-      <button
+      <Help as="button"
         className="icon-action small monitoring-json-copy"
         type="button"
         aria-label={`Copy ${kind.toUpperCase()}`}
@@ -434,7 +505,7 @@ export function CodeBlock({ value, kind }: { value: unknown; kind: "json" | "lis
         }}
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
-      </button>
+      </Help>
       <pre className={`monitoring-code-block${kind === "sql" ? " sql-syntax-light" : ""}`}>
         {kind === "sql" ? highlightSql(formatted) : highlightJson(formatted)}
       </pre>
@@ -447,7 +518,7 @@ export function JsonBlock({ value, compactArray = false }: { value: unknown; com
   const formatted = formatJsonValue(value, compactArray);
   return (
     <div className="monitoring-json-box monitoring-inline-json-box">
-      <button
+      <Help as="button"
         className="icon-action small monitoring-json-copy"
         type="button"
         aria-label="Copy JSON"
@@ -459,7 +530,7 @@ export function JsonBlock({ value, compactArray = false }: { value: unknown; com
         }}
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
-      </button>
+      </Help>
       <pre className="monitoring-inline-json monitoring-json-light">{highlightJson(formatted)}</pre>
     </div>
   );
@@ -467,7 +538,7 @@ export function JsonBlock({ value, compactArray = false }: { value: unknown; com
 
 export function safeJsonStringify(value: unknown) {
   try {
-    return JSON.stringify(value, null, 2);
+    return losslessStringify(value, null, 2) ?? String(value);
   } catch {
     return String(value);
   }
@@ -500,11 +571,7 @@ export function parseJsonLike(value: unknown) {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   if (!looksJson(trimmed)) return value;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
+  return parseRawRecordJson(trimmed) ?? value;
 }
 
 export function formatCompactJsonObject(value: Record<string, unknown>) {
@@ -513,7 +580,7 @@ export function formatCompactJsonObject(value: Record<string, unknown>) {
   const lines: string[] = ["{"];
   entries.forEach(([key, item], index) => {
     const suffix = index + 1 < entries.length ? "," : "";
-    lines.push(`  ${JSON.stringify(key)}: ${JSON.stringify(item)}${suffix}`);
+    lines.push(`  ${JSON.stringify(key)}: ${safeJsonStringify(item)}${suffix}`);
   });
   lines.push("}");
   return lines.join("\n");
@@ -522,22 +589,19 @@ export function formatCompactJsonObject(value: Record<string, unknown>) {
 export function formatCompactJsonArray(value: unknown) {
   let parsed = value;
   if (typeof value === "string") {
-    try {
-      parsed = JSON.parse(value);
-    } catch {
-      return value;
-    }
+    parsed = parseRawRecordJson(value);
+    if (parsed === null) return value;
   }
   if (!Array.isArray(parsed)) return safeJsonStringify(parsed);
   if (!parsed.length) return "[]";
   if (parsed.every(isPrimitiveJsonValue)) {
-    return `[\n  ${parsed.map((item) => JSON.stringify(item)).join(", ")}\n]`;
+    return `[\n  ${parsed.map((item) => safeJsonStringify(item)).join(", ")}\n]`;
   }
-  return JSON.stringify(parsed, null, 2);
+  return safeJsonStringify(parsed);
 }
 
 export function isPrimitiveJsonValue(value: unknown) {
-  return value === null || ["string", "number", "boolean"].includes(typeof value);
+  return value === null || ["string", "number", "boolean"].includes(typeof value) || isLosslessJsonNumber(value);
 }
 
 export function highlightJson(value: string) {
@@ -576,8 +640,9 @@ export function detailValue(row: Record<string, unknown>, field: string, timezon
   const value = row[field];
   if (field.endsWith("duration_seconds")) return `${display(row, field)}s`;
   if (field.includes("bytes")) {
-    const bytes = num(row, field);
-    return <span title={formatExactBytes(bytes)}>{formatBytes(bytes)}</span>;
+    const bytesValue = metricValue(row, field);
+    const bytes = toApproximateNumber(bytesValue);
+    return <Help title={formatTooltipBytes(bytesValue)}>{bytes === null ? "-" : formatBytes(bytes)}</Help>;
   }
   if (typeof value === "string" && timezoneName && isTimestampFieldName(field)) return formatTimestampForDisplay(value, timezoneName);
   if (Array.isArray(value) || (value && typeof value === "object")) {
@@ -595,13 +660,13 @@ export function isErrorField(field: string) {
 }
 
 export function IssueCell({ row }: { row: MonitoringRecord }) {
-  const issue = String(row.error_preview || row.error_message || row.source_error_message || row.transform_error_message || row.destination_error_message || "");
-  if (!issue) return <span className="monitor-muted">-</span>;
+  const message = effectiveMonitoringMessage(row);
+  if (message === null) return <span className="monitor-muted">-</span>;
   const status = String(row.status || "").toLowerCase();
   return (
-    <span className={`monitoring-issue-cell${status === "failed" ? " is-error" : ""}`} title={issue} aria-label={issue}>
-      {issue}
-    </span>
+    <Help className={`monitoring-issue-cell${status === "failed" ? " is-error" : ""}`} title={message} aria-label={message}>
+      {message}
+    </Help>
   );
 }
 
@@ -655,14 +720,35 @@ export function looksJson(value: string) {
   return (trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"));
 }
 
+function isMetricField(field: string) {
+  return /(?:count|number|rows?|bytes?|files?|runs?|jobs?|records?|total|failed|succeeded|skipped|running|pending|difference|duration_seconds)$/iu.test(field);
+}
+
 export function formatJson(value: string) {
-  try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return value;
-  }
+  return formatRawRecordJson(value);
 }
 
 export function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+/**
+ * Keep identifiers readable in narrow drawer fields while preserving the
+ * first and last token for values that use hyphen-delimited segments.
+ */
+export function compactDrawerIdentifier(value: unknown, maxLength = 18): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  if (text.length <= maxLength) return text;
+
+  const groups = text.split("-").filter(Boolean);
+  const separator = groups.length > 1 ? "-...-" : "...";
+  const available = maxLength - separator.length;
+  if (available <= 0) return text.slice(0, maxLength);
+
+  const headLength = Math.ceil(available / 2);
+  const tailLength = Math.floor(available / 2);
+  const headSource = groups.length > 1 ? groups[0] : text;
+  const tailSource = groups.length > 1 ? groups.at(-1) ?? "" : text;
+  return `${headSource.slice(0, headLength)}${separator}${tailLength > 0 ? tailSource.slice(-tailLength) : ""}`;
 }

@@ -1,6 +1,6 @@
 import { Icon } from "@iconify/react";
-import { assetTypeIconId, referenceTypeAssetType, type AssetIconKind } from "../model/presentation";
-import { LineageFormatIcon } from "./LineageFormatIcon";
+import { assetTypeIconId, referenceTypeAssetType, type AssetIconKind } from "../../../shared/assetPresentation";
+import { LineageFormatIcon } from "../../../shared/components/FormatIcon";
 
 export function LineageEntityIcon({ iconKind, badge, referenceType, size = 18 }: {
   iconKind: AssetIconKind;

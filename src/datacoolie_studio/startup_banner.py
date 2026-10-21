@@ -18,7 +18,7 @@ DATACOOLIE_WORDMARK = r"""
 """.strip("\n")
 WORDMARK_WIDTH = max(len(line) for line in DATACOOLIE_WORDMARK.splitlines())
 
-_STUDIO_DESCRIPTION = "Explore DataCoolie metadata, lineage, and ETL logs."
+_STUDIO_DESCRIPTION = "Explore DataCoolie metadata, lineage, execution, and system logs."
 
 
 def build_application_url(host: str, port: int) -> str | None:

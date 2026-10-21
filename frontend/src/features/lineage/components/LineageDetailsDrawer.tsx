@@ -18,10 +18,10 @@ import { useDrawerEscape } from "../../../shared/hooks/useDrawerEscape";
 import { displayStorageUri } from "../../../shared/lib/storage";
 import { latestRun } from "../model/flow";
 import { groupRelationsByNeighbor, isAttentionResolutionStatus, referenceNeighborAttentionStatus, type LineageGraphIndex, type Relation } from "../model/graphIndex";
-import { assetIconKind, assetTypeTone, presentLineageAsset, referenceTypeAssetType } from "../model/presentation";
+import { assetIconKind, assetTypeTone, presentLineageAsset, referenceTypeAssetType } from "../../../shared/assetPresentation";
 import { isLineageAsset, type LineageEntity, type LineageFocus, type LineageSelection } from "../model/types";
-import { highlightStructuredValue } from "../../metadata-explorer/MetadataStructuredCell";
-import { LineageFormatIcon } from "./LineageFormatIcon";
+import { highlightStructuredValue } from "../../../shared/metadata/metadataStructuredValue";
+import { LineageFormatIcon } from "../../../shared/components/FormatIcon";
 import { LineageCodeDialog } from "./LineageCodeDialog";
 import { LineageEntityIcon } from "./LineageEntityIcon";
 import { ReferenceMappingDrawer } from "../../reference-mappings/ReferenceMappingDrawer";
@@ -746,7 +746,7 @@ function RunHistory({ environmentId, dataflow, onOpenMonitoringDataflowRun }: { 
   const runs = useInfiniteQuery({ ...lineageDataflowRunsOptions(environmentId, dataflow.dataflow_id, dataflow.name), enabled: open });
   const records = runs.data?.pages.flatMap((page) => page.records) ?? [];
   return <section className="lineage-run-history"><button type="button" onClick={() => setOpen((value) => !value)}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}Run history</button>{open ? <div>{runs.isFetching && !records.length ? <small>Loading run history…</small> : null}{runs.error && !records.length ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load run history."}</small> : null}{records.length ? records.map((run, index) => {
-    const dataflowRunId = String(run.dataflow_run_id ?? "").trim();
+    const dataflowRunId = String(run.dataflow_run_id ?? "");
     return <button className="lineage-run-row" type="button" disabled={!dataflowRunId} key={dataflowRunId || String(run.started_at ?? index)} onClick={() => onOpenMonitoringDataflowRun(run)} aria-label={dataflowRunId ? `Open dataflow run ${dataflowRunId} in Monitoring details` : undefined}><StatusPill status={typeof run.status === "string" ? run.status : "unknown"} /><span>{formatTimestamp(firstValue(run, "completed_at", "end_time", "started_at", "start_time"))}</span><small>{formatDuration(run.duration_seconds)}</small></button>;
   }) : !runs.isFetching && !runs.error ? <small>No run history available.</small> : null}{runs.hasNextPage ? <button className="lineage-run-row lineage-run-history-more" type="button" disabled={runs.isFetchingNextPage} onClick={() => void runs.fetchNextPage()}>{runs.isFetchingNextPage ? "Loading…" : "More"}</button> : null}{runs.error && records.length ? <small className="error">{runs.error instanceof Error ? runs.error.message : "Unable to load more run history."}</small> : null}</div> : null}</section>;
 }

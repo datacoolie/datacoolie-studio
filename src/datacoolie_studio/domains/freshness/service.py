@@ -143,7 +143,7 @@ def environment_context(session: Session, environment_id: int) -> dict[str, Any]
         },
         "source_counts": {
             "metadata": freshness["metadata_source_count"],
-            "logs": freshness["etl_log_path_count"],
+            "logs": freshness["log_source_count"],
             "code": sum(source.source_kind == "code" for source in state.sources),
         },
         "freshness": {
@@ -151,7 +151,7 @@ def environment_context(session: Session, environment_id: int) -> dict[str, Any]
             "message": freshness["message"],
             "max_source_modified_at": freshness["max_source_modified_at"],
             "metadata": freshness["metadata"],
-            "etl_logs": freshness["etl_logs"],
+            "logs": freshness["logs"],
         },
         "versions": _dependency_versions(state),
         "checked_at": datetime.now(timezone.utc),
@@ -163,17 +163,10 @@ def metadata_catalog_version(
     sources: list[EnvironmentSource],
 ) -> str:
     """Return the same Metadata dependency version exposed by Environment Context."""
-    enabled_sources = [
-        source
-        for source in sources
-        if source.enabled and source.source_kind == "metadata"
-    ]
-    materializations = _structural_materializations(
-        session,
-        MetadataMaterialization,
-        [source.id for source in enabled_sources],
-    )
-    return _catalog_version_for_sources(enabled_sources, materializations)
+    from datacoolie_studio.domains.assets.identity_catalog import metadata_catalog_revision
+    # Enabled/kind may have changed in another Session; the shared scalar read
+    # applies those predicates against committed rows without refreshing edits.
+    return metadata_catalog_revision(session, source_ids=[source.id for source in sources])
 
 
 def _load_environment_context_state(session: Session, environment_id: int) -> EnvironmentContextState:
@@ -254,7 +247,7 @@ def _freshness_from_state(state: EnvironmentContextState) -> dict[str, Any]:
         "message": _freshness_message(status, max_modified_at),
         "max_source_modified_at": max_modified_at,
         "metadata_source_count": len(metadata_items),
-        "etl_log_path_count": len(log_items),
+        "log_source_count": len(log_items),
         "source_cache_version": _source_cache_version(state.sources, [materialized for _, materialized in item_pairs]),
         "structural_cache_version": _structural_cache_version(
             state.sources,
@@ -263,7 +256,7 @@ def _freshness_from_state(state: EnvironmentContextState) -> dict[str, Any]:
             state.mappings,
         ),
         "metadata": _group_summary(metadata_items),
-        "etl_logs": _group_summary(log_items),
+        "logs": _group_summary(log_items),
         "items": items,
     }
 
@@ -356,6 +349,28 @@ def _source_freshness(
         if observation
         else None
     )
+    if source.source_kind == "sql":
+        status = _sql_source_status(source)
+        checked_at = _as_utc(source.read_checked_at) if source.read_checked_at else None
+        synced_at = _cache_synced_at(
+            source,
+            metadata_materialization=None,
+            code_materialization=None,
+            manifest_rows=[],
+        ) or checked_at
+        return {
+            "source_id": source.id,
+            "source_kind": source.source_kind,
+            "label": source.label,
+            "uri": source.uri,
+            "status": status,
+            "source_modified_at": None,
+            "cache_synced_at": synced_at,
+            "cache_source_modified_at": None,
+            "revision": _public_revision(stored_revision),
+            "cache_revision": None,
+            "message": _source_message(status, source.source_kind),
+        }, None
     materialized_revision = _materialized_revision(
         source,
         observation,
@@ -454,6 +469,31 @@ def _source_status(
     if observation is None or observation.last_outcome == "never":
         return "unknown"
     return "current"
+
+
+def _sql_source_status(source: EnvironmentSource) -> str:
+    """Map the latest SQL readability check to the freshness contract.
+
+    SQL sources are not materialized by Studio, so their freshness is the
+    availability of the configured path rather than a cache revision.
+    """
+
+    validation_status = str(source.read_check_status or "").lower()
+    if validation_status in {"ok", "warning"}:
+        return "current"
+    if validation_status == "error":
+        result = _json_or_none(source.read_check_result_json) or {}
+        errors = result.get("errors")
+        if isinstance(errors, list):
+            for error in errors:
+                if isinstance(error, dict) and str(error.get("code") or "").lower() in {
+                    "not_found",
+                    "missing",
+                }:
+                    return "missing"
+        message = str(result.get("message") or "").lower()
+        return "missing" if "not found" in message else "sync_failed"
+    return "unknown"
 
 
 def _group_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -624,7 +664,18 @@ def _freshness_message(status: str, modified_at: datetime | None) -> str:
 
 
 def _source_message(status: str, source_kind: str) -> str:
-    noun = "source" if source_kind not in {"metadata", "logs"} else ("metadata" if source_kind == "metadata" else "logs")
+    noun = {
+        "metadata": "metadata",
+        "logs": "logs",
+        "sql": "SQL source",
+    }.get(source_kind, "source")
+    if source_kind == "sql":
+        return {
+            "current": "SQL source is readable",
+            "missing": "SQL source is missing",
+            "sync_failed": "SQL source validation failed",
+            "unknown": "SQL source not validated",
+        }.get(status, "SQL source freshness unknown")
     return {
         "current": f"{noun.capitalize()} cache is current",
         "not_cached": f"{noun.capitalize()} source is not synced",

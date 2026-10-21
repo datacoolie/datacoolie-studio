@@ -11,7 +11,7 @@ interface ContextBarProps {
   project: { id: number; name: string } | null;
   environment: { id: number; name: string } | null;
   metadataSourceCount: number;
-  logPathCount: number;
+  logSourceCount: number;
   freshness: EnvironmentContext["freshness"] | null;
   timezoneName: string | null;
   onProjectSelect: (projectId: number | null) => void;
@@ -24,7 +24,7 @@ export function ContextBar({
   project,
   environment,
   metadataSourceCount,
-  logPathCount,
+  logSourceCount,
   freshness,
   timezoneName,
   onProjectSelect,
@@ -76,18 +76,18 @@ export function ContextBar({
                 />
                 <FreshnessPill
                   label="Logs"
-                  count={logPathCount}
-                  countLabel="paths"
-                  modifiedAt={freshness.etl_logs.max_source_modified_at}
-                  status={freshness.etl_logs.status}
-                  pendingSyncCount={freshness.etl_logs.pending_sync_count ?? 0}
+                  count={logSourceCount}
+                  countLabel="sources"
+                  modifiedAt={freshness.logs.max_source_modified_at}
+                  status={freshness.logs.status}
+                  pendingSyncCount={freshness.logs.pending_sync_count ?? 0}
                   timezoneName={timezoneName}
                 />
               </>
             ) : (
               <>
                 <span>{metadataSourceCount} metadata sources</span>
-                <span>{logPathCount} log paths</span>
+                <span>{logSourceCount} log sources</span>
               </>
             )}
           </div>

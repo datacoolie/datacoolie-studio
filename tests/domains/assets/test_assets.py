@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
-from datacoolie_studio.domains.assets.service import build_asset_detail, build_assets_inventory
+from datacoolie_studio.domains.assets.detail import build_asset_detail
+from datacoolie_studio.domains.assets.inventory import build_assets_inventory
 from datacoolie_studio.domains.assets.reference_source import build_reference_occurrence_source
 from datacoolie_studio.domains.lineage.service import build_lineage
 from datacoolie_studio.domains.metadata.normalizer import normalize_metadata_document
@@ -333,7 +333,6 @@ def test_assets_api_list_and_detail(tmp_path: Path, monkeypatch):
         assert client.get("/api/v1/environments/999999/assets").status_code == 404
         assert client.get("/api/v1/environments/999999/asset-references").status_code == 404
 
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_asset_detail_definition_formats_sql_and_resolves_python_source(tmp_path: Path):

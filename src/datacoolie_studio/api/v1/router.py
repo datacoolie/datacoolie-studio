@@ -11,6 +11,7 @@ from datacoolie_studio.api.v1.routes import (
     monitoring,
     overview,
     sources,
+    sql,
     workspace,
 )
 
@@ -24,3 +25,4 @@ api_router.include_router(lineage.router)
 api_router.include_router(overview.router)
 api_router.include_router(monitoring.router)
 api_router.include_router(sources.router)
+api_router.include_router(sql.router)

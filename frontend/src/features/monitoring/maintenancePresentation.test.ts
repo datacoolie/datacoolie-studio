@@ -26,14 +26,14 @@ describe("maintenance presentation", () => {
     ["apache_iceberg", "iceberg"],
     ["SQL query", "sql"],
     ["python function", "python"],
-    ["lakehouse", "database"],
-    ["custom", "table"],
+    ["lakehouse", "table"],
+    ["custom", "file"],
   ] as const)("maps %s to the shared lineage icon %s", (format, icon) => {
     expect(maintenanceFormatIconKind(format)).toBe(icon);
   });
 
   it("formats maintenance lag consistently across page and drawer", () => {
-    expect(formatMaintenanceLag(0)).toBe("-");
+    expect(formatMaintenanceLag(0)).toBe("0s");
     expect(formatMaintenanceLag(7_200)).toBe("2h");
     expect(formatMaintenanceLag(102_527)).toBe("1.2d");
   });

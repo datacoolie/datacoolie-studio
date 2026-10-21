@@ -5,11 +5,10 @@ import type {
   LineageDependency,
   LineageReference,
 } from "../../../shared/api/domainTypes";
-import type { AssetIconKind } from "./presentation";
+import type { AssetIconKind } from "../../../shared/assetPresentation";
 
 export type TraceDirection = "upstream" | "both" | "downstream";
 export type LineageEntity = LineageAsset | LineageReference;
-export type LineageRelation = LineageDataflow | LineageDependency;
 
 export function isLineageAsset(entity: LineageEntity | undefined): entity is LineageAsset {
   return entity?.entity_type === "asset";

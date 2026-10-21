@@ -2,8 +2,8 @@ import { FileClock, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MetadataBackup, MetadataEditorDocument } from "../../shared/api/domainTypes";
 import { useDrawerEscape } from "../../shared/hooks/useDrawerEscape";
+import { formatCellValue } from "../../shared/metadata/metadataCellValues";
 import { displayStorageUri } from "../../shared/lib/storage";
-import { formatCellValue } from "./metadataSheetOperations";
 import type { SheetKey } from "./metadataSheetTypes";
 
 interface MetadataHistoryDrawerProps {
@@ -97,7 +97,7 @@ export function MetadataHistoryDrawer({
 
   async function deleteSelected() {
     if (!selectedBackup) return;
-    if (!window.confirm(`Delete this backup permanently?\n\n${selectedBackup.backup_path}`)) return;
+    if (!window.confirm(`Delete this backup permanently?\n\nSnapshot for ${displaySourceUri}`)) return;
     setActionBusy(true);
     setError("");
     try {
@@ -161,7 +161,7 @@ export function MetadataHistoryDrawer({
           </div>
         </header>
 
-        {error ? <div className="metadata-history-error" role="alert">{error}</div> : null}
+        {error ? <div className="metadata-history-error" role="alert">{error}<button type="button" disabled={loading || previewLoading || actionBusy} onClick={() => void (selectedBackup ? selectBackup(selectedBackup) : loadBackups())}>Retry</button></div> : null}
 
         <div className="metadata-history-layout">
           <section className="metadata-history-timeline" aria-label="Backup versions">
@@ -182,7 +182,7 @@ export function MetadataHistoryDrawer({
                 >
                   <strong>{formatDateTime(backup.created_at)}</strong>
                   <span>{revisionLabel(backup.source_revision)}</span>
-                  <small title={backup.backup_path}>{shortPath(backup.backup_path)}</small>
+                  <small title={backup.source_uri}>{shortPath(backup.source_uri)}</small>
                 </button>
               ))}
               {loading ? <div className="table-empty">Loading history...</div> : null}

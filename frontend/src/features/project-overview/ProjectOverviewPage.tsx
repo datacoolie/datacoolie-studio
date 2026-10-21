@@ -144,7 +144,7 @@ function EnvironmentSetupCard({
         </div>
         <div className="proj-env-card-stats">
           <span><Database size={11} />{environment.metadata_source_count} sources</span>
-          <span><FolderOpen size={11} />{environment.etl_log_path_count} logs</span>
+          <span><FolderOpen size={11} />{environment.log_source_count} logs</span>
           <span><Code2 size={11} />{environment.code_artifact_count ?? 0} code</span>
         </div>
         {needsMetadata ? <div className="proj-env-card-reason">{environmentReadinessReason(readiness)}</div> : null}

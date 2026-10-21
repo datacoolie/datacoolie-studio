@@ -24,12 +24,19 @@ MAX_CONSECUTIVE_OBSERVATION_FAILURES = 3
 
 
 def is_periodically_observed(source: EnvironmentSource) -> bool:
-    return source.storage_provider != "local" or source.source_kind == "logs"
+    # SQL roots are live references used by metadata readers.  They have no
+    # Studio materialization cache and therefore must not enter the generic
+    # automatic-observation loop (which only knows how to refresh metadata,
+    # code, and logs).
+    return source.source_kind != "sql" and (
+        source.storage_provider != "local" or source.source_kind == "logs"
+    )
 
 
 def _periodic_source_ids():
     return select(EnvironmentSource.id).where(
         EnvironmentSource.enabled.is_(True),
+        EnvironmentSource.source_kind != "sql",
         or_(
             EnvironmentSource.storage_provider != "local",
             EnvironmentSource.source_kind == "logs",

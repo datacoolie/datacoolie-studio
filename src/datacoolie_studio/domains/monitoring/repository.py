@@ -15,11 +15,15 @@ from datacoolie_studio.domains.monitoring.read_models.common import (
     reader_context,
     rows,
 )
+from datacoolie_studio.domains.monitoring.read_models.filter_counts import all_time_missing_counts, range_filter_counts
+from datacoolie_studio.domains.monitoring.dimensions import UNKNOWN_KEY, dimension_key, dimension_label, dimension_text_sql, dimension_predicate_sql, known_dimension_sql
 
 
 def monitoring_filter_options_read_model(
     paths: list[EnvironmentSource],
     analytics_context: AnalyticsContext | None = None,
+    *,
+    filters: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return exact filter dimensions from the published analytics generation."""
     with reader_context(paths, analytics_context) as (conn, source_ids, generation):
@@ -36,13 +40,33 @@ def monitoring_filter_options_read_model(
             """,
             source_ids,
         )
-        options: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        catalog: dict[str, dict[str, int]] = defaultdict(dict)
+        connections: dict[str, list[tuple[str, int]]] = defaultdict(list)
         for row in rows(result):
-            options[str(row["field"])].append(
-                {"value": row["value"], "label": row["value"], "count": row["record_count"]}
-            )
-        if "connection" not in options:
-            options["connection"] = _connection_filter_values(conn, source_ids)
+            key = dimension_key(row['value'])
+            if row['field'] == 'connection':
+                if key != UNKNOWN_KEY:
+                    connections[key].append((str(row['value']), int(row['record_count'])))
+                continue
+            if key == UNKNOWN_KEY:
+                continue
+            field = str(row['field'])
+            catalog[field][key] = catalog[field].get(key, 0) + int(row['record_count'])
+        options = {field: [{'value': key, 'label': dimension_label(key), 'count': count} for key, count in values.items()] for field, values in catalog.items()}
+        # Published connection aggregates cannot recover deduplication after
+        # canonical whitespace normalization merges two endpoint names.
+        options['connection'] = _connection_filter_values(conn, source_ids, connections, counts_required=not filters or filters.get('range') == 'all')
+        missing = all_time_missing_counts(conn, source_ids, catalog)
+        for (field, key), count in missing.items():
+            if count and field != 'connection':
+                options.setdefault(field, []).append({'value': key, 'label': dimension_label(key), 'count': count})
+        if filters and filters.get("range") != "all":
+            counts = range_filter_counts(conn, source_ids, filters)
+            for field, items in options.items():
+                for item in items:
+                    item["count"] = counts.get((field, str(item["value"])), 0)
+        for items in options.values():
+            items.sort(key=lambda item: (item['value'] == UNKNOWN_KEY, item['label'], item['value']))
     return {"generation": generation, "options": dict(options)}
 
 
@@ -92,8 +116,8 @@ def environment_overview_read_model(
               (SELECT COUNT(*) FROM filtered_dataflows WHERE normalized_status = 'succeeded') AS dataflow_succeeded,
               (SELECT COUNT(*) FROM filtered_dataflows WHERE normalized_status = 'failed') AS dataflow_failed,
               (SELECT COUNT(*) FROM filtered_jobs WHERE normalized_status = 'failed') AS job_failed,
-              (SELECT COUNT(DISTINCT engine_name) FROM filtered_jobs WHERE engine_name IS NOT NULL AND engine_name <> '') AS active_engines,
-              (SELECT COUNT(DISTINCT metadata_provider_name) FROM filtered_jobs WHERE metadata_provider_name IS NOT NULL AND metadata_provider_name <> '') AS active_metadata_providers,
+              (SELECT COUNT(DISTINCT {known_dimension_sql('engine_name')}) FROM filtered_jobs) AS active_engines,
+              (SELECT COUNT(DISTINCT {known_dimension_sql('metadata_provider_name')}) FROM filtered_jobs) AS active_metadata_providers,
               (SELECT MAX(event_time) FROM (
                 SELECT event_time FROM filtered_dataflows
                 UNION ALL
@@ -140,35 +164,23 @@ def environment_overview_read_model(
     }
 
 
-def _connection_filter_values(conn: Any, source_ids: list[int]) -> list[dict[str, Any]]:
-    placeholders = ", ".join("?" for _ in source_ids)
-    result = conn.execute(
-        f"""
+def _connection_filter_values(conn: Any, source_ids: list[int], catalog: dict[str, list[tuple[str, int]]], *, counts_required: bool) -> list[dict[str, Any]]:
+    """Reuse exact published counts; recount only normalization collisions/missing."""
+    values = {key: sum(count for _, count in entries) for key, entries in catalog.items()}
+    collisions = [key for key, entries in catalog.items() if len(entries) > 1] if counts_required else []
+    placeholders = ', '.join('?' for _ in source_ids)
+    selections, params = [], []
+    for column in ('source_name', 'destination_name'):
+        name = dimension_text_sql(column)
+        predicate, bound = dimension_predicate_sql(column, [UNKNOWN_KEY, *collisions])
+        selections.append(f"SELECT _source_id, _file_uri, dataflow_run_id, job_id, {name} AS connection_name FROM {DATAFLOW_TABLE} WHERE _source_id IN ({placeholders}) AND ({predicate})")
+        params.extend([*source_ids, *bound])
+    result = conn.execute(f"""
         SELECT connection_name AS value, COUNT(*) AS record_count
-        FROM (
-          SELECT DISTINCT _source_id, _file_uri, dataflow_run_id, job_id, connection_name
-          FROM (
-            SELECT _source_id, _file_uri, dataflow_run_id, job_id,
-                   TRIM(CAST(source_name AS VARCHAR)) AS connection_name
-            FROM {DATAFLOW_TABLE}
-            WHERE _source_id IN ({placeholders})
-              AND source_name IS NOT NULL
-              AND TRIM(CAST(source_name AS VARCHAR)) <> ''
-            UNION ALL
-            SELECT _source_id, _file_uri, dataflow_run_id, job_id,
-                   TRIM(CAST(destination_name AS VARCHAR)) AS connection_name
-            FROM {DATAFLOW_TABLE}
-            WHERE _source_id IN ({placeholders})
-              AND destination_name IS NOT NULL
-              AND TRIM(CAST(destination_name AS VARCHAR)) <> ''
-          ) raw_connection_names
-        ) connection_names
+        FROM (SELECT DISTINCT _source_id, _file_uri, dataflow_run_id, job_id, connection_name
+              FROM ({' UNION ALL '.join(selections)}) raw_connection_names) connection_names
         GROUP BY connection_name
-        ORDER BY connection_name
-        """,
-        [*source_ids, *source_ids],
-    )
-    return [
-        {"value": row["value"], "label": row["value"], "count": row["record_count"]}
-        for row in rows(result)
-    ]
+    """, params)
+    for row in rows(result):
+        values[dimension_key(row['value'])] = int(row['record_count'])
+    return [{'value': key, 'label': dimension_label(key), 'count': count} for key, count in values.items()]

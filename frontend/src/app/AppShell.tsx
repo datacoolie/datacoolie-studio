@@ -10,10 +10,11 @@ interface AppShellProps {
   activeScope: ModuleScope;
   project: { id: number; name: string } | null;
   environment: { id: number; name: string } | null;
+  environmentId: number | null;
   sidebarCollapsed: boolean;
   enabledCapabilities: ReadonlySet<CapabilityKey>;
   metadataSourceCount: number;
-  logPathCount: number;
+  logSourceCount: number;
   freshness: EnvironmentContext["freshness"] | null;
   timezoneName: string | null;
   error: string | null;
@@ -29,10 +30,11 @@ export function AppShell({
   activeScope,
   project,
   environment,
+  environmentId,
   sidebarCollapsed,
   enabledCapabilities,
   metadataSourceCount,
-  logPathCount,
+  logSourceCount,
   freshness,
   timezoneName,
   error,
@@ -58,7 +60,7 @@ export function AppShell({
       <SidebarNav
         activeModule={activeModule}
         hasProject={Boolean(project)}
-        hasEnvironment={Boolean(environment)}
+        hasEnvironment={environmentId !== null}
         collapsed={sidebarCollapsed}
         enabledCapabilities={enabledCapabilities}
         onToggleCollapsed={onToggleSidebar}
@@ -72,7 +74,7 @@ export function AppShell({
           project={project}
           environment={environment}
           metadataSourceCount={metadataSourceCount}
-          logPathCount={logPathCount}
+          logSourceCount={logSourceCount}
           freshness={freshness}
           timezoneName={timezoneName}
           onProjectSelect={onProjectSelect}

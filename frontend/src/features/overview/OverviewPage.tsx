@@ -5,6 +5,8 @@ import { RelativeTime } from "../../shared/components/RelativeTime";
 import { elapsedWholeDays } from "../../shared/time";
 import { createStageToneMap, normalizeStageSummary, stageToneClass } from "../../shared/stagePresentation";
 import type { ModuleKey } from "../../app/moduleRegistry";
+import { formatExactNumber, toApproximateNumber } from "../../shared/lib/numberFormat";
+import type { ReactNode } from "react";
 
 interface OverviewPageProps {
   overview: EnvironmentOverview | null;
@@ -19,19 +21,19 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
   const monitoring = overview?.monitoring;
   const enabledMetadataSources = sources?.metadata.enabled ?? 0;
   const metadataSourceCount = sources?.metadata.configured ?? 0;
-  const enabledLogPaths = sources?.logs.enabled ?? 0;
-  const logPathCount = sources?.logs.configured ?? 0;
-  const failedJobs = monitoring?.total_failures ?? 0;
+  const enabledLogSources = sources?.logs.enabled ?? 0;
+  const logSourceCount = sources?.logs.configured ?? 0;
+  const failedJobs = metricNumber(monitoring?.total_failures);
   const metadataErrors = metadata?.errors.length ?? 0;
   const lineageErrors = lineage?.error_count ?? 0;
   const monitoringErrors = monitoring?.errors.length ?? 0;
   const dataflowSuccessRate = monitoring?.dataflow_success_rate ?? 0;
   const readErrors = metadataErrors + lineageErrors + monitoringErrors;
   const now = Date.now();
-  const failedWindows = monitoring?.failed_job_windows ?? { last7: 0, last30: 0, last365: 0 };
+  const failedWindows = monitoring?.failed_job_windows ?? { last7: "0", last30: "0", last365: "0" };
   const logFreshness = getLogFreshness(monitoring?.latest_log_at ?? null, now);
   const sourceValidation = sources?.validation ?? { errors: 0, warnings: 0 };
-  const sourceValidationIntent: StatIntent = !metadataSourceCount && !logPathCount
+  const sourceValidationIntent: StatIntent = !metadataSourceCount && !logSourceCount
     ? "neutral"
     : sourceValidation.errors > 0
       ? "bad"
@@ -40,25 +42,25 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
         : "good";
   const nextActions = getNextActions({
     enabledMetadataSources,
-    enabledLogPaths,
+    enabledLogSources,
     metadataDataflows: metadata?.dataflows ?? 0,
     lineageDataflows: lineage?.dataflows ?? 0,
     metadataErrors,
     lineageErrors,
     monitoringErrors,
     failedJobs,
-    failedWindows,
+    failedWindows: metricWindow(failedWindows),
     logFreshness
   });
   const primaryAction = nextActions[0];
   const secondaryActions = nextActions.slice(1);
   const status = getEnvironmentStatus({
     enabledMetadataSources,
-    enabledLogPaths,
+    enabledLogSources,
     dataflows: metadata?.dataflows ?? 0,
-    jobs: monitoring?.job_records ?? 0,
+    jobs: metricNumber(monitoring?.job_records),
     readErrors,
-    failedWindows,
+    failedWindows: metricWindow(failedWindows),
     logFreshness,
     primaryAction
   });
@@ -72,7 +74,7 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
     )
     : 0;
 
-  if (!metadataSourceCount && !logPathCount) {
+  if (!metadataSourceCount && !logSourceCount) {
     return (
       <EmptyState
         icon={<SlidersHorizontal size={24} />}
@@ -95,11 +97,11 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
         <ModuleSnapshot
           icon={<SlidersHorizontal size={18} />}
           title="Sources"
-          moduleStatus={enabledMetadataSources + enabledLogPaths > 0 ? "ready" : "empty"}
+          moduleStatus={enabledMetadataSources + enabledLogSources > 0 ? "ready" : "empty"}
           metrics={[
             { label: "metadata", value: metadataSourceCount },
-            { label: "log paths", value: logPathCount },
-            { label: "enabled", value: enabledMetadataSources + enabledLogPaths }
+            { label: "log sources", value: logSourceCount },
+            { label: "enabled", value: enabledMetadataSources + enabledLogSources }
           ]}
           onClick={() => onNavigate("sources")}
         />
@@ -128,7 +130,7 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
         <ModuleSnapshot
           icon={<Activity size={18} />}
           title="Monitoring"
-          moduleStatus={(monitoring?.job_records ?? 0) > 0 ? (failedWindows.last7 > 0 ? "warning" : "ready") : "empty"}
+          moduleStatus={metricNumber(monitoring?.job_records) > 0 ? (metricNumber(failedWindows.last7) > 0 ? "warning" : "ready") : "empty"}
           metrics={[
             { label: "jobs", value: monitoring?.job_records ?? 0 },
             { label: "success rate", value: `${dataflowSuccessRate}%` },
@@ -142,7 +144,7 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
       <div className="overview-panel-grid">
         <OverviewPanel title="Setup and readiness">
           <RatioStat label="Metadata configured" enabled={enabledMetadataSources} total={metadataSourceCount} suffix="enabled" />
-          <RatioStat label="ETL logs configured" enabled={enabledLogPaths} total={logPathCount} suffix="enabled" />
+          <RatioStat label="Logs configured" enabled={enabledLogSources} total={logSourceCount} suffix="enabled" />
           <CompactStat
             label="Source validation"
             value={`${sourceValidation.errors} errors, ${sourceValidation.warnings} warnings`}
@@ -197,10 +199,10 @@ export function OverviewPage({ overview, onNavigate, timezoneName }: OverviewPag
         </OverviewPanel>
 
         <OverviewPanel title="Operations">
-          <CompactStat label="Failed last 7 days" value={failedWindows.last7} intent={failedWindows.last7 ? "bad" : "good"} />
-          <CompactStat label="Failed last 30 days" value={failedWindows.last30} intent={failedWindows.last30 ? "warning" : "good"} />
-          <CompactStat label="Failed last 1 year" value={failedWindows.last365} intent={failedWindows.last365 ? "warning" : "good"} />
-          <RatioStat label="Failed jobs" enabled={failedJobs} total={monitoring?.job_records ?? 0} suffix="failed" reverse />
+          <CompactStat label="Failed last 7 days" value={formatExactNumber(failedWindows.last7)} intent={metricNumber(failedWindows.last7) ? "bad" : "good"} />
+          <CompactStat label="Failed last 30 days" value={formatExactNumber(failedWindows.last30)} intent={metricNumber(failedWindows.last30) ? "warning" : "good"} />
+          <CompactStat label="Failed last 1 year" value={formatExactNumber(failedWindows.last365)} intent={metricNumber(failedWindows.last365) ? "warning" : "good"} />
+          <RatioStat label="Failed jobs" enabled={failedJobs} total={metricNumber(monitoring?.job_records)} suffix="failed" reverse />
           <CompactStat label="Success rate" value={`${dataflowSuccessRate}%`} />
           <CompactStat label="Active engines" value={monitoring?.active_engines ?? 0} />
           <CompactStat
@@ -232,7 +234,7 @@ function ModuleSnapshot({
   icon: React.ReactNode;
   title: string;
   moduleStatus: "ready" | "warning" | "empty";
-  metrics: Array<{ label: string; value: string | number }>;
+  metrics: Array<{ label: string; value: ReactNode }>;
   onClick: () => void;
 }) {
   return (
@@ -366,6 +368,18 @@ function formatDateRange(dateRange: { min?: string | null; max?: string | null }
   return `${dateRange.min ?? "-"} to ${dateRange.max ?? "-"}`;
 }
 
+function metricNumber(value: unknown) {
+  return toApproximateNumber(value as Parameters<typeof toApproximateNumber>[0]) ?? 0;
+}
+
+function metricWindow(value: { last7: unknown; last30: unknown; last365: unknown }) {
+  return {
+    last7: metricNumber(value.last7),
+    last30: metricNumber(value.last30),
+    last365: metricNumber(value.last365),
+  };
+}
+
 type StatIntent = "neutral" | "good" | "warning" | "bad";
 type LogFreshness = {
   latestAt: string | null;
@@ -397,7 +411,7 @@ function getLogFreshness(latestAt: string | null, now: number): LogFreshness {
 
 function getEnvironmentStatus(input: {
   enabledMetadataSources: number;
-  enabledLogPaths: number;
+  enabledLogSources: number;
   dataflows: number;
   jobs: number;
   readErrors: number;
@@ -405,10 +419,10 @@ function getEnvironmentStatus(input: {
   logFreshness: LogFreshness;
   primaryAction?: { label: string; detail: string; module: ModuleKey };
 }): { label: string; reason: string; intent: "neutral" | "good" | "warning" | "bad"; actionLabel: string; actionModule: ModuleKey } {
-  if (!input.enabledMetadataSources && !input.enabledLogPaths) {
+  if (!input.enabledMetadataSources && !input.enabledLogSources) {
     return {
       label: "Needs sources",
-      reason: "Add metadata and ETL log paths before this environment can show useful context.",
+      reason: "Add metadata and log sources before this environment can show useful context.",
       intent: "neutral",
       actionLabel: "Open Sources",
       actionModule: "sources"
@@ -453,7 +467,7 @@ function getEnvironmentStatus(input: {
   if (input.logFreshness.ageDays !== null && input.logFreshness.ageDays > 30) {
     return {
       label: "Stale logs",
-      reason: `Latest ETL log is ${input.logFreshness.ageDays} days old. Runtime health may be outdated.`,
+      reason: `Latest log is ${input.logFreshness.ageDays} days old. Runtime health may be outdated.`,
       intent: "warning",
       actionLabel: input.primaryAction?.label ?? "Open Monitoring",
       actionModule: input.primaryAction?.module ?? "monitoring"
@@ -462,18 +476,18 @@ function getEnvironmentStatus(input: {
   if (input.logFreshness.ageDays !== null && input.logFreshness.ageDays > 7) {
     return {
       label: "Warning",
-      reason: `Latest ETL log is ${input.logFreshness.ageDays} days old. Check whether logging is still running.`,
+      reason: `Latest log is ${input.logFreshness.ageDays} days old. Check whether logging is still running.`,
       intent: "warning",
       actionLabel: input.primaryAction?.label ?? "Open Monitoring",
       actionModule: input.primaryAction?.module ?? "monitoring"
     };
   }
-  if (!input.enabledLogPaths) {
+  if (!input.enabledLogSources) {
     return {
       label: "Metadata only",
-      reason: `${input.dataflows} dataflows loaded. Add ETL logs to include runtime health.`,
+      reason: `${input.dataflows} dataflows loaded. Add logs to include runtime health.`,
       intent: "neutral",
-      actionLabel: "Add log path",
+      actionLabel: "Add log source",
       actionModule: "sources"
     };
   }
@@ -488,7 +502,7 @@ function getEnvironmentStatus(input: {
 
 function getNextActions(input: {
   enabledMetadataSources: number;
-  enabledLogPaths: number;
+  enabledLogSources: number;
   metadataDataflows: number;
   lineageDataflows: number;
   metadataErrors: number;
@@ -502,8 +516,8 @@ function getNextActions(input: {
   if (!input.enabledMetadataSources) {
     actions.push({ label: "Add metadata source", detail: "Required for metadata and lineage", module: "sources" });
   }
-  if (!input.enabledLogPaths) {
-    actions.push({ label: "Add ETL log path", detail: "Required for monitoring", module: "sources" });
+  if (!input.enabledLogSources) {
+    actions.push({ label: "Add log source", detail: "Required for monitoring", module: "sources" });
   }
   if (input.metadataErrors) {
     actions.push({ label: "Review metadata errors", detail: `${input.metadataErrors} read errors`, module: "metadata" });

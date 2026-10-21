@@ -60,7 +60,7 @@ describe("metadata editor query ownership", () => {
     await queryClient.ensureQueryData(metadataEditorWorkspaceOptions(7));
 
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request).toHaveBeenCalledWith(7);
+    expect(request).toHaveBeenCalledWith(7, expect.any(AbortSignal));
   });
 
   it("keeps backup lists and previews in separate stable caches", () => {
@@ -68,8 +68,8 @@ describe("metadata editor query ownership", () => {
       "environments", 7, "metadata", "backups",
     ]);
     expect(metadataBackupsOptions(8).queryKey).not.toEqual(metadataBackupsOptions(7).queryKey);
-    expect(metadataBackupDocumentOptions(42).queryKey).toEqual([
-      "metadata-backups", 42, "document",
+    expect(metadataBackupDocumentOptions(7, 42).queryKey).toEqual([
+      "metadata", 7, "backups", 42, "document",
     ]);
   });
 });

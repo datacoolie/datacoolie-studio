@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { SourcePath, SourceSyncStatus } from "../../shared/api/domainTypes";
+import type { SourcePath } from "../../shared/api/domainTypes";
+import type { SourceSyncStatus } from "../../shared/api/contractTypes";
 import { sourceKey } from "../../shared/lib/sources";
 import {
   aggregateDeleteImpacts,
@@ -66,18 +67,23 @@ describe("source workspace model", () => {
       source_kind: "metadata",
       status: "ok",
       message: "Source revision recorded",
-      latest_job: { status: "running" }
+      validation: { state: "not_validated" },
+      observation: { state: "never" },
+      sync_execution: { state: "running" }
     } as SourceSyncStatus;
 
     expect(isSourceSyncRunning(status)).toBe(true);
     expect(hasRunningSourceSync({ [sourceKey("metadata", 1)]: status })).toBe(true);
     expect(sourceSyncStatusPollInterval({ [sourceKey("metadata", 1)]: status }))
       .toBe(SOURCE_SYNC_STATUS_POLL_INTERVAL_MS);
-    expect(isSourceSyncRunning({ ...status, latest_job: { ...status.latest_job!, status: "succeeded" } })).toBe(false);
+    expect(isSourceSyncRunning({
+      ...status,
+      sync_execution: { state: "succeeded" },
+    })).toBe(false);
     expect(sourceSyncStatusPollInterval({
       [sourceKey("metadata", 1)]: {
         ...status,
-        latest_job: { ...status.latest_job!, status: "succeeded" }
+        sync_execution: { state: "succeeded" }
       }
     })).toBe(false);
   });
@@ -88,8 +94,9 @@ describe("source workspace model", () => {
       source_kind: "metadata",
       status: "running",
       message: "Waiting to validate source",
-      active_operation: "validate",
-      latest_job: { status: "queued" }
+      validation: { state: "validating" },
+      observation: { state: "never" },
+      sync_execution: { state: "never" }
     } as SourceSyncStatus;
 
     expect(isSourceSyncRunning(status)).toBe(true);
@@ -103,8 +110,9 @@ describe("source workspace model", () => {
       source_kind: "metadata",
       status: "ok",
       message: "Observed",
-      next_check_at: "2026-07-28T10:01:00Z",
-      latest_job: null,
+      validation: { state: "not_validated" },
+      observation: { state: "unchanged", next_check_at: "2026-07-28T10:01:00Z" },
+      sync_execution: { state: "never" },
     } as SourceSyncStatus;
 
     expect(sourceSyncStatusPollInterval(
@@ -115,7 +123,7 @@ describe("source workspace model", () => {
       {
         [sourceKey("metadata", 1)]: {
           ...status,
-          next_check_at: "2026-07-28T10:00:01Z",
+          observation: { state: "unchanged", next_check_at: "2026-07-28T10:00:01Z", failure_count: 0 },
         },
       },
       Date.parse("2026-07-28T10:00:00Z"),
@@ -128,10 +136,9 @@ describe("source workspace model", () => {
       source_kind: "metadata",
       status: "error",
       message: "Source checks paused",
-      next_check_at: null,
-      observation_state: "paused",
-      observation_failure_count: 3,
-      latest_job: null,
+      validation: { state: "not_validated" },
+      observation: { state: "paused", next_check_at: null, failure_count: 3 },
+      sync_execution: { state: "never" },
     } as SourceSyncStatus;
 
     expect(sourceSyncStatusPollInterval({
@@ -179,27 +186,44 @@ describe("source workspace model", () => {
     ];
     const syncStatuses = {
       [sourceKey("metadata", 1)]: {
+        source_id: 1,
+        source_kind: "metadata",
+        status: "ok",
+        message: "Not synced",
         freshness: { state: "not_synced" },
         validation: { state: "ready" },
-        observation: { state: "changed" },
+        observation: { state: "changed", failure_count: 0 },
         sync_execution: { state: "succeeded" },
-      },
+      } as SourceSyncStatus,
       [sourceKey("code", 2)]: {
+        source_id: 2,
+        source_kind: "code",
+        status: "error",
+        message: "Sync failed",
         freshness: { state: "sync_failed" },
         validation: { state: "warning" },
-        observation: { state: "paused" },
+        observation: { state: "paused", failure_count: 3 },
         sync_execution: { state: "failed" },
-      },
+      } as SourceSyncStatus,
       [sourceKey("logs", 3)]: {
+        source_id: 3,
+        source_kind: "logs",
+        status: "error",
+        message: "Invalid",
         freshness: { state: "current" },
         validation: { state: "invalid" },
-        observation: { state: "error" },
+        observation: { state: "error", failure_count: 0 },
         sync_execution: { state: "succeeded" },
-      },
+      } as SourceSyncStatus,
       [sourceKey("metadata", 4)]: {
+        source_id: 4,
+        source_kind: "metadata",
         status: "error",
         message: "Legacy source error",
-      }
+        validation: { state: "not_validated" },
+        observation: { state: "error", failure_count: 0 },
+        sync_execution: { state: "never" },
+      } as SourceSyncStatus,
     } as Record<string, SourceSyncStatus>;
 
     expect(summarizeSourceHealth(entries, syncStatuses)).toEqual({ enabled: 3, pendingSync: 1, issues: 2 });

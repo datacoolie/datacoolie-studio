@@ -1,39 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  environmentDefaultModule,
-  moduleByKey,
-  monitoringDefaultPage,
-  projectDefaultSection,
-  type ModuleKey
-} from "./moduleRegistry";
+import { type ModuleKey } from "./moduleRegistry";
 import type { StudioRouter } from "./useStudioRouter";
-import { api } from "../shared/api/client";
 import type {
-  Environment,
-  MetadataBackup,
-  MetadataEditorDocument,
-  ProjectReferenceMapping,
-  Project,
-  ProjectSummary,
-  SourceImportResponse,
+  DatacoolieProjectSourceImportInput,
   LogSyncRequest,
   SourceDeleteImpact,
-  SourcePath,
+  SourceImportResponse,
   SourceReadCheckResult,
   SourceSyncStatus,
+} from "../shared/api/contractTypes";
+import type {
+  MetadataBackup,
+  MetadataEditorDocument,
+  MetadataWriteOperation,
+  ProjectReferenceMapping,
+  ProjectSummary,
+  SourcePath,
   StorageBinding,
   ReferenceType,
   TargetIdentifierKind
 } from "../shared/api/domainTypes";
 import { toErrorMessage } from "../shared/lib/errors";
 import type { SourceKind } from "../shared/lib/sources";
-import { projectRouteResources } from "./projectRouteResources";
-import { ResourceCache } from "../shared/data/resourceCache";
 import { environmentQueryKeys } from "../features/environments/environmentQueries";
 import { createEnvironmentMutations } from "../features/environments/environmentMutations";
 import { useEnvironmentMetadataEditor } from "../features/metadata-explorer/metadataEditorQueries";
 import { createProjectMutations } from "../features/projects/projectMutations";
+import { projectQueryKeys, useProjectSummariesQuery } from "../features/projects/projectQueries";
 import type {
   SourceBatchAction,
   SourceBatchEntry,
@@ -45,16 +39,14 @@ import { useEnvironmentSourcesQuery } from "../features/sources/sourceQueries";
 import { useLocalSourceObservation } from "../features/sources/useLocalSourceObservation";
 
 export interface StudioWorkspace {
-  projects: Project[];
   projectSummaries: ProjectSummary[];
   projectSummariesLoading: boolean;
   projectSummariesLoaded: boolean;
   projectSummariesError: string | null;
-  environments: Environment[];
-  selectedProject: Project | null;
   selectedProjectSummary: ProjectSummary | null;
   metadataSources: SourcePath[];
-  logPaths: SourcePath[];
+  sqlSources: SourcePath[];
+  logBasePaths: SourcePath[];
   codeArtifacts: SourcePath[];
   sourceSyncStatuses: Record<string, SourceSyncStatus>;
   sourceOperations: SourceOperations;
@@ -92,18 +84,9 @@ export interface StudioWorkspace {
   deleteEnvironment: (environmentId: number) => Promise<void>;
   addMetadataSource: (uri: string, label?: string) => Promise<void>;
   importMetadataSources: (uri: string, label?: string, storage?: StorageBinding) => Promise<SourceImportResponse | null>;
-  importDatacoolieProjectSources: (payload: {
-    project_uri: string;
-    metadata_subpath?: string;
-    code_subpath?: string;
-    code_discovery_mode?: "auto" | "explicit";
-    metadata_uri?: string | null;
-    code_uri?: string | null;
-    include_metadata?: boolean;
-    include_code?: boolean;
-    storage?: StorageBinding;
-  }) => Promise<SourceImportResponse | null>;
-  addLogPath: (uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) => Promise<void>;
+  addSqlSource: (uri: string, label?: string, storage?: StorageBinding) => Promise<void>;
+  importDatacoolieProjectSources: (payload: DatacoolieProjectSourceImportInput) => Promise<SourceImportResponse | null>;
+  addLogBasePath: (uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) => Promise<void>;
   addCodeArtifact: (uri: string, label?: string, sourceConfig?: Record<string, unknown>, storage?: StorageBinding) => Promise<void>;
   updateSource: (
     kind: SourceKind,
@@ -125,10 +108,12 @@ export interface StudioWorkspace {
   retrySourceObservation: (kind: SourceKind, id: number) => Promise<SourceSyncStatus>;
   runSourceBatch: (action: SourceBatchAction, entries: SourceBatchEntry[], logSyncRequest?: LogSyncRequest) => Promise<SourceBatchResult>;
   ensureMetadataEditorContext: () => Promise<void>;
-  validateMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  metadataWarning: string | null;
   saveMetadataEditorDraft: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
   discardMetadataEditorDraft: () => Promise<void>;
-  saveMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
+  prepareMetadataEditorDocument: (document: MetadataEditorDocument) => Promise<MetadataWriteOperation>;
+  applyMetadataEditorWrite: (operation: MetadataWriteOperation) => Promise<MetadataEditorDocument>;
+  abandonMetadataEditorWrite: (operation: MetadataWriteOperation) => Promise<MetadataWriteOperation>;
   listMetadataBackups: () => Promise<MetadataBackup[]>;
   previewMetadataBackup: (backupId: number) => Promise<MetadataEditorDocument>;
   restoreMetadataBackup: (backup: MetadataBackup, document: MetadataEditorDocument) => Promise<MetadataEditorDocument>;
@@ -137,8 +122,8 @@ export interface StudioWorkspace {
 }
 
 /**
- * Owns workspace mutations plus the remaining Project, Environment-source,
- * and Monitoring compatibility state. Feature server reads are query-owned. Route-driven loading
+ * Owns workspace mutations plus Environment-source,
+ * and Monitoring operation state. Feature server reads are query-owned. Route-driven loading
  * is coordinated through the supplied {@link StudioRouter}. Presentation lives
  * entirely in feature components; this hook is the container/data layer.
  */
@@ -148,37 +133,30 @@ export function useStudioWorkspace(
     onEnvironmentChanged?: (environmentId: number) => Promise<void> | void;
   }
 ): StudioWorkspace {
-  const { route, activeScope, setStudioRoute } = router;
+  const { route, setStudioRoute } = router;
   const queryClient = useQueryClient();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
-  const [projectSummariesLoading, setProjectSummariesLoading] = useState(false);
-  const [projectSummariesLoaded, setProjectSummariesLoaded] = useState(false);
-  const [projectSummariesError, setProjectSummariesError] = useState<string | null>(null);
-  const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [metadataSources, setMetadataSources] = useState<SourcePath[]>([]);
-  const [logPaths, setLogPaths] = useState<SourcePath[]>([]);
-  const [codeArtifacts, setCodeArtifacts] = useState<SourcePath[]>([]);
-  const [sourceSyncStatuses, setSourceSyncStatuses] = useState<Record<string, SourceSyncStatus>>({});
   const [sourceOperations, setSourceOperations] = useState<SourceOperations>({});
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeEnvironmentIdRef = useRef<number | null>(route.environmentId);
+  const activeProjectIdRef = useRef<number | null>(route.projectId);
   const environmentModuleLoadGeneration = useRef(0);
-  const projectSummariesCache = useRef(new ResourceCache<"directory", ProjectSummary[]>());
-  const projectSummariesGeneration = useRef(0);
 
   activeEnvironmentIdRef.current = route.environmentId;
+  activeProjectIdRef.current = route.projectId;
+  useEffect(() => { setBusy(false); setError(null); }, [route.projectId]);
 
-  const selectedProject = useMemo(
-    () => projects.find((project) => project.id === route.projectId) ?? null,
-    [projects, route.projectId]
-  );
+  const projectSummariesQuery = useProjectSummariesQuery(route.module === "projects");
+  const projectSummaries = projectSummariesQuery.data ?? [];
   const selectedProjectSummary = useMemo(
     () => projectSummaries.find((project) => project.id === route.projectId) ?? null,
     [projectSummaries, route.projectId]
   );
+
+  function invalidateProjectSummaries() {
+    void queryClient.invalidateQueries({ queryKey: projectQueryKeys.summaries() });
+  }
 
   const sourcesQuery = useEnvironmentSourcesQuery({
     environmentId: route.environmentId,
@@ -193,134 +171,17 @@ export function useStudioWorkspace(
   });
   const metadataEditor = useEnvironmentMetadataEditor(route.environmentId, {
     enabled: route.module === "metadata",
-    onCatalogChanged: async (mayChangeSources) => {
+    onCatalogChanged: async (mayChangeSources, environmentId) => {
       if (mayChangeSources) invalidateProjectSummaries();
-      await refreshEnvironmentHeader(route.environmentId);
+      await refreshEnvironmentHeader(environmentId);
     },
   });
 
-  // The source lists are derived solely from the query so the displayed data can
-  // never desync from the cache. Clearing here (instead of in a separate
-  // environment-change effect) avoids a race that could wipe freshly loaded data.
-  useEffect(() => {
-    const data = sourcesQuery.data;
-    if (data) {
-      setMetadataSources(data.metadataSources);
-      setLogPaths(data.logPaths);
-      setCodeArtifacts(data.codeArtifacts);
-      setSourceSyncStatuses(data.statuses);
-    } else {
-      setMetadataSources([]);
-      setLogPaths([]);
-      setCodeArtifacts([]);
-      setSourceSyncStatuses({});
-    }
-  }, [sourcesQuery.data]);
-
   function clearEnvironmentSources() {
-    setMetadataSources([]);
-    setLogPaths([]);
-    setCodeArtifacts([]);
-    setSourceSyncStatuses({});
-  }
-
-  async function loadProjects(preferredId?: number) {
-    setBusy(true);
-    setError(null);
-    try {
-      const items = await api.listProjects();
-      setProjects(items);
-      const projectId = preferredId ?? route.projectId;
-      if (projectId && items.some((project) => project.id === projectId)) return;
-      if (activeScope === "global") return;
-      if (items[0]) {
-        setStudioRoute({ projectId: items[0].id, environmentId: null, module: "projects", projectSection: projectDefaultSection }, true);
-      }
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function applyProjectSummaries(items: ProjectSummary[]) {
-    setProjectSummaries(items);
-    setProjects(items.map(({ id, name, description, created_at, updated_at }) => ({
-      id,
-      name,
-      description,
-      created_at,
-      updated_at,
-    })));
-    setProjectSummariesLoaded(true);
-    setProjectSummariesError(null);
-  }
-
-  function invalidateProjectSummaries() {
-    projectSummariesGeneration.current += 1;
-    projectSummariesCache.current.invalidate("directory");
-  }
-
-  function updateProjectSummaries(updater: (items: ProjectSummary[]) => ProjectSummary[]) {
-    invalidateProjectSummaries();
-    setProjectSummaries(updater);
-    setProjectSummariesLoaded(true);
-    setProjectSummariesLoading(false);
-    setProjectSummariesError(null);
-  }
-
-  async function loadProjectSummaries(force = false) {
-    const generation = projectSummariesGeneration.current;
-    setProjectSummariesLoading(true);
-    setProjectSummariesError(null);
-    setError(null);
-    try {
-      const result = await projectSummariesCache.current.load(
-        "directory",
-        api.listProjectSummaries,
-        { ttlMs: Number.MAX_SAFE_INTEGER, force }
-      );
-      if (result.current && generation === projectSummariesGeneration.current) {
-        applyProjectSummaries(result.data);
-      }
-    } catch (err) {
-      if (generation !== projectSummariesGeneration.current) return;
-      const message = toErrorMessage(err);
-      setProjectSummariesError(message);
-    } finally {
-      if (generation === projectSummariesGeneration.current) setProjectSummariesLoading(false);
-    }
-  }
-
-  async function loadEnvironments(projectId: number, preferredId?: number, replace = false) {
-    setBusy(true);
-    setError(null);
-    try {
-      const items = await api.listEnvironments(projectId);
-      setEnvironments(items);
-      const environmentId = preferredId ?? (route.projectId === projectId ? route.environmentId : null);
-      const nextEnvironmentId = environmentId && items.some((env) => env.id === environmentId) ? environmentId : (items[0]?.id ?? null);
-      const currentScope = moduleByKey(route.module)?.scope ?? "global";
-      if (currentScope !== "environment") {
-        return;
-      }
-      if (nextEnvironmentId) {
-        setStudioRoute(
-          {
-            projectId,
-            environmentId: nextEnvironmentId,
-            module: route.module || environmentDefaultModule,
-            monitoringPage: route.module === "monitoring" ? (route.monitoringPage ?? monitoringDefaultPage) : monitoringDefaultPage
-          },
-          replace
-        );
-      } else {
-        setStudioRoute({ projectId, environmentId: null, module: "projects", projectSection: "environments" }, replace);
-      }
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setBusy(false);
+    if (route.environmentId !== null) {
+      queryClient.removeQueries({
+        queryKey: environmentQueryKeys.sources(route.environmentId),
+      });
     }
   }
 
@@ -332,7 +193,6 @@ export function useStudioWorkspace(
   async function loadEnvironmentModule(
     environmentId: number,
     module: ModuleKey,
-    generation: number,
     force = false
   ) {
     // Source mutations force a module refresh; refetch the Sources list so the UI
@@ -353,7 +213,7 @@ export function useStudioWorkspace(
     setError(null);
     try {
       await Promise.all([
-        loadEnvironmentModule(environmentId, module, generation, Boolean(refreshOptions?.forceModule)),
+        loadEnvironmentModule(environmentId, module, Boolean(refreshOptions?.forceModule)),
         refreshOptions?.forceHeader ? options?.onEnvironmentChanged?.(environmentId) : undefined,
       ]);
     } catch (err) {
@@ -368,14 +228,6 @@ export function useStudioWorkspace(
     await options?.onEnvironmentChanged?.(environmentId);
   }
 
-  async function refreshEnvironmentAfterHeaderMutation(
-    environmentId = route.environmentId,
-    module: ModuleKey = route.module
-  ) {
-    if (!environmentId) return;
-    await refreshEnvironment(environmentId, module, { forceHeader: true, forceModule: true });
-  }
-
   const {
     createProject,
     renameProject,
@@ -386,30 +238,28 @@ export function useStudioWorkspace(
   } = createProjectMutations({
     projectId: route.projectId,
     environmentId: route.environmentId,
+    queryClient,
     setStudioRoute,
-    setProjects,
-    setEnvironments,
     setBusy,
     setError,
-    updateProjectSummaries,
     clearEnvironmentSources,
     onEnvironmentChanged: options?.onEnvironmentChanged,
+    isActiveProject: projectId => activeProjectIdRef.current === projectId,
   });
 
   const { createEnvironment, renameEnvironment, deleteEnvironment } = createEnvironmentMutations({
     projectId: route.projectId,
     queryClient,
-    setEnvironments,
     setBusy,
     setError,
-    updateProjectSummaries,
   });
 
   const {
     addMetadataSource,
     importMetadataSources,
+    addSqlSource,
     importDatacoolieProjectSources,
-    addLogPath,
+    addLogBasePath,
     addCodeArtifact,
     updateSource,
     deleteSource,
@@ -422,47 +272,17 @@ export function useStudioWorkspace(
     environmentId: route.environmentId,
     module: route.module,
     activeEnvironmentIdRef,
+    queryClient,
     setBusy,
     setError,
-    setSourceSyncStatuses,
     setSourceOperations,
     invalidateProjectSummaries,
     refreshEnvironment,
   });
 
-  const routeResources = projectRouteResources(route);
-
-  // Load project identity only for routes that consume project context.
-  useEffect(() => {
-    if (!routeResources.projects) return;
-    void loadProjects();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeResources.projects]);
-
-  // Project summaries are specific to the project hub/detail experience.
-  useEffect(() => {
-    if (!routeResources.projectSummaries) return;
-    void loadProjectSummaries();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeResources.projectSummaries]);
-
-  // Load environments when the selected project changes.
-  useEffect(() => {
-    if (routeResources.environments && route.projectId) {
-      void loadEnvironments(route.projectId);
-    } else {
-      setEnvironments([]);
-    }
-    if (!route.projectId) {
-      clearEnvironmentSources();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.projectId, routeResources.environments]);
-
   // Load environment-scoped data when the environment or module changes. Source
-  // list state is cleared/repopulated by the sources query effect above, keyed on
-  // the active environment, so it must not be cleared here (that race left the
-  // Sources tab blank until a full reload).
+  // server state is owned by the Sources query and is never copied into this
+  // container's local state.
   useEffect(() => {
     if (!route.environmentId) return;
     void refreshEnvironment(route.environmentId, route.module);
@@ -473,30 +293,30 @@ export function useStudioWorkspace(
     .find((query) => query.error)?.error;
 
   return {
-    projects,
     projectSummaries,
-    projectSummariesLoading,
-    projectSummariesLoaded,
-    projectSummariesError,
-    environments,
-    selectedProject,
+    projectSummariesLoading: projectSummariesQuery.isPending,
+    projectSummariesLoaded: projectSummariesQuery.data !== undefined,
+    projectSummariesError: projectSummariesQuery.error
+      ? toErrorMessage(projectSummariesQuery.error)
+      : null,
     selectedProjectSummary,
-    metadataSources,
-    logPaths,
-    codeArtifacts,
-    sourceSyncStatuses,
+    metadataSources: sourcesQuery.data?.metadataSources ?? [],
+    sqlSources: sourcesQuery.data?.sqlSources ?? [],
+    logBasePaths: sourcesQuery.data?.logBasePaths ?? [],
+    codeArtifacts: sourcesQuery.data?.codeArtifacts ?? [],
+    sourceSyncStatuses: sourcesQuery.data?.statuses ?? {},
     sourceOperations,
     metadataEditorDocument: metadataEditor.workspace?.document ?? null,
     metadataEditorDraft: metadataEditor.workspace?.draft ?? null,
     metadataEditorSavingDraft: metadataEditor.savingDraft,
-    loading: loading || sourcesQuery.isPending || metadataEditor.loading,
+    loading: loading || (route.module === "sources" && sourcesQuery.isPending) || metadataEditor.loading,
     busy: busy || metadataEditor.busy,
     error: error
       ?? (activeQueryError ? toErrorMessage(activeQueryError) : null)
       ?? (metadataEditor.error ? toErrorMessage(metadataEditor.error) : null),
     retryMetadataEditor: async () => { await metadataEditor.retryWorkspace(); },
     refreshCurrentEnvironment: () => refreshEnvironment(route.environmentId, route.module, { forceHeader: true, forceModule: true }),
-    reloadProjectSummaries: () => loadProjectSummaries(true),
+    reloadProjectSummaries: async () => { await projectSummariesQuery.refetch(); },
     createProject,
     renameProject,
     deleteProject,
@@ -508,8 +328,9 @@ export function useStudioWorkspace(
     deleteEnvironment,
     addMetadataSource,
     importMetadataSources,
+    addSqlSource,
     importDatacoolieProjectSources,
-    addLogPath,
+    addLogBasePath,
     addCodeArtifact,
     updateSource,
     deleteSource,
@@ -519,10 +340,12 @@ export function useStudioWorkspace(
     retrySourceObservation,
     runSourceBatch,
     ensureMetadataEditorContext: async () => { await metadataEditor.ensureContext(); },
-    validateMetadataEditorDocument: metadataEditor.validateDocument,
+    metadataWarning: metadataEditor.warning,
     saveMetadataEditorDraft: metadataEditor.saveDraft,
     discardMetadataEditorDraft: metadataEditor.discardDraft,
-    saveMetadataEditorDocument: metadataEditor.saveDocument,
+    prepareMetadataEditorDocument: metadataEditor.prepareDocumentWrite,
+    applyMetadataEditorWrite: metadataEditor.applyPreparedDocumentWrite,
+    abandonMetadataEditorWrite: metadataEditor.abandonDocumentWrite,
     listMetadataBackups: metadataEditor.listBackups,
     previewMetadataBackup: metadataEditor.previewBackup,
     restoreMetadataBackup: metadataEditor.restoreBackup,

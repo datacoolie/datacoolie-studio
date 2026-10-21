@@ -24,6 +24,9 @@ from datacoolie_studio.domains.storage.uri import canonical_cloud_uri
 ONELAKE_TEST_URI = os.getenv("DATACOOLIE_ONELAKE_TEST_URI")
 
 
+pytestmark = pytest.mark.live
+
+
 @pytest.mark.skipif(
     not ONELAKE_TEST_URI,
     reason="DATACOOLIE_ONELAKE_TEST_URI is not configured",

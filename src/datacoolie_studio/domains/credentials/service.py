@@ -4,6 +4,10 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import uuid4
+from contextlib import ExitStack
+
+from datacoolie_studio.core.process_lock import ProcessLockTimeoutError
+from datacoolie_studio.domains.credentials.store import credential_profile_guards
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -182,7 +186,52 @@ def create_profile(
     return _profile_view(session, profile)
 
 
-def update_profile(
+
+def update_profile(session, profile_id, *, name, config, secret, secret_store):
+    from datacoolie_studio.domains.metadata.write_operations import environment_publication_guard
+    from datacoolie_studio.domains.metadata.errors import MetadataConflictError
+
+    def environments():
+        return set(session.scalars(select(EnvironmentSource.environment_id).where(
+            EnvironmentSource.credential_profile_id == profile_id
+        )))
+
+    from datacoolie_studio.db.session import WorkspaceMutationPendingError, refresh_workspace_reads
+    try:
+        refresh_workspace_reads(session)
+    except WorkspaceMutationPendingError as exc:
+        raise CredentialProfileConflict(str(exc)) from exc
+    environment_ids = environments()
+    for _attempt in range(3):
+        mutation_started = False
+        try:
+            with ExitStack() as stack:
+                for environment_id in sorted(environment_ids):
+                    stack.enter_context(environment_publication_guard(session, environment_id))
+                stack.enter_context(credential_profile_guards(session, [profile_id]))
+                refresh_workspace_reads(session)
+                current = environments()
+                if not current.issubset(environment_ids):
+                    environment_ids |= current
+                    continue
+                profile = _require_profile(session, profile_id)
+                session.refresh(profile)
+                mutation_started = True
+                return _update_profile(session, profile_id, name=name, config=config,
+                    secret=secret, secret_store=secret_store)
+        except WorkspaceMutationPendingError as exc:
+            raise CredentialProfileConflict(str(exc)) from exc
+        except (ProcessLockTimeoutError, MetadataConflictError) as exc:
+            if mutation_started:
+                session.rollback()
+            raise CredentialProfileConflict("Credential profile is busy; retry after publication") from exc
+        except Exception:
+            if mutation_started:
+                session.rollback()
+            raise
+    raise CredentialProfileConflict("Credential profile membership changed; retry")
+
+def _update_profile(
     session: Session,
     profile_id: str,
     *,
@@ -229,6 +278,17 @@ def update_profile(
     )
     if spec.required_secret_fields and secret is None and not profile.secret_ref:
         raise CredentialValidationError("secret is required for this authentication type")
+
+    if config_changed:
+        from datacoolie_studio.domains.sources.registration import rekey_profile_registrations
+        from datacoolie_studio.domains.storage.errors import StorageConfigurationError
+
+        profile.config_json = _json(safe_config)
+        try:
+            rekey_profile_registrations(session, profile.id)
+        except StorageConfigurationError as exc:
+            session.rollback()
+            raise CredentialProfileConflict(str(exc)) from exc
 
     secret_ref = profile.secret_ref or (profile.id if safe_secret else None)
     if secret is not None:

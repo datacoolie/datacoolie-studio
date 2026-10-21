@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -73,7 +72,6 @@ def test_studio_settings_and_diagnostics_have_separate_read_costs(tmp_path: Path
         assert diagnostics.json()["analytics_cache"]["scope"] == "studio"
         assert analytics_calls == 1
 
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)
 
 
 def test_workspace_database_compaction_is_confirmed_and_preserves_core_rows(tmp_path: Path, monkeypatch):
@@ -182,5 +180,3 @@ def test_studio_settings_update_is_atomic_and_avoids_noop_commits(tmp_path: Path
         assert reset.json()["timezone_source"] == "server_default"
         assert reset.json()["source_check_interval_seconds"] == 45
         assert commit_count == 2
-
-    os.environ.pop("DATACOOLIE_STUDIO_DATABASE_URL", None)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import threading
 from contextlib import AbstractContextManager
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Callable, Protocol
 from urllib.parse import urlsplit
@@ -27,25 +29,45 @@ class ConditionalStorageWriter(Protocol):
     def create(self, uri: str, content: bytes) -> str | None: ...
 
 
+_LOCAL_URI_LOCKS: dict[str, threading.RLock] = {}
+_LOCAL_URI_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _local_uri_lock(path: Path):
+    """Serialize Studio's check-and-replace window for one local target."""
+
+    key = str(path.resolve(strict=False))
+    with _LOCAL_URI_LOCKS_GUARD:
+        lock = _LOCAL_URI_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        yield
+
+
 class LocalConditionalStorageWriter:
     def replace(
         self, uri: str, content: bytes, expected_revision: StorageRevision
     ) -> str | None:
         path = require_local_path(uri)
-        state = path.stat()
-        current = f"{state.st_mtime_ns}:{state.st_size}"
-        if current != expected_revision.provider_revision:
-            raise StorageConflictError(uri)
-        _atomic_write(path, content, must_not_exist=False)
-        updated = path.stat()
+        with _local_uri_lock(path):
+            try:
+                state = path.stat()
+            except FileNotFoundError as exc:
+                raise StorageConflictError(uri, "Storage object does not exist") from exc
+            current = f"{state.st_mtime_ns}:{state.st_size}"
+            if current != expected_revision.provider_revision:
+                raise StorageConflictError(uri)
+            _atomic_write(path, content, must_not_exist=False)
+            updated = path.stat()
         return f"{updated.st_mtime_ns}:{updated.st_size}"
 
     def create(self, uri: str, content: bytes) -> str | None:
         path = require_local_path(uri)
-        if path.exists():
-            raise StorageConflictError(uri, "Storage object already exists")
-        _atomic_write(path, content, must_not_exist=True)
-        state = path.stat()
+        with _local_uri_lock(path):
+            if path.exists():
+                raise StorageConflictError(uri, "Storage object already exists")
+            _atomic_write(path, content, must_not_exist=True)
+            state = path.stat()
         return f"{state.st_mtime_ns}:{state.st_size}"
 
 
@@ -246,12 +268,31 @@ def _atomic_write(path: Path, content: bytes, *, must_not_exist: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        temporary.write_bytes(content)
+        with temporary.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         if must_not_exist and path.exists():
             raise StorageConflictError(str(path), "Storage object already exists")
         os.replace(temporary, path)
+        _flush_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _flush_directory(directory: Path) -> None:
+    """Best-effort directory durability; Windows does not expose this uniformly."""
+
+    try:
+        descriptor = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _bucket_key(uri: str, provider: str) -> tuple[str, str]:

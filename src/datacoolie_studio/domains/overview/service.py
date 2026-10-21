@@ -15,17 +15,17 @@ from datacoolie_studio.db.models import (
     EnvironmentSource,
     LogFileManifest,
     MetadataMaterialization,
-    ProjectReferenceMapping,
     SourceObservation,
 )
 from datacoolie_studio.db.session import create_session
 from datacoolie_studio.domains.credentials.store import CredentialSecretStore
-from datacoolie_studio.domains.lineage.service import build_lineage_overview_summary
+from datacoolie_studio.domains.lineage.query_service import build_lineage_overview_summary
 from datacoolie_studio.domains.analytics.errors import AnalyticsRebuildRequired
 from datacoolie_studio.domains.metadata.service import load_environment_metadata
 import datacoolie_studio.domains.monitoring.query_service as monitoring_query_service
+from datacoolie_studio.domains.reference_mappings import repository as reference_mapping_repository
+from datacoolie_studio.domains.sources import repository as source_repository
 from datacoolie_studio.domains.studio_settings import service as studio_settings
-from datacoolie_studio.domains.workspace import service as workspace
 from datacoolie_studio.domains.read_models.cache import (
     cached_read_model,
     fingerprint,
@@ -37,7 +37,7 @@ from datacoolie_studio.domains.read_models.keys import OVERVIEW
 
 
 OVERVIEW_SUMMARY_KEY = OVERVIEW
-OVERVIEW_CALCULATOR_VERSION = "environment-overview-v3-source-validation-warnings"
+OVERVIEW_CALCULATOR_VERSION = "environment-overview-v5-independent-failure-windows"
 OVERVIEW_RANGE = "30d"
 
 
@@ -67,7 +67,6 @@ def load_environment_overview(
 
     input_fingerprint = overview_input_fingerprint(session, environment, timezone_context["timezone"])
     cached = cached_read_model(
-        session,
         environment_id=environment_id,
         model_key=OVERVIEW_SUMMARY_KEY,
         parameters_fingerprint=parameters_fingerprint,
@@ -95,7 +94,6 @@ def load_environment_overview(
         parameters_fingerprint = fingerprint(parameters)
         input_fingerprint = overview_input_fingerprint(session, environment, timezone_context["timezone"])
         cached = cached_read_model(
-            session,
             environment_id=environment_id,
             model_key=OVERVIEW_SUMMARY_KEY,
             parameters_fingerprint=parameters_fingerprint,
@@ -112,8 +110,8 @@ def load_environment_overview(
             producer_version=OVERVIEW_CALCULATOR_VERSION,
         )
 
-        metadata_sources = workspace.list_metadata_sources(session, environment_id)
-        code_artifacts = workspace.list_code_artifacts(session, environment_id)
+        metadata_sources = source_repository.list_sources(session, environment_id, "metadata")
+        code_artifacts = source_repository.list_sources(session, environment_id, "code")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="overview-monitoring") as executor:
             monitoring_future = executor.submit(
                 _load_monitoring_summary,
@@ -123,7 +121,10 @@ def load_environment_overview(
             metadata = load_environment_metadata(
                 session, metadata_sources, secret_store=secret_store
             )
-            reference_mappings = workspace.list_project_reference_mappings(session, environment.project_id)
+            reference_mappings = reference_mapping_repository.list_project_reference_mappings(
+                session,
+                environment.project_id,
+            )
             lineage = build_lineage_overview_summary(
                 session,
                 metadata,
@@ -132,7 +133,7 @@ def load_environment_overview(
                 reference_mappings,
             )
             monitoring_summary = monitoring_future.result()
-        log_sources = workspace.list_log_sources(session, environment_id)
+        log_sources = source_repository.list_sources(session, environment_id, "logs")
         payload = {
             "schema_version": "environment-overview.v2",
             "sources": _source_summary(metadata_sources, log_sources),
@@ -145,7 +146,6 @@ def load_environment_overview(
         # the post-compute fingerprint used by all following requests.
         input_fingerprint = overview_input_fingerprint(session, environment, timezone_context["timezone"])
         entry = replace_read_model(
-            session,
             environment_id=environment_id,
             model_key=OVERVIEW_SUMMARY_KEY,
             parameters_fingerprint=parameters_fingerprint,
@@ -190,12 +190,9 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
             .order_by(LogFileManifest.source_id, LogFileManifest.file_uri)
         )
     ) if source_ids else []
-    mappings = list(
-        session.scalars(
-            select(ProjectReferenceMapping)
-            .where(ProjectReferenceMapping.project_id == environment.project_id)
-            .order_by(ProjectReferenceMapping.id)
-        )
+    mappings = reference_mapping_repository.list_project_reference_mappings(
+        session,
+        environment.project_id,
     )
     return fingerprint({
         "environment_id": environment.id,
@@ -255,14 +252,14 @@ def overview_input_fingerprint(session: Session, environment: Environment, timez
         ],
         "reference_mappings": [
             {
-                "id": item.id,
-                "reference_type": item.reference_type,
-                "reference_normalized_value": item.reference_normalized_value,
-                "target_identifier_kind": item.target_identifier_kind,
-                "target_normalized_value": item.target_normalized_value,
-                "updated_at": item.updated_at,
+                "id": item["id"],
+                "reference_type": item["reference_type"],
+                "reference_normalized_value": item["reference_normalized_value"],
+                "target_identifier_kind": item["target_identifier_kind"],
+                "target_normalized_value": item["target_normalized_value"],
+                "updated_at": item["updated_at"],
             }
-            for item in mappings
+            for item in sorted(mappings, key=lambda mapping: mapping["id"])
         ],
     })
 
@@ -329,7 +326,7 @@ def _load_monitoring_summary(environment_id: int, timezone_context: dict[str, An
     """Use an independent Session so the two Overview read models can overlap."""
     monitoring_session = create_session()
     try:
-        paths = workspace.list_log_sources(monitoring_session, environment_id)
+        paths = source_repository.list_sources(monitoring_session, environment_id, "logs")
         try:
             return _monitoring_summary(monitoring_session, paths, timezone_context)
         except AnalyticsRebuildRequired as exc:
