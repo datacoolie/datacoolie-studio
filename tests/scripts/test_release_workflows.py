@@ -49,8 +49,7 @@ def test_tag_publication_requires_the_same_run_verification_artifact():
     assert publisher["jobs"]["verify"]["with"]["ref"] == "${{ inputs.tag || github.ref }}"
     checkout = publisher["jobs"]["publish"]["steps"][0]
     assert checkout["with"]["ref"] == publisher["jobs"]["verify"]["with"]["ref"]
-    for job in ("backend", "release"):
-        assert ci["jobs"][job]["steps"][0]["with"]["ref"] == "${{ inputs.ref || github.ref }}"
+    assert ci["jobs"]["release"]["steps"][0]["with"]["ref"] == "${{ inputs.ref || github.ref }}"
     assert release["jobs"]["github-release"]["steps"][0]["with"]["tag_name"] == "${{ inputs.tag }}"
     assert publisher["jobs"]["publish"]["environment"]["name"] == "pypi"
     assert publisher["jobs"]["publish"]["permissions"]["id-token"] == "write"
@@ -58,7 +57,7 @@ def test_tag_publication_requires_the_same_run_verification_artifact():
 
 def test_ci_installs_locked_dependencies_and_keeps_release_checks():
     ci = workflow("ci.yml")
-    for job_name in ("backend", "release"):
+    for job_name in ci["jobs"]:
         commands = "\n".join(step.get("run", "") for step in ci["jobs"][job_name]["steps"])
         assert "uv sync --locked --all-extras" in commands
         assert "uv run --no-sync python scripts/verify.py" in commands
@@ -66,6 +65,33 @@ def test_ci_installs_locked_dependencies_and_keeps_release_checks():
     commands = "\n".join(step.get("run", "") for step in ci["jobs"]["release"]["steps"])
     assert "npm ci" in commands
     assert "npm run test:lifecycle" in commands
+
+
+def test_ci_runs_backend_once_on_python_311_and_keeps_full_release_scope(script_module_loader):
+    ci = workflow("ci.yml")
+    assert set(ci["jobs"]) == {"release"}
+    job = ci["jobs"]["release"]
+    assert "strategy" not in job
+    steps = job["steps"]
+    python = next(step for step in steps if step.get("uses", "").startswith("actions/setup-python@"))
+    assert python["with"]["python-version"] == "3.11"
+    verification = next(step for step in steps if "scripts/verify.py" in step.get("run", ""))
+    assert verification["run"] == "python -m uv run --no-sync python scripts/verify.py release"
+    verify = script_module_loader("scripts/verify.py", "studio_ci_verify")
+    release_plan = verify.command_plan("release", python="python", npm="npm")
+    backend_plan = verify.command_plan("backend", python="python")
+    assert release_plan[:len(backend_plan)] == backend_plan
+    assert [command.label for command in release_plan].count("Backend deterministic suite") == 1
+    assert {command.label for command in release_plan} == {
+        "Backend lint", "Backend deterministic suite", "OpenAPI contract", "Generated API types",
+        "Frontend suite", "Frontend production build", "Frontend dependency audit",
+        "Python lock and dependency audit", "Build distributions", "Check distributions",
+        "Smoke-test the built wheel",
+    }
+    lifecycle = next(step for step in steps if "npm run test:lifecycle" in step.get("run", ""))
+    upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+    assert steps.index(verification) < steps.index(lifecycle) < steps.index(upload)
+    assert not any(step.get("continue-on-error") == "true" for step in steps)
 
 
 def test_publisher_checks_version_and_does_not_rebuild_verified_artifacts():

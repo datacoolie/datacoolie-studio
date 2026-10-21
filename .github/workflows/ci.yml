@@ -14,29 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install locked Python dependencies
-        run: |
-          python -m pip install uv
-          python -m uv sync --locked --all-extras
-
-      - name: Run shared backend verification
-        run: python -m uv run --no-sync python scripts/verify.py backend
-
+  # Release verification includes the full backend suite; run it once on 3.11.
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
