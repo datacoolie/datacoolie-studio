@@ -5,8 +5,6 @@ import json
 import duckdb
 import pytest
 
-from datacoolie.logging.persistence.projection import flatten_job_runtime
-from datacoolie.orchestration.runtime import JobRuntimeInfo
 from datacoolie_studio.domains.analytics import contracts, store
 from datacoolie_studio.domains.monitoring.log_repository import query_cached_job_logs
 from datacoolie_studio.domains.monitoring.metrics.failure import dataflow_failed_phases
@@ -16,6 +14,7 @@ from datacoolie_studio.domains.monitoring.read_models.jobs import jobs_read_mode
 from datacoolie_studio.domains.monitoring.read_models.performance import performance_read_model
 from datacoolie_studio.domains.monitoring.read_models.volume import volume_read_model
 from tests.domains.analytics.test_framework_v7_observed_metrics import STAMP, _entry, _publish
+from tests.support.v7_fixture import v7_job_entry
 
 
 def _duration(entry, seconds=10):
@@ -56,9 +55,10 @@ def test_job_drawer_excludes_maintenance_rows_and_retains_physical_effects(tmp_p
     maintenance = _entry("maintenance", count=5, operation="maintenance")
     maintenance["metrics"]["bytes_added"] = 20
     database = _publish(tmp_path, [etl, maintenance])
-    job = flatten_job_runtime(JobRuntimeInfo(job_id="v7-job", status="succeeded",
-        total_dataflows=2, total_succeeded=2, total_rows_written=100, total_bytes_added=30),
-        observed_at=STAMP)
+    job = v7_job_entry(
+        job_id="v7-job", total_dataflows=2, total_succeeded=2,
+        total_rows_written=100, total_bytes_added=30,
+    )
     path = tmp_path / "job.jsonl"
     path.write_text(json.dumps(job) + "\n", encoding="utf-8")
     descriptor = contracts.LogFileDescriptor(str(path), "job_json", "{}", str(path))
@@ -118,7 +118,7 @@ def test_measured_rows_require_duration_and_preserve_observed_zero(tmp_path, dur
 def test_job_only_source_preserves_empty_population_mode(tmp_path, version, expected):
     from datetime import timezone
     from datacoolie_studio.domains.monitoring.page_dispatch import build_monitoring_page
-    entry = flatten_job_runtime(JobRuntimeInfo(job_id="job-only", status="succeeded"), observed_at=STAMP)
+    entry = v7_job_entry(job_id="job-only", status="succeeded")
     entry["log_schema_version"] = version
     path = tmp_path / "jobs.jsonl"
     path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
@@ -163,7 +163,7 @@ def test_job_workload_rate_retains_values_and_uses_matching_duration(tmp_path, m
     other["metrics"]["rows_read"] = measured
     other["duration_seconds"] = duration
     database = _publish(tmp_path, [known, other])
-    job = flatten_job_runtime(JobRuntimeInfo(job_id="v7-job", status="succeeded", total_dataflows=2), observed_at=STAMP)
+    job = v7_job_entry(job_id="v7-job", total_dataflows=2)
     path = tmp_path / "jobs.jsonl"
     path.write_text(json.dumps(job) + "\n", encoding="utf-8")
     descriptor = contracts.LogFileDescriptor(str(path), "job_json", "{}", str(path))

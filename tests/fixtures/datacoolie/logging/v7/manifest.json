@@ -1,0 +1,11 @@
+{
+  "fixture_profile": "studio-observed-metrics-v7",
+  "producer_projectors": ["build_dataflow_entry", "flatten_job_runtime"],
+  "producer_version": "0.2.0",
+  "schema_file": "schema.json",
+  "schema_version": 7,
+  "streams": {
+    "observed_dataflow.json": {"kind": "dataflow", "rows": 1},
+    "observed_job.json": {"kind": "job", "rows": 1}
+  }
+}

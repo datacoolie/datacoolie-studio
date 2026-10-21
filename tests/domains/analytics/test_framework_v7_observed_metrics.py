@@ -6,36 +6,27 @@ import json
 import duckdb
 import pytest
 
-from datacoolie.core.models.connection import Connection
-from datacoolie.core.models.dataflow import DataFlow
-from datacoolie.core.models.destination import Destination
-from datacoolie.core.models.source import Source
-from datacoolie.destinations.runtime import DestinationRuntimeInfo
-from datacoolie.logging.persistence.projection import build_dataflow_entry
-from datacoolie.orchestration.execution.runtime import AttemptRuntimeInfo, DataFlowRuntimeInfo
-from datacoolie.orchestration.runtime import JobRuntimeInfo
-from datacoolie.sources.runtime import SourceRuntimeInfo
 from datacoolie_studio.domains.analytics import contracts, schema, store
 from datacoolie_studio.domains.analytics.log_contract import admit_log_record
 from datacoolie_studio.domains.monitoring.read_models.dataflows import dataflows_read_model
+from tests.support.v7_fixture import v7_dataflow_entry, v7_schema_document
 
 
 STAMP = datetime(2026, 10, 11, 10, tzinfo=timezone.utc)
 
 
 def _entry(identifier, *, count=None, entered=True, operation="etl"):
-    connection = Connection(name="observed", format="delta", configure={"base_path": "/data"})
-    flow = DataFlow(dataflow_id="v7-parity", source=Source(connection=connection, table="in"),
-                    destination=Destination(connection=connection, table="out", load_type="append"))
-    destination = DestinationRuntimeInfo(status="succeeded", rows_written=count,
-                                         operation_type="append" if operation == "etl" else "maintenance") if entered else None
-    attempt = AttemptRuntimeInfo(status="succeeded", start_time=STAMP, end_time=STAMP,
-                                 source=SourceRuntimeInfo(status="succeeded", rows_read=100),
-                                 destination=destination)
-    runtime = DataFlowRuntimeInfo(dataflow_id=flow.dataflow_id, dataflow_run_id=identifier,
-                                  status="succeeded", operation_type=operation, start_time=STAMP,
-                                  end_time=STAMP, attempts=[attempt])
-    return build_dataflow_entry(flow, runtime, job_info=JobRuntimeInfo(job_id="v7-job"))
+    entry = v7_dataflow_entry()
+    entry["dataflow_run_id"] = identifier
+    entry["operation_type"] = operation
+    entry["metrics"]["rows_written"] = count if entered else None
+    destination = entry["attempts"][0]["destination"]
+    if not entered:
+        entry["attempts"][0]["destination"] = None
+    else:
+        destination["rows_written"] = count
+        destination["operation_type"] = "append" if operation == "etl" else "maintenance"
+    return entry
 
 
 def _publish(tmp_path, entries):
@@ -102,10 +93,8 @@ def test_no_observations_and_zero_have_distinct_coverage(
 
 
 def test_producer_and_consumer_share_exact_v7_schema():
-    from pathlib import Path
     from datacoolie_studio.domains.analytics.schema_compiler import V7_SCHEMA_DOCUMENT
-    root = Path(__file__).resolve().parents[4]
-    producer = json.loads((root / "datacoolie/tests/fixtures/logging/v7/schema.json").read_text())
+    producer = v7_schema_document()
     assert V7_SCHEMA_DOCUMENT == producer
 
 
