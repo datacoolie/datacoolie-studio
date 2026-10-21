@@ -1,25 +1,17 @@
-name: release
+name: github-release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  verify:
-    uses: ./.github/workflows/ci.yml
-
-  publish:
-    needs: verify
-    uses: ./.github/workflows/publish-pypi.yml
-    permissions:
-      contents: read
-      id-token: write
-
   github-release:
-    needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,6 +19,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
           generate_release_notes: true
           make_latest: true

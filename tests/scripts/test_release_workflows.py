@@ -17,14 +17,17 @@ def test_tag_publication_requires_the_same_run_verification_artifact():
     ci = workflow("ci.yml")
     publisher = workflow("publish-pypi.yml")
 
-    assert release["on"] == {"push": {"tags": ["v*"]}}
+    assert release["on"]["workflow_call"]["inputs"]["tag"]["required"] == "true"
     assert "workflow_call" in ci["on"]
     assert "tags" not in ci["on"]["push"]
-    assert publisher["on"] == {"workflow_call": ""}
-    assert release["jobs"]["verify"]["uses"] == "./.github/workflows/ci.yml"
-    assert release["jobs"]["publish"]["needs"] == "verify"
-    assert release["jobs"]["publish"]["uses"] == "./.github/workflows/publish-pypi.yml"
-    assert release["jobs"]["github-release"]["needs"] == "publish"
+    assert "workflow_call" not in publisher["on"]
+    assert publisher["on"]["push"] == {"tags": ["v*"]}
+    assert publisher["on"]["workflow_dispatch"]["inputs"]["tag"]["required"] == "true"
+    assert publisher["jobs"]["verify"]["uses"] == "./.github/workflows/ci.yml"
+    assert publisher["jobs"]["verify"]["if"] == "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'"
+    assert publisher["jobs"]["publish"]["needs"] == "verify"
+    assert publisher["jobs"]["github-release"]["needs"] == "publish"
+    assert publisher["jobs"]["github-release"]["uses"] == "./.github/workflows/release.yml"
 
     upload = next(
         step for step in ci["jobs"]["release"]["steps"]
@@ -38,6 +41,12 @@ def test_tag_publication_requires_the_same_run_verification_artifact():
     assert download["with"]["path"] == "dist"
     assert "run-id" not in download["with"]
     assert "repository" not in download["with"]
+    assert publisher["jobs"]["verify"]["with"]["ref"] == "${{ inputs.tag || github.ref }}"
+    checkout = publisher["jobs"]["publish"]["steps"][0]
+    assert checkout["with"]["ref"] == publisher["jobs"]["verify"]["with"]["ref"]
+    for job in ("backend", "release"):
+        assert ci["jobs"][job]["steps"][0]["with"]["ref"] == "${{ inputs.ref || github.ref }}"
+    assert release["jobs"]["github-release"]["steps"][0]["with"]["tag_name"] == "${{ inputs.tag }}"
     assert publisher["jobs"]["publish"]["environment"]["name"] == "pypi"
     assert publisher["jobs"]["publish"]["permissions"]["id-token"] == "write"
 
@@ -65,5 +74,9 @@ def test_publisher_checks_version_and_does_not_rebuild_verified_artifacts():
     assert version_index < publish_index
     commands = "\n".join(step.get("run", "") for step in steps)
     assert 'expected_tag = f"v{version}"' in commands
+    assert 'refs/tags/{actual_tag}^{{commit}}' in commands
+    assert '"--is-ancestor", head, "origin/main"' in commands
+    assert 'f"datacoolie_studio-{version}-py3-none-any.whl"' in commands
+    assert 'f"datacoolie_studio-{version}.tar.gz"' in commands
     assert "python -m build" not in commands
     assert "scripts/verify.py release" not in commands
