@@ -45,7 +45,7 @@ jobs:
 
       - name: Verify release tag matches package version
         env:
-          GITHUB_REF_NAME: ${{ inputs.tag || github.ref_name }}
+          STUDIO_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           python - <<'PY'
           import os
@@ -56,7 +56,7 @@ jobs:
           with open("pyproject.toml", "rb") as file:
               version = tomllib.load(file)["project"]["version"]
           expected_tag = f"v{version}"
-          actual_tag = os.environ["GITHUB_REF_NAME"]
+          actual_tag = os.environ["STUDIO_RELEASE_TAG"]
           if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", actual_tag):
               raise SystemExit("A stable version tag is required.")
           if actual_tag != expected_tag:

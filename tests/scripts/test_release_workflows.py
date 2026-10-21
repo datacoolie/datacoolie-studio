@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
+import pytest
 import yaml
 
 from tests.support.paths import REPOSITORY_ROOT
@@ -80,3 +85,35 @@ def test_publisher_checks_version_and_does_not_rebuild_verified_artifacts():
     assert 'f"datacoolie_studio-{version}.tar.gz"' in commands
     assert "python -m build" not in commands
     assert "scripts/verify.py release" not in commands
+
+
+@pytest.mark.parametrize("failure", [None, "unstable", "version", "checkout", "ancestry"])
+def test_release_guard_uses_requested_tag_during_main_dispatch(tmp_path, failure):
+    steps = workflow("publish-pypi.yml")["jobs"]["publish"]["steps"]
+    guard = next(step for step in steps if step.get("name") == "Verify release tag matches package version")
+    assert guard["env"] == {"STUDIO_RELEASE_TAG": "${{ inputs.tag || github.ref_name }}"}
+    script = guard["run"].removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Release guard test")
+    git("config", "user.email", "release-test@example.invalid")
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.2.1"\n', encoding="utf-8")
+    git("add", "pyproject.toml")
+    git("commit", "-m", "Release fixture")
+    commit = git("rev-parse", "HEAD")
+    tag = "v0.2.1" if failure not in {"unstable", "version"} else {"unstable": "main", "version": "v0.2.0"}[failure]
+    git("tag", "-a", tag, "-m", "Release fixture")
+    git("update-ref", "refs/remotes/origin/main", commit)
+    if failure in {"checkout", "ancestry"}:
+        git("commit", "--allow-empty", "-m", "Unpublished change")
+        if failure == "ancestry":
+            git("tag", "-d", tag)
+            git("tag", "-a", tag, "-m", "Not on origin/main")
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True,
+        env={**os.environ, "GITHUB_REF_NAME": "main", "STUDIO_RELEASE_TAG": tag},
+    )
+    assert (result.returncode == 0) == (failure is None), result.stdout + result.stderr
