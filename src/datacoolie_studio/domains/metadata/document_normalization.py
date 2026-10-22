@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping
 
+from datacoolie_studio.core.identity import identity_name
 from datacoolie_studio.domains.metadata.document_primitives import (
     is_empty,
     parse_cell_value,
@@ -166,6 +167,7 @@ def clean_row(
         unchanged = key in original and value == stringify_cell_value(original[key])
         if (
             key.startswith("__")
+            or _inferred_workspace_unchanged(row, key, value)
             or (
                 key in excluded_fields
                 and not authored_runtime_field(row, key)
@@ -174,7 +176,13 @@ def clean_row(
             or is_default_omitted_value(key, value)
         ):
             continue
-        result[key] = deepcopy(original[key]) if unchanged else (value if preserve_empty else parse_cell_value(value))
+        result[key] = _saved_field_value(
+            key,
+            value,
+            original_value=original.get(key),
+            unchanged=unchanged,
+            preserve_empty=preserve_empty,
+        )
     return result
 
 
@@ -192,6 +200,7 @@ def unflatten_dataflow(row: dict[str, Any]) -> dict[str, Any]:
         unchanged = key in original and value == stringify_cell_value(original[key])
         if (
             key.startswith("__")
+            or _inferred_workspace_unchanged(row, key, value)
             or (
                 key in FILE_RUNTIME_FIELDS["dataflows"]
                 and not authored_runtime_field(row, key)
@@ -208,7 +217,13 @@ def unflatten_dataflow(row: dict[str, Any]) -> dict[str, Any]:
                 target = prefix
                 field = key[len(marker):]
                 break
-        parsed = deepcopy(original[key]) if unchanged else (value if preserve_empty else parse_cell_value(value))
+        parsed = _saved_field_value(
+            key,
+            value,
+            original_value=original.get(key),
+            unchanged=unchanged,
+            preserve_empty=preserve_empty,
+        )
         if target:
             nested[target][field] = parsed
         else:
@@ -226,8 +241,8 @@ def group_schema_hints(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         clean = clean_row(row)
         if not clean:
             continue
-        connection_name = string_value(clean.get("connection_name"))
-        connection_id = string_value(clean.get("connection_id"))
+        connection_name = identity_name(clean.get("connection_name")) or ""
+        connection_id = identity_name(clean.get("connection_id")) or ""
         table_name = string_value(clean.get("table_name"))
         schema_name = string_value(clean.get("schema_name"))
         if not (connection_name or connection_id) or not table_name:
@@ -329,6 +344,64 @@ def mark_authored_runtime_fields(
 
 def authored_runtime_field(row: dict[str, Any], field: str) -> bool:
     return row.get(f"__studio_authored_{field}") is True
+
+
+def _inferred_workspace_unchanged(
+    row: dict[str, Any],
+    key: str,
+    value: Any,
+) -> bool:
+    return (
+        key == "workspace_id"
+        and bool(row.get("__studio_inferred_workspace_id"))
+        and str(value) == str(row.get("__studio_inferred_workspace_id"))
+    )
+
+
+def _saved_field_value(
+    key: str,
+    value: Any,
+    *,
+    original_value: Any,
+    unchanged: bool,
+    preserve_empty: bool,
+) -> Any:
+    """Parse editor values without coercing identity strings.
+
+    Generic configuration cells intentionally retain their JSON/bool parsing
+    behavior.  Names, IDs, workspace scopes, and endpoint references are
+    identity bytes: values such as ``"true"`` or ``"[\"lake\"]"`` must stay
+    strings when an author edits or creates a row.
+    """
+
+    if unchanged:
+        return deepcopy(original_value)
+    if preserve_empty:
+        return value
+    if _is_identity_field(key):
+        # Endpoint ``*_connection`` cells can hold either a name/reference
+        # string or an inline object.  Preserve identity strings verbatim;
+        # when the original cell was structured, accept an edited JSON
+        # mapping/list so inline configure fields remain structured.
+        if isinstance(original_value, (Mapping, list, tuple)):
+            parsed = parse_cell_value(value)
+            if isinstance(parsed, (Mapping, list, tuple)):
+                return parsed
+        return value
+    return parse_cell_value(value)
+
+
+def _is_identity_field(key: str) -> bool:
+    if key in {
+        "name",
+        "connection",
+        "connection_id",
+        "connection_name",
+        "dataflow_id",
+        "workspace_id",
+    }:
+        return True
+    return key.endswith(("_connection", "_connection_id", "_connection_name", "_workspace_id"))
 
 
 def flatten_dataflow(row: dict[str, Any]) -> dict[str, Any]:

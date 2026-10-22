@@ -17,7 +17,11 @@ from typing import Any, Iterable, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from datacoolie_studio.core.identity import name_to_uuid
+from datacoolie_studio.core.identity import (
+    identity_name,
+    name_to_uuid,
+    normalize_workspace_id,
+)
 from datacoolie_studio.db.models import EnvironmentSource, MetadataMaterialization
 from datacoolie_studio.domains.assets.endpoint_identity import (
     ASSETS_ENDPOINT_IDENTITY_VERSION,
@@ -50,7 +54,7 @@ IDENTITY_CATALOG_PROJECTOR_VERSION = (
     # Presentation candidates are cached beside the compact identity rows, so
     # changing their projection must invalidate only this catalog family.  The
     # endpoint identity version remains the input fence for the identity map.
-    f"assets-identity-catalog-v3:{ASSETS_ENDPOINT_IDENTITY_VERSION}"
+    f"assets-identity-catalog-v4-workspace:{ASSETS_ENDPOINT_IDENTITY_VERSION}"
 )
 
 # These fields are presentation data.  They deliberately do not participate
@@ -371,6 +375,16 @@ def resolve_destination_signature(
 
     direct_identifiers = build_asset_identifiers(captured)
     if compatible:
+        if _metadata_identity_ambiguous(compatible, captured):
+            return _unresolved_row(
+                environment_id,
+                signature,
+                version,
+                "multiple metadata connection identities",
+                captured,
+                status="conflict",
+                metadata_rows=compatible,
+            )
         candidate_ids = sorted({str(row.get("asset_id")) for row in compatible if row.get("asset_id")})
         if len(candidate_ids) > 1:
             return _unresolved_row(
@@ -482,8 +496,18 @@ def _published_endpoint_rows(session: Session, environment_id: int) -> list[dict
             str(materialization_fingerprint or ""),
             raw,
         ))
+    # Editor materializations are source shards.  Resolve inheritance against
+    # the combined snapshot before generating fallback IDs, so a flow shard
+    # can inherit the sole authored workspace from a connection shard.
+    from datacoolie_studio.domains.metadata.document_lifecycle import (
+        recompose_workspace_documents,
+    )
+    recompose_workspace_documents([raw for _source_id, _uri, _fingerprint, raw in prepared])
+    for source_id, source_uri, materialization_fingerprint, raw in prepared:
         for connection in (raw.get("connections") or []):
             if not isinstance(connection, Mapping):
+                continue
+            if connection.get("_identity_workspace_error"):
                 continue
             candidate = dict(connection)
             candidate["_metadata_source_ids"] = [int(source_id)]
@@ -515,8 +539,18 @@ def _editor_document_to_raw_metadata(document: dict[str, Any]) -> dict[str, Any]
         editor_document_to_raw_metadata,
         metadata_payload,
     )
+    from datacoolie_studio.domains.metadata.document_lifecycle import (
+        normalize_document_workspace,
+    )
 
-    return metadata_payload(editor_document_to_raw_metadata(document))
+    raw = metadata_payload(editor_document_to_raw_metadata(document))
+    try:
+        return normalize_document_workspace(raw)
+    except ValueError:
+        # Studio keeps malformed authored metadata editable.  Do not derive a
+        # new valid identity from an invalid workspace field; the row remains
+        # unresolved until DataCoolie semantic validation reports it.
+        return raw
 
 
 def _endpoint_rows_from_raw(
@@ -528,26 +562,56 @@ def _endpoint_rows_from_raw(
     *,
     connections: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    from datacoolie_studio.domains.metadata.document_lifecycle import (
+        normalize_document_workspace,
+    )
+
+    try:
+        raw = normalize_document_workspace(dict(raw))
+    except ValueError:
+        raw = dict(raw)
     local_connections = [
         dict(item)
         for item in (raw.get("connections") or [])
         if isinstance(item, Mapping)
+        and not item.get("_identity_workspace_error")
     ]
     connections = connections or local_connections
     rows: list[dict[str, Any]] = []
     for index, dataflow in enumerate(raw.get("dataflows") or []):
         if not isinstance(dataflow, Mapping) or not _is_active(dataflow.get("is_active", True)):
             continue
+        if dataflow.get("_identity_workspace_error"):
+            # Keep the authored row editable, but do not publish a derived
+            # asset for an omitted scope in a mixed-workspace snapshot.
+            continue
+        try:
+            workspace_id = normalize_workspace_id(dataflow.get("workspace_id"))
+        except ValueError:
+            continue
         dataflow_name_value = dataflow.get("name") or f"dataflow_{index + 1}"
-        dataflow_id = str(dataflow.get("dataflow_id") or name_to_uuid(str(dataflow_name_value)))
+        dataflow_name_identity = identity_name(dataflow_name_value)
+        dataflow_id = str(
+            dataflow.get("dataflow_id")
+            if _identity_reference(dataflow.get("dataflow_id"))
+            else (
+                name_to_uuid(dataflow_name_identity, workspace_id)
+                if dataflow_name_identity
+                else ""
+            )
+        )
         dataflow_name = str(dataflow.get("name") or dataflow_id)
         for role in ("source", "destination"):
             endpoint = dataflow.get(role)
-            for resolved in _resolve_raw_endpoint(endpoint, connections):
+            for resolved in _resolve_raw_endpoint(
+                endpoint,
+                connections,
+                workspace_id=workspace_id,
+            ):
                 resolved["dataflow_id"] = dataflow_id
                 resolved["dataflow_name"] = dataflow_name
                 if resolved.get("workspace_id") is None:
-                    resolved["workspace_id"] = dataflow.get("workspace_id")
+                    resolved["workspace_id"] = workspace_id
                 # Scope only weak declarations by their metadata source. A
                 # qualified physical/logical identifier remains source
                 # independent, while local/unbound declarations must not be
@@ -617,36 +681,103 @@ def _endpoint_rows_from_raw(
 def _resolve_raw_endpoint(
     value: Any,
     connections: list[dict[str, Any]],
+    *,
+    workspace_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    from datacoolie_studio.domains.metadata.normalizer import _resolve_endpoint
+    from datacoolie_studio.domains.metadata.normalizer import (
+        _index_connections,
+        _resolve_endpoint,
+    )
+
+    # Keep the complete ID-owner index available even when a name lookup is
+    # narrowed to one workspace.  A globally conflicting explicit ID must
+    # invalidate named and inline references too; passing a singleton map
+    # would hide the other owner from the resolver.
+    connection_by_id = _index_connections(connections, "connection_id")
     endpoint = dict(value) if isinstance(value, Mapping) else {}
     reference = endpoint.get("connection")
     inline = reference if isinstance(reference, Mapping) else None
     if inline is not None:
-        resolved = _resolve_endpoint(endpoint, {}, {})
+        try:
+            resolved = _resolve_endpoint(
+                endpoint,
+                {},
+                connection_by_id,
+                workspace_id=workspace_id,
+            )
+        except ValueError as exc:
+            resolved = dict(endpoint)
+            if workspace_id is not None:
+                resolved.setdefault("workspace_id", workspace_id)
+            resolved["_identity_error"] = str(exc)
         _attach_layout_candidates(resolved, endpoint, inline)
         return [resolved]
-    reference_text = str(
-        endpoint.get("connection_name") or reference or endpoint.get("connection_id") or ""
-    ).strip()
+    connection_id_reference = _identity_reference(endpoint.get("connection_id"))
+    connection_name_reference = _identity_reference(endpoint.get("connection_name"))
+    reference_field = (
+        "connection_id" if connection_id_reference
+        else "connection_name" if connection_name_reference
+        else "connection"
+    )
+    reference_text = _identity_reference(
+        endpoint.get(reference_field) or ""
+    )
+    explicit_id = reference_field == "connection_id"
+    all_id_candidates = [
+        connection
+        for connection in connections
+        if explicit_id
+        and _identity_reference(connection.get("connection_id")) == reference_text
+    ]
+    if explicit_id and _conflicting_connection_id_candidates(all_id_candidates):
+        resolved = dict(endpoint)
+        if workspace_id is not None:
+            resolved.setdefault("workspace_id", workspace_id)
+        resolved["_identity_error"] = "connection_id has conflicting workspace owners"
+        _attach_layout_candidates(resolved, endpoint, {})
+        return [resolved]
     candidates = [
         connection
         for connection in connections
         if reference_text
-        and reference_text in {
-            str(connection.get("name") or "").strip(),
-            str(connection.get("connection_id") or "").strip(),
-        }
+        and (
+            _identity_reference(connection.get("connection_id")) == reference_text
+            if explicit_id
+            else _identity_reference(connection.get("name")) == reference_text
+        )
+        and _candidate_in_scope(connection, workspace_id, explicit_id=explicit_id)
     ]
     if not candidates:
-        resolved = _resolve_endpoint(endpoint, {}, {})
+        try:
+            resolved = _resolve_endpoint(
+                endpoint,
+                {},
+                connection_by_id,
+                workspace_id=workspace_id,
+            )
+        except ValueError as exc:
+            resolved = dict(endpoint)
+            if workspace_id is not None:
+                resolved.setdefault("workspace_id", workspace_id)
+            resolved["_identity_error"] = str(exc)
         _attach_layout_candidates(resolved, endpoint, {})
         return [resolved]
     # Equivalent declarations are one candidate. Distinct bindings remain
     # separate so the resolver can report ambiguity instead of picking one.
     unique: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
-        merged = _resolve_endpoint(endpoint, {reference_text: [candidate]}, {reference_text: [candidate]})
+        try:
+            merged = _resolve_endpoint(
+                endpoint,
+                {reference_text: [candidate]},
+                connection_by_id,
+                workspace_id=workspace_id,
+            )
+        except ValueError as exc:
+            merged = dict(endpoint)
+            if workspace_id is not None:
+                merged.setdefault("workspace_id", workspace_id)
+            merged["_identity_error"] = str(exc)
         _attach_layout_candidates(merged, endpoint, candidate)
         for key in ("_metadata_source_ids", "_materialization_fingerprints", "_metadata_sources"):
             if candidate.get(key):
@@ -1064,6 +1195,21 @@ def _layout_list(value: Any) -> list[str] | None:
 def _context_candidates(values: Mapping[str, Any], catalog: IdentityCatalog) -> list[dict[str, Any]]:
     captured = _captured_endpoint(values)
     rows = catalog.context_candidates(values)
+    captured_workspace = _safe_workspace(captured.get("workspace_id"))
+    if captured_workspace is not None:
+        rows = [
+            row for row in rows
+            if _safe_workspace(row.get("workspace_id")) == captured_workspace
+        ]
+    else:
+        # A name-only captured endpoint cannot select one of several scoped
+        # declarations. Explicit IDs are globally unique and remain valid.
+        has_explicit_connection_id = bool(_identity_reference(captured.get("connection_id")))
+        if not has_explicit_connection_id:
+            rows = [
+                row for row in rows
+                if _safe_workspace(row.get("workspace_id")) is None
+            ]
     scored: list[tuple[int, dict[str, Any]]] = []
     for row in rows:
         endpoint = row.get("endpoint") or {}
@@ -1246,6 +1392,47 @@ def _captured_locators_compatible(captured: Mapping[str, Any], candidate: Mappin
         elif incoming.casefold() != existing.casefold():
             return False
     return True
+
+
+def _metadata_identity_ambiguous(
+    rows: Iterable[Mapping[str, Any]],
+    captured: Mapping[str, Any],
+) -> bool:
+    """Keep distinct metadata owners ambiguous even when assets coalesce."""
+
+    candidates = [row for row in rows if isinstance(row, Mapping)]
+    captured_id = _identity_reference(captured.get("connection_id"))
+    if captured_id:
+        candidates = [
+            row for row in candidates
+            if _metadata_connection_id(row) == captured_id
+        ]
+    owners = {
+        (
+            _metadata_connection_id(row),
+            _safe_workspace(
+                row.get("workspace_id")
+                if row.get("workspace_id") is not None
+                else (row.get("endpoint") or {}).get("workspace_id")
+            ),
+            _identity_reference(
+                row.get("connection_name")
+                if row.get("connection_name") is not None
+                else (row.get("endpoint") or {}).get("connection_name")
+            ),
+        )
+        for row in candidates
+    }
+    return len(owners) > 1
+
+
+def _metadata_connection_id(row: Mapping[str, Any]) -> str:
+    endpoint = row.get("endpoint") or {}
+    return _identity_reference(
+        row.get("connection_id")
+        if row.get("connection_id") is not None
+        else endpoint.get("connection_id")
+    )
 
 
 def _matching_qualified_identifier(left, right):
@@ -1677,6 +1864,55 @@ def _present(value: Any) -> bool:
 
 def _text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _identity_reference(value: Any) -> str:
+    value = identity_name(value)
+    return value or ""
+
+
+def _candidate_in_scope(
+    connection: Mapping[str, Any],
+    workspace_id: str | None,
+    *,
+    explicit_id: bool,
+) -> bool:
+    scope = _safe_workspace(workspace_id)
+    if scope is not None:
+        return _safe_workspace(connection.get("workspace_id")) == scope
+    # A flow with no workspace cannot adopt a scoped connection from a mixed
+    # snapshot. Explicit IDs remain globally unique, but endpoint ownership
+    # still requires the flow scope to agree.
+    return _safe_workspace(connection.get("workspace_id")) is None
+
+
+def _safe_workspace(value: Any) -> str | None:
+    try:
+        return normalize_workspace_id(value)
+    except ValueError:
+        return None
+
+
+def _conflicting_connection_id_candidates(
+    candidates: list[dict[str, Any]],
+) -> bool:
+    if len(candidates) < 2:
+        return False
+    fingerprints = {
+        (
+            _safe_workspace(candidate.get("workspace_id")),
+            _identity_reference(candidate.get("name")),
+            json.dumps(
+                _endpoint_projection(candidate),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ),
+        )
+        for candidate in candidates
+    }
+    return len(fingerprints) > 1
 
 
 def _first_nonmissing(*values: Any) -> Any:

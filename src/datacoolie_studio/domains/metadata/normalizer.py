@@ -2,18 +2,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from datacoolie_studio.core.identity import name_to_uuid
+from datacoolie_studio.core.identity import (
+    identity_name,
+    name_to_uuid,
+    normalize_workspace_id,
+)
 from datacoolie_studio.domains.assets.endpoint_identity import (
     endpoint_identity,
     endpoint_identity_quality,
     project_endpoint_identity,
 )
 from datacoolie_studio.domains.assets.identifiers import build_asset_identifiers
+from datacoolie_studio.domains.metadata.document_lifecycle import (
+    normalize_document_workspace,
+    recompose_workspace_documents,
+)
 
 
-# Reproject unchanged editor documents after the v3 Assets identity correction;
+# Reproject unchanged editor documents after the workspace identity contract;
 # persisted normalized payloads can contain canonical asset IDs.
-METADATA_NORMALIZER_VERSION = "metadata-normalizer-v8-assets-identity"
+METADATA_NORMALIZER_VERSION = "metadata-normalizer-v9-workspace-identity"
 
 
 def normalize_metadata_document(source_id: int, source_uri: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -28,9 +36,23 @@ def normalize_metadata_document(source_id: int, source_uri: str, raw: dict[str, 
 def _normalize_metadata_projection(source_id: int, source_uri: str, raw: dict[str, Any]) -> dict[str, Any]:
     from datacoolie_studio.domains.metadata.document_normalization import opaque_metadata_sections
 
+    raw = normalize_document_workspace(raw)
     opaque = opaque_metadata_sections(raw)
     raw = {key: value for key, value in raw.items() if key not in opaque}
-    connections = [dict(item, metadata_source_id=source_id, metadata_source_uri=source_uri) for item in raw.get("connections", [])]
+    connections = []
+    for item in raw.get("connections", []):
+        if not isinstance(item, dict):
+            continue
+        connection = dict(item, metadata_source_id=source_id, metadata_source_uri=source_uri)
+        name = identity_name(connection.get("name"))
+        workspace_id = normalize_workspace_id(connection.get("workspace_id"))
+        if workspace_id is not None:
+            connection["workspace_id"] = workspace_id
+        generated_connection_id = not _usable_identity(connection.get("connection_id"))
+        if generated_connection_id and name:
+            connection["connection_id"] = name_to_uuid(name, workspace_id)
+            connection["_identity_generated_connection_id"] = True
+        connections.append(connection)
     connection_by_name = _index_connections(connections, "name")
     connection_by_id = _index_connections(connections, "connection_id")
     schema_hints = _flatten_schema_hints(source_id, source_uri, raw.get("schema_hints", []))
@@ -41,22 +63,42 @@ def _normalize_metadata_projection(source_id: int, source_uri: str, raw: dict[st
     for item in raw.get("dataflows", []):
         if not _is_active(item.get("is_active", True)):
             continue
-        source = _resolve_endpoint(item.get("source", {}), connection_by_name, connection_by_id)
-        destination = _resolve_endpoint(item.get("destination", {}), connection_by_name, connection_by_id)
+        workspace_id = normalize_workspace_id(item.get("workspace_id"))
+        source = _resolve_endpoint(
+            item.get("source", {}), connection_by_name, connection_by_id,
+            workspace_id=workspace_id,
+        )
+        destination = _resolve_endpoint(
+            item.get("destination", {}), connection_by_name, connection_by_id,
+            workspace_id=workspace_id,
+        )
         for endpoint in (source, destination):
             endpoint["scope_source_id"] = source_id
             if endpoint.get("workspace_id") is None:
-                endpoint["workspace_id"] = item.get("workspace_id")
+                endpoint["workspace_id"] = workspace_id
         source_asset = build_asset(source, "source")
         destination_asset = build_asset(destination, "destination")
         nodes[source_asset["id"]] = source_asset
         nodes[destination_asset["id"]] = destination_asset
         for role in ("source", "destination"):
-            for candidate in _endpoint_candidate_nodes(item.get(role, {}), role, source_id, item.get("workspace_id"), connection_by_name, connection_by_id):
+            for candidate in _endpoint_candidate_nodes(
+                item.get(role, {}), role, source_id, workspace_id,
+                connection_by_name, connection_by_id,
+            ):
                 nodes[candidate["id"]] = candidate
         active_index += 1
         dataflow_name = item.get("name") or item.get("dataflow_id") or f"dataflow_{active_index}"
-        dataflow_id = item.get("dataflow_id") or name_to_uuid(str(dataflow_name))
+        dataflow_name_identity = identity_name(dataflow_name)
+        generated_dataflow_id = not _usable_identity(item.get("dataflow_id"))
+        dataflow_id = (
+            item.get("dataflow_id")
+            if not generated_dataflow_id
+            else (
+                name_to_uuid(dataflow_name_identity, workspace_id)
+                if dataflow_name_identity
+                else None
+            )
+        )
         dataflow = {
             "metadata_source_id": source_id,
             "metadata_source_uri": source_uri,
@@ -64,7 +106,7 @@ def _normalize_metadata_projection(source_id: int, source_uri: str, raw: dict[st
             "name": dataflow_name,
             "description": item.get("description"),
             "stage": item.get("stage"),
-            "workspace_id": item.get("workspace_id"),
+            "workspace_id": workspace_id,
             "group_number": item.get("group_number"),
             "execution_order": item.get("execution_order"),
             "processing_mode": item.get("processing_mode", "batch"),
@@ -77,6 +119,12 @@ def _normalize_metadata_projection(source_id: int, source_uri: str, raw: dict[st
             "transform": item.get("transform", {}),
             "source_asset_id": source_asset["id"],
             "destination_asset_id": destination_asset["id"],
+            "_identity_generated_dataflow_id": generated_dataflow_id,
+            **(
+                {"_identity_inferred_workspace_id": item["_identity_inferred_workspace_id"]}
+                if item.get("_identity_inferred_workspace_id") is not None
+                else {}
+            ),
         }
         dataflows.append(dataflow)
         edges.append({
@@ -114,12 +162,14 @@ def _normalize_metadata_projection(source_id: int, source_uri: str, raw: dict[st
 
 
 def enrich_metadata_documents_with_connections(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recompose_workspace_documents(documents)
     connection_by_name = _index_connections(
         [
             connection
             for document in documents
             for connection in document.get("connections", [])
             if isinstance(connection, dict)
+            and not connection.get("_identity_workspace_error")
         ],
         "name",
     )
@@ -129,6 +179,7 @@ def enrich_metadata_documents_with_connections(documents: list[dict[str, Any]]) 
             for document in documents
             for connection in document.get("connections", [])
             if isinstance(connection, dict)
+            and not connection.get("_identity_workspace_error")
         ],
         "connection_id",
     )
@@ -142,9 +193,34 @@ def enrich_metadata_documents_with_connections(documents: list[dict[str, Any]]) 
         source_id = int(source_info.get("id") or 0)
         source_uri = str(source_info.get("uri") or "")
         for index, dataflow in enumerate(document.get("dataflows", [])):
+            if dataflow.get("_identity_workspace_error"):
+                dataflow["source"] = _unresolved_endpoint(
+                    (dataflow.get("source") or {}),
+                    None,
+                    error=dataflow["_identity_workspace_error"],
+                )
+                dataflow["destination"] = _unresolved_endpoint(
+                    (dataflow.get("destination") or {}),
+                    None,
+                    error=dataflow["_identity_workspace_error"],
+                )
+                continue
             authored = dataflow.get("_identity_authored_endpoints") or dataflow
-            source = _resolve_endpoint(authored.get("source", {}), connection_by_name, connection_by_id)
-            destination = _resolve_endpoint(authored.get("destination", {}), connection_by_name, connection_by_id)
+            workspace_id = normalize_workspace_id(dataflow.get("workspace_id"))
+            try:
+                source = _resolve_endpoint(
+                    authored.get("source", {}), connection_by_name, connection_by_id,
+                    workspace_id=workspace_id,
+                )
+            except ValueError:
+                source = _unresolved_endpoint(authored.get("source", {}), workspace_id)
+            try:
+                destination = _resolve_endpoint(
+                    authored.get("destination", {}), connection_by_name, connection_by_id,
+                    workspace_id=workspace_id,
+                )
+            except ValueError:
+                destination = _unresolved_endpoint(authored.get("destination", {}), workspace_id)
             for role, endpoint in (("source", source), ("destination", destination)):
                 previous = dataflow.get(role) or {}
                 for key in ("query_content", "query_file", "query_resolution_error"):
@@ -153,13 +229,16 @@ def enrich_metadata_documents_with_connections(documents: list[dict[str, Any]]) 
             for endpoint in (source, destination):
                 endpoint["scope_source_id"] = source_id
                 if endpoint.get("workspace_id") is None:
-                    endpoint["workspace_id"] = dataflow.get("workspace_id")
+                    endpoint["workspace_id"] = workspace_id
             source_asset = build_asset(source, "source")
             destination_asset = build_asset(destination, "destination")
             nodes[source_asset["id"]] = source_asset
             nodes[destination_asset["id"]] = destination_asset
             for role in ("source", "destination"):
-                for candidate in _endpoint_candidate_nodes(authored.get(role, {}), role, source_id, dataflow.get("workspace_id"), connection_by_name, connection_by_id):
+                for candidate in _endpoint_candidate_nodes(
+                    authored.get(role, {}), role, source_id, workspace_id,
+                    connection_by_name, connection_by_id,
+                ):
                     nodes[candidate["id"]] = candidate
 
             dataflow["source"] = source
@@ -169,9 +248,21 @@ def enrich_metadata_documents_with_connections(documents: list[dict[str, Any]]) 
             dataflow["load_type"] = destination.get("load_type")
 
             dataflow_name = dataflow.get("name") or dataflow.get("dataflow_id") or f"dataflow_{index + 1}"
+            dataflow_name_identity = identity_name(dataflow_name)
+            dataflow_id = (
+                dataflow.get("dataflow_id")
+                if _usable_identity(dataflow.get("dataflow_id"))
+                else (
+                    name_to_uuid(dataflow_name_identity, workspace_id)
+                    if dataflow_name_identity
+                    else None
+                )
+            )
+            dataflow["workspace_id"] = workspace_id
+            dataflow["dataflow_id"] = dataflow_id
             edges.append({
                 "id": f"{source_id}:{index}:{_slug(dataflow_name)}",
-                "dataflow_id": dataflow.get("dataflow_id") or name_to_uuid(str(dataflow_name)),
+                "dataflow_id": dataflow_id,
                 "source": source_asset["id"],
                 "target": destination_asset["id"],
                 "dataflow_name": dataflow_name,
@@ -207,7 +298,7 @@ def _index_connections(
     """
     index: dict[str, list[dict[str, Any]]] = {}
     for connection in connections:
-        value = _string(connection.get(field))
+        value = _identity_reference(connection.get(field))
         if not value:
             continue
         index.setdefault(value, []).append(connection)
@@ -238,6 +329,18 @@ def _select_connection_candidate(candidates: list[dict[str, Any]]) -> dict[str, 
         return {}
     if len(candidates) == 1:
         return dict(candidates[0])
+    metadata_identity = {
+        (
+            _identity_reference(candidate.get("connection_id")),
+            normalize_workspace_id(candidate.get("workspace_id")),
+            _identity_reference(candidate.get("name")),
+        )
+        for candidate in candidates
+    }
+    if len(metadata_identity) > 1:
+        # Equal physical bindings are still distinct metadata owners when
+        # their IDs or scopes differ. Name-only lookup must stay ambiguous.
+        return {}
     # Equivalent duplicate declarations are safe to coalesce.  Distinct
     # configure/binding values remain unresolved so metadata cannot invent a
     # host, path or database by source order.
@@ -253,13 +356,31 @@ def _endpoint_candidate_nodes(endpoint, role, source_id, workspace_id, by_name, 
     reference = endpoint.get("connection") if isinstance(endpoint, dict) else None
     if isinstance(reference, dict):
         return []
-    reference = str(endpoint.get("connection_name") or endpoint.get("connection_id") or reference or "") if isinstance(endpoint, dict) else ""
-    candidates = _lookup_connections(by_name, reference) or _lookup_connections(by_id, reference)
+    connection_id = (
+        _identity_reference(endpoint.get("connection_id"))
+        if isinstance(endpoint, dict)
+        else ""
+    )
+    connection_name = (
+        _identity_reference(endpoint.get("connection_name"))
+        if isinstance(endpoint, dict)
+        else ""
+    )
+    reference = connection_id or connection_name or _identity_reference(reference)
+    candidates = (
+        _lookup_connections(by_id, reference)
+        if connection_id
+        else _lookup_connections(by_name, reference)
+    )
+    candidates = _scope_candidates(candidates, workspace_id)
     if len(candidates) < 2 or _select_connection_candidate(candidates):
         return []
     nodes = []
     for candidate in candidates:
-        resolved = _resolve_endpoint(endpoint, {reference: [candidate]}, {reference: [candidate]})
+        resolved = _resolve_endpoint(
+            endpoint, {reference: [candidate]}, {reference: [candidate]},
+            workspace_id=workspace_id,
+        )
         resolved["scope_source_id"] = source_id
         if resolved.get("workspace_id") is None:
             resolved["workspace_id"] = workspace_id
@@ -299,9 +420,18 @@ def _resolve_endpoint(
     raw_endpoint: dict[str, Any],
     connection_by_name: dict[str, list[dict[str, Any]]] | dict[str, dict[str, Any]],
     connection_by_id: dict[str, list[dict[str, Any]]] | dict[str, dict[str, Any]] | None = None,
+    *,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     endpoint = dict(raw_endpoint) if isinstance(raw_endpoint, dict) else {}
     connection_by_id = connection_by_id or {}
+    endpoint_workspace = normalize_workspace_id(endpoint.get("workspace_id"))
+    workspace_id = normalize_workspace_id(workspace_id)
+    if endpoint_workspace is not None and (
+        workspace_id is None or endpoint_workspace != workspace_id
+    ):
+        raise ValueError("endpoint workspace does not match its dataflow")
+    workspace_id = endpoint_workspace or workspace_id
     # A normalized endpoint carries both a display/reference name and the
     # original inline connection dictionary.  Prefer the dictionary whenever
     # it is present so a second enrichment pass cannot discard inline
@@ -316,20 +446,58 @@ def _resolve_endpoint(
     inline_connection: dict[str, Any] | None = None
     if isinstance(raw_reference, dict):
         inline_connection = dict(raw_reference)
-        conn_name = _string(inline_connection.get("name") or inline_connection.get("connection_name")) or None
-        conn_id = _string(inline_connection.get("connection_id")) or (
-            name_to_uuid(conn_name) if conn_name else None
+        conn_name = _identity_reference(
+            inline_connection.get("name") or inline_connection.get("connection_name")
+        ) or None
+        inline_workspace = normalize_workspace_id(inline_connection.get("workspace_id"))
+        if inline_workspace is not None and (
+            workspace_id is None or inline_workspace != workspace_id
+        ):
+            raise ValueError("inline connection workspace does not match its dataflow")
+        effective_workspace = inline_workspace or workspace_id
+        if effective_workspace is not None:
+            inline_connection["workspace_id"] = effective_workspace
+        conn_id = _identity_reference(inline_connection.get("connection_id")) or (
+            name_to_uuid(conn_name, effective_workspace) if conn_name else None
         )
+        if conn_id and _conflicting_connection_id_candidates(
+            _lookup_connections(connection_by_id, conn_id)
+        ):
+            raise ValueError("connection_id has conflicting workspace owners")
         conn = inline_connection
     elif isinstance(raw_reference, str):
-        reference = raw_reference.strip()
-        candidates = _lookup_connections(connection_by_name, reference)
-        if not candidates and connection_by_id is not None:
-            candidates = _lookup_connections(connection_by_id, reference)
+        reference = _identity_reference(raw_reference)
+        by_id_reference = endpoint.get("connection_id")
+        by_name_reference = endpoint.get("connection_name")
+        if by_id_reference is not None and _identity_reference(by_id_reference):
+            reference = _identity_reference(by_id_reference)
+            all_id_candidates = _lookup_connections(connection_by_id or {}, reference)
+            if _conflicting_connection_id_candidates(all_id_candidates):
+                raise ValueError("connection_id has conflicting workspace owners")
+            candidates = all_id_candidates
+        elif by_name_reference is not None and _identity_reference(by_name_reference):
+            reference = _identity_reference(by_name_reference)
+            candidates = _lookup_connections(connection_by_name, reference)
+        else:
+            candidates = _lookup_connections(connection_by_name, reference)
+            if not candidates and connection_by_id is not None:
+                candidates = _lookup_connections(connection_by_id, reference)
+        _validate_connection_id_owners(candidates, connection_by_id)
+        candidates = _scope_candidates(
+            candidates,
+            workspace_id,
+            allow_scoped_without_scope=bool(
+                by_id_reference is not None and _identity_reference(by_id_reference)
+            ),
+        )
         conn = _select_connection_candidate(candidates)
-        conn_name = _string(conn.get("name")) or reference or None
-        conn_id = _string(conn.get("connection_id")) or (
-            name_to_uuid(conn_name) if conn_name and conn else None
+        conn_name = _identity_reference(conn.get("name")) or reference or None
+        conn_workspace = normalize_workspace_id(conn.get("workspace_id"))
+        if conn_workspace is not None and workspace_id is not None and conn_workspace != workspace_id:
+            raise ValueError("connection workspace does not match its dataflow")
+        effective_workspace = conn_workspace or normalize_workspace_id(workspace_id)
+        conn_id = _identity_reference(conn.get("connection_id")) or (
+            name_to_uuid(conn_name, effective_workspace) if conn_name and conn else None
         )
     else:
         conn_name = None
@@ -343,6 +511,8 @@ def _resolve_endpoint(
         projection_connection.setdefault("connection_name", conn_name)
     if conn_id:
         projection_connection.setdefault("connection_id", conn_id)
+    if workspace_id is not None:
+        projection_connection.setdefault("workspace_id", normalize_workspace_id(workspace_id))
     resolved = project_endpoint_identity(endpoint, projection_connection)
     # SQL content is attached after normalization by the SQL resolver.
     # Preserve the derived preview fields when connection enrichment runs
@@ -482,7 +652,7 @@ def _flatten_schema_hints(source_id: int, source_uri: str, raw_hints: list[dict[
             row = {
                 "metadata_source_id": source_id,
                 "metadata_source_uri": source_uri,
-                "connection_name": group.get("connection_name") or group.get("connection_id"),
+                "connection_name": group.get("connection_name"),
                 "table_name": group.get("table_name"),
                 "schema_name": group.get("schema_name"),
                 **hint,
@@ -491,6 +661,21 @@ def _flatten_schema_hints(source_id: int, source_uri: str, raw_hints: list[dict[
                 row["connection_id"] = group["connection_id"]
             rows.append(row)
     return rows
+
+
+def _unresolved_endpoint(
+    raw_endpoint: Any,
+    workspace_id: str | None,
+    *,
+    error: str = "metadata connection identity is ambiguous",
+) -> dict[str, Any]:
+    """Preserve an authored endpoint while withholding a derived binding."""
+
+    endpoint = dict(raw_endpoint) if isinstance(raw_endpoint, dict) else {}
+    if workspace_id is not None and endpoint.get("workspace_id") is None:
+        endpoint["workspace_id"] = workspace_id
+    endpoint["_identity_error"] = error
+    return endpoint
 
 
 def _slug(value: object) -> str:
@@ -511,3 +696,78 @@ def _is_active(value: Any) -> bool:
 
 def _string(value: Any) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _identity_reference(value: Any) -> str:
+    """Keep authored identity references exact while rejecting blanks."""
+
+    value = identity_name(value)
+    return value or ""
+
+
+def _usable_identity(value: Any) -> bool:
+    return bool(_identity_reference(value))
+
+
+def _scope_candidates(
+    candidates: list[dict[str, Any]],
+    workspace_id: str | None,
+    *,
+    allow_scoped_without_scope: bool = False,
+) -> list[dict[str, Any]]:
+    """Restrict a named/ID lookup to the flow's workspace scope."""
+
+    scope = normalize_workspace_id(workspace_id)
+    if scope is not None:
+        return [
+            candidate
+            for candidate in candidates
+            if normalize_workspace_id(candidate.get("workspace_id")) == scope
+        ]
+    # An unscoped flow may resolve only an unscoped candidate.  This prevents
+    # a missing flow scope from selecting an arbitrary workspace in a mixed
+    # snapshot; explicit IDs remain available when they are global.
+    if allow_scoped_without_scope:
+        # The flag is retained for callers that pass an explicit ID, but a
+        # flow still owns the endpoint scope.  A missing flow scope cannot
+        # silently adopt a scoped connection from a mixed environment.
+        return [
+            candidate
+            for candidate in candidates
+            if normalize_workspace_id(candidate.get("workspace_id")) is None
+        ]
+    return [
+        candidate
+        for candidate in candidates
+        if normalize_workspace_id(candidate.get("workspace_id")) is None
+    ]
+
+
+def _conflicting_connection_id_candidates(
+    candidates: list[dict[str, Any]],
+) -> bool:
+    if len(candidates) < 2:
+        return False
+    fingerprints = {
+        (
+            normalize_workspace_id(candidate.get("workspace_id")),
+            _identity_reference(candidate.get("name")),
+            repr(sorted(_identity_connection_projection(candidate).items())),
+        )
+        for candidate in candidates
+    }
+    return len(fingerprints) > 1
+
+
+def _validate_connection_id_owners(
+    candidates: list[dict[str, Any]],
+    connection_by_id: dict[str, list[dict[str, Any]]] | dict[str, dict[str, Any]] | None,
+) -> None:
+    if not connection_by_id:
+        return
+    for candidate in candidates:
+        connection_id = _identity_reference(candidate.get("connection_id"))
+        if connection_id and _conflicting_connection_id_candidates(
+            _lookup_connections(connection_by_id, connection_id)
+        ):
+            raise ValueError("connection_id has conflicting workspace owners")

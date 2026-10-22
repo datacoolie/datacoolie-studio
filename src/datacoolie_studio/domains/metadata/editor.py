@@ -96,9 +96,7 @@ def load_editor_document_from_path(
 ) -> dict[str, Any]:
     revision = source_revision(str(path))
     document_info = read_metadata_document_file(str(path), strict=strict)
-    raw_sheets = _stringify_complex_values(
-        _raw_metadata_to_sheets(document_info.payload)
-    )
+    raw_sheets = _stringify_complex_values(_raw_metadata_to_sheets(document_info.payload))
     _materialize_default_active_flags(raw_sheets)
     _materialize_generated_ids(raw_sheets)
     _apply_studio_routing_fields(

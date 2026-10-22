@@ -17,7 +17,7 @@ from datacoolie_studio.domains.read_models.contracts import ResultCacheKey
 
 def test_identity_correction_fences_previous_derived_cache_producers():
     assert ASSETS_ENDPOINT_IDENTITY_VERSION == "assets-endpoint-identity-v3"
-    assert METADATA_NORMALIZER_VERSION == "metadata-normalizer-v8-assets-identity"
+    assert METADATA_NORMALIZER_VERSION == "metadata-normalizer-v9-workspace-identity"
 
     producer_versions = (
         ASSETS_PROJECTOR_VERSION,

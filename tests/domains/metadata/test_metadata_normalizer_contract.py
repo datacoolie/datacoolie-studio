@@ -109,7 +109,7 @@ def test_normalizer_keeps_inline_connection_and_new_dataflow_metadata_fields():
 
     dataflow = document["dataflows"][0]
     destination = dataflow["destination"]
-    assert METADATA_NORMALIZER_VERSION == "metadata-normalizer-v8-assets-identity"
+    assert METADATA_NORMALIZER_VERSION == "metadata-normalizer-v9-workspace-identity"
     assert dataflow["workspace_id"] == "workspace-1"
     assert dataflow["group_number"] == 2
     assert dataflow["execution_order"] == 8
