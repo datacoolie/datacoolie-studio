@@ -17,4 +17,5 @@ skills-lock.json
 .agents/
 .ruff_cache/
 .scratch/
+.scratch*
 plans/

@@ -13,9 +13,9 @@ smallest useful context over loading everything.
 Before planning or implementation:
 
 1. `README.md`
-2. This `AGENTS.md`
-3. The smallest relevant skill from `.agents/skills/`
-4. The smallest relevant global instruction from `../instructions/`
+2. This `AGENTS.md` file in `datacoolie-studio/`
+3. The smallest relevant skill from `datacoolie-studio/.agents/skills/`
+4. The smallest relevant global instruction from `datacoolie-studio/../instructions/`
 
 Do not bulk-load all skills, instructions, plans, or source files by default.
 
@@ -24,7 +24,7 @@ Do not bulk-load all skills, instructions, plans, or source files by default.
 Project-local skills live in:
 
 ```text
-.agents/skills/
+datacoolie-studio/.agents/skills/
 ```
 
 Use a local skill when it directly matches the task:
