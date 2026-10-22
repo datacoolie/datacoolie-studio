@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 from datacoolie_studio.domains.monitoring.metrics.performance_projections import _performance_page
@@ -9,6 +11,7 @@ from tests.domains.monitoring.monitoring_test_support import (
     _published_monitoring_paths,
 )
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_monitoring_performance_page_uses_dataflow_logs(tmp_path: Path, monkeypatch):
     paths = _published_monitoring_paths(tmp_path, monkeypatch)
     performance = monitoring_page(paths, page="performance")

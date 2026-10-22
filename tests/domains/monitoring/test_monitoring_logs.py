@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 import json
 
@@ -123,6 +125,7 @@ def test_system_log_scope_defaults_to_job_only_and_can_include_dataflows(tmp_pat
     assert dataflow_total == 1
     assert [row["msg"] for row in dataflow_rows] == ["child"]
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_monitoring_job_and_dataflow_logs_include_investigation_fields(
     tmp_path: Path,
     monkeypatch,

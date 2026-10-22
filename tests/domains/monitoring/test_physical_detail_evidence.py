@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from contextlib import nullcontext
 import json
 
@@ -15,6 +17,7 @@ from datacoolie_studio.domains.monitoring.query_service import dataflow_logs
 from tests.support.v6_records import native_record
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_bounded_direct_detail_preserves_native_timing_watermark_and_cache_redaction(tmp_path):
     source = tmp_path / 'flows.jsonl'
     database = tmp_path / 'analytics.duckdb'
@@ -52,6 +55,7 @@ def test_bounded_direct_detail_preserves_native_timing_watermark_and_cache_redac
     assert cached['records'][0]['raw_record_json'] is None
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_dataflow_service_forwards_reader_generation(monkeypatch, tmp_path):
     database = tmp_path / 'analytics.duckdb'
     row = native_record({'dataflow_run_id': 'recorded'})
@@ -79,6 +83,7 @@ def test_dataflow_service_forwards_reader_generation(monkeypatch, tmp_path):
     assert response['summary']['analytics_generation'] == 'generation-1'
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_job_detail_retains_source_root_fields_without_expanding_physical_facts(tmp_path):
     database = tmp_path / 'analytics.duckdb'
     row = native_record({'_type': 'job_run_log', 'total_bytes_added': 10**30,

@@ -23,6 +23,7 @@ def _duration(entry, seconds=10):
     return entry
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_throughput_duration_uses_measured_population_and_requires_measurements(tmp_path):
     known = _duration(_entry("known", count=100))
     excluded = _duration(_entry("excluded", entered=False))
@@ -36,6 +37,7 @@ def test_throughput_duration_uses_measured_population_and_requires_measurements(
     assert result["summary"]["rows_read_per_second"] == 10
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_disabled_maintenance_preserves_effects_and_measured_rate(tmp_path):
     known = _duration(_entry("effect", operation="maintenance"))
     known["metrics"].update(files_removed=3, bytes_removed=100, bytes_saved=100)
@@ -49,6 +51,7 @@ def test_disabled_maintenance_preserves_effects_and_measured_rate(tmp_path):
     assert result["table_outcome"][0]["bytes_reclaimed_per_second"] == 10
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_job_drawer_excludes_maintenance_rows_and_retains_physical_effects(tmp_path):
     etl = _entry("etl", count=100)
     etl["metrics"]["bytes_added"] = 10
@@ -91,6 +94,7 @@ def test_v7_native_timing_and_preflight_failure_remain_native_evidence():
     assert dataflow_failed_phases({"log_schema_version": 7, "status": "failed", "attempts": []}) == ("unknown",)
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_unmeasured_non_lakehouse_subset_stays_null(tmp_path):
     database = _publish(tmp_path, [_entry("lakehouse", count=100)])
     with duckdb.connect(str(database), read_only=True) as conn:
@@ -100,6 +104,7 @@ def test_unmeasured_non_lakehouse_subset_stays_null(tmp_path):
     assert result["summary"]["total_non_lakehouse_rows_written"] is None
 
 
+@pytest.mark.usefixtures("studio_paths")
 @pytest.mark.parametrize("duration, expected", [(None, None), (0, 15)])
 def test_measured_rows_require_duration_and_preserve_observed_zero(tmp_path, duration, expected):
     known = _duration(_entry("known", count=100))
@@ -114,6 +119,7 @@ def test_measured_rows_require_duration_and_preserve_observed_zero(tmp_path, dur
     assert result["summary"]["rows_read_per_second"] == expected
 
 
+@pytest.mark.usefixtures("studio_paths")
 @pytest.mark.parametrize("version, expected", [(6, 0), (7, None)])
 def test_job_only_source_preserves_empty_population_mode(tmp_path, version, expected):
     from datetime import timezone
@@ -135,6 +141,7 @@ def test_job_only_source_preserves_empty_population_mode(tmp_path, version, expe
     assert page["volume"]["kpis"]["total_rows_written"] == expected
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_mixed_source_mode_survives_empty_lakehouse_subset(tmp_path):
     from datetime import timezone
     from datacoolie_studio.domains.monitoring.page_dispatch import build_monitoring_page
@@ -153,6 +160,7 @@ def test_mixed_source_mode_survives_empty_lakehouse_subset(tmp_path):
     assert page["volume"]["kpis"]["total_lakehouse_rows_written"] is None
 
 
+@pytest.mark.usefixtures("studio_paths")
 @pytest.mark.parametrize("measured, duration, expected_rows, expected_rate", [
     (None, 10, 100, 10),
     (50, None, 150, None),

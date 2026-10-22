@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -22,6 +24,7 @@ from tests.domains.monitoring.monitoring_test_support import (
     _published_monitoring_paths,
 )
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_monitoring_overview_page_has_bounded_read_model(tmp_path: Path, monkeypatch):
     paths = _published_monitoring_paths(tmp_path, monkeypatch)
     report = monitoring_page(paths, page="overview")
@@ -49,6 +52,7 @@ def test_monitoring_overview_page_has_bounded_read_model(tmp_path: Path, monkeyp
     assert report["reconciliation"] == {}
     assert "metric_definitions" not in report
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_public_monitoring_pages_project_only_consumed_sections(tmp_path: Path, monkeypatch):
     paths = _published_monitoring_paths(tmp_path, monkeypatch)
     report = monitoring_page(paths, page="overview")

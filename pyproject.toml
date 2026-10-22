@@ -82,6 +82,8 @@ cloud = [
 dev = [
   "build>=1.2",
   "httpx>=0.28,<1.0",
+  # DuckDB repeatedly probes absent Pandas while binding nested test records.
+  "pandas>=2.2,<3.0",
   "pip-audit>=2.10",
   "pytest>=8.0",
   "ruff>=0.11,<1.0",
@@ -98,6 +100,7 @@ all = [
   "gcsfs>=2025.3",
   "google-cloud-storage>=3.0",
   "httpx>=0.28,<1.0",
+  "pandas>=2.2,<3.0",
   "pip-audit>=2.10",
   "pytest>=8.0",
   "ruff>=0.11,<1.0",

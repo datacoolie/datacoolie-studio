@@ -217,6 +217,7 @@ def test_hydration_has_an_explicit_row_bound():
         hydration.hydrate_rows(rows, (None, [], "generation-1"), max_rows=1)
 
 
+@pytest.mark.usefixtures("studio_paths")
 def test_warm_sqlite_cache_hydrates_native_typed_evidence_without_raw_storage(
     tmp_path, monkeypatch
 ):

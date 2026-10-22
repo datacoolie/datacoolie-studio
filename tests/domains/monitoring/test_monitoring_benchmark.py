@@ -20,6 +20,7 @@ from datacoolie_studio.domains.monitoring.context import materialization_token
 pytestmark = pytest.mark.benchmark
 
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_monitoring_fixture_is_published_and_deterministic(tmp_path: Path, monkeypatch):
     analytics_path = tmp_path / "analytics.duckdb"
     monkeypatch.setattr(log_ingestion, "analytics_database_path", lambda: analytics_path)

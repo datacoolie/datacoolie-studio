@@ -66,6 +66,7 @@ dates = Draft202012Validator({'type':'string','format':'date-time'}, validate_fo
 assert dates.is_valid('2026-10-04T12:00:00Z')
 assert not dates.is_valid('invalid-datetime')
 assert importlib.util.find_spec('datacoolie') is None
+assert importlib.util.find_spec('pandas') is None, 'Base wheel smoke must run without test-only Pandas'
 static = files('datacoolie_studio').joinpath('static')
 index = static.joinpath('index.html').read_text(encoding='utf-8')
 references = re.findall(r'(?:src|href)="(/assets/[^"]+)"', index)

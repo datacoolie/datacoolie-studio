@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.support.v6_records import insert_native_rows
 
 from datetime import datetime, timezone
@@ -422,6 +424,7 @@ def test_maintenance_read_model_returns_wide_trends_and_registry_drawer_evidence
     assert registry["upstream_run_count"] == 0
     assert registry["upstream_dataflows"] == []
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_all_monitoring_pages_bypass_legacy_fact_materialization() -> None:
     connection = _dataflow_metric_connection()
     paths = [EnvironmentSource(

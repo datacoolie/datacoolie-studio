@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 
 import pytest
+
+from tests.support.paths import REPOSITORY_ROOT
 
 
 @pytest.fixture
@@ -133,3 +136,12 @@ def test_distribution_expansion_selects_current_project_version(tmp_path, verify
         str(current_wheel),
         str(current_source),
     )
+
+
+def test_pandas_is_qualified_in_test_extras_and_excluded_from_base_wheel(verify_module):
+    with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as file:
+        project = tomllib.load(file)["project"]
+    assert not any(dependency.startswith("pandas") for dependency in project["dependencies"])
+    for extra in ("dev", "all"):
+        assert "pandas>=2.2,<3.0" in project["optional-dependencies"][extra]
+    assert "assert importlib.util.find_spec('pandas') is None" in verify_module._WHEEL_SMOKE

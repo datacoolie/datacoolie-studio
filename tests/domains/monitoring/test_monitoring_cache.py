@@ -43,6 +43,7 @@ def _v6_typed_row(file_uri: str, kind: str, row: dict) -> tuple[str, str, str, d
     })
     return file_uri, f"{kind}_jsonl", json.dumps(record), record
 
+@pytest.mark.usefixtures("studio_paths")
 def test_legacy_duckdb_cache_routes_to_upgrade_owner(tmp_path: Path, monkeypatch):
     import duckdb
 
@@ -213,6 +214,7 @@ def test_dataflow_registry_key_separates_entity_detail_and_generation(monkeypatc
     assert detail.identity != next_generation.identity
     assert detail.producer_version == DATAFLOW_REGISTRY_PRODUCER_VERSION
 
+@pytest.mark.usefixtures("studio_paths")
 def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, monkeypatch):
     import duckdb
 
@@ -266,6 +268,7 @@ def test_failed_analytics_publish_preserves_previous_generation(tmp_path: Path, 
         ).fetchone()
     assert after == before
 
+@pytest.mark.usefixtures("monitoring_workspace")
 @pytest.mark.parametrize(
     "timezone_name,utc_offset_seconds", [("Asia/Saigon", None), (None, 7 * 3600)]
 )
@@ -366,6 +369,7 @@ def test_cached_monitoring_summary_aggregates_overview_window_in_duckdb(
     assert str(summary["date_min"]) == "2026-06-11"
     assert str(summary["date_max"]) == "2026-07-11"
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_latest_dataflow_query_has_no_global_row_cap(tmp_path: Path, monkeypatch):
     import duckdb
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.support.v6_records import insert_native_rows
 
 from datacoolie_studio.domains.analytics import schema
@@ -8,6 +10,7 @@ from tests.domains.monitoring.monitoring_test_support import _published_monitori
 from tests.domains.monitoring.monitoring_read_model_support import _rebuild_serving_facts
 
 
+@pytest.mark.usefixtures("monitoring_workspace")
 def test_canonical_messages_reach_record_queries_with_null_precedence(tmp_path, monkeypatch):
     paths = _published_monitoring_paths(tmp_path, monkeypatch)
     import duckdb
